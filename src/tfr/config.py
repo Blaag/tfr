@@ -62,6 +62,25 @@ class ScreenClearConfig(StrictModel):
         return self
 
 
+class GatewayReconnectConfig(StrictModel):
+    """UI-side liveness verification and bounded automatic reconnect.
+
+    A background heartbeat actively verifies the Gateway connection is alive
+    (rather than only reacting to errors), so a connection left silently
+    stale after the UI machine sleeps and wakes is detected even though the
+    underlying socket may not report an error on its own. On a failed
+    verification, the UI retries `/gateway reconnect`'s own logic up to
+    `max_attempts` times before giving up and asking the operator to run
+    `/gateway reconnect` manually.
+    """
+
+    enabled: bool = True
+    heartbeat_seconds: float = Field(default=20.0, gt=0)
+    ping_timeout_seconds: float = Field(default=8.0, gt=0)
+    max_attempts: PositiveInt = 5
+    retry_interval_seconds: float = Field(default=3.0, gt=0)
+
+
 class UiConfig(StrictModel):
     scrollback_lines: PositiveInt = 20_000
     recent_input_lines: int = Field(default=3, ge=0, le=20)
@@ -71,6 +90,7 @@ class UiConfig(StrictModel):
     low_bandwidth: bool = False
     pager: PagerConfig = Field(default_factory=PagerConfig)
     screen_clear: ScreenClearConfig = Field(default_factory=ScreenClearConfig)
+    gateway_reconnect: GatewayReconnectConfig = Field(default_factory=GatewayReconnectConfig)
 
 
 class LoggingConfig(StrictModel):

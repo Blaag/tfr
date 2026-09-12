@@ -847,6 +847,8 @@ class GatewayServer:
                 if not isinstance(action, str):
                     raise ValueError("agent control action must be a string")
                 await self.runtime.agent_control(name=name, action=action)
+            elif message_type == "ping":
+                pass
             else:
                 raise ValueError(f"unsupported request type: {message_type}")
         except (UnknownSessionError, RuntimeError, ValueError) as exc:

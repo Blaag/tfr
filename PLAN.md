@@ -762,7 +762,7 @@ Acceptance criteria:
 - [ ] Fix screen-clear geometry after `/recall`: clearing after `/recall 10`
   must use the true bottom of the pane rather than the last recalled text row as
   the animation floor.
-- [ ] Add UI-side gateway connection verification and bounded automatic retry
+- [x] Add UI-side gateway connection verification and bounded automatic retry
   after laptop sleep, using configurable or fixed retry counts and intervals so
   `/gateway reconnect` is not normally required.
 - [ ] Add `/n` and `/p` shortcuts for switching to the next and previous worlds.

@@ -174,6 +174,51 @@ def test_plugins_sources_reject_unsafe_repo_value(tmp_path: Path) -> None:
         load_configuration(main_path)
 
 
+def test_gateway_reconnect_defaults_and_overrides(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+
+    default_bundle = load_configuration(main_path)
+    defaults = default_bundle.main.ui.gateway_reconnect
+    assert defaults.enabled is True
+    assert defaults.heartbeat_seconds == 20.0
+    assert defaults.ping_timeout_seconds == 8.0
+    assert defaults.max_attempts == 5
+    assert defaults.retry_interval_seconds == 3.0
+
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"scrollback_lines": 500, "gateway_reconnect": {'
+            '"enabled": false, "heartbeat_seconds": 5, "ping_timeout_seconds": 2, '
+            '"max_attempts": 2, "retry_interval_seconds": 1'
+            "}},",
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_configuration(main_path)
+    reconnect = bundle.main.ui.gateway_reconnect
+    assert reconnect.enabled is False
+    assert reconnect.heartbeat_seconds == 5
+    assert reconnect.ping_timeout_seconds == 2
+    assert reconnect.max_attempts == 2
+    assert reconnect.retry_interval_seconds == 1
+
+
+def test_gateway_reconnect_rejects_non_positive_intervals(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"scrollback_lines": 500, "gateway_reconnect": {"heartbeat_seconds": 0}},',
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError):
+        load_configuration(main_path)
+
+
 def test_resolves_tls_ca_file_relative_to_worlds_file(tmp_path: Path) -> None:
     main_path = write_configuration(tmp_path)
     worlds_path = tmp_path / "worlds.jsonc"

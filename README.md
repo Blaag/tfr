@@ -309,10 +309,31 @@ plugins. Begin input with `//` to send a literal
 leading slash. `/help` displays commands, loaded plugins, world markers, and
 keybindings.
 
-After a laptop sleep or transient network loss, `/gateway reconnect` replaces
-only the stale transport, restores missed retained events, and preserves the
-current UI. If the Gateway itself restarted or changed its worlds, use `/reload`
-instead so the UI can be rebuilt from the new Gateway state.
+After a laptop sleep or transient network loss, TFR verifies the Gateway
+connection is still alive on a background interval, and automatically retries
+`/gateway reconnect`'s own logic (bounded attempts, configurable interval)
+before asking you to run it manually. This only replaces the stale transport;
+it restores missed retained events and preserves the current UI. Configure
+attempt count and timing under `ui.gateway_reconnect` in `config.jsonc`:
+
+```jsonc
+"ui": {
+  "gateway_reconnect": {
+    "enabled": true,
+    "heartbeat_seconds": 20,
+    "ping_timeout_seconds": 8,
+    "max_attempts": 5,
+    "retry_interval_seconds": 3,
+  },
+}
+```
+
+`heartbeat_seconds` controls how often TFR actively confirms the connection is
+alive; `ping_timeout_seconds` bounds how long it waits for that confirmation
+before treating the connection as lost. Set `enabled` to `false` to disable
+automatic retry entirely and rely on `/gateway reconnect` manually. If the
+Gateway itself restarted or changed its worlds, use `/reload` instead so the
+UI can be rebuilt from the new Gateway state.
 
 `/boss` replaces the entire interface with a subdued, static incremental-build
 screen. World connections, buffering, and event logging continue in the

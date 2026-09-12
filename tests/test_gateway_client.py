@@ -2,21 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import ssl
+from collections.abc import Callable
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 import trustme
 
+from tfr.config import GatewayReconnectConfig
 from tfr.core import EventBus
 from tfr.events import Actor, ActorType, CommandRequest, Direction, Event, EventKind
 from tfr.gateway import EventHistory, GatewayServer
-from tfr.gateway_client import GatewayClient, GatewayDisconnectedError
+from tfr.gateway_client import GatewayClient, GatewayDisconnectedError, GatewayUiRuntime
 from tfr.gateway_protocol import GatewayProtocolError
 from tfr.gateway_transport import (
     create_gateway_client_tls_context,
     create_gateway_server_tls_context,
 )
+from tfr.plugins import PluginManager
 
 
 def make_event(sequence: int) -> Event:
@@ -243,6 +246,206 @@ async def test_client_reconnect_requires_reload_after_gateway_restart() -> None:
         await history.stop()
         await bus.close()
     socket_path.parent.rmdir()
+
+
+async def test_ping_and_verify_connection_confirm_a_live_gateway() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    socket_path = Path("/tmp") / f"tfr-test-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    client.start()
+    try:
+        await asyncio.wait_for(client.ping(), timeout=1)
+        assert await client.verify_connection(timeout=1) is True
+    finally:
+        await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+    socket_path.parent.rmdir()
+
+
+async def test_verify_connection_returns_false_once_the_client_is_stopped() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    socket_path = Path("/tmp") / f"tfr-test-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    client.start()
+    try:
+        await client.stop()
+        assert await client.verify_connection(timeout=1) is False
+    finally:
+        await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+    socket_path.parent.rmdir()
+
+
+async def make_plugin_manager(client: GatewayClient) -> PluginManager:
+    return await PluginManager.load(
+        enabled=(),
+        config={},
+        event_bus=client.event_bus,
+        command_bus=client.command_bus,  # type: ignore[arg-type]
+        targets={session.world: session.session_id for session in client.sessions},
+        scope="ui",
+    )
+
+
+async def test_gateway_ui_runtime_supervisor_leaves_a_healthy_connection_alone() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    socket_path = Path("/tmp") / f"tfr-test-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    client.start()
+    notices: list[str] = []
+    ui_runtime = GatewayUiRuntime(
+        client,
+        await make_plugin_manager(client),
+        reconnect_config=GatewayReconnectConfig(
+            heartbeat_seconds=0.02,
+            ping_timeout_seconds=1,
+            max_attempts=3,
+            retry_interval_seconds=0.01,
+        ),
+        notify=notices.append,
+    )
+    try:
+        await ui_runtime.start()
+        await asyncio.sleep(0.15)
+        assert notices == []
+    finally:
+        await ui_runtime.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+    socket_path.parent.rmdir()
+
+
+async def test_gateway_ui_runtime_supervisor_recovers_from_a_dropped_connection() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    socket_path = Path("/tmp") / f"tfr-test-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    client.start()
+    notices: list[str] = []
+    ui_runtime = GatewayUiRuntime(
+        client,
+        await make_plugin_manager(client),
+        reconnect_config=GatewayReconnectConfig(
+            heartbeat_seconds=0.02,
+            ping_timeout_seconds=1,
+            max_attempts=3,
+            retry_interval_seconds=0.01,
+        ),
+        notify=notices.append,
+    )
+    try:
+        await ui_runtime.start()
+        # Simulate a dropped connection the way a dead socket would surface:
+        # the pump ends without the runtime having asked for it.
+        await client.stop()
+
+        await asyncio.wait_for(
+            _wait_until(lambda: any("Reconnected to Gateway" in text for text in notices)),
+            timeout=2,
+        )
+        assert any("reconnecting (attempt 1/3)" in text for text in notices)
+    finally:
+        await ui_runtime.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+    socket_path.parent.rmdir()
+
+
+async def test_gateway_ui_runtime_recover_connection_gives_up_after_max_attempts() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    socket_path = Path("/tmp") / f"tfr-test-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    client.start()
+    notices: list[str] = []
+    ui_runtime = GatewayUiRuntime(
+        client,
+        await make_plugin_manager(client),
+        reconnect_config=GatewayReconnectConfig(
+            heartbeat_seconds=10,
+            ping_timeout_seconds=1,
+            max_attempts=3,
+            retry_interval_seconds=0.01,
+        ),
+        notify=notices.append,
+    )
+    await client.stop()
+    await server.stop()
+    try:
+        await asyncio.wait_for(ui_runtime._recover_connection(), timeout=2)
+    finally:
+        await history.stop()
+        await bus.close()
+    socket_path.parent.rmdir()
+
+    attempts = [text for text in notices if "reconnecting (attempt" in text]
+    assert len(attempts) == 3
+    assert attempts[-1].endswith("(attempt 3/3)...")
+    assert any("failed after 3 attempts" in text for text in notices)
+    assert "Use /gateway reconnect to retry manually." in notices[-1]
+
+
+async def test_gateway_ui_runtime_stop_cancels_the_supervisor_promptly() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    socket_path = Path("/tmp") / f"tfr-test-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    client.start()
+    notices: list[str] = []
+    ui_runtime = GatewayUiRuntime(
+        client,
+        await make_plugin_manager(client),
+        reconnect_config=GatewayReconnectConfig(heartbeat_seconds=10),
+        notify=notices.append,
+    )
+    try:
+        await ui_runtime.start()
+        await asyncio.wait_for(ui_runtime.stop(), timeout=1)
+        assert ui_runtime._supervisor_task is None
+        assert notices == []
+    finally:
+        await server.stop()
+        await history.stop()
+        await bus.close()
+    socket_path.parent.rmdir()
+
+
+async def _wait_until(predicate: Callable[[], bool], *, interval: float = 0.01) -> None:
+    while not predicate():
+        await asyncio.sleep(interval)
 
 
 async def test_client_connects_to_authenticated_tls_gateway(tmp_path: Path) -> None:

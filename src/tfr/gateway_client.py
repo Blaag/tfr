@@ -11,7 +11,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from tfr.agents import AgentInspection
-from tfr.config import UiConfiguration, WorldConfig, WorldDefaults
+from tfr.config import GatewayReconnectConfig, UiConfiguration, WorldConfig, WorldDefaults
 from tfr.core import EventBus
 from tfr.events import CommandRequest, Event
 from tfr.gateway import default_gateway_socket
@@ -537,6 +537,25 @@ class GatewayClient:
             request_id,
         )
 
+    async def ping(self) -> None:
+        request_id = uuid4()
+        await self._request({"type": "ping", "request_id": str(request_id)}, request_id)
+
+    async def verify_connection(self, *, timeout: float) -> bool:
+        """Actively confirm the connection is alive with a bounded ping round trip.
+
+        Unlike waiting for a read error, this detects a connection left
+        silently stale (for example, after the UI machine sleeps and wakes
+        with a socket that never reports an error on its own).
+        """
+        if self._pump is None or self._pump.done():
+            return False
+        try:
+            await asyncio.wait_for(self.ping(), timeout=timeout)
+        except (TimeoutError, ConnectionError, OSError, GatewayProtocolError, ValueError):
+            return False
+        return True
+
     async def _request(self, message: dict[str, Any], request_id: UUID) -> None:
         if self._pump is None or self._pump.done():
             raise GatewayDisconnectedError("gateway client is not running")
@@ -635,15 +654,36 @@ class GatewayClient:
 
 
 class GatewayUiRuntime:
-    def __init__(self, client: GatewayClient, plugins: PluginManager) -> None:
+    def __init__(
+        self,
+        client: GatewayClient,
+        plugins: PluginManager,
+        *,
+        reconnect_config: GatewayReconnectConfig | None = None,
+        notify: Callable[[str], None] | None = None,
+    ) -> None:
         self.client = client
         self.plugins = plugins
+        self.reconnect_config = reconnect_config or GatewayReconnectConfig()
+        self.notify = notify or (lambda _text: None)
+        self._supervisor_task: asyncio.Task[None] | None = None
+        self._stopping = False
 
     async def start(self) -> None:
         await self.plugins.lifecycle(PluginLifecycleEvent(kind="application_start"))
         self.client.start()
+        if self.reconnect_config.enabled:
+            self._supervisor_task = asyncio.create_task(
+                self._supervise(), name="tfr-gateway-reconnect-supervisor"
+            )
 
     async def stop(self) -> None:
+        self._stopping = True
+        if self._supervisor_task is not None:
+            self._supervisor_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._supervisor_task
+            self._supervisor_task = None
         await self.plugins.lifecycle(PluginLifecycleEvent(kind="application_stop"))
         await self.plugins.drain()
         await self.client.stop()
@@ -651,6 +691,9 @@ class GatewayUiRuntime:
 
     async def reconnect(self) -> str:
         restored = await self.client.reconnect()
+        return self._format_reconnect_message(restored)
+
+    def _format_reconnect_message(self, restored: int) -> str:
         if self.client.history_truncated:
             return (
                 f"Reconnected to Gateway; restored {restored} retained events after a history gap"
@@ -658,6 +701,53 @@ class GatewayUiRuntime:
         if restored:
             return f"Reconnected to Gateway; restored {restored} missed events"
         return "Reconnected to Gateway"
+
+    async def _supervise(self) -> None:
+        """Periodically verify the Gateway connection and recover from silence.
+
+        A read error alone cannot detect a connection left stale by the UI
+        machine sleeping and waking: the underlying socket may never report
+        an error, so `_run`'s read loop would simply hang. This task instead
+        actively pings the Gateway on a fixed interval; a failed or timed-out
+        ping is treated the same as a hard disconnect and triggers a bounded
+        automatic reconnect, reusing the same `GatewayClient.reconnect()`
+        logic `/gateway reconnect` already uses.
+        """
+        config = self.reconnect_config
+        try:
+            while True:
+                await asyncio.sleep(config.heartbeat_seconds)
+                if self._stopping:
+                    return
+                alive = await self.client.verify_connection(timeout=config.ping_timeout_seconds)
+                if alive or self._stopping:
+                    continue
+                await self._recover_connection()
+        except asyncio.CancelledError:
+            pass
+
+    async def _recover_connection(self) -> None:
+        config = self.reconnect_config
+        for attempt in range(1, config.max_attempts + 1):
+            if self._stopping:
+                return
+            self.notify(
+                f"Gateway connection lost; reconnecting (attempt "
+                f"{attempt}/{config.max_attempts})..."
+            )
+            try:
+                restored = await self.client.reconnect()
+            except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+                if attempt == config.max_attempts:
+                    self.notify(
+                        f"Gateway reconnect failed after {config.max_attempts} attempts: {exc}. "
+                        "Use /gateway reconnect to retry manually."
+                    )
+                    return
+                await asyncio.sleep(config.retry_interval_seconds)
+            else:
+                self.notify(self._format_reconnect_message(restored))
+                return
 
 
 async def run_gateway_ui(
@@ -719,7 +809,11 @@ async def run_gateway_ui(
         extra_discovered=extra_plugins,
         scope="ui",
     )
-    runtime = GatewayUiRuntime(client, plugins)
+    runtime = GatewayUiRuntime(
+        client,
+        plugins,
+        reconnect_config=configuration.main.ui.gateway_reconnect,
+    )
     tui = TfrTui(
         sessions=client.sessions,  # type: ignore[arg-type]
         manager=manager,
@@ -743,6 +837,7 @@ async def run_gateway_ui(
         initial_events=client.initial_events,
         initial_scroll_to_end=True,
     )
+    runtime.notify = lambda text: tui.add_notice(tui.active_alias, text)
     if resume_world in tui.views:
         tui.switch_world(resume_world)
     if client.history_reset:
