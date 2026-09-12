@@ -952,7 +952,7 @@ class TfrTui:
 
     def add_notice(self, alias: str, text: str) -> None:
         self.views[alias].clear_selection()
-        self.views[alias].display.append(f"\x1b[33m-- {text} --\x1b[0m")
+        self.views[alias].display.append(f"\x1b[33m-- {text} --\x1b[0m", recallable=False)
         self.application.invalidate()
 
     def _copy_selection(self, text: str) -> None:

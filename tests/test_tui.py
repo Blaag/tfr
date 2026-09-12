@@ -352,6 +352,19 @@ async def test_recall_uses_only_the_requested_world_history() -> None:
     assert "alpha line" not in beta_text
 
 
+async def test_recall_excludes_local_client_command_notices() -> None:
+    tui = make_tui()
+    view = tui.active_view
+    view.display.append("world output")
+
+    await tui._handle_client_command("alpha", "/help")
+    await tui._handle_client_command("alpha", "/recall 1")
+
+    text = fragment_list_to_text(view.display.formatted_text())
+    assert text.endswith("-- Recall 1\nworld output")
+    assert "TFR commands" not in text.rsplit("-- Recall 1", 1)[-1]
+
+
 @pytest.mark.parametrize("command", ["/recall", "/recall two", "/recall 1 2"])
 async def test_recall_rejects_invalid_arguments(command: str) -> None:
     tui = make_tui()
