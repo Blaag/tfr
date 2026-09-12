@@ -21,23 +21,23 @@ uv sync
 Create a private working configuration from the supplied examples:
 
 ```console
-mkdir -p .tfr-local
-cp examples/config.jsonc examples/worlds.jsonc examples/agents.jsonc .tfr-local/
-chmod 600 .tfr-local/*.jsonc
+mkdir -p .tfr
+cp examples/config.jsonc examples/worlds.jsonc examples/agents.jsonc .tfr/
+chmod 600 .tfr/*.jsonc
 ```
 
-Edit `.tfr-local/worlds.jsonc` with the world addresses and logins you want to
-use. Edit `.tfr-local/agents.jsonc` if you want agent-controlled worlds. Check
+Edit `.tfr/worlds.jsonc` with the world addresses and logins you want to
+use. Edit `.tfr/agents.jsonc` if you want agent-controlled worlds. Check
 the complete configuration before connecting:
 
 ```console
-uv run tfr --check-config --config .tfr-local/config.jsonc
+uv run tfr --check-config --config .tfr/config.jsonc
 ```
 
 Start the persistent Gateway in one terminal:
 
 ```console
-uv run tfr gateway --config .tfr-local/config.jsonc
+uv run tfr gateway --config .tfr/config.jsonc
 ```
 
 Leave that command running. A successful startup reports its socket:
@@ -50,7 +50,7 @@ Press Ctrl-C to stop the gateway.
 Attach the UI from a second terminal:
 
 ```console
-uv run tfr ui --config .tfr-local/config.jsonc
+uv run tfr ui --config .tfr/config.jsonc
 ```
 
 You can attach multiple UIs to the same Gateway. `Ctrl-Q` or `/quit` closes only
@@ -65,8 +65,8 @@ The Gateway and UI use `$XDG_RUNTIME_DIR/tfr/gateway.sock` when
 pass the identical path to both commands:
 
 ```console
-uv run tfr gateway --config .tfr-local/config.jsonc --socket /private/path/tfr.sock
-uv run tfr ui --config .tfr-local/config.jsonc --socket /private/path/tfr.sock
+uv run tfr gateway --config .tfr/config.jsonc --socket /private/path/tfr.sock
+uv run tfr ui --config .tfr/config.jsonc --socket /private/path/tfr.sock
 ```
 
 The socket's existing parent directory must be owned by the current user and
@@ -78,7 +78,7 @@ For a single-process session without a persistent Gateway, use the legacy
 combined mode:
 
 ```console
-uv run tfr --config .tfr-local/config.jsonc
+uv run tfr --config .tfr/config.jsonc
 ```
 
 ## Development
@@ -133,7 +133,7 @@ private CA works with the UI's `--tls-ca` option. Keep the TLS private key mode
 address:
 
 ```console
-uv run tfr gateway --config .tfr-local/config.jsonc \
+uv run tfr gateway --config .tfr/config.jsonc \
   --listen-host 100.x.y.z --listen-port 7347 \
   --token-file ~/.config/tfr/gateway.token \
   --tls-cert ~/.config/tfr/gateway.crt \
@@ -146,7 +146,7 @@ the Gateway's `worlds.jsonc`, `agents.jsonc`, world passwords, or provider keys.
 Connect using the certificate's MagicDNS hostname:
 
 ```console
-uv run tfr ui --config .tfr-local/config.jsonc \
+uv run tfr ui --config .tfr/config.jsonc \
   --gateway-host gateway.example.ts.net --gateway-port 7347 \
   --token-file ~/.config/tfr/gateway.token
 ```
