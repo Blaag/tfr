@@ -1,0 +1,272 @@
+{
+  "$defs": {
+    "LoggingConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "directory": {
+          "default": "~/.local/state/tfr/logs",
+          "format": "path",
+          "title": "Directory",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "mode": {
+          "const": "all",
+          "default": "all",
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "title": "LoggingConfig",
+      "type": "object"
+    },
+    "PagerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "overlap_lines": {
+          "default": 1,
+          "minimum": 0,
+          "title": "Overlap Lines",
+          "type": "integer"
+        }
+      },
+      "title": "PagerConfig",
+      "type": "object"
+    },
+    "PluginSource": {
+      "additionalProperties": false,
+      "description": "A GitHub (or other Git host) repository TFR fetches plugin code from.\n\n``repo`` accepts an ``OWNER/REPO`` GitHub shorthand, a full ``https://``\nURL, or an ``ssh://``/``git@`` URL for a private repository reachable with\nthe operator's own SSH credentials. TFR never stores or transmits\ncredentials for this feature; it only invokes the local ``git`` binary.",
+      "properties": {
+        "auto_update": {
+          "default": false,
+          "title": "Auto Update",
+          "type": "boolean"
+        },
+        "path": {
+          "default": ".",
+          "maxLength": 200,
+          "pattern": "^(?!/)(?!.*\\.\\.)[A-Za-z0-9._/+-]*$",
+          "title": "Path",
+          "type": "string"
+        },
+        "ref": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "pattern": "^(?!-)[A-Za-z0-9](?:[A-Za-z0-9._/+-]*[A-Za-z0-9])?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ref"
+        },
+        "repo": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^(?!-)[A-Za-z0-9](?:[A-Za-z0-9._~:/@%+-]*[A-Za-z0-9])?$",
+          "title": "Repo",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo"
+      ],
+      "title": "PluginSource",
+      "type": "object"
+    },
+    "PluginsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "config": {
+          "additionalProperties": true,
+          "title": "Config",
+          "type": "object"
+        },
+        "enabled": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Enabled",
+          "type": "array"
+        },
+        "sources": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PluginSource"
+          },
+          "title": "Sources",
+          "type": "array"
+        },
+        "state_directory": {
+          "default": "~/.local/state/tfr/plugins",
+          "format": "path",
+          "title": "State Directory",
+          "type": "string"
+        }
+      },
+      "title": "PluginsConfig",
+      "type": "object"
+    },
+    "ScreenClearConfig": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "effect": {
+                "type": "null"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "locked"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "required": [
+              "effect"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "effect": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z][A-Za-z0-9_.-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effect"
+        },
+        "mode": {
+          "default": "cycle",
+          "enum": [
+            "cycle",
+            "random",
+            "locked"
+          ],
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "title": "ScreenClearConfig",
+      "type": "object"
+    },
+    "UiConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "animations_enabled": {
+          "default": true,
+          "title": "Animations Enabled",
+          "type": "boolean"
+        },
+        "low_bandwidth": {
+          "default": false,
+          "title": "Low Bandwidth",
+          "type": "boolean"
+        },
+        "output_color": {
+          "default": "#d7d7d7",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "title": "Output Color",
+          "type": "string"
+        },
+        "pager": {
+          "$ref": "#/$defs/PagerConfig"
+        },
+        "recent_input_lines": {
+          "default": 3,
+          "maximum": 20,
+          "minimum": 0,
+          "title": "Recent Input Lines",
+          "type": "integer"
+        },
+        "screen_clear": {
+          "$ref": "#/$defs/ScreenClearConfig"
+        },
+        "scrollback_lines": {
+          "default": 20000,
+          "exclusiveMinimum": 0,
+          "title": "Scrollback Lines",
+          "type": "integer"
+        },
+        "show_nospoof_prefix": {
+          "default": false,
+          "title": "Show Nospoof Prefix",
+          "type": "boolean"
+        }
+      },
+      "title": "UiConfig",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "$Schema"
+    },
+    "agents_file": {
+      "default": "agents.jsonc",
+      "format": "path",
+      "title": "Agents File",
+      "type": "string"
+    },
+    "logging": {
+      "$ref": "#/$defs/LoggingConfig"
+    },
+    "plugins": {
+      "$ref": "#/$defs/PluginsConfig"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "ui": {
+      "$ref": "#/$defs/UiConfig"
+    },
+    "worlds_file": {
+      "default": "worlds.jsonc",
+      "format": "path",
+      "title": "Worlds File",
+      "type": "string"
+    }
+  },
+  "title": "MainConfig",
+  "type": "object"
+}

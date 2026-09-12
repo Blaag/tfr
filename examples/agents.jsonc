@@ -1,0 +1,39 @@
+{
+  "$schema": "../schemas/agents.schema.json",
+  "schema_version": 1,
+
+  "providers": {
+    "openai": {
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "replace-me",
+    },
+    "ollama": {
+      "base_url": "http://localhost:11434/v1",
+      "api_key": "ollama",
+    },
+  },
+
+  "agents": {
+    "example-bot": {
+      "world": "example-agent-world",
+      "provider": "ollama",
+      "model": "my-character-lora",
+      "system_prompt": "Play this character consistently.",
+      "triggers": {
+        "speech": true,
+        "pages": true,
+        "manual": true,
+      },
+      "allowed_actions": ["say", "pose", "page"],
+      "context": {
+        "maximum_events": 100,
+        "maximum_characters": 32000,
+        "include_recent_look": true,
+      },
+      "limits": {
+        "maximum_messages_per_minute": 6,
+        "minimum_seconds_between_turns": 3,
+      },
+    },
+  },
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "../schemas/config.schema.json",
+  "schema_version": 1,
+  "worlds_file": "worlds.jsonc",
+  "agents_file": "agents.jsonc",
+
+  "ui": {
+    "scrollback_lines": 20000,
+    "recent_input_lines": 3,
+    "output_color": "#d7d7d7",
+    "show_nospoof_prefix": false,
+    "animations_enabled": true,
+    "low_bandwidth": false,
+    "screen_clear": {
+      "mode": "cycle",
+    },
+    "pager": {
+      "enabled": true,
+      "overlap_lines": 1,
+    },
+  },
+
+  // Complete traffic is logged. Sensitive outbound commands are redacted.
+  "logging": {
+    "enabled": true,
+    "mode": "all",
+    "directory": "~/.local/state/tfr/logs",
+  },
+
+  "plugins": {
+    // Install optional plugin distributions before enabling their entry-point names.
+    "enabled": [],
+    "config": {},
+  },
+}

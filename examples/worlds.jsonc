@@ -1,0 +1,55 @@
+{
+  "$schema": "../schemas/worlds.schema.json",
+  "schema_version": 1,
+
+  "defaults": {
+    "encoding": "utf-8",
+    "reconnect": true,
+    "scrollback_lines": 20000,
+  },
+
+  "worlds": {
+    "example-me": {
+      "host": "mux.example.org",
+      "port": 4201,
+      "server": "tinymux",
+      "tls": {
+        "enabled": true,
+        "verify": true,
+      },
+      "login": {
+        "character": "Alice",
+        "password": "replace-me",
+      },
+      "autoconnect": true,
+      "provenance": {
+        "nospoof": true,
+        "show_prefix": false,
+      },
+      "idle": {
+        "after_seconds": 300,
+        "command": "IDLE",
+      },
+      "startup_commands": [],
+    },
+
+    // An agent always uses a separate connection identity.
+    "example-agent-world": {
+      "host": "mux.example.org",
+      "port": 4201,
+      "server": "tinymux",
+      "tls": {
+        "enabled": true,
+        "verify": true,
+      },
+      "login": {
+        "character": "ExampleBot",
+        "password": "replace-me",
+      },
+      "autoconnect": true,
+      "provenance": {
+        "nospoof": true,
+      },
+    },
+  },
+}

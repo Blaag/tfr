@@ -1,0 +1,301 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+
+from tfr.config import (
+    ConfigurationError,
+    credential_permission_warning,
+    load_configuration,
+    load_ui_configuration,
+)
+
+MAIN = """
+{
+  // Referenced files are relative to this file.
+  "$schema": "config.schema.json",
+  "schema_version": 1,
+  "worlds_file": "worlds.jsonc",
+  "agents_file": "agents.jsonc",
+  "ui": {"scrollback_lines": 500,},
+}
+"""
+
+WORLDS = """
+{
+  "schema_version": 1,
+  "worlds": {
+    "bot-world": {
+      "host": "localhost",
+      "port": 4201,
+      "login": {"character": "ExampleBot", "password": "world-secret"},
+    },
+  },
+}
+"""
+
+AGENTS = """
+{
+  "schema_version": 1,
+  "providers": {
+    "local": {"base_url": "http://localhost:11434/v1", "api_key": "api-secret"},
+  },
+  "agents": {
+    "bot": {
+      "world": "bot-world",
+      "provider": "local",
+      "model": "styled-model",
+      "system_prompt": "Stay in character.",
+    },
+  },
+}
+"""
+
+
+def write_configuration(directory: Path) -> Path:
+    main_path = directory / "config.jsonc"
+    main_path.write_text(MAIN, encoding="utf-8")
+    (directory / "worlds.jsonc").write_text(WORLDS, encoding="utf-8")
+    (directory / "agents.jsonc").write_text(AGENTS, encoding="utf-8")
+    for path in directory.iterdir():
+        path.chmod(0o600)
+    return main_path
+
+
+def test_loads_jsonc_and_resolves_references(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+
+    bundle = load_configuration(main_path)
+
+    assert bundle.main.ui.scrollback_lines == 500
+    assert bundle.main.ui.recent_input_lines == 3
+    assert bundle.main.ui.output_color == "#d7d7d7"
+    assert bundle.main.ui.animations_enabled is True
+    assert bundle.main.ui.low_bandwidth is False
+    assert bundle.main.ui.screen_clear.mode == "cycle"
+    assert bundle.main.ui.screen_clear.effect is None
+    assert bundle.main.logging.directory == Path("~/.local/state/tfr/logs").expanduser().resolve()
+    assert bundle.worlds_path == (tmp_path / "worlds.jsonc").resolve()
+    assert bundle.agents_path == (tmp_path / "agents.jsonc").resolve()
+    assert bundle.worlds.worlds["bot-world"].login is not None
+    assert bundle.worlds.worlds["bot-world"].login.password.get_secret_value() == "world-secret"
+    assert bundle.agents.providers["local"].api_key.get_secret_value() == "api-secret"
+    assert "world-secret" not in repr(bundle)
+    assert "api-secret" not in repr(bundle)
+    assert bundle.warnings == ()
+
+
+def test_ui_configuration_does_not_read_world_or_agent_files(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    (tmp_path / "worlds.jsonc").unlink()
+    (tmp_path / "agents.jsonc").unlink()
+
+    configuration = load_ui_configuration(main_path)
+
+    assert configuration.main.ui.scrollback_lines == 500
+
+
+def test_resolves_relative_log_directory_from_main_config(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"scrollback_lines": 500,}, "logging": {"directory": "logs"},',
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_configuration(main_path)
+
+    assert bundle.main.logging.directory == (tmp_path / "logs").resolve()
+
+
+def test_plugins_state_directory_defaults_and_resolves_like_logging(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+
+    default_bundle = load_configuration(main_path)
+
+    assert (
+        default_bundle.main.plugins.state_directory
+        == Path("~/.local/state/tfr/plugins").expanduser().resolve()
+    )
+
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"scrollback_lines": 500,}, "plugins": {"state_directory": "plugins"},',
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_configuration(main_path)
+
+    assert bundle.main.plugins.state_directory == (tmp_path / "plugins").resolve()
+
+
+def test_plugins_sources_parse_github_shorthand_and_pinned_ref(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"scrollback_lines": 500,}, "plugins": {"sources": ['
+            '{"repo": "someone/tfr-plugins-fun"},'
+            '{"repo": "someone/tfr-plugins-pinned", '
+            '"ref": "0123456789abcdef0123456789abcdef01234567", "auto_update": true}'
+            "]},",
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_configuration(main_path)
+
+    assert len(bundle.main.plugins.sources) == 2
+    first, second = bundle.main.plugins.sources
+    assert first.repo == "someone/tfr-plugins-fun"
+    assert first.ref is None
+    assert first.auto_update is False
+    assert second.ref == "0123456789abcdef0123456789abcdef01234567"
+    assert second.auto_update is True
+
+
+def test_plugins_sources_reject_unsafe_repo_value(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"scrollback_lines": 500,}, "plugins": {"sources": [{"repo": "-not-a-flag"}]},',
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError):
+        load_configuration(main_path)
+
+
+def test_resolves_tls_ca_file_relative_to_worlds_file(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    worlds_path = tmp_path / "worlds.jsonc"
+    worlds_path.write_text(
+        WORLDS.replace(
+            '"port": 4201,',
+            '"port": 4201, "tls": {"enabled": true, "ca_file": "certs/ca.pem"},',
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_configuration(main_path)
+
+    assert (
+        bundle.worlds.worlds["bot-world"].tls.ca_file == (tmp_path / "certs" / "ca.pem").resolve()
+    )
+
+
+def test_rejects_unknown_keys_with_a_configuration_path(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    main_path.write_text(
+        MAIN.replace('"scrollback_lines": 500,', '"typo": true,'), encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigurationError, match=r"ui\.typo: Extra inputs are not permitted"):
+        load_configuration(main_path)
+
+
+def test_rejects_invalid_output_color(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    main_path.write_text(
+        MAIN.replace('"scrollback_lines": 500,', '"output_color": "white",'),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match=r"ui\.output_color: String should match pattern"):
+        load_configuration(main_path)
+
+
+def test_loads_locked_screen_clear_effect(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"scrollback_lines": 500, '
+            '"screen_clear": {"mode": "locked", "effect": "flame"}},',
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_configuration(main_path)
+
+    assert bundle.main.ui.screen_clear.mode == "locked"
+    assert bundle.main.ui.screen_clear.effect == "flame"
+
+
+def test_screen_clear_effect_accepts_entry_point_name_characters(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"screen_clear": {"mode": "locked", "effect": "Flame.Clear"}},',
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_configuration(main_path)
+
+    assert bundle.main.ui.screen_clear.effect == "Flame.Clear"
+
+
+def test_rejects_locked_screen_clear_without_effect(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"screen_clear": {"mode": "locked"}},',
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="effect is required"):
+        load_configuration(main_path)
+
+
+def test_rejects_unknown_agent_world(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    agents_path = tmp_path / "agents.jsonc"
+    agents_path.write_text(AGENTS.replace('"bot-world"', '"missing-world"'), encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="unknown world"):
+        load_configuration(main_path)
+
+
+def test_rejects_unknown_agent_provider(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    agents_path = tmp_path / "agents.jsonc"
+    agents_path.write_text(
+        AGENTS.replace('"provider": "local"', '"provider": "missing"'), encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigurationError, match="unknown provider"):
+        load_configuration(main_path)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits are required")
+def test_warns_about_open_credential_permissions(tmp_path: Path) -> None:
+    path = tmp_path / "worlds.jsonc"
+    path.write_text(WORLDS, encoding="utf-8")
+    path.chmod(0o644)
+
+    warning = credential_permission_warning(path, contains_credentials=True)
+
+    assert warning is not None
+    assert "0644" in warning
+    assert "0600" in warning
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits are required")
+def test_accepts_private_credential_permissions(tmp_path: Path) -> None:
+    path = tmp_path / "worlds.jsonc"
+    path.write_text(WORLDS, encoding="utf-8")
+    path.chmod(0o600)
+
+    assert credential_permission_warning(path, contains_credentials=True) is None

@@ -1,0 +1,188 @@
+{
+  "$defs": {
+    "AgentConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed_actions": {
+          "default": [
+            "say",
+            "pose",
+            "page"
+          ],
+          "items": {
+            "enum": [
+              "say",
+              "pose",
+              "page"
+            ],
+            "type": "string"
+          },
+          "title": "Allowed Actions",
+          "type": "array"
+        },
+        "context": {
+          "$ref": "#/$defs/AgentContextConfig"
+        },
+        "limits": {
+          "$ref": "#/$defs/AgentLimitsConfig"
+        },
+        "model": {
+          "minLength": 1,
+          "title": "Model",
+          "type": "string"
+        },
+        "provider": {
+          "minLength": 1,
+          "title": "Provider",
+          "type": "string"
+        },
+        "system_prompt": {
+          "minLength": 1,
+          "title": "System Prompt",
+          "type": "string"
+        },
+        "triggers": {
+          "$ref": "#/$defs/TriggerConfig"
+        },
+        "world": {
+          "minLength": 1,
+          "title": "World",
+          "type": "string"
+        }
+      },
+      "required": [
+        "world",
+        "provider",
+        "model",
+        "system_prompt"
+      ],
+      "title": "AgentConfig",
+      "type": "object"
+    },
+    "AgentContextConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "include_recent_look": {
+          "default": true,
+          "title": "Include Recent Look",
+          "type": "boolean"
+        },
+        "maximum_characters": {
+          "default": 32000,
+          "minimum": 1000,
+          "title": "Maximum Characters",
+          "type": "integer"
+        },
+        "maximum_events": {
+          "default": 100,
+          "exclusiveMinimum": 0,
+          "title": "Maximum Events",
+          "type": "integer"
+        }
+      },
+      "title": "AgentContextConfig",
+      "type": "object"
+    },
+    "AgentLimitsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "maximum_messages_per_minute": {
+          "default": 6,
+          "exclusiveMinimum": 0,
+          "title": "Maximum Messages Per Minute",
+          "type": "integer"
+        },
+        "minimum_seconds_between_turns": {
+          "default": 3.0,
+          "minimum": 0,
+          "title": "Minimum Seconds Between Turns",
+          "type": "number"
+        }
+      },
+      "title": "AgentLimitsConfig",
+      "type": "object"
+    },
+    "ProviderConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "api_key": {
+          "format": "password",
+          "title": "Api Key",
+          "type": "string",
+          "writeOnly": true
+        },
+        "base_url": {
+          "format": "uri",
+          "minLength": 1,
+          "title": "Base Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "base_url",
+        "api_key"
+      ],
+      "title": "ProviderConfig",
+      "type": "object"
+    },
+    "TriggerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "manual": {
+          "default": true,
+          "title": "Manual",
+          "type": "boolean"
+        },
+        "pages": {
+          "default": true,
+          "title": "Pages",
+          "type": "boolean"
+        },
+        "speech": {
+          "default": true,
+          "title": "Speech",
+          "type": "boolean"
+        }
+      },
+      "title": "TriggerConfig",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "$Schema"
+    },
+    "agents": {
+      "additionalProperties": {
+        "$ref": "#/$defs/AgentConfig"
+      },
+      "title": "Agents",
+      "type": "object"
+    },
+    "providers": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ProviderConfig"
+      },
+      "title": "Providers",
+      "type": "object"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "title": "AgentsConfig",
+  "type": "object"
+}

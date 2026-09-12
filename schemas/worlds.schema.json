@@ -1,0 +1,281 @@
+{
+  "$defs": {
+    "IdleConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "after_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "After Seconds",
+          "type": "integer"
+        },
+        "command": {
+          "minLength": 1,
+          "title": "Command",
+          "type": "string"
+        }
+      },
+      "required": [
+        "after_seconds",
+        "command"
+      ],
+      "title": "IdleConfig",
+      "type": "object"
+    },
+    "LoginConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "character": {
+          "minLength": 1,
+          "title": "Character",
+          "type": "string"
+        },
+        "password": {
+          "format": "password",
+          "title": "Password",
+          "type": "string",
+          "writeOnly": true
+        }
+      },
+      "required": [
+        "character",
+        "password"
+      ],
+      "title": "LoginConfig",
+      "type": "object"
+    },
+    "ProvenanceConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "nospoof": {
+          "default": true,
+          "title": "Nospoof",
+          "type": "boolean"
+        },
+        "show_prefix": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Show Prefix"
+        }
+      },
+      "title": "ProvenanceConfig",
+      "type": "object"
+    },
+    "TlsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "ca_file": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ca File"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "server_hostname": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Server Hostname"
+        },
+        "verify": {
+          "default": true,
+          "title": "Verify",
+          "type": "boolean"
+        }
+      },
+      "title": "TlsConfig",
+      "type": "object"
+    },
+    "WorldConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "autoconnect": {
+          "default": false,
+          "title": "Autoconnect",
+          "type": "boolean"
+        },
+        "encoding": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Encoding"
+        },
+        "host": {
+          "minLength": 1,
+          "title": "Host",
+          "type": "string"
+        },
+        "idle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IdleConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "login": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoginConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Port",
+          "type": "integer"
+        },
+        "provenance": {
+          "$ref": "#/$defs/ProvenanceConfig"
+        },
+        "reconnect": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reconnect"
+        },
+        "scrollback_lines": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scrollback Lines"
+        },
+        "server": {
+          "default": "generic",
+          "enum": [
+            "bare",
+            "generic",
+            "rhost",
+            "tinymush",
+            "tinymux"
+          ],
+          "title": "Server",
+          "type": "string"
+        },
+        "startup_commands": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Startup Commands",
+          "type": "array"
+        },
+        "tls": {
+          "$ref": "#/$defs/TlsConfig"
+        }
+      },
+      "required": [
+        "host",
+        "port"
+      ],
+      "title": "WorldConfig",
+      "type": "object"
+    },
+    "WorldDefaults": {
+      "additionalProperties": false,
+      "properties": {
+        "encoding": {
+          "default": "utf-8",
+          "title": "Encoding",
+          "type": "string"
+        },
+        "reconnect": {
+          "default": true,
+          "title": "Reconnect",
+          "type": "boolean"
+        },
+        "scrollback_lines": {
+          "default": 20000,
+          "exclusiveMinimum": 0,
+          "title": "Scrollback Lines",
+          "type": "integer"
+        }
+      },
+      "title": "WorldDefaults",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "$Schema"
+    },
+    "defaults": {
+      "$ref": "#/$defs/WorldDefaults"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "worlds": {
+      "additionalProperties": {
+        "$ref": "#/$defs/WorldConfig"
+      },
+      "title": "Worlds",
+      "type": "object"
+    }
+  },
+  "title": "WorldsConfig",
+  "type": "object"
+}
