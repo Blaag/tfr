@@ -58,6 +58,20 @@ def _osc52_sequence(text: str) -> str:
     return f"\x1b]52;c;{payload}\x07"
 
 
+def _format_elapsed(seconds: float) -> str:
+    total_seconds = int(max(0.0, seconds))
+    if total_seconds < 60:
+        return f"{total_seconds}s"
+    minutes = total_seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h"
+    days = hours // 24
+    return f"{days}d"
+
+
 def _selected_row(row: FormattedRow, start: int, end: int) -> FormattedRow:
     fragments: list[tuple[str, str]] = []
     offset = 0
@@ -106,6 +120,7 @@ class WorldView:
         self.display = display
         self.is_agent = is_agent
         self.unread_events = 0
+        self.last_inbound_at: float | None = None
         self.recent_input_lines = recent_input_lines
         self.recent_commands: deque[str] = deque(maxlen=recent_input_lines)
         self._copy_handler = copy_handler
@@ -368,6 +383,7 @@ class TfrTui:
         self._border_frame_elapsed = 0.0
         self._animation_task: asyncio.Task[None] | None = None
         self._animations_started = False
+        self._activity_ticker_task: asyncio.Task[None] | None = None
         self.screen_clear_mode = screen_clear_mode
         self.screen_clear_effect = screen_clear_effect
         self._screen_clear_lines: tuple[str, ...] = ()
@@ -1014,6 +1030,7 @@ class TfrTui:
             return
         should_count = False
         if event.direction is Direction.INBOUND:
+            view.last_inbound_at = time.monotonic()
             event_text = event.display_text
             if event.provenance is not None and event.provenance.prefix_span is not None:
                 if view.session.show_nospoof_prefix:
@@ -1104,8 +1121,15 @@ class TfrTui:
             if view.unread_events:
                 classes.append("class:world.unread")
             marker = "A" if view.is_agent else "H"
+            activity = (
+                f" ({_format_elapsed(time.monotonic() - view.last_inbound_at)})"
+                if view.last_inbound_at is not None
+                else ""
+            )
             unread = f" +{view.unread_events}" if view.unread_events else ""
-            output.append((" ".join(classes), f" [{marker}] {alias}{unread} ", select_world))
+            output.append(
+                (" ".join(classes), f" [{marker}] {alias}{activity}{unread} ", select_world)
+            )
         return output
 
     def status_bar(self) -> StyleAndTextTuples:
@@ -1322,6 +1346,7 @@ class TfrTui:
             "",
             "World markers",
             "  [H] human-operated world; [A] agent world",
+            "  (Xs/Xm/Xh/Xd) time since that world last received inbound input",
             "",
             "Keybindings",
             "  Enter send; F5/Ctrl-Left/Option-Left previous world",
@@ -1496,6 +1521,29 @@ class TfrTui:
         elif not should_run and self._animation_task is not None:
             self._animation_task.cancel()
             self._animation_task = None
+        self._sync_activity_ticker()
+
+    def _sync_activity_ticker(self) -> None:
+        # A separate, much slower ticker so the world bar's per-world
+        # "last activity" indicator keeps counting up even when no other
+        # animation or event is causing a redraw. Deliberately independent
+        # of animations_enabled (it's informational text, not a visual
+        # effect), but still respects low_bandwidth/boss_mode like the
+        # rest of the continuous-redraw machinery.
+        should_run = self._animations_started and not self.low_bandwidth and not self.boss_mode
+        if should_run and (self._activity_ticker_task is None or self._activity_ticker_task.done()):
+            task = asyncio.create_task(self._animate_last_activity(), name="tfr-activity-ticker")
+            self._activity_ticker_task = task
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_task_done)
+        elif not should_run and self._activity_ticker_task is not None:
+            self._activity_ticker_task.cancel()
+            self._activity_ticker_task = None
+
+    async def _animate_last_activity(self) -> None:
+        while True:
+            await asyncio.sleep(1.0)
+            self.application.invalidate()
 
     def _text_frame_delay(self, elapsed_seconds: float) -> float | None:
         if self.inspector_agent is not None or self._screen_clear_world == self.active_alias:

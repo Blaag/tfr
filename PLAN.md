@@ -757,7 +757,7 @@ Acceptance criteria:
 - [ ] Publish gateway- and UI-detected operational activity as plugin-visible
   events, including gateway connection and disconnection, world activity,
   world connection and disconnection, and boss-mode activation.
-- [ ] Add a per-world last-activity indicator showing the elapsed time since
+- [x] Add a per-world last-activity indicator showing the elapsed time since
   inbound input was most recently received.
 - [x] Fix screen-clear geometry after `/recall`: clearing after `/recall 10`
   must use the true bottom of the pane rather than the last recalled text row as

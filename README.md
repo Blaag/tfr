@@ -376,7 +376,9 @@ exiting it. Input beginning with `!` runs a one-shot local shell command, such a
 not submitted to a world and are not included in TFR's event log.
 
 The world bar marks human-operated worlds with `[H]` and configured agent worlds
-with `[A]`. Each world retains its own draft, command history, rendered scrollback,
+with `[A]`, followed by `(Xs)`/`(Xm)`/`(Xh)`/`(Xd)` showing how long it has been
+since that world last received inbound input, once it has received any. Each
+world retains its own draft, command history, rendered scrollback,
 pager state, and unread count while inactive.
 The active world's recently sent commands remain directly above the editor.
 These lines are separate from server output, so server speech echoes are not

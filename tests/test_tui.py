@@ -23,7 +23,7 @@ from tfr.pager import PagerMode
 from tfr.plugin_api import BorderFragment, ScreenClearContext, TextDecoration, TextEffectKind
 from tfr.plugins import PluginManager
 from tfr.sessions import SessionManager, SessionState, WorldSession
-from tfr.tui import TfrTui, _osc52_sequence, run_client
+from tfr.tui import TfrTui, _format_elapsed, _osc52_sequence, run_client
 
 
 def make_tui(*, input: Input | None = None) -> TfrTui:
@@ -189,6 +189,101 @@ def test_world_bar_entries_switch_worlds_on_left_click() -> None:
 
     assert tui.active_alias == "beta"
     assert tui.application.layout.current_buffer is tui.views["beta"].input_buffer
+
+
+def test_format_elapsed_uses_the_largest_reasonable_unit() -> None:
+    assert _format_elapsed(0) == "0s"
+    assert _format_elapsed(59) == "59s"
+    assert _format_elapsed(60) == "1m"
+    assert _format_elapsed(125) == "2m"
+    assert _format_elapsed(3599) == "59m"
+    assert _format_elapsed(3600) == "1h"
+    assert _format_elapsed(86399) == "23h"
+    assert _format_elapsed(86400) == "1d"
+    assert _format_elapsed(-5) == "0s"
+
+
+def test_world_bar_shows_no_activity_indicator_before_any_inbound_event() -> None:
+    tui = make_tui()
+
+    assert tui.active_view.last_inbound_at is None
+    assert "(" not in fragment_list_to_text(tui.world_bar())
+
+
+def test_world_bar_shows_elapsed_time_since_last_inbound_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("tfr.tui.time.monotonic", lambda: 1000.0)
+    tui = make_tui()
+    tui.handle_event(
+        Event(
+            session_id=tui.active_view.session.session_id,
+            world="alpha",
+            connection_generation=1,
+            sequence=0,
+            direction=Direction.INBOUND,
+            kind=EventKind.RAW_OUTPUT,
+            canonical_text="hello",
+            plain_text="hello",
+            display_text="hello",
+        )
+    )
+    assert tui.active_view.last_inbound_at == 1000.0
+
+    monkeypatch.setattr("tfr.tui.time.monotonic", lambda: 1125.0)
+
+    assert "[H] alpha (2m)" in fragment_list_to_text(tui.world_bar())
+
+
+def test_activity_indicator_ignores_outbound_command_events() -> None:
+    tui = make_tui()
+
+    tui.handle_event(
+        Event(
+            session_id=tui.active_view.session.session_id,
+            world="alpha",
+            connection_generation=1,
+            sequence=0,
+            direction=Direction.OUTBOUND,
+            kind=EventKind.COMMAND,
+            canonical_text="look",
+            plain_text="look",
+            display_text="look",
+            actor=Actor(ActorType.HUMAN, "me"),
+        )
+    )
+
+    assert tui.active_view.last_inbound_at is None
+
+
+async def test_activity_ticker_runs_once_the_ui_starts_animating() -> None:
+    tui = make_tui()
+    tui._animations_started = True
+    tui._sync_animation_task()
+
+    assert tui._activity_ticker_task is not None
+    task = tui._activity_ticker_task
+    assert not task.done()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_activity_ticker_stops_under_low_bandwidth_and_boss_mode() -> None:
+    tui = make_tui()
+    tui._animations_started = True
+    tui._sync_animation_task()
+    assert tui._activity_ticker_task is not None
+
+    await tui._handle_client_command("alpha", "/lowbw on")
+    assert tui._activity_ticker_task is None
+
+    await tui._handle_client_command("alpha", "/lowbw off")
+    assert tui._activity_ticker_task is not None
+
+    tui.activate_boss()
+    assert tui._activity_ticker_task is None
 
 
 def test_dragging_output_selects_highlights_and_copies_plain_text() -> None:
