@@ -18,6 +18,16 @@
       "enabled": true,
       "overlap_lines": 1,
     },
+    // Verifies the Gateway connection is alive on a background heartbeat and
+    // automatically retries /gateway reconnect's own logic before asking the
+    // operator to reconnect manually. These are the built-in defaults.
+    "gateway_reconnect": {
+      "enabled": true,
+      "heartbeat_seconds": 20,
+      "ping_timeout_seconds": 8,
+      "max_attempts": 5,
+      "retry_interval_seconds": 3,
+    },
   },
 
   // Complete traffic is logged. Sensitive outbound commands are redacted.
@@ -28,8 +38,35 @@
   },
 
   "plugins": {
-    // Install optional plugin distributions before enabling their entry-point names.
-    "enabled": [],
-    "config": {},
+    // Every visual plugin from tfr-plugins-public, using their built-in
+    // defaults ({}). See that repository's README for what each plugin does
+    // and which fields it accepts, and SPEAKER-EFFECTS.md for the full
+    // speaker_effects catalog. speaker_effects loads with no rules
+    // configured and is a safe no-op until you add some.
+    "enabled": [
+      "cat",
+      "border_reflection",
+      "film_burn",
+      "flame",
+      "marching_ants",
+      "speaker_effects",
+      "terminal_reveal",
+      "vortex",
+      "water",
+    ],
+    "sources": [
+      { "repo": "Blaag/tfr-plugins-public" },
+    ],
+    "config": {
+      "cat": {},
+      "border_reflection": {},
+      "film_burn": {},
+      "flame": {},
+      "marching_ants": {},
+      "speaker_effects": {},
+      "terminal_reveal": {},
+      "vortex": {},
+      "water": {},
+    },
   },
 }

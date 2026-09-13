@@ -780,6 +780,10 @@ Acceptance criteria:
   Git repository (GitHub shorthand, full URL, or SSH URL), with optional
   branch/tag/commit pinning and optional per-launch `auto_update`, without a
   separate packaging or installation step.
+- [ ] Notify at UI startup when updates are available for the Gateway, the UI's
+  own checkout, or any Git-sourced plugin, by comparing each running commit
+  against its tracked upstream ref without fetching or applying anything
+  automatically.
 
 ## Test Strategy
 
