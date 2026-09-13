@@ -199,9 +199,12 @@ def test_dragging_output_selects_highlights_and_copies_plain_text() -> None:
     copied: list[str] = []
     view._copy_handler = copied.append
 
+    # The pane is 5 rows tall but only 2 rows are buffered, so the real
+    # content is bottom-anchored at pane rows 3-4 (3 blank rows padded
+    # above); y=3/y=4 below target "first"/"second" respectively.
     view.handle_output_mouse(
         MouseEvent(
-            position=Point(x=1, y=0),
+            position=Point(x=1, y=3),
             event_type=MouseEventType.MOUSE_DOWN,
             button=MouseButton.LEFT,
             modifiers=frozenset(),
@@ -209,7 +212,7 @@ def test_dragging_output_selects_highlights_and_copies_plain_text() -> None:
     )
     view.handle_output_mouse(
         MouseEvent(
-            position=Point(x=2, y=1),
+            position=Point(x=2, y=4),
             event_type=MouseEventType.MOUSE_MOVE,
             button=MouseButton.LEFT,
             modifiers=frozenset(),
@@ -217,7 +220,7 @@ def test_dragging_output_selects_highlights_and_copies_plain_text() -> None:
     )
     view.handle_output_mouse(
         MouseEvent(
-            position=Point(x=2, y=1),
+            position=Point(x=2, y=4),
             event_type=MouseEventType.MOUSE_UP,
             button=MouseButton.LEFT,
             modifiers=frozenset(),
@@ -253,6 +256,7 @@ def test_click_on_a_url_opens_it_without_copying() -> None:
     tui = make_tui()
     view = tui.active_view
     text = "see http://example.com now"
+    view.display.resize(width=80, height=1)
     view.display.append(text)
     copied: list[str] = []
     view._copy_handler = copied.append
@@ -277,6 +281,7 @@ def test_click_on_a_url_opens_it_without_copying() -> None:
 def test_click_outside_a_url_does_not_open_anything() -> None:
     tui = make_tui()
     view = tui.active_view
+    view.display.resize(width=80, height=1)
     view.display.append("see http://example.com now")
     opened: list[str] = []
     view._open_url_handler = opened.append
@@ -306,9 +311,11 @@ def test_dragging_over_a_url_copies_text_instead_of_opening_it() -> None:
     view._open_url_handler = opened.append
     start = text.index("http://")
 
+    # The pane is 5 rows tall but only 1 row is buffered, so the real
+    # content is bottom-anchored at pane row 4 (4 blank rows padded above).
     view.handle_output_mouse(
         MouseEvent(
-            position=Point(x=start, y=0),
+            position=Point(x=start, y=4),
             event_type=MouseEventType.MOUSE_DOWN,
             button=MouseButton.LEFT,
             modifiers=frozenset(),
@@ -316,7 +323,7 @@ def test_dragging_over_a_url_copies_text_instead_of_opening_it() -> None:
     )
     view.handle_output_mouse(
         MouseEvent(
-            position=Point(x=start + 5, y=0),
+            position=Point(x=start + 5, y=4),
             event_type=MouseEventType.MOUSE_MOVE,
             button=MouseButton.LEFT,
             modifiers=frozenset(),
@@ -324,7 +331,7 @@ def test_dragging_over_a_url_copies_text_instead_of_opening_it() -> None:
     )
     view.handle_output_mouse(
         MouseEvent(
-            position=Point(x=start + 5, y=0),
+            position=Point(x=start + 5, y=4),
             event_type=MouseEventType.MOUSE_UP,
             button=MouseButton.LEFT,
             modifiers=frozenset(),
@@ -420,6 +427,68 @@ async def test_recall_appends_retained_rows_after_a_screen_clear() -> None:
     rows = view.display.visible_rows()
     assert fragment_list_to_text(view.display.formatted_text()) == "-- Recall 2\nsecond\nthird"
     assert "ansiyellow" in rows[0][0][0]
+
+
+async def test_recall_output_is_anchored_to_the_bottom_of_the_pane() -> None:
+    tui = make_tui()
+    view = tui.active_view
+    view.display.resize(width=40, height=10)
+    view.display.append("first")
+    view.display.append("second")
+    view.display.append("third")
+    view.display.clear_screen()
+
+    await tui._handle_client_command("alpha", "/recall 2")
+
+    lines = fragment_list_to_text(view.output_text()).split("\n")
+    assert lines == ["", "", "", "", "", "", "", "-- Recall 2", "second", "third"]
+
+
+async def test_output_after_a_clear_is_anchored_to_the_bottom_of_the_pane() -> None:
+    tui = make_tui()
+    view = tui.active_view
+    view.display.resize(width=40, height=6)
+    view.display.append("old text")
+    view.display.clear_screen()
+
+    view.display.append("hello")
+
+    lines = fragment_list_to_text(view.output_text()).split("\n")
+    assert lines == ["", "", "", "", "", "hello"]
+
+
+def test_dragging_within_blank_padding_selects_nothing() -> None:
+    tui = make_tui()
+    view = tui.active_view
+    view.display.resize(width=20, height=5)
+    view.display.append("only one line")
+
+    view.handle_output_mouse(
+        MouseEvent(
+            position=Point(x=0, y=0),
+            event_type=MouseEventType.MOUSE_DOWN,
+            button=MouseButton.LEFT,
+            modifiers=frozenset(),
+        )
+    )
+    view.handle_output_mouse(
+        MouseEvent(
+            position=Point(x=3, y=1),
+            event_type=MouseEventType.MOUSE_MOVE,
+            button=MouseButton.LEFT,
+            modifiers=frozenset(),
+        )
+    )
+    view.handle_output_mouse(
+        MouseEvent(
+            position=Point(x=3, y=1),
+            event_type=MouseEventType.MOUSE_UP,
+            button=MouseButton.LEFT,
+            modifiers=frozenset(),
+        )
+    )
+
+    assert not any("class:selection" in style for style, _text, *_ in view.output_text())
 
 
 async def test_recall_does_not_recall_previous_recall_blocks() -> None:
@@ -908,6 +977,7 @@ def test_low_bandwidth_freezes_and_resumes_animation_time(
 async def test_speaker_effects_animate_visually_but_keep_stored_text() -> None:
     tui = make_tui()
     await add_speaker_effects(tui)
+    tui.active_view.display.resize(width=80, height=1)
     event = Event(
         session_id=tui.active_view.session.session_id,
         world="alpha",
@@ -932,6 +1002,7 @@ async def test_speaker_effects_animate_visually_but_keep_stored_text() -> None:
 async def test_speaker_effects_keep_static_color_when_animations_are_off() -> None:
     tui = make_tui()
     await add_speaker_effects(tui)
+    tui.active_view.display.resize(width=80, height=1)
     tui.animations_enabled = False
     event = Event(
         session_id=tui.active_view.session.session_id,
@@ -1028,6 +1099,7 @@ async def test_historical_one_shot_effect_remains_completed_after_reload(
         loop=False,
         base_color="#6f7782",
     )
+    tui.active_view.display.resize(width=80, height=1)
     tui.handle_event(
         Event(
             session_id=tui.active_view.session.session_id,
@@ -1072,6 +1144,31 @@ def test_releasing_selection_over_border_finishes_copy() -> None:
     view.display.append("first\nsecond")
     view.handle_output_mouse(
         MouseEvent(Point(x=2, y=0), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+
+    view.handle_border_mouse(
+        MouseEvent(Point(x=4, y=0), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset()),
+        BorderEdge.BOTTOM,
+        panel="output",
+    )
+
+    assert view._selection_dragging is False
+    assert view.selected_text() == "rst\nseco"
+    assert copied == ["rst\nseco"]
+
+
+def test_releasing_selection_over_border_finishes_copy_with_padding() -> None:
+    # Same drag as above, but the pane is taller than the buffered content,
+    # so the border-mouse coordinate translation must account for the
+    # blank rows padded above the real content.
+    tui = make_tui()
+    view = tui.active_view
+    copied: list[str] = []
+    view._copy_handler = copied.append
+    view.display.resize(width=10, height=5)
+    view.display.append("first\nsecond")
+    view.handle_output_mouse(
+        MouseEvent(Point(x=2, y=3), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
     )
 
     view.handle_border_mouse(

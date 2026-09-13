@@ -185,6 +185,39 @@ def test_display_buffer_bounds_rendered_rows_and_reflows() -> None:
     assert display.pager.visible_range == (0, 2)
 
 
+def test_padded_visible_rows_pads_short_content_above_not_below() -> None:
+    display = DisplayBuffer(max_rows=10, width=20, height=5, pager_enabled=False)
+    display.append("first")
+    display.append("second")
+
+    padded = display.padded_visible_rows()
+
+    assert len(padded) == 5
+    assert [fragment_list_to_text(list(row)) for row in padded] == [
+        "",
+        "",
+        "",
+        "first",
+        "second",
+    ]
+
+
+def test_padded_visible_rows_is_unchanged_once_content_fills_the_pane() -> None:
+    display = DisplayBuffer(max_rows=10, width=20, height=2, pager_enabled=False)
+    display.append("first")
+    display.append("second")
+
+    assert display.padded_visible_rows() == display.visible_rows()
+
+
+def test_padded_visible_rows_pads_fully_when_the_buffer_is_empty() -> None:
+    display = DisplayBuffer(max_rows=10, width=20, height=3, pager_enabled=False)
+
+    padded = display.padded_visible_rows()
+
+    assert padded == ((), (), ())
+
+
 def test_url_at_resolves_a_click_within_a_detected_url() -> None:
     text = "see http://example.com now"
     url = "http://example.com"

@@ -484,6 +484,29 @@ class DisplayBuffer:
             visible.extend(rows[max(0, start - row_start) : end - row_start])
         return tuple(visible)
 
+    def padded_visible_rows(
+        self,
+        *,
+        elapsed_seconds: float | None = None,
+        animations_enabled: bool = False,
+    ) -> tuple[FormattedRow, ...]:
+        """Like :meth:`visible_rows`, but padded to the pane's full height.
+
+        When there are fewer buffered rows than the pane is tall (for
+        example, right after a screen clear or a small ``/recall``), blank
+        rows are added *above* the real content so it stays anchored to the
+        pane's bottom edge, matching a normal terminal, instead of leaving
+        blank space below newly displayed text.
+        """
+        rows = self.visible_rows(
+            elapsed_seconds=elapsed_seconds,
+            animations_enabled=animations_enabled,
+        )
+        pad_count = self.pager.height - len(rows)
+        if pad_count <= 0:
+            return rows
+        return ((),) * pad_count + rows
+
     def animation_frame_delay(self, elapsed_seconds: float) -> float | None:
         start, end = self._visible_bounds()
         delays: list[float] = []

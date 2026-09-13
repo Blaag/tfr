@@ -159,19 +159,24 @@ class WorldView:
 
     def output_text(self) -> StyleAndTextTuples:
         elapsed_seconds, animations_enabled = self._animation_state()
-        rows = self.display.visible_rows(
+        rows = self.display.padded_visible_rows(
             elapsed_seconds=elapsed_seconds,
             animations_enabled=animations_enabled,
         )
-        selection = self.selection_range(rows)
+        # Selection anchor/head coordinates are content-relative (matching
+        # _selection_point()), so the padding at the front of `rows` must be
+        # skipped before checking the selection range against it.
+        pad_count = len(rows) - len(self.display.visible_rows())
+        selection = self.selection_range(rows[pad_count:])
         if selection is None:
             return rows_to_formatted_text(rows)
         (start_row, start_column), (end_row, end_column) = selection
         selected_rows = []
         for row_number, row in enumerate(rows):
-            if start_row <= row_number <= end_row:
-                row_start = start_column if row_number == start_row else 0
-                row_end = end_column if row_number == end_row else len(_row_text(row))
+            content_row_number = row_number - pad_count
+            if start_row <= content_row_number <= end_row:
+                row_start = start_column if content_row_number == start_row else 0
+                row_end = end_column if content_row_number == end_row else len(_row_text(row))
                 row = _selected_row(row, row_start, row_end)
             selected_rows.append(row)
         return rows_to_formatted_text(tuple(selected_rows))
@@ -264,6 +269,8 @@ class WorldView:
         rows = self.display.visible_rows()
         if not rows:
             return None
+        pane_height = self.display.pager.height
+        pad_count = max(0, pane_height - len(rows))
         width = max(1, self.display.width)
         if edge in {BorderEdge.TOP, BorderEdge.BOTTOM}:
             column = min(width - 1, max(0, mouse_event.position.x - 1))
@@ -271,12 +278,16 @@ class WorldView:
             column = 0
         else:
             column = width - 1
+        # `row` is in the same pane-relative coordinates as a real output
+        # mouse event's position.y (i.e. row 0 is the pane's top edge, not
+        # necessarily the first buffered row), since handle_output_mouse
+        # below feeds it straight into _selection_point.
         if panel == "input" or edge is BorderEdge.BOTTOM:
-            row = len(rows) - 1
+            row = pane_height - 1
         elif edge is BorderEdge.TOP:
-            row = 0
+            row = pad_count
         else:
-            row = min(len(rows) - 1, max(0, mouse_event.position.y))
+            row = min(pane_height - 1, max(pad_count, mouse_event.position.y))
         return self.handle_output_mouse(
             MouseEvent(
                 position=Point(x=column, y=row),
@@ -297,7 +308,11 @@ class WorldView:
         rows = self.display.visible_rows()
         if not rows:
             return None
-        row = min(max(0, mouse_event.position.y), len(rows) - 1)
+        pad_count = max(0, self.display.pager.height - len(rows))
+        y = mouse_event.position.y - pad_count
+        if y < 0:
+            return None
+        row = min(max(0, y), len(rows) - 1)
         column = min(max(0, mouse_event.position.x), len(_row_text(rows[row])))
         return row, column
 
@@ -681,18 +696,14 @@ class TfrTui:
         view = self.views[alias]
         view.clear_selection()
         elapsed_seconds = self._animation_elapsed_seconds()
-        styled_rows = view.display.visible_rows(
+        # Padded to the pane's true height (rather than however many rows
+        # happen to be buffered) so the animation's floor always lands on
+        # the pane's actual bottom edge, for example right after /recall
+        # truncated the buffer down to just a few lines.
+        styled_rows = view.display.padded_visible_rows(
             elapsed_seconds=elapsed_seconds,
             animations_enabled=self.animations_enabled,
         )
-        pane_height = view.display.pager.height
-        if len(styled_rows) < pane_height:
-            # Fewer buffered rows than the pane's height (for example, right
-            # after /recall truncated the buffer) must not shrink the
-            # animation's geometry. Pad blank rows above the real content so
-            # the last real row still lands on the pane's true bottom edge,
-            # instead of using the last buffered row as the animation floor.
-            styled_rows = ((),) * (pane_height - len(styled_rows)) + styled_rows
         rows = tuple(_row_text(row) for row in styled_rows)
         view.display.clear_screen()
         self._sync_animation_task(restart=True)
