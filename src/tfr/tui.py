@@ -1229,9 +1229,9 @@ class TfrTui:
                 self.switch_world(parameters[0])
             else:
                 self.add_notice(alias, "Worlds: " + ", ".join(self.aliases))
-        elif command == "next":
+        elif command in {"next", "n"}:
             self.switch_relative(1)
-        elif command in {"previous", "prev"}:
+        elif command in {"previous", "prev", "p"}:
             self.switch_relative(-1)
         elif command == "connect":
             await self.connect_world(alias)
@@ -1275,7 +1275,7 @@ class TfrTui:
             "  /boss - hide TFR behind a quiet build screen until Enter",
             "  /sh - temporarily open an interactive local shell",
             "  ! command - run one local shell command; !!TEXT sends a literal !",
-            "  /world ALIAS - switch worlds; /next and /previous also switch",
+            "  /world ALIAS - switch worlds; /next (/n) and /previous (/p) also switch",
             "  /connect, /disconnect, /reconnect - manage the active connection",
             "  /clear [status|cycle|random|lock EFFECT] - clear output or select its effect",
             "  /recall X - show the last X retained lines for the active world",

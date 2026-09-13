@@ -301,7 +301,7 @@ above.
 - Drag across world output to highlight it and copy the plain text to the clipboard.
 
 Input beginning with `/` is a client command. Available commands are `/world
-ALIAS`, `/next`, `/previous`, `/connect`, `/disconnect`, `/reconnect`, `/more`,
+ALIAS`, `/next` (`/n`), `/previous` (`/p`), `/connect`, `/disconnect`, `/reconnect`, `/more`,
 `/end`, `/nospoof show|hide|status`, `/animations on|off|status`,
 `/lowbw on|off|status`, `/clear`, `/boss`, `/sh`, `/reload`, `/restart`,
 `/gateway reconnect`, `/help`, and `/quit`, plus commands registered by enabled

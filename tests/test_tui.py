@@ -404,6 +404,17 @@ async def test_gateway_reconnect_command_preserves_the_running_ui() -> None:
     assert tui.restart_requested is False
 
 
+async def test_n_and_p_are_shortcuts_for_next_and_previous_world() -> None:
+    tui = make_tui()
+    assert tui.active_alias == "alpha"
+
+    await tui._handle_client_command("alpha", "/n")
+    assert tui.active_alias == "beta"
+
+    await tui._handle_client_command("beta", "/p")
+    assert tui.active_alias == "alpha"
+
+
 async def test_nospoof_command_toggles_prefix_visibility() -> None:
     tui = make_tui()
     session = tui.active_view.session
