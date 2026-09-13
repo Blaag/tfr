@@ -336,6 +336,33 @@ def test_decorations_render_after_ansi_parsing_without_changing_wrapping() -> No
     assert any("fg:#e6c965" in style for style, _text in rows[0])
 
 
+def test_url_underline_survives_the_per_frame_decoration_rewrap() -> None:
+    # visible_rows() re-wraps entries that carry an active decoration fresh
+    # on every frame (for animation), which previously dropped the URL
+    # underline for any line a plugin also decorated (e.g. a speaker
+    # effect on the sender's name, or a broadly-applied effect like
+    # terminal_reveal).
+    text = "Alice says, check http://example.com now"
+    url = "http://example.com"
+    decoration = TextDecoration(
+        start=0,
+        end=5,
+        effect=TextEffectKind.CAPITALIZATION_ROLL,
+        base_color="#a9914a",
+        accent_color="#e6c965",
+        interval_seconds=0.5,
+    )
+    display = DisplayBuffer(max_rows=10, width=60, height=5, pager_enabled=False)
+    display.append(text, decorations=(decoration,))
+
+    rows = display.visible_rows(elapsed_seconds=0.1, animations_enabled=True)
+
+    underlined = "".join(
+        fragment_text for row in rows for style, fragment_text in row if "underline" in style
+    )
+    assert underlined == url
+
+
 def test_display_decorations_are_static_when_animation_is_disabled() -> None:
     display = DisplayBuffer(max_rows=20, width=20, height=5, pager_enabled=False)
     display.append(

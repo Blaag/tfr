@@ -472,6 +472,10 @@ class DisplayBuffer:
                         decorations=decorations,
                         elapsed_seconds=elapsed_seconds,
                         animations_enabled=animations_enabled,
+                        url_spans=tuple(
+                            (url_start, url_end)
+                            for url_start, url_end, _url in self._entry_urls[index]
+                        ),
                     )
                 )[offset:]
                 if decorations
