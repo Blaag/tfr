@@ -10,6 +10,7 @@ import shlex
 import signal
 import sys
 import time
+import webbrowser
 from collections import deque
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import replace
@@ -99,6 +100,7 @@ class WorldView:
         copy_handler: Callable[[str], None],
         invalidate_handler: Callable[[], None],
         animation_state: Callable[[], tuple[float, bool]],
+        open_url_handler: Callable[[str], None],
     ) -> None:
         self.session = session
         self.display = display
@@ -109,6 +111,7 @@ class WorldView:
         self._copy_handler = copy_handler
         self._invalidate_handler = invalidate_handler
         self._animation_state = animation_state
+        self._open_url_handler = open_url_handler
         self._selection_anchor: tuple[int, int] | None = None
         self._selection_head: tuple[int, int] | None = None
         self._selection_dragged = False
@@ -238,6 +241,10 @@ class WorldView:
             selected = self.selected_text()
             if selected:
                 self._copy_handler(selected)
+            elif point is not None and not self._selection_dragged:
+                url = self.display.url_at(*point)
+                if url is not None:
+                    self._open_url_handler(url)
             self._invalidate_handler()
             return None
         return NotImplemented
@@ -398,6 +405,7 @@ class TfrTui:
                     self._border_frame_elapsed,
                     self.animations_enabled and not self.low_bandwidth,
                 ),
+                open_url_handler=self._open_url,
             )
 
         self.output_panels = {
@@ -982,6 +990,13 @@ class TfrTui:
             return
         await process.communicate(text.encode("utf-8"))
 
+    def _open_url(self, url: str) -> None:
+        self._spawn(self._open_url_in_browser(url))
+
+    @staticmethod
+    async def _open_url_in_browser(url: str) -> None:
+        await asyncio.to_thread(webbrowser.open_new_tab, url)
+
     def handle_event(self, event: Event) -> None:
         view = self.views.get(event.world)
         if view is None:
@@ -1300,6 +1315,7 @@ class TfrTui:
             "Keybindings",
             "  Enter send; F5/Ctrl-Left/Option-Left previous world",
             "  F6/Ctrl-Right next; left-click selects a world; drag copies output",
+            "  Click an underlined http(s) link to open it in your browser",
             "  PageUp/PageDown scroll or page; End returns to live output",
             "  Ctrl-L clear screen; Ctrl-R reconnect; F8 agent inspector",
             "  Ctrl-Q quit; Ctrl-C interrupt",

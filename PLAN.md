@@ -771,7 +771,7 @@ Acceptance criteria:
   and an explicit option to emit selected statistics to the world.
 - [ ] Make display-affecting keys such as Page Up and Page Down immediately end
   an active screen-clear animation before performing the requested action.
-- [ ] Detect HTTP and HTTPS URLs in chat output, render them underlined and
+- [x] Detect HTTP and HTTPS URLs in chat output, render them underlined and
   clickable, and open them in a new tab through the operating system's default
   browser.
 - [x] Add root `README.md` instructions for configuring and running the TFR UI

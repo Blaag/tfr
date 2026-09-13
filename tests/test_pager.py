@@ -120,6 +120,54 @@ def test_wide_glyph_is_replaced_when_it_cannot_fit_the_row() -> None:
     assert fragment_list_to_text(list(rows[0])) == "\N{REPLACEMENT CHARACTER}"
 
 
+def test_url_spans_are_underlined_without_altering_the_text() -> None:
+    text = "see http://example.com now"
+    start, end = text.index("http://"), text.index(" now")
+
+    rows = wrap_ansi_text(text, 40, url_spans=((start, end),))
+
+    assert fragment_list_to_text(list(rows[0])) == text
+    assert "underline" in rows[0][1][0]
+    assert "underline" not in rows[0][0][0]
+    assert "underline" not in rows[0][2][0]
+
+
+def test_url_underline_is_combined_with_the_default_style() -> None:
+    text = "http://example.com"
+
+    rows = wrap_ansi_text(text, 40, default_style="fg:#d7d7d7", url_spans=((0, len(text)),))
+
+    assert rows[0][0] == ("fg:#d7d7d7 underline", text)
+
+
+def test_url_span_survives_a_hard_wrap_mid_url() -> None:
+    text = "http://example.com"
+
+    rows = wrap_ansi_text(text, 10, url_spans=((0, len(text)),))
+
+    assert len(rows) == 2
+    assert fragment_list_to_text(list(rows[0])) + fragment_list_to_text(list(rows[1])) == text
+    assert all("underline" in style for row in rows for style, _text in row)
+
+
+def test_row_offsets_are_populated_at_each_wrap_boundary() -> None:
+    offsets: list[int] = []
+
+    rows = wrap_ansi_text("abcdefghij", 4, row_offsets=offsets)
+
+    assert len(rows) == 3
+    assert offsets == [0, 4, 8]
+
+
+def test_row_offsets_account_for_newlines_and_carriage_returns() -> None:
+    offsets: list[int] = []
+
+    rows = wrap_ansi_text("ab\r\ncd\nef", 40, row_offsets=offsets)
+
+    assert [fragment_list_to_text(list(row)) for row in rows] == ["ab", "cd", "ef"]
+    assert offsets == [0, 4, 7]
+
+
 def test_display_buffer_bounds_rendered_rows_and_reflows() -> None:
     display = DisplayBuffer(max_rows=3, width=10, height=5, pager_enabled=False)
     display.append("first")
@@ -135,6 +183,81 @@ def test_display_buffer_bounds_rendered_rows_and_reflows() -> None:
     display.resize(width=20, height=2)
     assert len(display.rows) == 2
     assert display.pager.visible_range == (0, 2)
+
+
+def test_url_at_resolves_a_click_within_a_detected_url() -> None:
+    text = "see http://example.com now"
+    url = "http://example.com"
+    start = text.index(url)
+    display = DisplayBuffer(max_rows=10, width=40, height=5, pager_enabled=False)
+    display.append(text)
+
+    assert display.url_at(0, start) == url
+    assert display.url_at(0, start + 1) == url
+    assert display.url_at(0, start + len(url) - 1) == url
+
+
+def test_url_at_returns_none_outside_any_url_span() -> None:
+    text = "see http://example.com now"
+    url = "http://example.com"
+    start = text.index(url)
+    display = DisplayBuffer(max_rows=10, width=40, height=5, pager_enabled=False)
+    display.append(text)
+
+    assert display.url_at(0, 0) is None
+    assert display.url_at(0, start - 1) is None
+    assert display.url_at(0, start + len(url)) is None
+    assert display.url_at(0, len(text) - 1) is None
+
+
+def test_url_at_returns_none_when_no_urls_are_present() -> None:
+    display = DisplayBuffer(max_rows=10, width=40, height=5, pager_enabled=False)
+    display.append("just plain chat text")
+
+    assert display.url_at(0, 5) is None
+
+
+def test_url_at_resolves_a_url_wrapped_across_rows() -> None:
+    display = DisplayBuffer(max_rows=10, width=10, height=5, pager_enabled=False)
+    display.append("http://example.com")
+
+    assert [fragment_list_to_text(list(row)) for row in display.rows] == [
+        "http://exa",
+        "mple.com",
+    ]
+    assert display.url_at(0, 0) == "http://example.com"
+    assert display.url_at(1, 3) == "http://example.com"
+
+
+def test_url_at_remains_correct_after_scrollback_trimming() -> None:
+    display = DisplayBuffer(max_rows=1, width=40, height=5, pager_enabled=False)
+    display.append("http://first.example")
+    display.append("http://second.example")
+
+    assert display.entries == ["http://second.example"]
+    assert display.url_at(0, 5) == "http://second.example"
+
+
+def test_url_at_remains_correct_after_a_partial_row_trim() -> None:
+    # max_rows=2 forces trimming exactly one row off the *front* of the
+    # first (wrapped-into-two-rows) entry, rather than removing it whole.
+    display = DisplayBuffer(max_rows=2, width=10, height=5, pager_enabled=False)
+    display.append("http://example.com")
+    display.append("hi")
+
+    assert [fragment_list_to_text(list(row)) for row in display.rows] == ["mple.com", "hi"]
+    assert display.url_at(0, 0) == "http://example.com"
+
+
+def test_url_at_remains_correct_after_a_width_resize() -> None:
+    display = DisplayBuffer(max_rows=10, width=40, height=5, pager_enabled=False)
+    display.append("see http://example.com now")
+
+    display.resize(width=10, height=5)
+
+    assert len(display.rows) > 1
+    found = {display.url_at(row, 0) for row in range(len(display.rows))}
+    assert "http://example.com" in found
 
 
 def test_recent_rows_excludes_previous_recall_output() -> None:

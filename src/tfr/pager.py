@@ -6,8 +6,9 @@ from enum import StrEnum
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.utils import get_cwidth
 
-from tfr.ansi import safe_ansi_formatted_text
+from tfr.ansi import safe_ansi_formatted_text, terminal_plain_text
 from tfr.text_effects import TextDecoration, TextEffectKind
+from tfr.urls import find_urls
 
 
 class PagerMode(StrEnum):
@@ -176,6 +177,8 @@ def wrap_ansi_text(
     decorations: tuple[TextDecoration, ...] = (),
     elapsed_seconds: float = 0.0,
     animations_enabled: bool = False,
+    url_spans: tuple[tuple[int, int], ...] = (),
+    row_offsets: list[int] | None = None,
 ) -> tuple[FormattedRow, ...]:
     if width <= 0:
         raise ValueError("display width must be positive")
@@ -187,6 +190,8 @@ def wrap_ansi_text(
     rows: list[list[tuple[str, str]]] = [[]]
     column = 0
     visible_offset = 0
+    if row_offsets is not None:
+        row_offsets.append(0)
     fragments = safe_ansi_formatted_text(text)
     for fragment in fragments:
         style, fragment_text = fragment[:2]
@@ -198,6 +203,8 @@ def wrap_ansi_text(
                 rows.append([])
                 column = 0
                 visible_offset += 1
+                if row_offsets is not None:
+                    row_offsets.append(visible_offset)
                 continue
             rendered_style = f"{default_style} {style}".strip()
             rendered_character = character
@@ -216,6 +223,8 @@ def wrap_ansi_text(
                     )
                     if effect_style:
                         rendered_style = f"{rendered_style} {effect_style}".strip()
+            if any(start <= visible_offset < end for start, end in url_spans):
+                rendered_style = f"{rendered_style} underline".strip()
             if character == "\t":
                 cell_width = 8 - (column % 8)
                 remaining = cell_width
@@ -225,6 +234,8 @@ def wrap_ansi_text(
                         rows.append([])
                         column = 0
                         available = width
+                        if row_offsets is not None:
+                            row_offsets.append(visible_offset)
                     chunk_width = min(remaining, available)
                     _append_fragment(rows[-1], rendered_style, " " * chunk_width)
                     column += chunk_width
@@ -242,6 +253,8 @@ def wrap_ansi_text(
             if cell_width > 0 and column > 0 and column + cell_width > width:
                 rows.append([])
                 column = 0
+                if row_offsets is not None:
+                    row_offsets.append(visible_offset)
             _append_fragment(rows[-1], rendered_style, rendered)
             column += cell_width
             visible_offset += 1
@@ -278,6 +291,8 @@ class DisplayBuffer:
         self._entry_row_offsets: list[int] = []
         self._entry_decorations: list[tuple[TextDecoration, ...]] = []
         self._entry_recallable: list[bool] = []
+        self._entry_urls: list[tuple[tuple[int, int, str], ...]] = []
+        self._entry_row_starts: list[list[int]] = []
         self.rows: list[FormattedRow] = []
         self._screen_start_entry = 0
         self.pager = PagerState(
@@ -293,12 +308,16 @@ class DisplayBuffer:
         decorations: tuple[TextDecoration, ...] = (),
         recallable: bool = True,
     ) -> None:
+        urls = find_urls(terminal_plain_text(text))
+        row_starts: list[int] = []
         new_rows = list(
             wrap_ansi_text(
                 text,
                 self.width,
                 default_style=self.default_style,
                 decorations=decorations,
+                url_spans=tuple((start, end) for start, end, _url in urls),
+                row_offsets=row_starts,
             )
         )
         self.entries.append(text)
@@ -306,6 +325,8 @@ class DisplayBuffer:
         self._entry_row_offsets.append(0)
         self._entry_decorations.append(decorations)
         self._entry_recallable.append(recallable)
+        self._entry_urls.append(urls)
+        self._entry_row_starts.append(row_starts)
         self.rows.extend(new_rows)
         self.pager.append_rows(len(new_rows))
         self._trim_rows()
@@ -320,11 +341,14 @@ class DisplayBuffer:
             self._entry_row_offsets.pop(0)
             self._entry_decorations.pop(0)
             self._entry_recallable.pop(0)
+            self._entry_urls.pop(0)
+            self._entry_row_starts.pop(0)
             removed_entries += 1
         self._screen_start_entry = max(0, self._screen_start_entry - removed_entries)
         if remaining:
             self._entry_rows[0] = self._entry_rows[0][remaining:]
             self._entry_row_offsets[0] += remaining
+            self._entry_row_starts[0] = self._entry_row_starts[0][remaining:]
         if trim_count:
             del self.rows[:trim_count]
             self.pager.trim_rows(trim_count)
@@ -336,21 +360,30 @@ class DisplayBuffer:
             raise ValueError("display height must be positive")
         if width != self.width:
             self.width = width
-            self._entry_rows = [
-                list(
-                    wrap_ansi_text(
-                        entry,
-                        width,
-                        default_style=self.default_style,
-                        decorations=decorations,
+            row_starts_by_entry: list[list[int]] = []
+            entry_rows = []
+            for entry, decorations, urls in zip(
+                self.entries,
+                self._entry_decorations,
+                self._entry_urls,
+                strict=True,
+            ):
+                row_starts: list[int] = []
+                entry_rows.append(
+                    list(
+                        wrap_ansi_text(
+                            entry,
+                            width,
+                            default_style=self.default_style,
+                            decorations=decorations,
+                            url_spans=tuple((start, end) for start, end, _url in urls),
+                            row_offsets=row_starts,
+                        )
                     )
                 )
-                for entry, decorations in zip(
-                    self.entries,
-                    self._entry_decorations,
-                    strict=True,
-                )
-            ]
+                row_starts_by_entry.append(row_starts)
+            self._entry_rows = entry_rows
+            self._entry_row_starts = row_starts_by_entry
             self._entry_row_offsets = [0] * len(self.entries)
             self.rows = [row for entry in self._entry_rows for row in entry]
             self.pager.reflow(len(self.rows))
@@ -457,6 +490,32 @@ class DisplayBuffer:
                 if (delay := decoration.frame_delay(elapsed_seconds)) is not None
             )
         return min(delays, default=None)
+
+    def url_at(self, row: int, column: int) -> str | None:
+        """Return the URL under a visible ``(row, column)``, if any.
+
+        ``row`` and ``column`` use the same coordinates as the rows
+        returned by :meth:`visible_rows`: ``row`` is an index into the
+        currently visible rows, and ``column`` is a character offset into
+        that row's plain text.
+        """
+        start, end = self._visible_bounds()
+        absolute_row = start + row
+        if not start <= absolute_row < end:
+            return None
+        for index, row_start in self._visible_entries(start, end):
+            local_row = absolute_row - row_start
+            if not 0 <= local_row < len(self._entry_rows[index]):
+                continue
+            row_starts = self._entry_row_starts[index]
+            if local_row >= len(row_starts):
+                return None
+            target_offset = row_starts[local_row] + max(0, column)
+            for url_start, url_end, url in self._entry_urls[index]:
+                if url_start <= target_offset < url_end:
+                    return url
+            return None
+        return None
 
     @property
     def screen_is_cleared(self) -> bool:

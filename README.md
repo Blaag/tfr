@@ -299,6 +299,8 @@ above.
 - `Ctrl+Q`: quit cleanly.
 - Left-click a world in the top bar to switch to it.
 - Drag across world output to highlight it and copy the plain text to the clipboard.
+- Click an underlined `http://` or `https://` link in world output to open it in
+  your default browser.
 
 Input beginning with `/` is a client command. Available commands are `/world
 ALIAS`, `/next` (`/n`), `/previous` (`/p`), `/connect`, `/disconnect`, `/reconnect`, `/more`,

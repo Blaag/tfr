@@ -249,6 +249,102 @@ def test_click_without_drag_does_not_copy_text() -> None:
     assert not any("class:selection" in style for style, _text, *_ in view.output_text())
 
 
+def test_click_on_a_url_opens_it_without_copying() -> None:
+    tui = make_tui()
+    view = tui.active_view
+    text = "see http://example.com now"
+    view.display.append(text)
+    copied: list[str] = []
+    view._copy_handler = copied.append
+    opened: list[str] = []
+    view._open_url_handler = opened.append
+    column = text.index("http://") + 1
+
+    for event_type in (MouseEventType.MOUSE_DOWN, MouseEventType.MOUSE_UP):
+        view.handle_output_mouse(
+            MouseEvent(
+                position=Point(x=column, y=0),
+                event_type=event_type,
+                button=MouseButton.LEFT,
+                modifiers=frozenset(),
+            )
+        )
+
+    assert opened == ["http://example.com"]
+    assert copied == []
+
+
+def test_click_outside_a_url_does_not_open_anything() -> None:
+    tui = make_tui()
+    view = tui.active_view
+    view.display.append("see http://example.com now")
+    opened: list[str] = []
+    view._open_url_handler = opened.append
+
+    for event_type in (MouseEventType.MOUSE_DOWN, MouseEventType.MOUSE_UP):
+        view.handle_output_mouse(
+            MouseEvent(
+                position=Point(x=0, y=0),
+                event_type=event_type,
+                button=MouseButton.LEFT,
+                modifiers=frozenset(),
+            )
+        )
+
+    assert opened == []
+
+
+def test_dragging_over_a_url_copies_text_instead_of_opening_it() -> None:
+    tui = make_tui()
+    view = tui.active_view
+    view.display.resize(width=40, height=5)
+    text = "see http://example.com now"
+    view.display.append(text)
+    copied: list[str] = []
+    view._copy_handler = copied.append
+    opened: list[str] = []
+    view._open_url_handler = opened.append
+    start = text.index("http://")
+
+    view.handle_output_mouse(
+        MouseEvent(
+            position=Point(x=start, y=0),
+            event_type=MouseEventType.MOUSE_DOWN,
+            button=MouseButton.LEFT,
+            modifiers=frozenset(),
+        )
+    )
+    view.handle_output_mouse(
+        MouseEvent(
+            position=Point(x=start + 5, y=0),
+            event_type=MouseEventType.MOUSE_MOVE,
+            button=MouseButton.LEFT,
+            modifiers=frozenset(),
+        )
+    )
+    view.handle_output_mouse(
+        MouseEvent(
+            position=Point(x=start + 5, y=0),
+            event_type=MouseEventType.MOUSE_UP,
+            button=MouseButton.LEFT,
+            modifiers=frozenset(),
+        )
+    )
+
+    assert opened == []
+    assert copied == ["http:/"]
+
+
+def test_url_text_is_rendered_with_an_underline() -> None:
+    tui = make_tui()
+    view = tui.active_view
+    view.display.append("see http://example.com now")
+
+    underlined = "".join(text for style, text, *_ in view.output_text() if "underline" in style)
+
+    assert underlined == "http://example.com"
+
+
 def test_osc52_clipboard_sequence_contains_utf8_selection() -> None:
     sequence = _osc52_sequence("hello π")
 
