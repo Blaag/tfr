@@ -383,7 +383,11 @@ pager state, and unread count while inactive.
 The active world's recently sent commands remain directly above the editor.
 These lines are separate from server output, so server speech echoes are not
 duplicated. Configure their number with `ui.recent_input_lines` (default `3`, or
-`0` to hide the pane). `PageUp` after `Ctrl+L` reveals retained pre-clear output.
+`0` to hide the pane). `PageUp` after `Ctrl+L` reveals retained pre-clear output;
+pressing `PageUp`, `PageDown`, `End`, `/more`, or `/end` while a screen-clear
+animation is still running ends that animation immediately so the requested
+scrolling is visible right away, instead of silently changing scroll position
+underneath the still-active animation.
 
 ## Plugins
 

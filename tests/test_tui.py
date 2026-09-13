@@ -867,6 +867,116 @@ async def test_screen_clear_after_recall_uses_the_full_pane_as_its_floor() -> No
         await task
 
 
+async def test_page_up_ends_an_active_screen_clear_before_scrolling() -> None:
+    tui = make_tui()
+    await add_screen_clear_effects(tui)
+    tui.animations_enabled = False
+    view = tui.active_view
+    view.display.append("first")
+    tui.start_screen_clear("alpha")
+    assert tui._screen_clear_task is not None
+    assert view.display.screen_is_cleared is True
+
+    page_up = next(
+        binding for binding in tui.application.key_bindings.bindings if Keys.PageUp in binding.keys
+    )
+    page_up.handler(SimpleNamespace(app=tui.application))
+
+    assert tui._screen_clear_task is None
+    assert tui._screen_clear_world is None
+    # The requested action (revealing pre-clear scrollback) still happened,
+    # rather than being silently absorbed by the still-active clear overlay.
+    assert view.display.screen_is_cleared is False
+
+
+async def test_page_down_ends_an_active_screen_clear() -> None:
+    tui = make_tui()
+    await add_screen_clear_effects(tui)
+    tui.animations_enabled = False
+    tui.active_view.display.append("first")
+    tui.start_screen_clear("alpha")
+    assert tui._screen_clear_task is not None
+
+    page_down = next(
+        binding
+        for binding in tui.application.key_bindings.bindings
+        if Keys.PageDown in binding.keys
+    )
+    page_down.handler(SimpleNamespace(app=tui.application))
+
+    assert tui._screen_clear_task is None
+    assert tui._screen_clear_world is None
+
+
+async def test_jump_to_end_key_ends_an_active_screen_clear() -> None:
+    tui = make_tui()
+    await add_screen_clear_effects(tui)
+    tui.animations_enabled = False
+    tui.active_view.display.append("first")
+    tui.start_screen_clear("alpha")
+    assert tui._screen_clear_task is not None
+
+    end_key = next(
+        binding for binding in tui.application.key_bindings.bindings if Keys.End in binding.keys
+    )
+    end_key.handler(SimpleNamespace(app=tui.application))
+
+    assert tui._screen_clear_task is None
+    assert tui._screen_clear_world is None
+
+
+async def test_more_command_ends_an_active_screen_clear() -> None:
+    tui = make_tui()
+    await add_screen_clear_effects(tui)
+    tui.animations_enabled = False
+    tui.active_view.display.append("first")
+    tui.start_screen_clear("alpha")
+    assert tui._screen_clear_task is not None
+
+    await tui._handle_client_command("alpha", "/more")
+
+    assert tui._screen_clear_task is None
+    assert tui._screen_clear_world is None
+
+
+async def test_end_command_ends_an_active_screen_clear() -> None:
+    tui = make_tui()
+    await add_screen_clear_effects(tui)
+    tui.animations_enabled = False
+    tui.active_view.display.append("first")
+    tui.start_screen_clear("alpha")
+    assert tui._screen_clear_task is not None
+
+    await tui._handle_client_command("alpha", "/end")
+
+    assert tui._screen_clear_task is None
+    assert tui._screen_clear_world is None
+
+
+async def test_paging_the_active_world_does_not_end_a_different_worlds_screen_clear() -> None:
+    tui = make_tui()
+    await add_screen_clear_effects(tui)
+    tui.animations_enabled = False
+    tui.views["beta"].display.append("background world text")
+    tui.start_screen_clear("beta")
+    assert tui._screen_clear_world == "beta"
+    task = tui._screen_clear_task
+    assert task is not None
+    # Switch away without touching beta's still-running clear animation.
+    tui.switch_world("alpha")
+
+    page_up = next(
+        binding for binding in tui.application.key_bindings.bindings if Keys.PageUp in binding.keys
+    )
+    page_up.handler(SimpleNamespace(app=tui.application))
+
+    assert tui._screen_clear_world == "beta"
+    assert tui._screen_clear_task is task
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
 async def test_screen_clear_waits_for_plugin_completion_after_duration() -> None:
     tui = make_tui()
     complete = False

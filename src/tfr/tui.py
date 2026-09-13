@@ -560,6 +560,7 @@ class TfrTui:
 
         @bindings.add("pageup")
         def page_up(event: Any) -> None:
+            self._end_screen_clear_for(self.active_alias)
             if self.inspector_agent is not None:
                 self.inspector_window.vertical_scroll = max(
                     0,
@@ -577,6 +578,7 @@ class TfrTui:
 
         @bindings.add("pagedown")
         def page_down(event: Any) -> None:
+            self._end_screen_clear_for(self.active_alias)
             if self.inspector_agent is not None:
                 self.inspector_window.vertical_scroll += self.active_view.display.pager.page_size
                 event.app.invalidate()
@@ -592,6 +594,7 @@ class TfrTui:
 
         @bindings.add("end")
         def jump_to_end(event: Any) -> None:
+            self._end_screen_clear_for(self.active_alias)
             if self.inspector_agent is not None:
                 self.inspector_window.vertical_scroll = 0
                 event.app.invalidate()
@@ -707,6 +710,16 @@ class TfrTui:
         self._screen_clear_elapsed_seconds = 0.0
         self._sync_animation_task(restart=True)
         self.application.invalidate()
+
+    def _end_screen_clear_for(self, alias: str) -> None:
+        # Scrolling, paging, or jumping to the end of a world's output
+        # while its screen-clear animation is still running would silently
+        # change pager state underneath an overlay that's still covering
+        # it -- the change wouldn't even be visible until the animation
+        # finishes on its own. Ending the animation immediately makes the
+        # requested action visible right away instead.
+        if self._screen_clear_world == alias:
+            self._stop_screen_clear()
 
     def start_screen_clear(self, alias: str) -> None:
         view = self.views[alias]
@@ -1302,11 +1315,13 @@ class TfrTui:
         elif command == "recall":
             self._handle_recall_command(alias, parameters)
         elif command == "more":
+            self._end_screen_clear_for(alias)
             self.views[alias].clear_selection()
             self.views[alias].display.pager.advance()
             self._sync_animation_task(restart=True)
             self.application.invalidate()
         elif command == "end":
+            self._end_screen_clear_for(alias)
             self.views[alias].clear_selection()
             self.views[alias].display.pager.jump_to_end()
             self._sync_animation_task(restart=True)

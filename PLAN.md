@@ -769,7 +769,7 @@ Acceptance criteria:
 - [ ] Create a `/stats` plugin with per-world received-versus-sent counts, top
   speakers, message histograms, speech-length statistics by speaker, UI output,
   and an explicit option to emit selected statistics to the world.
-- [ ] Make display-affecting keys such as Page Up and Page Down immediately end
+- [x] Make display-affecting keys such as Page Up and Page Down immediately end
   an active screen-clear animation before performing the requested action.
 - [x] Detect HTTP and HTTPS URLs in chat output, render them underlined and
   clickable, and open them in a new tab through the operating system's default
