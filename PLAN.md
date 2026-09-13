@@ -784,6 +784,11 @@ Acceptance criteria:
   own checkout, or any Git-sourced plugin, by comparing each running commit
   against its tracked upstream ref without fetching or applying anything
   automatically.
+- [ ] Support skinning or theming the UI: configurable colors for borders,
+  the status bar, world markers, selection highlight, and the input prompt
+  (currently fixed `class:*` styles in `tui.py`), beyond the single existing
+  `ui.output_color` setting, ideally as named presets plus a way for plugins
+  to register their own.
 
 ## Test Strategy
 
