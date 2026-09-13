@@ -759,7 +759,7 @@ Acceptance criteria:
   world connection and disconnection, and boss-mode activation.
 - [ ] Add a per-world last-activity indicator showing the elapsed time since
   inbound input was most recently received.
-- [ ] Fix screen-clear geometry after `/recall`: clearing after `/recall 10`
+- [x] Fix screen-clear geometry after `/recall`: clearing after `/recall 10`
   must use the true bottom of the pane rather than the last recalled text row as
   the animation floor.
 - [x] Add UI-side gateway connection verification and bounded automatic retry

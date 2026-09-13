@@ -677,6 +677,14 @@ class TfrTui:
             elapsed_seconds=elapsed_seconds,
             animations_enabled=self.animations_enabled,
         )
+        pane_height = view.display.pager.height
+        if len(styled_rows) < pane_height:
+            # Fewer buffered rows than the pane's height (for example, right
+            # after /recall truncated the buffer) must not shrink the
+            # animation's geometry. Pad blank rows above the real content so
+            # the last real row still lands on the pane's true bottom edge,
+            # instead of using the last buffered row as the animation floor.
+            styled_rows = ((),) * (pane_height - len(styled_rows)) + styled_rows
         rows = tuple(_row_text(row) for row in styled_rows)
         view.display.clear_screen()
         self._sync_animation_task(restart=True)

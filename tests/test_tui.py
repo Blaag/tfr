@@ -548,8 +548,60 @@ async def test_screen_clear_context_includes_visible_text_styles() -> None:
     assert task is not None
     tui.screen_clear_text()
 
-    assert captured[0].lines == ("red plain",)
-    assert "ansired" in captured[0].styled_lines[0][0][0]
+    assert captured[0].lines == ("", "red plain")
+    assert captured[0].styled_lines[0] == ()
+    assert "ansired" in captured[0].styled_lines[1][0][0]
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_screen_clear_after_recall_uses_the_full_pane_as_its_floor() -> None:
+    tui = make_tui()
+    captured: list[ScreenClearContext] = []
+
+    class CapturingClearFixture:
+        def register(self, registrar: object, _config: object) -> None:
+            def render(context: ScreenClearContext) -> tuple[tuple[str, str], ...]:
+                captured.append(context)
+                return (("", "\n".join(context.lines)),)
+
+            registrar.register_screen_clear_effect(  # type: ignore[attr-defined]
+                render,
+                duration_seconds=1,
+                frames_per_second=20,
+            )
+
+    tui.plugins = await PluginManager.load(
+        enabled=("capturing-clear",),
+        config={},
+        event_bus=tui.event_bus,
+        command_bus=tui.command_bus,
+        targets={},
+        discovered=(entry_point("capturing-clear", CapturingClearFixture()),),
+        scope="ui",
+    )
+    view = tui.active_view
+    view.display.resize(width=40, height=10)
+    view.display.append("first")
+    view.display.append("second")
+    view.display.append("third")
+    view.display.clear_screen()
+
+    await tui._handle_client_command("alpha", "/recall 2")
+    tui.start_screen_clear("alpha")
+    task = tui._screen_clear_task
+    assert task is not None
+    tui.screen_clear_text()
+
+    # /recall left only 3 buffered rows ("-- Recall 2", "second", "third") in
+    # a 10-row pane. The animation's geometry must still span the pane's
+    # true height, with the recalled text anchored at the bottom -- not
+    # shrink to only the buffered rows, which would put the animation's
+    # floor at the last recalled row instead of the pane's actual bottom.
+    assert len(captured[0].lines) == 10
+    assert captured[0].lines[:7] == ("",) * 7
+    assert captured[0].lines[7:] == ("-- Recall 2", "second", "third")
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
