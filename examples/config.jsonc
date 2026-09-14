@@ -14,6 +14,9 @@
     "screen_clear": {
       "mode": "cycle",
     },
+    "boss": {
+      "mode": "cycle",
+    },
     "pager": {
       "enabled": true,
       "overlap_lines": 1,
@@ -67,6 +70,27 @@
       "terminal_reveal": {},
       "vortex": {},
       "water": {},
+      // Built-in disguised operational dashboard. Set include_defaults to
+      // false in any section to replace rather than supplement its catalog.
+      "tfr.boss": {
+        "log_path_template": "/var/log/{world}",
+        "histogram": {
+          "seconds": 20,
+          "include_defaults": true,
+          // Candidate axis labels. Each chart chooses two different entries.
+          "labels": [],
+        },
+        "flow": {
+          "seconds": 15,
+          "include_defaults": true,
+          // Candidate component names. Each sequence chooses 3-7 entries.
+          "labels": [],
+        },
+        "files": {
+          "include_defaults": true,
+          "names": [],
+        },
+      },
     },
   },
 }

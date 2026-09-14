@@ -346,6 +346,7 @@ class GatewayRuntime:
         self._started = False
         await self.agents.stop()
         await self.manager.stop_all()
+        await self.plugins.drain()
         await self.plugins.lifecycle(PluginLifecycleEvent(kind="application_stop"))
         await self.plugins.drain()
         await self.history.stop()

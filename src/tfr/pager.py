@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.utils import get_cwidth
 
-from tfr.ansi import safe_ansi_formatted_text, terminal_plain_text
+from tfr.ansi import project_ansi, safe_ansi_formatted_text, terminal_plain_text
 from tfr.text_effects import TextDecoration, TextEffectKind
 from tfr.urls import find_urls
 
@@ -406,6 +406,53 @@ class DisplayBuffer:
             if remaining == 0:
                 break
         return tuple(selected)
+
+    def recent_entries(
+        self,
+        count: int,
+    ) -> tuple[tuple[str, tuple[TextDecoration, ...]], ...]:
+        """Return recent recallable rows with their source decorations."""
+        if count <= 0:
+            raise ValueError("recall row count must be positive")
+        selected: list[tuple[str, tuple[TextDecoration, ...]]] = []
+        remaining = count
+        for index in range(len(self._entry_rows) - 1, -1, -1):
+            if not self._entry_recallable[index]:
+                continue
+            rows = self._entry_rows[index]
+            take = min(remaining, len(rows))
+            row_start = len(rows) - take
+            if row_start == 0 and self._entry_row_offsets[index] == 0:
+                recalled = (self.entries[index], self._entry_decorations[index])
+            else:
+                recalled = self._partial_recall_entry(index, row_start)
+            selected.insert(0, recalled)
+            remaining -= take
+            if remaining == 0:
+                break
+        return tuple(selected)
+
+    def _partial_recall_entry(
+        self,
+        index: int,
+        row_start: int,
+    ) -> tuple[str, tuple[TextDecoration, ...]]:
+        projection = project_ansi(self.entries[index])
+        source_start = self._entry_row_starts[index][row_start]
+        source_end = len(projection.plain)
+        decorations: list[TextDecoration] = []
+        for decoration in self._entry_decorations[index]:
+            overlap_start = max(source_start, decoration.start)
+            overlap_end = min(source_end, decoration.end)
+            if overlap_start < overlap_end:
+                decorations.append(
+                    replace(
+                        decoration,
+                        start=overlap_start - source_start,
+                        end=overlap_end - source_start,
+                    )
+                )
+        return projection.remove_visible_prefix(source_start), tuple(decorations)
 
     def _visible_bounds(self) -> tuple[int, int]:
         start, end = self.pager.visible_range

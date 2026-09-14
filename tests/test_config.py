@@ -76,6 +76,8 @@ def test_loads_jsonc_and_resolves_references(tmp_path: Path) -> None:
     assert bundle.main.ui.low_bandwidth is False
     assert bundle.main.ui.screen_clear.mode == "cycle"
     assert bundle.main.ui.screen_clear.effect is None
+    assert bundle.main.ui.boss.mode == "cycle"
+    assert bundle.main.ui.boss.screen is None
     assert bundle.main.logging.directory == Path("~/.local/state/tfr/logs").expanduser().resolve()
     assert bundle.worlds_path == (tmp_path / "worlds.jsonc").resolve()
     assert bundle.agents_path == (tmp_path / "agents.jsonc").resolve()
@@ -301,6 +303,51 @@ def test_rejects_locked_screen_clear_without_effect(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ConfigurationError, match="effect is required"):
+        load_configuration(main_path)
+
+
+def test_loads_locked_boss_screen(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"scrollback_lines": 500, '
+            '"boss": {"mode": "locked", "screen": "build-dashboard"}},',
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_configuration(main_path)
+
+    assert bundle.main.ui.boss.mode == "locked"
+    assert bundle.main.ui.boss.screen == "build-dashboard"
+
+
+def test_rejects_locked_boss_without_screen(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"boss": {"mode": "locked"}},',
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="screen is required"):
+        load_configuration(main_path)
+
+
+def test_rejects_unregistrable_locked_boss_name(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"boss": {"mode": "locked", "screen": "bad.name"}},',
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="ui.boss.screen"):
         load_configuration(main_path)
 
 

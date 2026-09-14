@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from prompt_toolkit.formatted_text import fragment_list_to_text
 
+from tfr.ansi import terminal_plain_text
 from tfr.pager import DisplayBuffer, PagerMode, PagerState, wrap_ansi_text
 from tfr.text_effects import TextDecoration, TextEffectKind, validate_decorations
 
@@ -462,6 +463,45 @@ def test_display_schedules_only_decorations_in_visible_rows() -> None:
 
     display.pager.scroll_rows(-1)
     assert display.animation_frame_delay(0.0) == 0.05
+
+
+def test_recent_entries_preserve_decorations_and_clip_partial_wrapped_entries() -> None:
+    display = DisplayBuffer(max_rows=20, width=5, height=3, pager_enabled=False)
+    decoration = TextDecoration(
+        start=3,
+        end=8,
+        effect=TextEffectKind.SHIMMER,
+        base_color="#d70000",
+        accent_color="#ffffff",
+        interval_seconds=1.4,
+    )
+    display.append("abcdefghij", decorations=(decoration,))
+
+    full = display.recent_entries(2)
+    partial = display.recent_entries(1)
+
+    assert full == (("abcdefghij", (decoration,)),)
+    assert partial[0][0] == "fghij"
+    assert [(item.start, item.end) for item in partial[0][1]] == [(0, 3)]
+
+
+def test_partial_recent_entry_preserves_ansi_and_source_offsets() -> None:
+    display = DisplayBuffer(max_rows=20, width=5, height=3, pager_enabled=False)
+    decoration = TextDecoration(
+        start=4,
+        end=7,
+        effect=TextEffectKind.SHIMMER,
+        base_color="#d70000",
+        accent_color="#ffffff",
+        interval_seconds=1.4,
+    )
+    display.append("\x1b[31mabc\tdef\x1b[0m", decorations=(decoration,))
+
+    partial = display.recent_entries(2)
+
+    assert terminal_plain_text(partial[0][0]) == "\tdef"
+    assert "\x1b[31m" in partial[0][0]
+    assert [(item.start, item.end) for item in partial[0][1]] == [(1, 4)]
 
 
 def test_terminal_reveal_preserves_wrapping_and_composes_with_speaker_effects() -> None:

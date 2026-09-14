@@ -39,7 +39,7 @@ from tfr.config import ConfigurationBundle
 from tfr.core import CommandBus, EventBus, UnknownSessionError
 from tfr.events import Actor, ActorType, CommandRequest, Direction, Event, EventKind
 from tfr.pager import DisplayBuffer, FormattedRow, PagerMode, rows_to_formatted_text
-from tfr.plugins import PluginLifecycleEvent, PluginManager
+from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.sessions import SessionManager, SessionState, WorldSession
 
 
@@ -355,6 +355,8 @@ class TfrTui:
         output_color: str | None = None,
         screen_clear_mode: str = "cycle",
         screen_clear_effect: str | None = None,
+        boss_screen_mode: str = "cycle",
+        boss_screen: str | None = None,
         initial_events: Sequence[Event] = (),
         initial_scroll_to_end: bool = True,
         replay_mode: bool = False,
@@ -367,10 +369,26 @@ class TfrTui:
             raise ValueError("screen-clear mode must be cycle, random, or locked")
         if screen_clear_mode == "locked" and screen_clear_effect is None:
             raise ValueError("locked screen-clear mode requires an effect")
+        if boss_screen_mode not in {"cycle", "random", "locked"}:
+            raise ValueError("boss-screen mode must be cycle, random, or locked")
+        if boss_screen_mode == "locked" and boss_screen is None:
+            raise ValueError("locked boss-screen mode requires a screen")
         self.manager = manager
         self.event_bus = event_bus
         self.command_bus = command_bus
-        self.plugins = plugins
+        self.plugins = plugins or PluginManager(
+            event_bus=event_bus,
+            command_bus=command_bus,
+            targets={session.world: session.session_id for session in sessions},
+            worlds={
+                session.world: PluginWorldInfo(
+                    server=session.config.server,
+                    encoding=session.encoding,
+                )
+                for session in sessions
+            },
+            scope="ui",
+        )
         self.agents = agents
         self.service_runtime = service_runtime
         self.gateway_reconnect = gateway_reconnect
@@ -384,6 +402,8 @@ class TfrTui:
         self._animation_task: asyncio.Task[None] | None = None
         self._animations_started = False
         self._activity_ticker_task: asyncio.Task[None] | None = None
+        self._boss_refresh_task: asyncio.Task[None] | None = None
+        self._boss_refresh_interval: float | None = None
         self.screen_clear_mode = screen_clear_mode
         self.screen_clear_effect = screen_clear_effect
         self._screen_clear_lines: tuple[str, ...] = ()
@@ -405,7 +425,6 @@ class TfrTui:
         self.aliases = [session.world for session in sessions]
         self.active_index = 0
         self.inspector_agent: str | None = None
-        self.boss_mode = False
         self._event_queue: asyncio.Queue[Event] | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self.views: dict[str, WorldView] = {}
@@ -523,12 +542,16 @@ class TfrTui:
                     "border.output": "fg:#5f87af",
                     "border.input": "fg:#87afff",
                     "boss": "fg:#a8a8a8 bg:#1c1c1c",
+                    "boss.chart": "fg:#ffffff bg:#1c1c1c",
                 }
             ),
             before_render=self._before_render,
             input=input,
             output=output,
         )
+        self.plugins.initialize_boss_selection(boss_screen_mode, boss_screen)
+        self.plugins.set_notice_handler(self.add_notice)
+        self.plugins.set_boss_state_handler(self._boss_state_changed)
 
     @property
     def active_alias(self) -> str:
@@ -537,6 +560,10 @@ class TfrTui:
     @property
     def active_view(self) -> WorldView:
         return self.views[self.active_alias]
+
+    @property
+    def boss_mode(self) -> bool:
+        return self.plugins.boss_active
 
     def _create_bindings(self) -> KeyBindings:
         bindings = KeyBindings()
@@ -971,40 +998,54 @@ class TfrTui:
         self._sync_animation_task(restart=True)
         self.application.invalidate()
 
-    def activate_boss(self) -> None:
-        if self.boss_mode:
-            return
-        self.boss_mode = True
+    async def activate_boss(self) -> None:
+        await self.plugins.activate_selected_boss(self.active_alias)
+
+    def _boss_state_changed(self, active: bool) -> None:
         self._sync_animation_task()
-        self.application.layout.focus(self.boss_control)
+        self._sync_boss_refresh_task()
+        self.application.layout.focus(
+            self.boss_control if active else self.active_view.input_buffer
+        )
         self.application.invalidate()
+
+    def _sync_boss_refresh_task(self) -> None:
+        interval = self.plugins.active_boss_refresh_interval
+        should_run = self.boss_mode and interval is not None
+        restart = should_run and self._boss_refresh_interval != interval
+        if restart and self._boss_refresh_task is not None:
+            self._boss_refresh_task.cancel()
+            self._boss_refresh_task = None
+        if should_run and (self._boss_refresh_task is None or self._boss_refresh_task.done()):
+            self._boss_refresh_interval = interval
+            self._boss_refresh_task = asyncio.create_task(
+                self._refresh_boss_view(),
+                name="tfr-boss-refresh",
+            )
+        elif not should_run and self._boss_refresh_task is not None:
+            self._boss_refresh_task.cancel()
+            self._boss_refresh_task = None
+            self._boss_refresh_interval = None
+
+    async def _refresh_boss_view(self) -> None:
+        try:
+            while self.boss_mode:
+                interval = self.plugins.active_boss_refresh_interval
+                if interval is None:
+                    return
+                await asyncio.sleep(interval)
+                self.application.invalidate()
+        finally:
+            if asyncio.current_task() is self._boss_refresh_task:
+                self._boss_refresh_task = None
+                self._boss_refresh_interval = None
 
     def dismiss_boss(self) -> None:
-        if not self.boss_mode:
-            return
-        self.boss_mode = False
-        self._sync_animation_task()
-        self.application.layout.focus(self.active_view.input_buffer)
-        self.application.invalidate()
+        self.plugins.dismiss_boss()
 
     def boss_text(self) -> StyleAndTextTuples:
-        return [
-            (
-                "class:boss",
-                "Incremental build\n"
-                "=================\n\n"
-                "[1/8] Checking source dependencies\n"
-                "[2/8] Generating interface metadata\n"
-                "[3/8] Compiling core modules\n"
-                "[4/8] Compiling service modules\n"
-                "[5/8] Compiling application modules\n"
-                "[6/8] Linking application\n"
-                "[7/8] Running static checks\n"
-                "[8/8] Verifying build artifacts\n\n"
-                "Build completed successfully.\n"
-                "Watching for filesystem changes...",
-            )
-        ]
+        size = self.application.output.get_size()
+        return self.plugins.render_boss(width=size.columns, height=size.rows)
 
     def add_notice(self, alias: str, text: str) -> None:
         self.views[alias].clear_selection()
@@ -1038,6 +1079,7 @@ class TfrTui:
         await asyncio.to_thread(webbrowser.open_new_tab, url)
 
     def handle_event(self, event: Event) -> None:
+        self.plugins.observe_ui_event(event)
         view = self.views.get(event.world)
         if view is None:
             return
@@ -1256,11 +1298,6 @@ class TfrTui:
                 self.add_notice(alias, "Usage: /help")
             else:
                 self.add_notice(alias, self.help_text())
-        elif command == "boss":
-            if parameters:
-                self.add_notice(alias, "Usage: /boss")
-            else:
-                self.activate_boss()
         elif command == "sh":
             if parameters:
                 self.add_notice(alias, "Usage: /sh")
@@ -1314,12 +1351,6 @@ class TfrTui:
             self._handle_clear_command(alias, parameters)
         elif command == "recall":
             self._handle_recall_command(alias, parameters)
-        elif command == "more":
-            self._end_screen_clear_for(alias)
-            self.views[alias].clear_selection()
-            self.views[alias].display.pager.advance()
-            self._sync_animation_task(restart=True)
-            self.application.invalidate()
         elif command == "end":
             self._end_screen_clear_for(alias)
             self.views[alias].clear_selection()
@@ -1345,14 +1376,13 @@ class TfrTui:
         lines = [
             "TFR commands",
             "  /help - show this help",
-            "  /boss - hide TFR behind a quiet build screen until Enter",
             "  /sh - temporarily open an interactive local shell",
             "  ! command - run one local shell command; !!TEXT sends a literal !",
             "  /world ALIAS - switch worlds; /next (/n) and /previous (/p) also switch",
             "  /connect, /disconnect, /reconnect - manage the active connection",
             "  /clear [status|cycle|random|lock EFFECT] - clear output or select its effect",
             "  /recall X - show the last X retained lines for the active world",
-            "  /more, /end - advance paged output or return to live output",
+            "  /end - return to live output",
             "  /nospoof show|hide|status - control NOSPOOF prefix visibility",
             "  /lowbw [on|off|status] - suppress continuous UI animation",
             "  /animations [on|off|status] - enable continuous UI effects",
@@ -1380,7 +1410,7 @@ class TfrTui:
             )
         if self.gateway_reconnect is not None:
             lines.insert(5, "  /gateway reconnect - reconnect this UI to the gateway")
-        if self.plugins is None or not self.plugins.registry.commands:
+        if not self.plugins.registry.commands:
             lines.append("  none")
         else:
             for command, (plugin, _handler) in sorted(self.plugins.registry.commands.items()):
@@ -1448,13 +1478,16 @@ class TfrTui:
             self.add_notice(alias, "Recall count must be a positive integer")
             return
         view = self.views[alias]
-        rows = view.display.recent_rows(count)
-        recalled = "\n".join(_row_text(row) for row in rows)
-        output = f"\x1b[33m-- Recall {count}\x1b[0m"
-        if recalled:
-            output += f"\n{recalled}"
+        recalled = view.display.recent_entries(count)
         view.clear_selection()
-        view.display.append(output, recallable=False)
+        view.display.append(f"\x1b[33m-- Recall {count}\x1b[0m", recallable=False)
+        elapsed_seconds = self._animation_elapsed_seconds()
+        for text, decorations in recalled:
+            replayed = tuple(
+                replace(decoration, phase_offset_seconds=-elapsed_seconds)
+                for decoration in decorations
+            )
+            view.display.append(text, decorations=replayed, recallable=False)
         view.display.pager.jump_to_end()
         self._sync_animation_task(restart=True)
         self.application.invalidate()
@@ -1681,6 +1714,13 @@ class TfrTui:
                 animation_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await animation_task
+            boss_refresh_task = self._boss_refresh_task
+            self._boss_refresh_task = None
+            self._boss_refresh_interval = None
+            if boss_refresh_task is not None:
+                boss_refresh_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await boss_refresh_task
             for handled_signal in installed_signals:
                 loop.remove_signal_handler(handled_signal)
             pump.cancel()
@@ -1694,6 +1734,7 @@ class TfrTui:
                     await self.agents.stop()
                 await self.manager.stop_all()
                 if self.plugins is not None:
+                    await self.plugins.drain()
                     await self.plugins.lifecycle(PluginLifecycleEvent(kind="application_stop"))
                     await self.plugins.drain()
             for task in self._background_tasks:
@@ -1705,23 +1746,31 @@ async def run_client(bundle: ConfigurationBundle) -> int:
     from tfr.gateway import GatewayRuntime, scrollback_for
 
     runtime = await GatewayRuntime.from_configuration(bundle, plugin_scope="all")
-    tui = TfrTui(
-        sessions=runtime.sessions,
-        manager=runtime.manager,
-        event_bus=runtime.event_bus,
-        command_bus=runtime.command_bus,
-        scrollback_lines={alias: scrollback_for(bundle, alias) for alias in bundle.worlds.worlds},
-        agent_worlds={agent.world for agent in bundle.agents.agents.values()},
-        pager_enabled=bundle.main.ui.pager.enabled,
-        pager_overlap=bundle.main.ui.pager.overlap_lines,
-        recent_input_lines=bundle.main.ui.recent_input_lines,
-        animations_enabled=bundle.main.ui.animations_enabled,
-        low_bandwidth=bundle.main.ui.low_bandwidth,
-        output_color=bundle.main.ui.output_color,
-        screen_clear_mode=bundle.main.ui.screen_clear.mode,
-        screen_clear_effect=bundle.main.ui.screen_clear.effect,
-        plugins=runtime.plugins,
-        agents=runtime.agents,
-        service_runtime=runtime,
-    )
+    try:
+        tui = TfrTui(
+            sessions=runtime.sessions,
+            manager=runtime.manager,
+            event_bus=runtime.event_bus,
+            command_bus=runtime.command_bus,
+            scrollback_lines={
+                alias: scrollback_for(bundle, alias) for alias in bundle.worlds.worlds
+            },
+            agent_worlds={agent.world for agent in bundle.agents.agents.values()},
+            pager_enabled=bundle.main.ui.pager.enabled,
+            pager_overlap=bundle.main.ui.pager.overlap_lines,
+            recent_input_lines=bundle.main.ui.recent_input_lines,
+            animations_enabled=bundle.main.ui.animations_enabled,
+            low_bandwidth=bundle.main.ui.low_bandwidth,
+            output_color=bundle.main.ui.output_color,
+            screen_clear_mode=bundle.main.ui.screen_clear.mode,
+            screen_clear_effect=bundle.main.ui.screen_clear.effect,
+            boss_screen_mode=bundle.main.ui.boss.mode,
+            boss_screen=bundle.main.ui.boss.screen,
+            plugins=runtime.plugins,
+            agents=runtime.agents,
+            service_runtime=runtime,
+        )
+    except BaseException:
+        await runtime.stop()
+        raise
     return await tui.run()

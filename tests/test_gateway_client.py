@@ -4,22 +4,29 @@ import asyncio
 import ssl
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
 import trustme
 
-from tfr.config import GatewayReconnectConfig
+from tfr.config import GatewayReconnectConfig, MainConfig, PluginsConfig, UiConfiguration
 from tfr.core import EventBus
 from tfr.events import Actor, ActorType, CommandRequest, Direction, Event, EventKind
 from tfr.gateway import EventHistory, GatewayServer
-from tfr.gateway_client import GatewayClient, GatewayDisconnectedError, GatewayUiRuntime
+from tfr.gateway_client import (
+    GatewayClient,
+    GatewayDisconnectedError,
+    GatewayUiRuntime,
+    run_gateway_ui,
+)
 from tfr.gateway_protocol import GatewayProtocolError
 from tfr.gateway_transport import (
     create_gateway_client_tls_context,
     create_gateway_server_tls_context,
 )
-from tfr.plugins import PluginManager
+from tfr.plugins import PluginLifecycleEvent, PluginManager
 
 
 def make_event(sequence: int) -> Event:
@@ -299,6 +306,91 @@ async def make_plugin_manager(client: GatewayClient) -> PluginManager:
         targets={session.world: session.session_id for session in client.sessions},
         scope="ui",
     )
+
+
+async def test_gateway_ui_runtime_publishes_gateway_world_and_activity_events() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    socket_path = Path("/tmp") / f"tfr-test-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    plugins = await make_plugin_manager(client)
+    captured: list[PluginLifecycleEvent] = []
+    plugins.registry.lifecycle_handlers["capture"] = ("fixture", captured.append)
+    ui_runtime = GatewayUiRuntime(
+        client,
+        plugins,
+        reconnect_config=GatewayReconnectConfig(enabled=False),
+    )
+    try:
+        await ui_runtime.start()
+        assert [event.kind for event in captured[:4]] == [
+            "application_start",
+            "gateway_connected",
+            "session_state",
+            "world_connected",
+        ]
+
+        await bus.publish(make_event(1))
+        await asyncio.wait_for(
+            _wait_until(lambda: any(event.kind == "world_activity" for event in captured)),
+            timeout=1,
+        )
+        activity = next(event for event in captured if event.kind == "world_activity")
+        assert activity.world == "alpha"
+        assert activity.source == "world"
+        assert "line 1" not in repr(activity.metadata)
+
+        await client.stop()
+        await asyncio.wait_for(
+            _wait_until(lambda: any(event.kind == "gateway_disconnected" for event in captured)),
+            timeout=1,
+        )
+        assert [event.kind for event in captured].count("gateway_disconnected") == 1
+    finally:
+        await ui_runtime.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+    socket_path.parent.rmdir()
+
+
+async def test_gateway_ui_runtime_orders_reconnect_before_world_reconciliation() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    socket_path = Path("/tmp") / f"tfr-test-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    plugins = await make_plugin_manager(client)
+    captured: list[PluginLifecycleEvent] = []
+    plugins.registry.lifecycle_handlers["capture"] = ("fixture", captured.append)
+    ui_runtime = GatewayUiRuntime(
+        client,
+        plugins,
+        reconnect_config=GatewayReconnectConfig(enabled=False),
+    )
+    try:
+        await ui_runtime.start()
+        captured.clear()
+
+        await ui_runtime.reconnect()
+
+        kinds = [event.kind for event in captured]
+        assert kinds[:2] == ["gateway_disconnected", "gateway_connected"]
+        assert kinds.index("gateway_connected") < kinds.index("session_state")
+        assert captured[0].metadata["intentional"] is True
+    finally:
+        await ui_runtime.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+    socket_path.parent.rmdir()
 
 
 async def test_gateway_ui_runtime_supervisor_leaves_a_healthy_connection_alone() -> None:
@@ -688,3 +780,30 @@ async def test_unauthenticated_tcp_client_does_not_consume_authenticated_capacit
         await history.stop()
         await bus.close()
     socket_path.parent.rmdir()
+
+
+async def test_gateway_ui_closes_connected_client_when_plugin_configuration_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_bus = SimpleNamespace(close=AsyncMock())
+    client = SimpleNamespace(
+        sessions=(),
+        event_bus=event_bus,
+        command_bus=object(),
+        stop=AsyncMock(),
+    )
+
+    async def connect(*_args: object, **_kwargs: object) -> object:
+        return client
+
+    monkeypatch.setattr(GatewayClient, "connect", connect)
+    configuration = UiConfiguration(
+        main_path=Path("config.jsonc"),
+        main=MainConfig(plugins=PluginsConfig(config={"tfr.boss": []})),
+    )
+
+    with pytest.raises(ValueError, match="plugins.config.tfr.boss must be an object"):
+        await run_gateway_ui(configuration)
+
+    client.stop.assert_awaited_once()
+    event_bus.close.assert_awaited_once()

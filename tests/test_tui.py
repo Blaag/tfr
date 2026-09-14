@@ -4,7 +4,10 @@ import asyncio
 import base64
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from prompt_toolkit.data_structures import Point
@@ -16,17 +19,24 @@ from prompt_toolkit.output import DummyOutput
 
 from tfr.agents import AgentInspection
 from tfr.borders import BorderEdge
-from tfr.config import WorldConfig, WorldDefaults
+from tfr.config import (
+    AgentsConfig,
+    ConfigurationBundle,
+    MainConfig,
+    WorldConfig,
+    WorldDefaults,
+    WorldsConfig,
+)
 from tfr.core import CommandBus, EventBus
 from tfr.events import Actor, ActorType, Direction, Event, EventKind, Provenance
 from tfr.pager import PagerMode
 from tfr.plugin_api import BorderFragment, ScreenClearContext, TextDecoration, TextEffectKind
-from tfr.plugins import PluginManager
+from tfr.plugins import BossViewEvent, PluginManager
 from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.tui import TfrTui, _format_elapsed, _osc52_sequence, run_client
 
 
-def make_tui(*, input: Input | None = None) -> TfrTui:
+def make_tui(*, input: Input | None = None, plugins: PluginManager | None = None) -> TfrTui:
     event_bus = EventBus()
     command_bus = CommandBus()
     sessions = [
@@ -48,6 +58,7 @@ def make_tui(*, input: Input | None = None) -> TfrTui:
         agent_worlds={"beta"},
         pager_enabled=True,
         pager_overlap=1,
+        plugins=plugins,
         input=input or DummyInput(),
         output=DummyOutput(),
     )
@@ -68,7 +79,7 @@ async def add_speaker_effects(
     class SpeakerFixture:
         api_version = 1
 
-        def register(self, registrar: object, _config: object) -> None:
+        def register(self, registrar: Any, _config: object) -> None:
             def decorate(event: Event, text: str) -> tuple[TextDecoration, ...]:
                 sender = event.provenance.sender_name if event.provenance is not None else None
                 if (
@@ -282,7 +293,7 @@ async def test_activity_ticker_stops_under_low_bandwidth_and_boss_mode() -> None
     await tui._handle_client_command("alpha", "/lowbw off")
     assert tui._activity_ticker_task is not None
 
-    tui.activate_boss()
+    await tui.activate_boss()
     assert tui._activity_ticker_task is None
 
 
@@ -480,7 +491,7 @@ async def test_help_lists_commands_keybindings_markers_and_loaded_plugins() -> N
     await tui._handle_client_command("alpha", "/help")
 
     help_text = fragment_list_to_text(tui.active_view.display.formatted_text())
-    assert "/boss - hide TFR" in help_text
+    assert "/boss (tfr.boss) - open or configure" in help_text
     assert "/sh - temporarily open" in help_text
     assert "! command" in help_text
     assert "/nospoof show|hide|status" in help_text
@@ -537,6 +548,46 @@ async def test_recall_output_is_anchored_to_the_bottom_of_the_pane() -> None:
 
     lines = fragment_list_to_text(view.output_text()).split("\n")
     assert lines == ["", "", "", "", "", "", "", "-- Recall 2", "second", "third"]
+
+
+async def test_recall_replays_speaker_and_terminal_reveal_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("tfr.tui.time.monotonic", lambda: 50.0)
+    tui = make_tui()
+    tui._animation_epoch = 20
+    view = tui.active_view
+    view.display.resize(width=40, height=2)
+    speaker = TextDecoration(
+        start=0,
+        end=5,
+        effect=TextEffectKind.CAPITALIZATION_ROLL,
+        base_color="#a9914a",
+        accent_color="#e6c965",
+        interval_seconds=0.5,
+    )
+    reveal = TextDecoration(
+        start=0,
+        end=11,
+        effect=TextEffectKind.TERMINAL_REVEAL,
+        base_color="#d7ff5f",
+        accent_color="#d7ff5f",
+        interval_seconds=0.1,
+        frames_per_second=20,
+        loop=False,
+        glitch_characters="#",
+    )
+    view.display.append("Alice waves", decorations=(speaker, reveal))
+    await tui._handle_client_command("alpha", "/recall 1")
+
+    replayed = view.display._entry_decorations[-1]
+    assert {decoration.effect for decoration in replayed} == {
+        TextEffectKind.CAPITALIZATION_ROLL,
+        TextEffectKind.TERMINAL_REVEAL,
+    }
+    assert all(decoration.cycle_phase(30) == pytest.approx(0) for decoration in replayed)
+    visible = view.display.visible_rows(elapsed_seconds=30, animations_enabled=True)
+    assert fragment_list_to_text(list(visible[-1])) == " " * len("Alice waves")
 
 
 async def test_output_after_a_clear_is_anchored_to_the_bottom_of_the_pane() -> None:
@@ -925,20 +976,6 @@ async def test_jump_to_end_key_ends_an_active_screen_clear() -> None:
     assert tui._screen_clear_world is None
 
 
-async def test_more_command_ends_an_active_screen_clear() -> None:
-    tui = make_tui()
-    await add_screen_clear_effects(tui)
-    tui.animations_enabled = False
-    tui.active_view.display.append("first")
-    tui.start_screen_clear("alpha")
-    assert tui._screen_clear_task is not None
-
-    await tui._handle_client_command("alpha", "/more")
-
-    assert tui._screen_clear_task is None
-    assert tui._screen_clear_world is None
-
-
 async def test_end_command_ends_an_active_screen_clear() -> None:
     tui = make_tui()
     await add_screen_clear_effects(tui)
@@ -1121,6 +1158,7 @@ async def test_standalone_client_loads_all_plugin_capabilities(
     monkeypatch.setattr(GatewayRuntime, "from_configuration", classmethod(from_configuration))
     monkeypatch.setattr("tfr.tui.TfrTui", FakeTui)
     screen_clear = SimpleNamespace(mode="cycle", effect=None)
+    boss = SimpleNamespace(mode="cycle", screen=None)
     ui = SimpleNamespace(
         pager=SimpleNamespace(enabled=True, overlap_lines=1),
         recent_input_lines=3,
@@ -1128,6 +1166,7 @@ async def test_standalone_client_loads_all_plugin_capabilities(
         low_bandwidth=False,
         output_color="#d7d7d7",
         screen_clear=screen_clear,
+        boss=boss,
     )
     bundle = SimpleNamespace(
         main=SimpleNamespace(ui=ui),
@@ -1394,6 +1433,7 @@ async def test_boss_mode_hides_buffered_world_text_until_enter() -> None:
     await tui._handle_client_command("alpha", "/boss")
 
     assert tui.boss_mode is True
+    assert tui._boss_refresh_task is not None
     assert tui.boss_control.modal is True
     assert tui.application.layout.has_focus(tui.boss_control)
     assert any(Keys.Any in binding.keys for binding in tui.boss_control.key_bindings.bindings)
@@ -1414,6 +1454,10 @@ async def test_boss_mode_hides_buffered_world_text_until_enter() -> None:
     assert "new private world text" in fragment_list_to_text(
         tui.active_view.display.formatted_text()
     )
+    assert "New events on /var/log/alpha: 1 line" in fragment_list_to_text(tui.boss_text())
+    assert tui.plugins.emit_boss_event(
+        BossViewEvent(kind="fixture", text="Background check completed", source="fixture")
+    )
 
     enter = next(
         binding
@@ -1423,8 +1467,43 @@ async def test_boss_mode_hides_buffered_world_text_until_enter() -> None:
     enter.handler(SimpleNamespace())
 
     assert tui.boss_mode is False
+    assert tui._boss_refresh_task is None
     assert tui.application.layout.current_buffer is tui.active_view.input_buffer
     assert tui.active_view.input_buffer.text == "unfinished draft"
+
+
+async def test_switching_boss_views_restarts_a_changed_refresh_interval() -> None:
+    class RefreshBossFixture:
+        def register(self, registrar: object, _config: object) -> None:
+            self.slow = registrar.register_boss_view(
+                "slow", lambda _context: (("", "slow"),), refresh_interval_seconds=60
+            )
+            self.fast = registrar.register_boss_view(
+                "fast", lambda _context: (("", "fast"),), refresh_interval_seconds=1
+            )
+
+    fixture = RefreshBossFixture()
+    plugins = await PluginManager.load(
+        enabled=("refresh",),
+        config={},
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        discovered=(entry_point("refresh", fixture),),
+        scope="ui",
+    )
+    tui = make_tui(plugins=plugins)
+
+    await fixture.slow.activate("alpha")
+    slow_task = tui._boss_refresh_task
+    assert tui._boss_refresh_interval == 60
+    await fixture.fast.activate("alpha")
+    await asyncio.sleep(0)
+
+    assert slow_task is not tui._boss_refresh_task
+    assert slow_task is not None and slow_task.cancelled()
+    assert tui._boss_refresh_interval == 1
+    tui.dismiss_boss()
 
 
 async def test_boss_mode_consumes_normal_terminal_input() -> None:
@@ -1844,6 +1923,45 @@ async def test_initial_snapshot_is_rendered_at_live_end_before_service_runtime_s
         await asyncio.wait_for(started.wait(), timeout=1)
         input.send_bytes(b"\x11")
         assert await asyncio.wait_for(running, timeout=1) == 0
+
+
+async def test_run_client_stops_runtime_when_tui_initialization_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tfr.gateway import GatewayRuntime
+
+    runtime = SimpleNamespace(
+        sessions=(),
+        manager=object(),
+        event_bus=object(),
+        command_bus=object(),
+        plugins=object(),
+        agents=None,
+        stop=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        GatewayRuntime,
+        "from_configuration",
+        AsyncMock(return_value=runtime),
+    )
+
+    def fail_tui(**_kwargs: object) -> object:
+        raise ValueError("unknown boss screen: missing")
+
+    monkeypatch.setattr("tfr.tui.TfrTui", fail_tui)
+    bundle = ConfigurationBundle(
+        main_path=Path("config.jsonc"),
+        worlds_path=Path("worlds.jsonc"),
+        agents_path=Path("agents.jsonc"),
+        main=MainConfig(),
+        worlds=WorldsConfig(),
+        agents=AgentsConfig(),
+    )
+
+    with pytest.raises(ValueError, match="unknown boss screen: missing"):
+        await run_client(bundle)
+
+    runtime.stop.assert_awaited_once()
 
 
 async def test_reload_snapshot_returns_each_world_to_live_output() -> None:

@@ -62,6 +62,35 @@ class ScreenClearConfig(StrictModel):
         return self
 
 
+class BossConfig(StrictModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {"mode": {"const": "locked"}},
+                        "required": ["mode"],
+                    },
+                    "then": {"required": ["screen"]},
+                    "else": {"properties": {"screen": {"type": "null"}}},
+                }
+            ]
+        },
+    )
+    mode: Literal["cycle", "random", "locked"] = "cycle"
+    screen: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_-]*$")
+
+    @model_validator(mode="after")
+    def locked_screen_is_selected(self) -> BossConfig:
+        if self.mode == "locked" and self.screen is None:
+            raise ValueError("ui.boss.screen is required when mode is locked")
+        if self.mode != "locked" and self.screen is not None:
+            raise ValueError("ui.boss.screen is only valid when mode is locked")
+        return self
+
+
 class GatewayReconnectConfig(StrictModel):
     """UI-side liveness verification and bounded automatic reconnect.
 
@@ -90,6 +119,7 @@ class UiConfig(StrictModel):
     low_bandwidth: bool = False
     pager: PagerConfig = Field(default_factory=PagerConfig)
     screen_clear: ScreenClearConfig = Field(default_factory=ScreenClearConfig)
+    boss: BossConfig = Field(default_factory=BossConfig)
     gateway_reconnect: GatewayReconnectConfig = Field(default_factory=GatewayReconnectConfig)
 
 

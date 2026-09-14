@@ -8,8 +8,10 @@ The locked runtime dependency set was reviewed on 2026-09-08:
 | --- | ---: | --- |
 | json-with-comments | 1.3.0 | MIT |
 | openai | 3.9.0 | Apache-2.0 |
+| plotext | 6.1.0 | MIT |
 | prompt-toolkit | 3.0.53 | BSD |
 | pydantic | 2.13.5 | MIT |
+| retroflow | 0.10.0 | MIT |
 | annotated-types | 0.8.0 | MIT |
 | anyio | 4.15.1 | MIT |
 | h11 | 0.16.0 | MIT |
@@ -17,6 +19,8 @@ The locked runtime dependency set was reviewed on 2026-09-08:
 | httpx2 | 2.12.0 | BSD-3-Clause |
 | idna | 3.19 | BSD-3-Clause |
 | jiter | 0.16.0 | MIT |
+| networkx | 3.6.1 | BSD-3-Clause |
+| pillow | 12.3.0 | MIT-CMU |
 | pydantic-core | 2.46.5 | MIT |
 | sniffio | 1.3.1 | MIT OR Apache-2.0 |
 | truststore | 0.10.4 | MIT |

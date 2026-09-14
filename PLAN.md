@@ -752,9 +752,9 @@ Acceptance criteria:
 
 ## Future Work
 
-- [ ] Convert `/boss` into a plugin with dynamic display content and an API for
+- [x] Convert `/boss` into a plugin with dynamic display content and an API for
   other components or plugins to emit events into the active boss view.
-- [ ] Publish gateway- and UI-detected operational activity as plugin-visible
+- [x] Publish gateway- and UI-detected operational activity as plugin-visible
   events, including gateway connection and disconnection, world activity,
   world connection and disconnection, and boss-mode activation.
 - [x] Add a per-world last-activity indicator showing the elapsed time since

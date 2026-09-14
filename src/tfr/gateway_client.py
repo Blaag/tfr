@@ -45,6 +45,8 @@ class GatewayDisconnectedError(ConnectionError):
 
 
 ReconnectFactory = Callable[[UUID, int], Awaitable["GatewayClient"]]
+ConnectHandler = Callable[[], Awaitable[None]]
+DisconnectHandler = Callable[[Exception], None]
 
 
 class RemoteWorldSession:
@@ -202,6 +204,8 @@ class GatewayClient:
         self._pending: dict[UUID, asyncio.Future[None]] = {}
         self._pump: asyncio.Task[None] | None = None
         self._reconnect_factory: ReconnectFactory | None = None
+        self.connect_handler: ConnectHandler | None = None
+        self.disconnect_handler: DisconnectHandler | None = None
         self._reconnect_lock = asyncio.Lock()
 
     @classmethod
@@ -484,6 +488,8 @@ class GatewayClient:
             self.agent_worlds = replacement.agent_worlds
             self._write_lock = asyncio.Lock()
             await replacement.event_bus.close()
+            if self.connect_handler is not None:
+                await self.connect_handler()
             for event in self.initial_events:
                 self._update_session(event)
                 await self.event_bus.publish(event)
@@ -595,6 +601,8 @@ class GatewayClient:
             error = exc
         finally:
             self._fail_pending(error)
+            if self.disconnect_handler is not None:
+                self.disconnect_handler(error)
 
     def _handle_ack(self, message: Mapping[str, Any]) -> None:
         try:
@@ -668,9 +676,18 @@ class GatewayUiRuntime:
         self.notify = notify or (lambda _text: None)
         self._supervisor_task: asyncio.Task[None] | None = None
         self._stopping = False
+        self._gateway_connected = False
+        self._gateway_state_lock = asyncio.Lock()
+        self._reconnect_lock = asyncio.Lock()
+        self._connection_tasks: set[asyncio.Task[None]] = set()
+        self.client.connect_handler = self._handle_connected
+        self.client.disconnect_handler = self._handle_disconnect
+        self.client.event_bus.add_processor(self.plugins.process_event)
 
     async def start(self) -> None:
         await self.plugins.lifecycle(PluginLifecycleEvent(kind="application_start"))
+        await self._set_gateway_connected(True)
+        await self._reconcile_world_states()
         self.client.start()
         if self.reconnect_config.enabled:
             self._supervisor_task = asyncio.create_task(
@@ -684,14 +701,65 @@ class GatewayUiRuntime:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._supervisor_task
             self._supervisor_task = None
+        await self._set_gateway_connected(False, intentional=True)
+        await self.client.stop()
+        if self._connection_tasks:
+            await asyncio.gather(*tuple(self._connection_tasks), return_exceptions=True)
+        await self.plugins.drain()
         await self.plugins.lifecycle(PluginLifecycleEvent(kind="application_stop"))
         await self.plugins.drain()
-        await self.client.stop()
         await self.client.event_bus.close()
 
     async def reconnect(self) -> str:
-        restored = await self.client.reconnect()
-        return self._format_reconnect_message(restored)
+        reconnect_in_progress = self._reconnect_lock.locked()
+        async with self._reconnect_lock:
+            if (
+                reconnect_in_progress
+                and self._gateway_connected
+                and await self.client.verify_connection(
+                    timeout=self.reconnect_config.ping_timeout_seconds
+                )
+            ):
+                return "Gateway connection is already healthy"
+            await self._set_gateway_connected(False, intentional=True)
+            restored = await self.client.reconnect()
+            await self._set_gateway_connected(True)
+            await self._reconcile_world_states()
+            return self._format_reconnect_message(restored)
+
+    async def _handle_connected(self) -> None:
+        await self._set_gateway_connected(True)
+
+    def _handle_disconnect(self, _error: Exception) -> None:
+        task = asyncio.create_task(
+            self._set_gateway_connected(False, intentional=self._stopping),
+            name="tfr-gateway-disconnected-event",
+        )
+        self._connection_tasks.add(task)
+        task.add_done_callback(self._connection_task_done)
+
+    def _connection_task_done(self, task: asyncio.Task[None]) -> None:
+        self._connection_tasks.discard(task)
+        if not task.cancelled():
+            task.exception()
+
+    async def _set_gateway_connected(self, connected: bool, *, intentional: bool = False) -> None:
+        async with self._gateway_state_lock:
+            if self._gateway_connected is connected:
+                return
+            self._gateway_connected = connected
+            await self.plugins.lifecycle(
+                PluginLifecycleEvent(
+                    kind="gateway_connected" if connected else "gateway_disconnected",
+                    state="connected" if connected else "disconnected",
+                    source="gateway",
+                    metadata={"intentional": intentional},
+                )
+            )
+
+    async def _reconcile_world_states(self) -> None:
+        for session in self.client.sessions:
+            await self.plugins.publish_session_state(session.world, session.state.value)
 
     def _format_reconnect_message(self, restored: int) -> str:
         if self.client.history_truncated:
@@ -727,27 +795,36 @@ class GatewayUiRuntime:
             pass
 
     async def _recover_connection(self) -> None:
-        config = self.reconnect_config
-        for attempt in range(1, config.max_attempts + 1):
-            if self._stopping:
+        async with self._reconnect_lock:
+            config = self.reconnect_config
+            if self._gateway_connected and await self.client.verify_connection(
+                timeout=config.ping_timeout_seconds
+            ):
                 return
-            self.notify(
-                f"Gateway connection lost; reconnecting (attempt "
-                f"{attempt}/{config.max_attempts})..."
-            )
-            try:
-                restored = await self.client.reconnect()
-            except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
-                if attempt == config.max_attempts:
-                    self.notify(
-                        f"Gateway reconnect failed after {config.max_attempts} attempts: {exc}. "
-                        "Use /gateway reconnect to retry manually."
-                    )
+            await self._set_gateway_connected(False)
+            for attempt in range(1, config.max_attempts + 1):
+                if self._stopping:
                     return
-                await asyncio.sleep(config.retry_interval_seconds)
-            else:
-                self.notify(self._format_reconnect_message(restored))
-                return
+                self.notify(
+                    f"Gateway connection lost; reconnecting (attempt "
+                    f"{attempt}/{config.max_attempts})..."
+                )
+                try:
+                    restored = await self.client.reconnect()
+                except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+                    if attempt == config.max_attempts:
+                        failure = (
+                            f"Gateway reconnect failed after {config.max_attempts} attempts: "
+                            f"{exc}. Use /gateway reconnect to retry manually."
+                        )
+                        self.notify(failure)
+                        return
+                    await asyncio.sleep(config.retry_interval_seconds)
+                else:
+                    await self._set_gateway_connected(True)
+                    await self._reconcile_world_states()
+                    self.notify(self._format_reconnect_message(restored))
+                    return
 
 
 async def run_gateway_ui(
@@ -787,28 +864,39 @@ async def run_gateway_ui(
             **connection_options,
         )
     manager = SessionManager(client.sessions)  # type: ignore[arg-type]
-    extra_plugins, plugin_source_failures = await load_plugin_sources(
-        configuration.main.plugins.sources,
-        plugins_directory=configuration.main.plugins.state_directory,
-    )
-    for failure in plugin_source_failures:
-        print(f"tfr: plugin source {failure.repo}: {failure.error}", file=sys.stderr)
-    plugins = await PluginManager.load(
-        enabled=configuration.main.plugins.enabled,
-        config=configuration.main.plugins.config,
-        event_bus=client.event_bus,
-        command_bus=client.command_bus,  # type: ignore[arg-type]
-        targets={session.world: session.session_id for session in client.sessions},
-        worlds={
-            session.world: PluginWorldInfo(
-                server=session.config.server,
-                encoding=session.encoding,
-            )
-            for session in client.sessions
-        },
-        extra_discovered=extra_plugins,
-        scope="ui",
-    )
+    try:
+        extra_plugins, plugin_source_failures = await load_plugin_sources(
+            configuration.main.plugins.sources,
+            plugins_directory=configuration.main.plugins.state_directory,
+        )
+        for failure in plugin_source_failures:
+            print(f"tfr: plugin source {failure.repo}: {failure.error}", file=sys.stderr)
+        plugins = await PluginManager.load(
+            enabled=configuration.main.plugins.enabled,
+            config=configuration.main.plugins.config,
+            event_bus=client.event_bus,
+            command_bus=client.command_bus,  # type: ignore[arg-type]
+            targets={session.world: session.session_id for session in client.sessions},
+            worlds={
+                session.world: PluginWorldInfo(
+                    server=session.config.server,
+                    encoding=session.encoding,
+                )
+                for session in client.sessions
+            },
+            extra_discovered=extra_plugins,
+            scope="ui",
+        )
+        plugins.initialize_boss_selection(
+            configuration.main.ui.boss.mode,
+            configuration.main.ui.boss.screen,
+        )
+    except BaseException:
+        try:
+            await client.stop()
+        finally:
+            await client.event_bus.close()
+        raise
     runtime = GatewayUiRuntime(
         client,
         plugins,
@@ -829,6 +917,8 @@ async def run_gateway_ui(
         output_color=configuration.main.ui.output_color,
         screen_clear_mode=configuration.main.ui.screen_clear.mode,
         screen_clear_effect=configuration.main.ui.screen_clear.effect,
+        boss_screen_mode=configuration.main.ui.boss.mode,
+        boss_screen=configuration.main.ui.boss.screen,
         plugins=plugins,
         agents=client.agents,  # type: ignore[arg-type]
         service_runtime=runtime,

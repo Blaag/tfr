@@ -10,6 +10,10 @@ from tfr.clear_effects import (
 from tfr.events import Direction, Event, EventKind, Provenance
 from tfr.plugins import (
     PLUGIN_API_VERSION,
+    BossViewContext,
+    BossViewEvent,
+    BossViewHandle,
+    BossWorldStatus,
     DuplicatePluginRegistration,
     EventPatch,
     PluginCommandContext,
@@ -32,6 +36,10 @@ __all__ = (
     "BorderCellContext",
     "BorderEdge",
     "BorderFragment",
+    "BossViewContext",
+    "BossViewEvent",
+    "BossViewHandle",
+    "BossWorldStatus",
     "Direction",
     "DuplicatePluginRegistration",
     "Event",

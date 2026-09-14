@@ -303,7 +303,7 @@ above.
   your default browser.
 
 Input beginning with `/` is a client command. Available commands are `/world
-ALIAS`, `/next` (`/n`), `/previous` (`/p`), `/connect`, `/disconnect`, `/reconnect`, `/more`,
+ALIAS`, `/next` (`/n`), `/previous` (`/p`), `/connect`, `/disconnect`, `/reconnect`,
 `/end`, `/nospoof show|hide|status`, `/animations on|off|status`,
 `/lowbw on|off|status`, `/clear`, `/boss`, `/sh`, `/reload`, `/restart`,
 `/gateway reconnect`, `/help`, and `/quit`, plus commands registered by enabled
@@ -337,11 +337,15 @@ automatic retry entirely and rely on `/gateway reconnect` manually. If the
 Gateway itself restarted or changed its worlds, use `/reload` instead so the
 UI can be rebuilt from the new Gateway state.
 
-`/boss` replaces the entire interface with a subdued, static incremental-build
-screen. World connections, buffering, and event logging continue in the
-background without displaying new text. Press Enter to restore TFR and reveal
-the accumulated output. Other ordinary input is ignored while the cover is
-active.
+`/boss` opens a plugin-provided full-screen cover. The built-in
+`build-dashboard` disguises real per-world received counts and last-activity
+times as log-monitor output, alternates fake histogram and flow diagrams, and
+shows a fake artifact listing. World connections, buffering, and event logging
+continue without exposing world text. Press Enter to restore TFR. Use `/boss
+status`, `/boss cycle`, `/boss random`, or `/boss lock SCREEN` to select among
+registered screens; `ui.boss` configures the startup mode. See
+[`BOSS-VIEWS.md`](BOSS-VIEWS.md) for dashboard configuration and the complete
+custom-screen API.
 
 The output and combined recent-input/editor regions have independent borders.
 Enabled plugins can animate borders and attributed speaker names through TFR's
@@ -384,7 +388,7 @@ The active world's recently sent commands remain directly above the editor.
 These lines are separate from server output, so server speech echoes are not
 duplicated. Configure their number with `ui.recent_input_lines` (default `3`, or
 `0` to hide the pane). `PageUp` after `Ctrl+L` reveals retained pre-clear output;
-pressing `PageUp`, `PageDown`, `End`, `/more`, or `/end` while a screen-clear
+pressing `PageUp`, `PageDown`, `End`, or `/end` while a screen-clear
 animation is still running ends that animation immediately so the requested
 scrolling is visible right away, instead of silently changing scroll position
 underneath the still-active animation.
@@ -403,13 +407,30 @@ example = "example_plugin:plugin"
 The loaded object can implement `register(registrar, config)` and set
 `api_version = 1`. The registrar supports client commands, inbound event
 enrichers, display transforms, structured display decorators, border effects,
-screen-clear effects, status segments, key bindings, and lifecycle handlers.
+screen-clear effects, boss views, status segments, key bindings, and lifecycle
+handlers.
 Commands can include help text for `/help`. Enrichers return
 `tfr.plugin_api.EventPatch`; they cannot replace event
 identity or canonical text. Command and key handlers receive a
 `PluginCommandContext` and submit typed commands with `await context.submit(...)`
 rather than accessing sockets. `context.world_info` exposes the active world's
 non-secret server type and effective text encoding.
+
+Lifecycle handlers receive `PluginLifecycleEvent` values. In addition to
+`application_start`, `application_stop`, and `session_state`, TFR publishes
+`gateway_connected`, `gateway_disconnected`, `world_activity`,
+`world_connected`, `world_disconnected`, and `boss_activated`. Operational
+events identify their `source` and may include non-secret metadata; notably,
+`world_activity` does not include the received message text. Plugins should
+ignore lifecycle kinds they do not use so future additions remain compatible.
+
+UI plugins can register multiple dynamic covers with
+`registrar.register_boss_view(NAME, renderer)`. Renderers receive exact
+per-world since-activation counters and timestamps plus at most 200 recent,
+privacy-safe operational or plugin events. Other plugins can publish into the
+active cover with `registrar.emit_boss_event(event)`. See
+[`BOSS-VIEWS.md`](BOSS-VIEWS.md) for the complete context, event, selection,
+refresh, and safety contracts.
 
 Enable entry-point names under `plugins.enabled` in `config.jsonc`. Arbitrary
 plugin-owned settings belong under `plugins.config.NAME`. A failed extension is
