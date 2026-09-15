@@ -370,10 +370,10 @@ async def test_builtin_boss_dashboard_tracks_activity_and_alternates_views() -> 
     assert "Generated build sequence" in flow
     for label in ("Custom stage A", "Custom stage B", "Custom stage C", "Profit"):
         assert f"│ {label}" in flow
-    assert "──►" in flow
+    assert "►" in flow
     assert "╭" in flow
-    assert "░" in flow
-    assert "Profit │─┘" in flow
+    assert "░" not in flow
+    assert "│ Profit │┘" in flow
 
 
 async def test_builtin_boss_defaults_include_only_approved_additional_filenames() -> None:

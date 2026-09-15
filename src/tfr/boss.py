@@ -363,21 +363,20 @@ class BuiltinBossPlugin:
             edges = [*pairwise(nodes), ("Profit", loop_target)]
             source = "\n".join(f"{start} -> {end}" for start, end in edges)
             for direction in ("LR", "TB"):
-                for shadow in (True, False):
-                    diagram = FlowchartGenerator(
-                        max_text_width=16,
-                        min_box_width=6,
-                        horizontal_spacing=2,
-                        vertical_spacing=1,
-                        shadow=shadow,
-                        rounded=True,
-                        direction=direction,
-                    ).generate(source)
-                    lines = diagram.strip("\n").splitlines()
-                    if len(lines) <= available_height and all(
-                        len(line) <= context.width for line in lines
-                    ):
-                        return ("Generated build sequence", *lines)
+                diagram = FlowchartGenerator(
+                    max_text_width=16,
+                    min_box_width=6,
+                    horizontal_spacing=2,
+                    vertical_spacing=1,
+                    shadow=False,
+                    rounded=True,
+                    direction=direction,
+                ).generate(source)
+                lines = diagram.strip("\n").splitlines()
+                if len(lines) <= available_height and all(
+                    len(line) <= context.width for line in lines
+                ):
+                    return ("Generated build sequence", *lines)
 
         loop_target = components[loop_index]
         compact = f"Profit -> {loop_target} (cycle)"[: context.width]
