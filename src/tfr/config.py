@@ -16,6 +16,7 @@ from pydantic import (
     PositiveInt,
     SecretStr,
     ValidationError,
+    field_validator,
     model_validator,
 )
 
@@ -129,6 +130,28 @@ class LoggingConfig(StrictModel):
     directory: Path = Path("~/.local/state/tfr/logs")
 
 
+class UpdateConfig(StrictModel):
+    enabled: bool = True
+    manifest_url: AnyHttpUrl = Field(
+        default=AnyHttpUrl(
+            "https://github.com/Blaag/tfr/releases/latest/download/update-manifest.json"
+        ),
+        json_schema_extra={"pattern": "^https://"},
+    )
+    check_interval_seconds: float = Field(default=21_600.0, ge=300)
+    initial_delay_seconds: float = Field(default=3.0, ge=0)
+    jitter_seconds: float = Field(default=900.0, ge=0)
+    timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    state_directory: Path = Path("~/.local/state/tfr/updates")
+
+    @field_validator("manifest_url")
+    @classmethod
+    def manifest_uses_https(cls, value: AnyHttpUrl) -> AnyHttpUrl:
+        if value.scheme != "https":
+            raise ValueError("updates.manifest_url must use HTTPS")
+        return value
+
+
 _PLUGIN_SOURCE_REPO = re.compile(r"^(?!-)[A-Za-z0-9](?:[A-Za-z0-9._~:/@%+-]*[A-Za-z0-9])?$")
 _PLUGIN_SOURCE_REF = re.compile(r"^(?!-)[A-Za-z0-9](?:[A-Za-z0-9._/+-]*[A-Za-z0-9])?$")
 _PLUGIN_SOURCE_PATH = re.compile(r"^(?!/)(?!.*\.\.)[A-Za-z0-9._/+-]*$")
@@ -163,6 +186,7 @@ class MainConfig(StrictModel):
     agents_file: Path = Path("agents.jsonc")
     ui: UiConfig = Field(default_factory=UiConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    updates: UpdateConfig = Field(default_factory=UpdateConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
 
 
@@ -379,6 +403,14 @@ def load_ui_configuration(main_path: Path | str | None = None) -> UiConfiguratio
                 update={
                     "state_directory": _resolve_path(
                         main.plugins.state_directory,
+                        relative_to=resolved_main.parent,
+                    )
+                }
+            ),
+            "updates": main.updates.model_copy(
+                update={
+                    "state_directory": _resolve_path(
+                        main.updates.state_directory,
                         relative_to=resolved_main.parent,
                     )
                 }

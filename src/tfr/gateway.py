@@ -42,6 +42,13 @@ from tfr.gateway_transport import (
 from tfr.plugin_sources import load_plugin_sources
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.sessions import SessionManager, SessionState, WorldSession
+from tfr.updates import (
+    BuildIdentity,
+    UpdateChecker,
+    UpdateResult,
+    current_build,
+    format_update_status,
+)
 
 MAX_COMMAND_CHARACTERS = 65_536
 MAX_ACTOR_ID_CHARACTERS = 256
@@ -251,6 +258,8 @@ class GatewayRuntime:
         plugins: PluginManager,
         agents: AgentRuntime,
         history: EventHistory,
+        build: BuildIdentity | None = None,
+        update_checker: UpdateChecker | None = None,
     ) -> None:
         self.event_bus = event_bus
         self.command_bus = command_bus
@@ -259,8 +268,11 @@ class GatewayRuntime:
         self.plugins = plugins
         self.agents = agents
         self.history = history
+        self.build = build or current_build()
+        self.update_checker = update_checker
         self.gateway_id = uuid4()
         self._started = False
+        self._update_task: asyncio.Task[None] | None = None
         self._control_locks = {session.world: asyncio.Lock() for session in sessions}
         self._agent_locks = {name: asyncio.Lock() for name in agents.controllers}
 
@@ -324,6 +336,9 @@ class GatewayRuntime:
             plugins=plugins,
             agents=agents,
             history=history,
+            update_checker=(
+                UpdateChecker(bundle.main.updates) if plugin_scope == "gateway" else None
+            ),
         )
 
     async def start(self) -> None:
@@ -338,12 +353,22 @@ class GatewayRuntime:
             await self.stop()
             raise
         self._started = True
+        if self.update_checker is not None and self.update_checker.config.enabled:
+            self._update_task = asyncio.create_task(
+                self.update_checker.run_periodically(self._notify_update),
+                name="tfr-gateway-updates",
+            )
 
     async def stop(self) -> None:
         if not self._started and self.history._pump is None:
             await self.event_bus.close()
             return
         self._started = False
+        if self._update_task is not None:
+            self._update_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._update_task
+            self._update_task = None
         await self.agents.stop()
         await self.manager.stop_all()
         await self.plugins.drain()
@@ -351,6 +376,9 @@ class GatewayRuntime:
         await self.plugins.drain()
         await self.history.stop()
         await self.event_bus.close()
+
+    def _notify_update(self, result: UpdateResult) -> None:
+        print(format_update_status("Gateway", self.build, result), file=sys.stderr, flush=True)
 
     def world_descriptors(self) -> list[dict[str, Any]]:
         agent_worlds = {controller.session.world for controller in self.agents.controllers.values()}
@@ -720,6 +748,7 @@ class GatewayServer:
                     "history_reset": history_reset,
                     "worlds": self.runtime.world_descriptors(),
                     "agents": self.runtime.agent_descriptors(),
+                    "build": getattr(self.runtime, "build", current_build()).as_dict(),
                 },
                 lock=write_lock,
             )

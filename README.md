@@ -111,6 +111,30 @@ Within an attached UI, `/reload` (or `/restart`) replaces only the UI process
 and reloads retained Gateway history to rebuild the display; the gateway and
 world sessions continue running.
 
+## Stable Release Updates
+
+TFR checks the latest stable GitHub Release in the background after startup and
+then approximately every six hours. Checks are notification-only: they never
+download, install, or execute an artifact. Use `/update status` to inspect the
+cached result or `/update check` to refresh it immediately. An attached UI
+reports its own build and the remote Gateway build separately; update the
+Gateway through its administrator-controlled deployment and restart process.
+
+The release manifest is cached with its HTTP `ETag` under
+`~/.local/state/tfr/updates` by default. Network and validation failures do not
+interrupt startup or active sessions. Set `updates.enabled` to `false` to
+disable checks, or configure the timing, HTTPS manifest URL, and state directory
+under the top-level `updates` object. Only stable `vMAJOR.MINOR.PATCH` releases
+participate; prereleases and moving Git tags are not used.
+
+Maintainers publish a release by updating `project.version` in `pyproject.toml`,
+committing that change, and pushing the matching immutable tag. The release
+workflow tests the tag, embeds its exact commit in the wheel, and publishes the
+wheel, source distribution, and checksummed `update-manifest.json` together.
+Configure the `release` GitHub environment to require maintainer approval, and
+enable immutable releases plus protected release tags in the repository ruleset;
+the workflow also rejects commits that are not on `main`.
+
 ## Remote Gateway
 
 The Gateway can keep its private Unix socket while also listening for remote UIs
@@ -168,9 +192,8 @@ network listener. Use a normal non-root account with Python 3.12 or newer,
 network access to the Gateway. Keep the UI and Gateway on the same reviewed TFR
 revision when upgrading them.
 
-Until TFR is available as a packaged release, copy or clone a reviewed source
-checkout onto the UI host. For example, from the repository root on an
-administration machine:
+You can copy or clone a reviewed source checkout onto the UI host. For example,
+from the repository root on an administration machine:
 
 ```console
 ssh USER@UI_HOST 'mkdir -p ~/tfr'

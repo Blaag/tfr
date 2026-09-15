@@ -780,10 +780,11 @@ Acceptance criteria:
   Git repository (GitHub shorthand, full URL, or SSH URL), with optional
   branch/tag/commit pinning and optional per-launch `auto_update`, without a
   separate packaging or installation step.
-- [ ] Notify at UI startup when updates are available for the Gateway, the UI's
-  own checkout, or any Git-sourced plugin, by comparing each running commit
-  against its tracked upstream ref without fetching or applying anything
-  automatically.
+- [x] Notify at UI startup when stable updates are available for the Gateway or
+  UI, using a checksummed immutable-release manifest and exact packaged build
+  identity without fetching or applying artifacts automatically.
+- [ ] Notify at UI startup when updates are available for Git-sourced plugins
+  without fetching or applying them automatically.
 - [ ] Support skinning or theming the UI: configurable colors for borders,
   the status bar, world markers, selection highlight, and the input prompt
   (currently fixed `class:*` styles in `tui.py`), beyond the single existing

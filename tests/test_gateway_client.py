@@ -27,6 +27,7 @@ from tfr.gateway_transport import (
     create_gateway_server_tls_context,
 )
 from tfr.plugins import PluginLifecycleEvent, PluginManager
+from tfr.updates import current_build
 
 
 def make_event(sequence: int) -> Event:
@@ -130,6 +131,9 @@ async def test_client_receives_snapshot_live_events_and_command_acks() -> None:
     client.start()
     try:
         assert [event.canonical_text for event in client.initial_events] == ["line 0"]
+        assert client.gateway_build is not None
+        assert client.gateway_build.version == current_build().version
+        assert client.gateway_build.protocol == 1
         await bus.publish(make_event(1))
         received = await asyncio.wait_for(queue.get(), timeout=1)
         assert received.canonical_text == "line 1"

@@ -34,6 +34,7 @@ from tfr.gateway_transport import (
 from tfr.plugin_sources import load_plugin_sources
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.sessions import SessionManager, SessionState
+from tfr.updates import BuildIdentity, UpdateChecker, UpdateError
 
 _RESTART_GATEWAY_ID = "TFR_RESTART_GATEWAY_ID"
 _RESTART_CURSOR = "TFR_RESTART_CURSOR"
@@ -185,6 +186,7 @@ class GatewayClient:
         sessions: list[RemoteWorldSession],
         initial_events: tuple[Event, ...],
         agent_worlds: set[str],
+        gateway_build: BuildIdentity | None = None,
     ) -> None:
         self.reader = reader
         self.writer = writer
@@ -198,6 +200,7 @@ class GatewayClient:
         self.sessions = sessions
         self.initial_events = initial_events
         self.agent_worlds = agent_worlds
+        self.gateway_build = gateway_build
         self.command_bus = RemoteCommandBus(self)
         self.agents: RemoteAgentRuntime | None = None
         self._write_lock = asyncio.Lock()
@@ -360,6 +363,12 @@ class GatewayClient:
                 raise GatewayProtocolError("gateway hello contains no worlds")
             if not isinstance(agents, list):
                 raise GatewayProtocolError("gateway agents must be a list")
+            try:
+                gateway_build = (
+                    BuildIdentity.from_mapping(hello["build"]) if "build" in hello else None
+                )
+            except UpdateError as exc:
+                raise GatewayProtocolError(f"invalid gateway build identity: {exc}") from exc
             event_bus = EventBus()
             client = cls(
                 reader=reader,
@@ -378,6 +387,7 @@ class GatewayClient:
                     for agent in agents
                     if isinstance(agent, dict) and "world" in agent
                 },
+                gateway_build=gateway_build,
             )
             try:
                 client.sessions.extend(
@@ -486,6 +496,7 @@ class GatewayClient:
             self.history_reset = False
             self.initial_events = replacement.initial_events
             self.agent_worlds = replacement.agent_worlds
+            self.gateway_build = replacement.gateway_build
             self._write_lock = asyncio.Lock()
             await replacement.event_bus.close()
             if self.connect_handler is not None:
@@ -902,6 +913,7 @@ async def run_gateway_ui(
         plugins,
         reconnect_config=configuration.main.ui.gateway_reconnect,
     )
+    update_checker = UpdateChecker(configuration.main.updates)
     tui = TfrTui(
         sessions=client.sessions,  # type: ignore[arg-type]
         manager=manager,
@@ -924,6 +936,8 @@ async def run_gateway_ui(
         service_runtime=runtime,
         gateway_reconnect=runtime.reconnect,
         restart_supported=True,
+        update_checker=update_checker,
+        gateway_build=client.gateway_build,
         initial_events=client.initial_events,
         initial_scroll_to_end=True,
     )

@@ -40,6 +40,18 @@
     "directory": "~/.local/state/tfr/logs",
   },
 
+  // Stable release checks are asynchronous, notification-only, and do not
+  // download or execute release artifacts. These are the built-in defaults.
+  "updates": {
+    "enabled": true,
+    "manifest_url": "https://github.com/Blaag/tfr/releases/latest/download/update-manifest.json",
+    "check_interval_seconds": 21600,
+    "initial_delay_seconds": 3,
+    "jitter_seconds": 900,
+    "timeout_seconds": 10,
+    "state_directory": "~/.local/state/tfr/updates",
+  },
+
   "plugins": {
     // Every visual plugin from tfr-plugins-public, using their built-in
     // defaults ({}). See that repository's README for what each plugin does

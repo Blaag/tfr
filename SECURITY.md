@@ -95,6 +95,27 @@ which is never auto-updated regardless of `auto_update`, and never enable
 `auto_update` on a branch or tag you would not trust someone with a shell on
 this machine to control.
 
+## Release Checks
+
+Stable release checks fetch a bounded JSON manifest over HTTPS from the
+configured URL. The default is the latest stable release asset in the official
+GitHub repository. Checks run asynchronously, use HTTP `ETag` caching, and are
+notification-only: TFR does not download or execute the advertised artifact.
+Malformed, oversized, non-HTTPS, prerelease, or unexpected manifests are
+rejected without interrupting startup or sessions.
+
+The Gateway handshake shares only its TFR version, exact release commit when
+available, and protocol version. The shared Gateway token grants no update,
+package-management, filesystem, or restart operation. Gateway upgrades remain
+explicit administrator actions followed by
+a service restart. Treat a custom `updates.manifest_url` as a software supply
+chain trust decision; future managed installation must verify both the manifest
+source and the artifact's declared size and SHA-256 digest before activation.
+The release workflow builds without write credentials and transfers its outputs
+to a separate write-capable job gated by the protected `release` environment.
+Repository administrators must also enable immutable releases and protect stable
+release tags; workflow `--verify-tag` alone does not make a Git tag immutable.
+
 ## Agents
 
 Each agent is attached to a dedicated world session. World text is supplied to

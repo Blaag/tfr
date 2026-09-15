@@ -23,6 +23,7 @@ from tfr.config import (
     AgentsConfig,
     ConfigurationBundle,
     MainConfig,
+    UpdateConfig,
     WorldConfig,
     WorldDefaults,
     WorldsConfig,
@@ -34,9 +35,16 @@ from tfr.plugin_api import BorderFragment, ScreenClearContext, TextDecoration, T
 from tfr.plugins import BossViewEvent, PluginManager
 from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.tui import TfrTui, _format_elapsed, _osc52_sequence, run_client
+from tfr.updates import BuildIdentity, UpdateChecker
 
 
-def make_tui(*, input: Input | None = None, plugins: PluginManager | None = None) -> TfrTui:
+def make_tui(
+    *,
+    input: Input | None = None,
+    plugins: PluginManager | None = None,
+    update_checker: UpdateChecker | None = None,
+    gateway_build: BuildIdentity | None = None,
+) -> TfrTui:
     event_bus = EventBus()
     command_bus = CommandBus()
     sessions = [
@@ -59,6 +67,8 @@ def make_tui(*, input: Input | None = None, plugins: PluginManager | None = None
         pager_enabled=True,
         pager_overlap=1,
         plugins=plugins,
+        update_checker=update_checker,
+        gateway_build=gateway_build,
         input=input or DummyInput(),
         output=DummyOutput(),
     )
@@ -496,9 +506,51 @@ async def test_help_lists_commands_keybindings_markers_and_loaded_plugins() -> N
     assert "! command" in help_text
     assert "/nospoof show|hide|status" in help_text
     assert "/recall X" in help_text
+    assert "/update status|check" in help_text
     assert "[H] human-operated world" in help_text
     assert "left-click selects a world" in help_text
     assert "/fixture (fixture) - run the harmless fixture" in help_text
+
+
+async def test_update_check_reports_ui_and_gateway_versions(tmp_path: Path) -> None:
+    manifest = {
+        "schema_version": 1,
+        "project": "tfr",
+        "channel": "stable",
+        "version": "1.2.3",
+        "tag": "v1.2.3",
+        "commit": "a" * 40,
+        "protocol": {"minimum": 1, "maximum": 1},
+        "release_url": "https://github.com/Blaag/tfr/releases/tag/v1.2.3",
+        "artifact": {
+            "url": "https://github.com/Blaag/tfr/releases/download/v1.2.3/tfr.whl",
+            "size": 10,
+            "sha256": "b" * 64,
+        },
+    }
+
+    def fetch(_url: str, _etag: str | None, _timeout: float) -> object:
+        import json
+
+        return SimpleNamespace(content=json.dumps(manifest).encode(), etag=None)
+
+    checker = UpdateChecker(
+        UpdateConfig(state_directory=tmp_path),
+        build=BuildIdentity("1.0.0", "c" * 40),
+        fetch=fetch,  # type: ignore[arg-type]
+    )
+    tui = make_tui(
+        update_checker=checker,
+        gateway_build=BuildIdentity("1.1.0", "d" * 40),
+    )
+    tui.active_view.display.resize(width=100, height=20)
+
+    await tui._handle_client_command("alpha", "/update check")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Checking for stable TFR updates" in text
+    assert "UI update available: 1.2.3 (running 1.0.0" in text
+    assert "Gateway update available: 1.2.3 (running 1.1.0" in text
 
 
 async def test_restart_is_available_only_for_gateway_attached_ui() -> None:
@@ -1169,7 +1221,7 @@ async def test_standalone_client_loads_all_plugin_capabilities(
         boss=boss,
     )
     bundle = SimpleNamespace(
-        main=SimpleNamespace(ui=ui),
+        main=SimpleNamespace(ui=ui, updates=UpdateConfig(enabled=False)),
         worlds=SimpleNamespace(worlds={}),
         agents=SimpleNamespace(agents={}),
     )

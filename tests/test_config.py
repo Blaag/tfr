@@ -79,6 +79,12 @@ def test_loads_jsonc_and_resolves_references(tmp_path: Path) -> None:
     assert bundle.main.ui.boss.mode == "cycle"
     assert bundle.main.ui.boss.screen is None
     assert bundle.main.logging.directory == Path("~/.local/state/tfr/logs").expanduser().resolve()
+    assert bundle.main.updates.enabled is True
+    assert bundle.main.updates.check_interval_seconds == 21_600
+    assert (
+        bundle.main.updates.state_directory
+        == Path("~/.local/state/tfr/updates").expanduser().resolve()
+    )
     assert bundle.worlds_path == (tmp_path / "worlds.jsonc").resolve()
     assert bundle.agents_path == (tmp_path / "agents.jsonc").resolve()
     assert bundle.worlds.worlds["bot-world"].login is not None
@@ -135,6 +141,32 @@ def test_plugins_state_directory_defaults_and_resolves_like_logging(tmp_path: Pa
     bundle = load_configuration(main_path)
 
     assert bundle.main.plugins.state_directory == (tmp_path / "plugins").resolve()
+
+
+def test_updates_require_https_and_resolve_state_directory(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"scrollback_lines": 500,}, "updates": {"state_directory": "updates"},',
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_configuration(main_path)
+
+    assert bundle.main.updates.state_directory == (tmp_path / "updates").resolve()
+
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"scrollback_lines": 500,}, '
+            '"updates": {"manifest_url": "http://example.com/manifest.json"},',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="updates.manifest_url must use HTTPS"):
+        load_configuration(main_path)
 
 
 def test_plugins_sources_parse_github_shorthand_and_pinned_ref(tmp_path: Path) -> None:

@@ -322,6 +322,57 @@
       },
       "title": "UiConfig",
       "type": "object"
+    },
+    "UpdateConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "check_interval_seconds": {
+          "default": 21600.0,
+          "minimum": 300,
+          "title": "Check Interval Seconds",
+          "type": "number"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "initial_delay_seconds": {
+          "default": 3.0,
+          "minimum": 0,
+          "title": "Initial Delay Seconds",
+          "type": "number"
+        },
+        "jitter_seconds": {
+          "default": 900.0,
+          "minimum": 0,
+          "title": "Jitter Seconds",
+          "type": "number"
+        },
+        "manifest_url": {
+          "default": "https://github.com/Blaag/tfr/releases/latest/download/update-manifest.json",
+          "format": "uri",
+          "minLength": 1,
+          "pattern": "^https://",
+          "title": "Manifest Url",
+          "type": "string"
+        },
+        "state_directory": {
+          "default": "~/.local/state/tfr/updates",
+          "format": "path",
+          "title": "State Directory",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "default": 10.0,
+          "exclusiveMinimum": 0,
+          "maximum": 60,
+          "title": "Timeout Seconds",
+          "type": "number"
+        }
+      },
+      "title": "UpdateConfig",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -358,6 +409,9 @@
     },
     "ui": {
       "$ref": "#/$defs/UiConfig"
+    },
+    "updates": {
+      "$ref": "#/$defs/UpdateConfig"
     },
     "worlds_file": {
       "default": "worlds.jsonc",

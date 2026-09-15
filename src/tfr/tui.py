@@ -41,6 +41,12 @@ from tfr.events import Actor, ActorType, CommandRequest, Direction, Event, Event
 from tfr.pager import DisplayBuffer, FormattedRow, PagerMode, rows_to_formatted_text
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.sessions import SessionManager, SessionState, WorldSession
+from tfr.updates import (
+    BuildIdentity,
+    UpdateChecker,
+    UpdateResult,
+    format_update_status,
+)
 
 
 class ServiceRuntime(Protocol):
@@ -350,6 +356,8 @@ class TfrTui:
         service_runtime: ServiceRuntime | None = None,
         gateway_reconnect: Callable[[], Coroutine[Any, Any, str]] | None = None,
         restart_supported: bool = False,
+        update_checker: UpdateChecker | None = None,
+        gateway_build: BuildIdentity | None = None,
         animations_enabled: bool = True,
         low_bandwidth: bool = False,
         output_color: str | None = None,
@@ -393,6 +401,8 @@ class TfrTui:
         self.service_runtime = service_runtime
         self.gateway_reconnect = gateway_reconnect
         self.restart_supported = restart_supported
+        self.update_checker = update_checker
+        self.gateway_build = gateway_build
         self.restart_requested = False
         self.animations_enabled = animations_enabled
         self.low_bandwidth = low_bandwidth
@@ -1330,6 +1340,8 @@ class TfrTui:
                     self.add_notice(alias, f"Gateway reconnect failed: {exc}")
                 else:
                     self.add_notice(alias, result)
+        elif command == "update":
+            await self._handle_update_command(alias, parameters)
         elif command in {"quit", "exit"}:
             get_app().exit(result=0)
         elif command == "world":
@@ -1386,6 +1398,7 @@ class TfrTui:
             "  /nospoof show|hide|status - control NOSPOOF prefix visibility",
             "  /lowbw [on|off|status] - suppress continuous UI animation",
             "  /animations [on|off|status] - enable continuous UI effects",
+            "  /update status|check - inspect stable UI and Gateway releases",
             "  /agent status|inspect|pause|resume|trigger|close - manage agents",
             "  /quit - exit TFR; //TEXT sends a literal leading slash",
             "",
@@ -1417,6 +1430,35 @@ class TfrTui:
                 description = self.plugins.registry.command_help.get(command, "plugin command")
                 lines.append(f"  /{command} ({plugin}) - {description}")
         return "\n".join(lines)
+
+    async def _handle_update_command(self, alias: str, parameters: list[str]) -> None:
+        if parameters not in (["status"], ["check"]):
+            self.add_notice(alias, "Usage: /update status|check")
+            return
+        if self.update_checker is None or not self.update_checker.config.enabled:
+            self.add_notice(alias, "Stable update checks are disabled")
+            return
+        if parameters == ["check"]:
+            self.add_notice(alias, "Checking for stable TFR updates...")
+            result = await self.update_checker.check()
+        else:
+            result = self.update_checker.result
+        self._show_update_status(result, available_only=False, alias=alias)
+
+    def _show_update_status(
+        self,
+        result: UpdateResult,
+        *,
+        available_only: bool,
+        alias: str | None = None,
+    ) -> None:
+        target = alias or self.active_alias
+        builds = [("UI", self.update_checker.build)] if self.update_checker is not None else []
+        if self.gateway_build is not None:
+            builds.append(("Gateway", self.gateway_build))
+        for label, build in builds:
+            if not available_only or result.available_for(build):
+                self.add_notice(target, format_update_status(label, build, result))
 
     def _handle_nospoof_command(self, alias: str, parameters: list[str]) -> None:
         session = self.views[alias].session
@@ -1687,6 +1729,12 @@ class TfrTui:
                 if self.agents is not None:
                     self.agents.start()
                 await self.manager.start_autoconnect()
+            if self.update_checker is not None and self.update_checker.config.enabled:
+                self._spawn(
+                    self.update_checker.run_periodically(
+                        lambda result: self._show_update_status(result, available_only=True)
+                    )
+                )
             self._animations_started = True
             self._sync_animation_task()
             handled_signals = [signal.SIGTERM]
@@ -1769,6 +1817,7 @@ async def run_client(bundle: ConfigurationBundle) -> int:
             plugins=runtime.plugins,
             agents=runtime.agents,
             service_runtime=runtime,
+            update_checker=UpdateChecker(bundle.main.updates),
         )
     except BaseException:
         await runtime.stop()

@@ -14,6 +14,7 @@ from tfr.events import Actor, ActorType, Direction, Event, EventKind
 from tfr.gateway import EventHistory, GatewayRuntime, GatewayServer
 from tfr.gateway_protocol import MAX_MESSAGE_BYTES, encode_message, event_message, read_message
 from tfr.sessions import SessionState
+from tfr.updates import current_build
 
 
 def make_event(world: str, sequence: int) -> Event:
@@ -140,6 +141,8 @@ async def test_server_handshake_backfill_command_ack_and_detach() -> None:
         assert hello["type"] == "hello"
         assert hello["cursor"] == 1
         assert hello["worlds"][0]["world"] == "alpha"
+        assert hello["build"]["version"] == current_build().version
+        assert hello["build"]["protocol"] == 1
         assert backfill is not None
         assert backfill["type"] == "event"
         assert backfill["cursor"] == 1
