@@ -4,7 +4,6 @@ import argparse
 import asyncio
 import sys
 from collections.abc import Sequence
-from importlib.metadata import version
 from pathlib import Path
 
 from tfr.config import (
@@ -14,9 +13,14 @@ from tfr.config import (
     load_ui_configuration,
 )
 from tfr.gateway_transport import DEFAULT_GATEWAY_PORT
+from tfr.updates import current_build
 
 
 def build_parser() -> argparse.ArgumentParser:
+    build = current_build()
+    build_version = (
+        f"{build.version} ({build.commit[:12]})" if build.commit is not None else build.version
+    )
     parser = argparse.ArgumentParser(
         prog="tfr",
         description="Connect to and supervise human and LLM world sessions.",
@@ -80,7 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--tls-server-name",
         help="UI mode: TLS certificate hostname (defaults to --gateway-host)",
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {version('tfr')}")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {build_version}")
     return parser
 
 

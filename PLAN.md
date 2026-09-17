@@ -783,6 +783,13 @@ Acceptance criteria:
 - [x] Notify at UI startup when stable updates are available for the Gateway or
   UI, using a checksummed immutable-release manifest and exact packaged build
   identity without fetching or applying artifacts automatically.
+- [x] Add a managed versioned installation layout with isolated release
+  environments, exact checkout build identity, atomic activation, a stable
+  launcher, retained previous release, and rollback, plus a script that builds
+  and installs the current clean Git `HEAD` using `uv.lock`.
+- [ ] Add opt-in stable-release download and staging that verifies the manifest
+  source, artifact size, and SHA-256 digest before activating the managed UI
+  installation; keep Gateway activation and restart administrator-controlled.
 - [ ] Notify at UI startup when updates are available for Git-sourced plugins
   without fetching or applying them automatically.
 - [ ] Support skinning or theming the UI: configurable colors for borders,

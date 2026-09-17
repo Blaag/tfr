@@ -28,9 +28,17 @@ The locked runtime dependency set was reviewed on 2026-09-08:
 | typing-inspection | 0.4.4 | MIT |
 | wcwidth | 0.8.3 | MIT |
 
+The managed checkout wheel build additionally pins this build-only dependency,
+reviewed on 2026-09-17:
+
+| Package | Locked version | License |
+| --- | ---: | --- |
+| uv-build | 0.12.15 | MIT OR Apache-2.0 |
+
 TinyFugue is GPLv2 software. TFR uses behavioral inspiration only and contains
 no copied TinyFugue implementation code. TinyMUX source was consulted to verify
 the NOSPOOF wire grammar; no TinyMUX source code is included.
 
 Package distributions remain governed by their own license files. Regenerate
-and review the locked dependency tree before release with `uv tree --no-dev`.
+and review the locked runtime and build trees before release with
+`uv tree --no-dev` and `uv tree --only-group build`.

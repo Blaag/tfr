@@ -116,6 +116,33 @@ to a separate write-capable job gated by the protected `release` environment.
 Repository administrators must also enable immutable releases and protect stable
 release tags; workflow `--verify-tag` alone does not make a Git tag immutable.
 
+## Managed Installations
+
+The checkout installer accepts only a clean Git `HEAD`; it builds, exports
+dependencies, and hashes `uv.lock` from one `git archive` snapshot rather than
+from mutable working-tree files. The exact commit is embedded in the wheel,
+runtime dependencies must be hash-locked binary artifacts, and the installed
+package must report the expected version and commit before activation. The
+bootstrap uses an isolated environment instead of trusting the checkout's
+ignored `.venv`. The wheel build backend is pinned and hash-constrained from
+the same lock.
+
+Managed installation roots and release directories must be owned by the current
+user and must not be writable by group or other users. Path ancestors must be
+owned by the current user or root; writable ancestors are accepted only when
+the sticky bit protects their entries. Release metadata is owner-only, release
+pointers must be relative symlinks into the managed `releases` directory,
+concurrent modifications are prevented with an operating system lock, and
+pointer and launcher replacements are atomic. The installer refuses to
+overwrite an existing launcher it did not create. Do not run it as a more
+privileged account than the account that runs TFR.
+
+These checks protect against unsafe paths, cross-user modification, partial
+installation, and accidental corruption. They do not protect against an
+attacker who already controls the same operating-system account. Activating or
+rolling back a release affects only later process launches. Gateway restart and
+service configuration remain administrator responsibilities.
+
 ## Agents
 
 Each agent is attached to a dedicated world session. World text is supplied to

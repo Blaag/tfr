@@ -111,6 +111,55 @@ Within an attached UI, `/reload` (or `/restart`) replaces only the UI process
 and reloads retained Gateway history to rebuild the display; the gateway and
 world sessions continue running.
 
+## Versioned Installation From a Checkout
+
+A clean Git checkout can produce and activate an isolated, versioned TFR
+installation without modifying the checkout:
+
+```console
+./scripts/install-from-checkout
+~/.local/bin/tfr --version
+```
+
+The installer requires `git` and `uv`. It archives the exact `HEAD` commit,
+embeds that full commit in the wheel, exports hash-locked runtime dependencies
+from `uv.lock`, creates an isolated relocatable environment, verifies the
+installed build identity, and only then activates it. Uncommitted and untracked
+files are rejected rather than silently included.
+
+Managed files use this layout:
+
+```text
+~/.local/share/tfr/
+├── releases/VERSION+git.COMMIT/
+├── current -> releases/VERSION+git.COMMIT
+├── previous -> releases/PREVIOUS_VERSION
+└── install.lock
+~/.local/bin/tfr
+```
+
+`~/.local/bin/tfr` is a stable launcher that executes the environment selected
+by `current`. Activation changes new invocations only; existing UI and Gateway
+processes continue running their original code. A managed attached UI's
+`/reload` re-enters through `current`. Restart a managed Gateway through its
+normal systemd, launchd, or other administrator-controlled service operation.
+
+The checkout script also manages installed releases:
+
+```console
+./scripts/install-from-checkout --list
+./scripts/install-from-checkout --no-activate
+./scripts/install-from-checkout --activate VERSION+git.COMMIT
+./scripts/install-from-checkout --rollback
+```
+
+`--rollback` swaps `current` and `previous`, so it can be reversed by running it
+again. Installed release directories are retained until removed manually. Use
+`--root` and `--bin-dir` to place a test or nonstandard installation elsewhere,
+and `--python` to select the Python 3.12-or-newer interpreter that `uv` should
+use. The installer refuses to replace an existing `~/.local/bin/tfr` that it
+did not create. Ensure `~/.local/bin` is in `PATH` before using `tfr` directly.
+
 ## Stable Release Updates
 
 TFR checks the latest stable GitHub Release in the background after startup and
@@ -126,6 +175,10 @@ interrupt startup or active sessions. Set `updates.enabled` to `false` to
 disable checks, or configure the timing, HTTPS manifest URL, and state directory
 under the top-level `updates` object. Only stable `vMAJOR.MINOR.PATCH` releases
 participate; prereleases and moving Git tags are not used.
+
+Release notifications do not yet download or install the advertised artifact.
+The managed layout above is the activation and rollback foundation that a later
+opt-in stable-release staging command will reuse.
 
 Maintainers publish a release by updating `project.version` in `pyproject.toml`,
 committing that change, and pushing the matching immutable tag. The release

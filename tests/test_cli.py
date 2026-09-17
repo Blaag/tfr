@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from tfr.cli import run
+from tfr.cli import build_parser, run
 
 
 def write_configuration(directory: Path, *, with_world: bool) -> Path:
@@ -226,3 +227,18 @@ def test_config_check_rejects_transport_options(capsys: pytest.CaptureFixture[st
 
     assert result == 2
     assert "transport options cannot be combined" in capsys.readouterr().err
+
+
+def test_version_includes_packaged_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        "tfr.cli.current_build",
+        lambda: SimpleNamespace(version="1.2.3", commit="a" * 40),
+    )
+
+    with pytest.raises(SystemExit, match="0"):
+        build_parser().parse_args(["--version"])
+
+    assert capsys.readouterr().out == "tfr 1.2.3 (aaaaaaaaaaaa)\n"

@@ -31,6 +31,7 @@ from tfr.gateway_transport import (
     validate_gateway_token,
     validate_tcp_endpoint,
 )
+from tfr.installations import managed_restart_command
 from tfr.plugin_sources import load_plugin_sources
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.sessions import SessionManager, SessionState
@@ -952,7 +953,10 @@ async def run_gateway_ui(
     if tui.restart_requested:
         os.environ[_RESTART_GATEWAY_ID] = str(client.gateway_id)
         os.environ[_RESTART_WORLD] = tui.active_alias
-        os.execv(sys.executable, [sys.executable, "-m", "tfr", *sys.argv[1:]])
+        restart = managed_restart_command(sys.argv[1:])
+        if restart is None:
+            restart = [sys.executable, "-I", "-m", "tfr", *sys.argv[1:]]
+        os.execv(restart[0], restart)
     return result
 
 

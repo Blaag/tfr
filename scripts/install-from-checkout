@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+PYTHONPATH="$repository/src"
+PYTHONNOUSERSITE=1
+export PYTHONPATH PYTHONNOUSERSITE
+exec uv run --quiet --isolated --no-project --no-config --python 3.12 \
+    python -P -m tfr.install_checkout "$@"
