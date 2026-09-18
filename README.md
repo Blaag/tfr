@@ -11,12 +11,23 @@ The complete design and implementation sequence are in [PLAN.md](PLAN.md).
 
 ## Quick Start
 
-TFR requires Python 3.12 or newer and [`uv`](https://docs.astral.sh/uv/).
-From the repository root, install the project and its development dependencies:
+TFR requires `git`, Python 3.12 or newer, and
+[`uv`](https://docs.astral.sh/uv/). Clone the repository as a bootstrap checkout,
+then use its installer to resolve, verify, build, and activate the exact latest
+stable release:
 
 ```console
-uv sync
+git clone https://github.com/Blaag/tfr.git
+cd tfr
+./scripts/install-from-checkout --latest-stable
+~/.local/bin/tfr --version
 ```
+
+The bootstrap checkout is not installed as `main`. The installer fetches the
+official stable release manifest, verifies its immutable annotated tag and exact
+commit, builds that tagged source with its committed lock file, and exposes it
+through `~/.local/bin/tfr`. Add `~/.local/bin` to `PATH` if you want to invoke
+`tfr` without its full path.
 
 Create a private working configuration from the supplied examples:
 
@@ -31,13 +42,13 @@ use. Edit `.tfr/agents.jsonc` if you want agent-controlled worlds. Check
 the complete configuration before connecting:
 
 ```console
-uv run tfr --check-config --config .tfr/config.jsonc
+~/.local/bin/tfr --check-config --config .tfr/config.jsonc
 ```
 
 Start the persistent Gateway in one terminal:
 
 ```console
-uv run tfr gateway --config .tfr/config.jsonc
+~/.local/bin/tfr gateway --config .tfr/config.jsonc
 ```
 
 Leave that command running. A successful startup reports its socket:
@@ -50,7 +61,7 @@ Press Ctrl-C to stop the gateway.
 Attach the UI from a second terminal:
 
 ```console
-uv run tfr ui --config .tfr/config.jsonc
+~/.local/bin/tfr ui --config .tfr/config.jsonc
 ```
 
 You can attach multiple UIs to the same Gateway. `Ctrl-Q` or `/quit` closes only
@@ -65,8 +76,8 @@ The Gateway and UI use `$XDG_RUNTIME_DIR/tfr/gateway.sock` when
 pass the identical path to both commands:
 
 ```console
-uv run tfr gateway --config .tfr/config.jsonc --socket /private/path/tfr.sock
-uv run tfr ui --config .tfr/config.jsonc --socket /private/path/tfr.sock
+~/.local/bin/tfr gateway --config .tfr/config.jsonc --socket /private/path/tfr.sock
+~/.local/bin/tfr ui --config .tfr/config.jsonc --socket /private/path/tfr.sock
 ```
 
 The socket's existing parent directory must be owned by the current user and
@@ -78,7 +89,7 @@ For a single-process session without a persistent Gateway, use the legacy
 combined mode:
 
 ```console
-uv run tfr --config .tfr/config.jsonc
+~/.local/bin/tfr --config .tfr/config.jsonc
 ```
 
 ## Development
@@ -111,21 +122,30 @@ Within an attached UI, `/reload` (or `/restart`) replaces only the UI process
 and reloads retained Gateway history to rebuild the display; the gateway and
 world sessions continue running.
 
-## Versioned Installation From a Checkout
+## Managed Release Installation
 
-A clean Git checkout can produce and activate an isolated, versioned TFR
-installation without modifying the checkout:
+The recommended user installation resolves the latest stable release from the
+official manifest rather than installing the bootstrap checkout's `main`
+branch:
 
 ```console
-./scripts/install-from-checkout
+./scripts/install-from-checkout --latest-stable
 ~/.local/bin/tfr --version
 ```
 
-The installer requires `git` and `uv`. It archives the exact `HEAD` commit,
-embeds that full commit in the wheel, exports hash-locked runtime dependencies
-from `uv.lock`, creates an isolated relocatable environment, verifies the
-installed build identity, and only then activates it. Uncommitted and untracked
-files are rejected rather than silently included.
+The installer requires `git` and `uv`. It verifies that the manifest's fully
+qualified annotated tag points directly to the declared commit, checks that the
+tagged project version agrees, embeds that full commit in the wheel, exports
+hash-locked runtime dependencies from the tagged `uv.lock`, creates an isolated
+relocatable environment, verifies the installed build identity, and only then
+activates it.
+
+Developers can instead package the current clean checkout explicitly. This mode
+rejects uncommitted and untracked files rather than silently including them:
+
+```console
+./scripts/install-from-checkout
+```
 
 Using the managed installation is optional. Running the installer does not
 remove or modify the checkout, its `.venv`, configuration files, logs, plugin
@@ -157,7 +177,7 @@ The checkout script also manages installed releases:
 ```console
 ./scripts/install-from-checkout --list
 ./scripts/install-from-checkout --latest-stable
-./scripts/install-from-checkout --no-activate
+./scripts/install-from-checkout --latest-stable --no-activate
 ./scripts/install-from-checkout --activate RELEASE_ID
 ./scripts/install-from-checkout --rollback
 ```
@@ -188,7 +208,7 @@ resolved relative to that main configuration file:
 
 ```console
 checkout=$PWD
-./scripts/install-from-checkout
+./scripts/install-from-checkout --latest-stable
 ~/.local/bin/tfr gateway --config "$checkout/.tfr/config.jsonc"
 ~/.local/bin/tfr ui --config "$checkout/.tfr/config.jsonc"
 ```
@@ -221,6 +241,19 @@ to rebuild and activate the exact tagged source release. This command validates
 the manifest-to-tag trust chain independently and is never started by the
 background checker. Direct verified installation of the advertised wheel
 remains future work.
+
+From the bootstrap checkout, a normal update is:
+
+```console
+./scripts/install-from-checkout --latest-stable
+~/.local/bin/tfr --version
+```
+
+Activation affects new processes only. Restart a managed Gateway through its
+service manager and use `/reload` or restart each managed UI. If the new release
+must be reverted, use `./scripts/install-from-checkout --rollback`, then restart
+the affected process again. `--list` shows the exact release IDs selected by the
+`current` and `previous` pointers.
 
 Maintainers publish a release by updating `project.version` in `pyproject.toml`,
 committing and pushing that change, previewing `./scripts/publish-release`, then
@@ -256,7 +289,7 @@ private CA works with the UI's `--tls-ca` option. Keep the TLS private key mode
 address:
 
 ```console
-uv run tfr gateway --config .tfr/config.jsonc \
+~/.local/bin/tfr gateway --config .tfr/config.jsonc \
   --listen-host 100.x.y.z --listen-port 7347 \
   --token-file ~/.config/tfr/gateway.token \
   --tls-cert ~/.config/tfr/gateway.crt \
@@ -269,7 +302,7 @@ the Gateway's `worlds.jsonc`, `agents.jsonc`, world passwords, or provider keys.
 Connect using the certificate's MagicDNS hostname:
 
 ```console
-uv run tfr ui --config .tfr/config.jsonc \
+~/.local/bin/tfr ui --config .tfr/config.jsonc \
   --gateway-host gateway.example.ts.net --gateway-port 7347 \
   --token-file ~/.config/tfr/gateway.token
 ```
@@ -291,8 +324,14 @@ network listener. Use a normal non-root account with Python 3.12 or newer,
 network access to the Gateway. Keep the UI and Gateway on the same reviewed TFR
 revision when upgrading them.
 
-You can copy or clone a reviewed source checkout onto the UI host. For example,
-from the repository root on an administration machine:
+Clone the repository on the UI host as an installer bootstrap:
+
+```console
+git clone https://github.com/Blaag/tfr.git ~/tfr
+```
+
+Alternatively, copy an existing bootstrap checkout from an administration
+machine:
 
 ```console
 ssh USER@UI_HOST 'mkdir -p ~/tfr'
@@ -302,14 +341,13 @@ rsync -az \
   ./ USER@UI_HOST:~/tfr/
 ```
 
-On the UI host, install the locked runtime environment without development
-dependencies:
+On the UI host, install and activate the exact latest stable release. This does
+not install the bootstrap checkout's branch:
 
 ```console
 cd ~/tfr
-uv python install 3.12
-uv sync --frozen --no-dev
-uv run --frozen tfr --version
+./scripts/install-from-checkout --latest-stable
+~/.local/bin/tfr --version
 ```
 
 Create a private configuration directory on the UI host:
@@ -378,8 +416,7 @@ world passwords, or provider keys to the UI host.
 Connect from the UI host using the hostname in the Gateway certificate:
 
 ```console
-cd ~/tfr
-uv run --frozen tfr ui \
+~/.local/bin/tfr ui \
   --config ~/.config/tfr/config.jsonc \
   --gateway-host gateway.example.ts.net \
   --gateway-port 7347 \
@@ -395,7 +432,7 @@ service. It can be started directly over SSH with a pseudo-terminal:
 
 ```console
 ssh -t USER@UI_HOST \
-  'cd ~/tfr && uv run --frozen tfr ui \
+  '~/.local/bin/tfr ui \
     --config ~/.config/tfr/config.jsonc \
     --gateway-host gateway.example.ts.net \
     --gateway-port 7347 \
