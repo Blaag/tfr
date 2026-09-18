@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import os
 import random
 import re
@@ -16,12 +17,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from tfr._build import BUILD_COMMIT
-from tfr.config import UpdateConfig
 from tfr.gateway_protocol import PROTOCOL_VERSION
+
+if TYPE_CHECKING:
+    from tfr.config import UpdateConfig
 
 _SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _BUILD_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+!-]{0,127}$")
@@ -299,7 +302,11 @@ class _HttpsRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _fetch_manifest(url: str, etag: str | None, timeout: float) -> _FetchResult:
-    headers = {"Accept": "application/json", "User-Agent": "tfr-update-checker"}
+    headers = {
+        "Accept": "application/json",
+        "Cache-Control": "no-cache",
+        "User-Agent": "tfr-update-checker",
+    }
     if etag is not None:
         headers["If-None-Match"] = etag
     request = urllib.request.Request(url, headers=headers)
@@ -318,6 +325,19 @@ def _fetch_manifest(url: str, etag: str | None, timeout: float) -> _FetchResult:
         if len(content) > _MAX_MANIFEST_BYTES:
             raise UpdateError("release manifest exceeds the size limit")
         return _FetchResult(content=content, etag=response.headers.get("ETag"))
+
+
+def fetch_release_manifest(url: str, *, timeout: float = 10.0) -> ReleaseManifest:
+    """Fetch and validate a live release manifest without using the notification cache."""
+    _https_url(url, "release manifest URL")
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
+        raise UpdateError("release manifest timeout must be a number")
+    if not math.isfinite(timeout) or timeout <= 0 or timeout > 60:
+        raise UpdateError("release manifest timeout must be greater than zero and at most 60")
+    fetched = _fetch_manifest(url, None, float(timeout))
+    if fetched.content is None:
+        raise UpdateError("release server returned no manifest")
+    return ReleaseManifest.from_json(fetched.content)
 
 
 class UpdateChecker:

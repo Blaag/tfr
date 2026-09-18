@@ -10,6 +10,7 @@ building, publishing, and installing them.
 | `./scripts/publish-release` | Maintainer | Validate that the current `main` commit is ready for the version in `pyproject.toml`. It makes no release change without `--push`. |
 | `./scripts/publish-release --push` | Maintainer | Create and push the matching annotated `vX.Y.Z` tag, triggering the protected release workflow. |
 | `./scripts/install-from-checkout` | Operator or developer | Build the current clean checkout into an isolated local release and optionally activate it. It does not publish anything. |
+| `./scripts/install-from-checkout --latest-stable` | Operator | Fetch the live official manifest, verify its exact annotated tag and commit, then build and activate that tagged source. It never installs `main`. |
 | `scripts/build_update_manifest.py` | GitHub Actions | Generate `update-manifest.json` for an already-built wheel. It is a release-workflow helper and is not normally run manually. |
 
 The actual package build and GitHub Release publication are performed by
@@ -90,6 +91,21 @@ https://github.com/Blaag/tfr/releases/latest/download/update-manifest.json
 
 Running `/update check` in TFR then checks that manifest. Update checks are
 notification-only and do not install the advertised artifact.
+
+To install the published source release explicitly, run:
+
+```console
+./scripts/install-from-checkout --latest-stable
+```
+
+The stable installer fetches a fresh manifest without falling back to the
+notification cache. It fetches only `refs/tags/vX.Y.Z` from the fixed official
+repository, requires an annotated tag that points directly to the manifest's
+commit, verifies the tagged `pyproject.toml` version, and then uses the tagged
+`uv.lock` and existing atomic managed installer. The bootstrap checkout and
+`main` are not changed or installed. Normal stable installation refuses a
+downgrade or reuse of an installed stable version for a different commit;
+rollback remains a separate explicit operation.
 
 ## Failure Recovery
 

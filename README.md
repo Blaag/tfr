@@ -139,8 +139,9 @@ Managed files use this layout:
 ```text
 ~/.local/share/tfr/
 ├── releases/VERSION+git.COMMIT/
-├── current -> releases/VERSION+git.COMMIT
-├── previous -> releases/PREVIOUS_VERSION
+├── releases/VERSION+stable.COMMIT/
+├── current -> releases/RELEASE_ID
+├── previous -> releases/PREVIOUS_RELEASE_ID
 └── install.lock
 ~/.local/bin/tfr
 ```
@@ -155,10 +156,23 @@ The checkout script also manages installed releases:
 
 ```console
 ./scripts/install-from-checkout --list
+./scripts/install-from-checkout --latest-stable
 ./scripts/install-from-checkout --no-activate
-./scripts/install-from-checkout --activate VERSION+git.COMMIT
+./scripts/install-from-checkout --activate RELEASE_ID
 ./scripts/install-from-checkout --rollback
 ```
+
+`--latest-stable` performs an explicit, fail-closed stable installation. It
+fetches the live official release manifest without using the notification
+cache, fetches only its fully qualified annotated Git tag from the official
+repository, and requires the tag's direct commit and tagged project version to
+match the manifest. It builds that temporary detached checkout with its
+committed lock file; it never installs `main` or modifies the bootstrap
+checkout. Verified stable releases use `VERSION+stable.COMMIT` IDs so their
+provenance remains distinct from local checkout builds. A lower version than an
+already installed stable release, or the same version with a different commit,
+is rejected. Use `--no-activate` to stage the verified release without changing
+`current`.
 
 `--rollback` swaps `current` and `previous`, so it can be reversed by running it
 again. Installed release directories are retained until removed manually. Use
@@ -201,9 +215,12 @@ disable checks, or configure the timing, HTTPS manifest URL, and state directory
 under the top-level `updates` object. Only stable `vMAJOR.MINOR.PATCH` releases
 participate; prereleases and moving Git tags are not used.
 
-Release notifications do not yet download or install the advertised artifact.
-The managed layout above is the activation and rollback foundation that a later
-opt-in stable-release staging command will reuse.
+Release notifications do not download or install the advertised artifact.
+Operators may explicitly run `./scripts/install-from-checkout --latest-stable`
+to rebuild and activate the exact tagged source release. This command validates
+the manifest-to-tag trust chain independently and is never started by the
+background checker. Direct verified installation of the advertised wheel
+remains future work.
 
 Maintainers publish a release by updating `project.version` in `pyproject.toml`,
 committing and pushing that change, previewing `./scripts/publish-release`, then

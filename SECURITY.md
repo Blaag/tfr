@@ -109,8 +109,14 @@ available, and protocol version. The shared Gateway token grants no update,
 package-management, filesystem, or restart operation. Gateway upgrades remain
 explicit administrator actions followed by
 a service restart. Treat a custom `updates.manifest_url` as a software supply
-chain trust decision; future managed installation must verify both the manifest
-source and the artifact's declared size and SHA-256 digest before activation.
+chain trust decision. The explicit source-based stable installer does not use
+that configurable URL or the notification cache: it fetches the official live
+manifest and only the manifest's fully qualified tag from the fixed official
+repository. It requires an annotated tag that directly targets the declared
+commit and verifies the tagged project version before executing candidate build
+code. It never fetches or installs `main`, rejects normal stable downgrades and
+same-version commit changes, and leaves direct verification and installation of
+the manifest's wheel artifact as future work.
 The release workflow builds without write credentials and transfers its outputs
 to a separate write-capable job gated by the protected `release` environment.
 Repository administrators must also enable immutable releases and protect stable

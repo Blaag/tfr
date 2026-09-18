@@ -13,6 +13,7 @@ from tfr.installations import (
     checkout_release_id,
     managed_restart_command,
     release_python,
+    stable_release_id,
 )
 
 
@@ -51,6 +52,15 @@ def test_checkout_release_id_includes_exact_commit() -> None:
 
     with pytest.raises(InstallationError):
         checkout_release_id("1.2.3", "short")
+
+
+def test_stable_release_id_includes_exact_commit() -> None:
+    commit = "a" * 40
+
+    assert stable_release_id("1.2.3", commit) == f"1.2.3+stable.{commit}"
+
+    with pytest.raises(InstallationError):
+        stable_release_id("1.2.3rc1", commit)
 
 
 def test_release_metadata_is_strict() -> None:

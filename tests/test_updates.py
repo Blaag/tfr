@@ -11,12 +11,14 @@ from types import SimpleNamespace
 
 import pytest
 
+import tfr.updates
 from tfr.config import UpdateConfig
 from tfr.updates import (
     BuildIdentity,
     ReleaseManifest,
     UpdateChecker,
     UpdateError,
+    fetch_release_manifest,
     format_update_status,
     update_available,
 )
@@ -79,6 +81,36 @@ def test_manifest_rejects_unknown_fields_and_insecure_urls() -> None:
             pass
         else:
             raise AssertionError("invalid manifest was accepted")
+
+
+def test_live_manifest_fetch_does_not_use_cached_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str | None, float]] = []
+
+    def fetch(url: str, etag: str | None, timeout: float) -> object:
+        calls.append((url, etag, timeout))
+        return SimpleNamespace(content=manifest_bytes(), etag='"release-1"')
+
+    monkeypatch.setattr(tfr.updates, "_fetch_manifest", fetch)
+
+    manifest = fetch_release_manifest("https://updates.example.com/stable.json", timeout=7)
+
+    assert manifest.version == "1.2.3"
+    assert calls == [("https://updates.example.com/stable.json", None, 7.0)]
+
+
+def test_live_manifest_fetch_rejects_no_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tfr.updates,
+        "_fetch_manifest",
+        lambda _url, _etag, _timeout: SimpleNamespace(content=None, etag='"stale"'),
+    )
+
+    with pytest.raises(UpdateError, match="returned no manifest"):
+        fetch_release_manifest("https://updates.example.com/stable.json")
 
 
 async def test_checker_fetches_caches_and_reuses_304_manifest(tmp_path: Path) -> None:

@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover - managed installs target POSIX hosts
 
 _RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$")
 _VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+!-]{0,127}$")
+_STABLE_VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _LAUNCHER_MARKER = "# Managed by TFR's versioned installer."
@@ -48,6 +49,14 @@ def checkout_release_id(version: str, commit: str) -> str:
     return f"{version}+git.{commit}"
 
 
+def stable_release_id(version: str, commit: str) -> str:
+    if _STABLE_VERSION.fullmatch(version) is None:
+        raise InstallationError("stable release version is invalid")
+    if _COMMIT.fullmatch(commit) is None:
+        raise InstallationError("stable release commit must be 40 lowercase hexadecimal characters")
+    return f"{version}+stable.{commit}"
+
+
 @dataclass(frozen=True, slots=True)
 class ReleaseMetadata:
     release_id: str
@@ -72,6 +81,10 @@ class ReleaseMetadata:
             self.version, self.commit
         ):
             raise InstallationError("checkout release ID does not match its version and commit")
+        if self.source == "stable-release" and self.release_id != stable_release_id(
+            self.version, self.commit
+        ):
+            raise InstallationError("stable release ID does not match its version and commit")
         try:
             installed_at = datetime.fromisoformat(self.installed_at)
         except ValueError as exc:
