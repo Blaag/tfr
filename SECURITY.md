@@ -81,19 +81,25 @@ Install and enable only reviewed plugins. Runtime extension failures are
 reported without exception messages, then the failing parser, display, status,
 or lifecycle extension is disabled.
 
-`plugins.sources` lets TFR fetch and run plugin code directly from a Git
-repository, with an optional `auto_update` that re-fetches on every launch.
-This trades safety for convenience by design, for small groups who trust each
-other's repositories: TFR only runs `git clone`/`fetch`/`checkout` (never
-`pip install` or a build step) and only imports the Python module a source's
-own `pyproject.toml` declares, but that import still executes with TFR's full
-privileges, identically to any other plugin. Anyone who can push to a
-non-pinned source's branch, or compromise that account, controls code that
-will run on this machine the next time TFR starts. Pin any source you have
-not personally reviewed to a full commit hash (`ref`, 40 hex characters),
-which is never auto-updated regardless of `auto_update`, and never enable
-`auto_update` on a branch or tag you would not trust someone with a shell on
-this machine to control.
+`plugins.sources` supports immutable stable releases, exact commit pins, and a
+legacy mutable Git mode. Stable manifests are fetched over HTTPS with bounded
+size and strict fields. Before import, TFR verifies compatibility, rejects
+downgrades and same-version commit changes, fetches only the declared tag,
+requires that annotated tag to point directly to the manifest commit, and
+matches the released project version and entry-point inventory. Stable releases
+live in owner-controlled versioned directories and activate through atomic
+relative pointers. The previous verified release is retained for rollback.
+Stable policies never fall back to a branch. When offline they may reuse only
+the current checkout after revalidating its origin, tag, commit, metadata, and
+clean worktree.
+
+An exact `pinned` source requires a lowercase 40-character commit and revalidates
+its origin, `HEAD`, and clean worktree on every launch. Legacy `auto_update`
+re-fetches a branch or tag and trades safety for convenience by design. Anyone
+who can push to that ref controls code that runs with TFR's privileges on the
+next launch. Reserve mutable sources for maintainers you trust with the account
+running TFR. TFR never runs `pip install` or repository build steps for source
+plugins, so dependencies must already exist in TFR's environment.
 
 ## Release Checks
 

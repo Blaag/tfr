@@ -43,6 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate configuration and exit",
     )
     parser.add_argument(
+        "--rollback-plugin",
+        metavar="REPO",
+        help="activate the previous verified stable release for a configured plugin source",
+    )
+    parser.add_argument(
         "--replay",
         type=Path,
         help="open a JSONL event transcript without connecting",
@@ -107,6 +112,67 @@ def run(argv: Sequence[str] | None = None) -> int:
         or args.listen_port != DEFAULT_GATEWAY_PORT
         or args.gateway_port != DEFAULT_GATEWAY_PORT
     )
+
+    if args.rollback_plugin is not None:
+        if (
+            args.mode is not None
+            or args.check_config
+            or args.replay is not None
+            or args.socket is not None
+            or network_arguments
+        ):
+            print(
+                "tfr: --rollback-plugin cannot be combined with runtime or transport options",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            bundle = load_configuration(args.config)
+            matches = [
+                source
+                for source in bundle.main.plugins.sources
+                if source.repo == args.rollback_plugin
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    "--rollback-plugin must name exactly one configured plugin source"
+                )
+            source = matches[0]
+            if source.policy not in {"stable-auto", "stable-notify"}:
+                raise ValueError("plugin rollback requires a stable plugin source policy")
+            from tfr.plugin_releases import (
+                PluginReleaseLayout,
+                current_plugin_release,
+                rollback_plugin_release,
+            )
+            from tfr.plugin_sources import normalize_repo_url, source_slug
+
+            repo_url = normalize_repo_url(source.repo)
+            layout = PluginReleaseLayout(
+                (
+                    bundle.main.plugins.state_directory.expanduser()
+                    / "managed"
+                    / source_slug(repo_url)
+                ).resolve()
+            )
+            rollback_plugin_release(layout, repo_url=repo_url, source_path=source.path)
+            current = current_plugin_release(
+                layout, repo_url=repo_url, source_path=source.path
+            )
+            if current is None:  # pragma: no cover - rollback guarantees a current release
+                raise ValueError("plugin rollback did not activate a release")
+            print(
+                f"Rolled back {source.repo} to {current[1].version} at {current[1].commit}."
+            )
+            if source.policy == "stable-auto":
+                print(
+                    "Set this source to stable-notify before the next launch to hold the rollback.",
+                    file=sys.stderr,
+                )
+            return 0
+        except (ConfigurationError, OSError, RuntimeError, ValueError) as exc:
+            print(f"tfr: plugin rollback error: {exc}", file=sys.stderr)
+            return 2
 
     if args.replay is not None:
         if (

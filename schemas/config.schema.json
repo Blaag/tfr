@@ -144,11 +144,36 @@
           "title": "Auto Update",
           "type": "boolean"
         },
+        "manifest_url": {
+          "anyOf": [
+            {
+              "format": "uri",
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manifest Url"
+        },
         "path": {
           "default": ".",
           "maxLength": 200,
           "pattern": "^(?!/)(?!.*\\.\\.)[A-Za-z0-9._/+-]*$",
           "title": "Path",
+          "type": "string"
+        },
+        "policy": {
+          "default": "legacy",
+          "enum": [
+            "legacy",
+            "pinned",
+            "stable-auto",
+            "stable-notify"
+          ],
+          "title": "Policy",
           "type": "string"
         },
         "ref": {

@@ -147,6 +147,66 @@ async def test_sync_plugin_source_pinned_commit_is_never_auto_updated(tmp_path: 
     assert not (checkout / "new-file.txt").exists()
 
 
+async def test_sync_plugin_source_rejects_tampered_pinned_checkout(tmp_path: Path) -> None:
+    upstream = _make_upstream_repo(tmp_path)
+    pinned_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=upstream,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    source = PluginSource(repo=f"file://{upstream}", ref=pinned_sha, policy="pinned")
+    checkout = await sync_plugin_source(source, tmp_path / "plugins")
+    (checkout / "pyproject.toml").write_text("tampered\n", encoding="utf-8")
+
+    with pytest.raises(PluginSourceError, match="local changes"):
+        await sync_plugin_source(source, tmp_path / "plugins")
+
+
+async def test_pinned_checkout_accepts_only_runtime_bytecode(tmp_path: Path) -> None:
+    upstream = _make_upstream_repo(tmp_path)
+    pinned_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=upstream,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    source = PluginSource(repo=f"file://{upstream}", ref=pinned_sha, policy="pinned")
+    checkout = await sync_plugin_source(source, tmp_path / "plugins")
+    points = discover_source_entry_points(checkout, source)
+    points[0].load()
+    assert tuple(checkout.rglob("*.pyc"))
+
+    assert await sync_plugin_source(source, tmp_path / "plugins") == checkout
+    assert not tuple(checkout.rglob("*.pyc"))
+
+
+def test_plugin_source_policy_validation() -> None:
+    commit = "a" * 40
+    assert PluginSource(repo="owner/repo", ref=commit, policy="pinned").policy == "pinned"
+    assert (
+        PluginSource(
+            repo="owner/repo",
+            policy="stable-auto",
+            manifest_url="https://example.invalid/plugin-manifest.json",
+        ).policy
+        == "stable-auto"
+    )
+    with pytest.raises(ValidationError):
+        PluginSource(repo="owner/repo", policy="pinned", ref="main")
+    with pytest.raises(ValidationError):
+        PluginSource(repo="owner/repo", policy="stable-auto")
+    with pytest.raises(ValidationError):
+        PluginSource(
+            repo="owner/repo",
+            policy="stable-notify",
+            ref=commit,
+            manifest_url="https://example.invalid/plugin-manifest.json",
+        )
+
+
 async def test_sync_plugin_source_keeps_existing_checkout_when_fetch_fails(
     tmp_path: Path,
 ) -> None:
@@ -233,11 +293,12 @@ async def test_load_plugin_sources_discovers_a_working_plugin_end_to_end(
     upstream = _make_upstream_repo(tmp_path, entry_point_name="fixture")
     source = PluginSource(repo=f"file://{upstream}")
 
-    discovered, failures = await load_plugin_sources(
+    discovered, failures, notices = await load_plugin_sources(
         (source,), plugins_directory=tmp_path / "plugins"
     )
 
     assert failures == ()
+    assert notices == ()
     assert len(discovered) == 1
     assert discovered[0].name == "fixture"
     plugin = discovered[0].load()
@@ -247,10 +308,11 @@ async def test_load_plugin_sources_discovers_a_working_plugin_end_to_end(
 async def test_load_plugin_sources_reports_failures_without_raising(tmp_path: Path) -> None:
     source = PluginSource(repo=f"file://{tmp_path}/does-not-exist")
 
-    discovered, failures = await load_plugin_sources(
+    discovered, failures, notices = await load_plugin_sources(
         (source,), plugins_directory=tmp_path / "plugins"
     )
 
     assert discovered == ()
+    assert notices == ()
     assert len(failures) == 1
     assert failures[0].repo == source.repo

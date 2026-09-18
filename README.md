@@ -600,20 +600,57 @@ Plugin packages are trusted native code and are not sandboxed: enabling one
 runs its code with TFR's full process privileges. Only enable plugins you or
 someone you trust wrote or reviewed.
 
-### Installing Plugins From a GitHub Repository
+### Installing Plugins From a Git Repository
 
-The easiest way to add plugins is to point TFR at a Git repository directly in
-`config.jsonc`; TFR clones it locally and discovers its `tfr.plugins.v1` entry
-points without any separate packaging or installation step:
+For a repository that publishes TFR's stable plugin manifest, use an immutable
+stable policy. `stable-auto` checks the live HTTPS manifest before plugin import,
+installs only a compatible annotated tag at its exact commit, and atomically
+activates it while retaining the previous release:
 
 ```jsonc
 "plugins": {
-  "enabled": ["cat", "some_friend_plugin"],
+  "enabled": ["cat", "film_burn"],
   "sources": [
-    { "repo": "someone/tfr-plugins-fun" },
+    {
+      "repo": "Blaag/tfr-plugins-public",
+      "policy": "stable-auto",
+      "manifest_url": "https://github.com/Blaag/tfr-plugins-public/releases/latest/download/plugin-manifest.json",
+    },
   ],
 }
 ```
+
+The manifest binds the semantic version to the full commit, release artifact,
+supported TFR and plugin API ranges, and exact entry-point inventory. TFR then
+fetches only the manifest's tag, requires an annotated tag pointing directly to
+that commit, and verifies the released `pyproject.toml` before import. It rejects
+downgrades and a different commit for an already installed version. It never
+falls back to `main`. If the manifest service is temporarily unreachable, TFR
+may continue with the current release only after revalidating its metadata,
+origin, tag, commit, project metadata, and clean checkout.
+
+Use `"policy": "stable-notify"` to bootstrap the current stable release but only
+report later compatible releases. To roll back, first change `stable-auto` to
+`stable-notify` so the next launch does not immediately update again, then run:
+
+```sh
+tfr --config ~/.config/tfr/config.jsonc --rollback-plugin Blaag/tfr-plugins-public
+```
+
+For a repository without a release manifest, `pinned` selects and revalidates
+one exact lowercase 40-character commit:
+
+```jsonc
+{
+  "repo": "someone/tfr-plugins-serious",
+  "policy": "pinned",
+  "ref": "b7f3c1b6a8e2d4c9f1a0b3e5d7c9a1f3e5d7c9a1",
+}
+```
+
+The default `legacy` policy preserves the original convenience behavior: TFR
+clones the repository directly and discovers its `tfr.plugins.v1` entry points
+without a packaging or installation step.
 
 `repo` accepts an `OWNER/REPO` GitHub shorthand (expanded to
 `https://github.com/OWNER/REPO.git`), a full `https://` URL, or a `git@`/`ssh://`
@@ -623,8 +660,8 @@ your credentials anywhere itself and never runs `pip install` or any build
 step, so a source's own third-party dependencies (if any) must already be
 available in TFR's environment.
 
-By default a source is fetched once and then left alone on later launches.
-Two optional fields change that:
+Under `legacy`, a source is fetched once and then left alone on later launches.
+Two optional fields change that behavior:
 
 - `"ref": "BRANCH_TAG_OR_COMMIT"` checks out that branch, tag, or full 40-character
   commit hash instead of the repository's default branch.
@@ -637,25 +674,22 @@ Two optional fields change that:
   // Convenient, but whoever can push to this branch controls code that
   // runs with your privileges the next time TFR starts.
   { "repo": "someone/tfr-plugins-fun", "auto_update": true },
-  // Reproducible and reviewed once, then pinned; recommended for anything
-  // you have not personally read.
+  // Legacy exact commits remain supported; explicit policy: pinned is clearer.
   { "repo": "someone/tfr-plugins-serious", "ref": "b7f3c1b6a8e2d4c9f1a0b3e5d7c9a1f3e5d7c9a1" },
   // A monorepo plugin living in a subdirectory.
   { "repo": "someone/tfr-plugin-monorepo", "path": "plugins/cool-effect" },
 ],
 ```
 
-This is intentionally convenient rather than maximally safe: it suits a small
-group of friends who trust each other's repositories, not an untrusted or
-adversarial source. Pin anything you have not personally reviewed to a full
-commit hash, and never enable `auto_update` on a source whose maintainer you
-would not trust with a shell on this machine. If a source cannot be fetched
-(offline, renamed, deleted), TFR keeps using its last successful checkout, if
-any, and prints a warning rather than failing to start.
+Legacy mutation is intentionally convenient rather than maximally safe. It
+suits repositories whose maintainers you trust with a shell on this machine.
+Prefer stable policies, use `pinned` for reviewed repositories without a stable
+channel, and reserve legacy `auto_update` for development.
 
 Checkouts live under `plugins.state_directory` (default
-`~/.local/state/tfr/plugins`). Delete a source's subdirectory there to force a
-fresh clone.
+`~/.local/state/tfr/plugins`). Managed stable releases use versioned directories
+under `managed/`, with atomic `current` and `previous` pointers. Legacy and
+pinned clones remain outside that managed namespace.
 
 ### Installing Published Plugin Packages
 

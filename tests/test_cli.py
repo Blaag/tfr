@@ -229,6 +229,51 @@ def test_config_check_rejects_transport_options(capsys: pytest.CaptureFixture[st
     assert "transport options cannot be combined" in capsys.readouterr().err
 
 
+def test_plugin_rollback_uses_configured_stable_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = write_configuration(tmp_path, with_world=False)
+    config.write_text(
+        '{"schema_version": 1, "worlds_file": "worlds.jsonc", '
+        '"agents_file": "agents.jsonc", "logging": {"enabled": false}, '
+        '"plugins": {"state_directory": "plugin-state", "sources": [{'
+        '"repo": "owner/plugins", "policy": "stable-notify", '
+        '"manifest_url": "https://example.invalid/plugin-manifest.json"}]}}',
+        encoding="utf-8",
+    )
+    called: list[object] = []
+
+    def fake_rollback(layout: object, **options: object) -> Path:
+        called.extend((layout, options))
+        return tmp_path / "checkout"
+
+    monkeypatch.setattr("tfr.plugin_releases.rollback_plugin_release", fake_rollback)
+    monkeypatch.setattr(
+        "tfr.plugin_releases.current_plugin_release",
+        lambda *_args, **_kwargs: (
+            tmp_path / "checkout",
+            SimpleNamespace(version="0.1.0", commit="a" * 40),
+        ),
+    )
+
+    result = run(
+        ["--config", str(config), "--rollback-plugin", "owner/plugins"]
+    )
+
+    assert result == 0
+    assert called
+    assert "Rolled back owner/plugins to 0.1.0" in capsys.readouterr().out
+
+
+def test_plugin_rollback_rejects_runtime_mode(capsys: pytest.CaptureFixture[str]) -> None:
+    result = run(["gateway", "--rollback-plugin", "owner/plugins"])
+
+    assert result == 2
+    assert "cannot be combined" in capsys.readouterr().err
+
+
 def test_version_includes_packaged_commit(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

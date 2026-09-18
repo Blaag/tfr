@@ -170,6 +170,27 @@ class PluginSource(StrictModel):
     ref: str | None = Field(default=None, min_length=1, max_length=200, pattern=_PLUGIN_SOURCE_REF)
     path: str = Field(default=".", max_length=200, pattern=_PLUGIN_SOURCE_PATH)
     auto_update: bool = False
+    policy: Literal["legacy", "pinned", "stable-auto", "stable-notify"] = "legacy"
+    manifest_url: AnyHttpUrl | None = None
+
+    @model_validator(mode="after")
+    def validate_policy(self) -> PluginSource:
+        full_commit = self.ref is not None and re.fullmatch(r"[0-9a-f]{40}", self.ref) is not None
+        if self.policy == "pinned":
+            if not full_commit:
+                raise ValueError("pinned plugin sources require a full lowercase 40-character ref")
+            if self.auto_update or self.manifest_url is not None:
+                raise ValueError("pinned plugin sources cannot auto-update or use a manifest")
+        elif self.policy in {"stable-auto", "stable-notify"}:
+            if self.ref is not None or self.auto_update or self.manifest_url is None:
+                raise ValueError(
+                    "stable plugin sources require manifest_url and cannot set ref or auto_update"
+                )
+            if self.manifest_url.scheme != "https":
+                raise ValueError("plugin source manifest_url must use HTTPS")
+        elif self.manifest_url is not None:
+            raise ValueError("legacy plugin sources cannot use manifest_url")
+        return self
 
 
 class PluginsConfig(StrictModel):

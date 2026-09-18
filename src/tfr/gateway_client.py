@@ -877,12 +877,14 @@ async def run_gateway_ui(
         )
     manager = SessionManager(client.sessions)  # type: ignore[arg-type]
     try:
-        extra_plugins, plugin_source_failures = await load_plugin_sources(
+        extra_plugins, plugin_source_failures, plugin_source_notices = await load_plugin_sources(
             configuration.main.plugins.sources,
             plugins_directory=configuration.main.plugins.state_directory,
         )
         for failure in plugin_source_failures:
             print(f"tfr: plugin source {failure.repo}: {failure.error}", file=sys.stderr)
+        for notice in plugin_source_notices:
+            print(f"tfr: plugin source {notice.repo}: {notice.message}", file=sys.stderr)
         plugins = await PluginManager.load(
             enabled=configuration.main.plugins.enabled,
             config=configuration.main.plugins.config,

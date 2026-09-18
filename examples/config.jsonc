@@ -70,7 +70,11 @@
       "water",
     ],
     "sources": [
-      { "repo": "Blaag/tfr-plugins-public" },
+      {
+        "repo": "Blaag/tfr-plugins-public",
+        "policy": "stable-auto",
+        "manifest_url": "https://github.com/Blaag/tfr-plugins-public/releases/latest/download/plugin-manifest.json",
+      },
     ],
     "config": {
       "cat": {},

@@ -382,7 +382,7 @@ def test_installed_build_probe_ignores_working_directory(
 
     build = _installed_build(Path(sys.executable))
 
-    assert build["version"] == "0.1.0"
+    assert build["version"] == "0.1.1"
 
 
 def test_list_operation_does_not_require_a_repository(
