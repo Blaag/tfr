@@ -52,6 +52,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     environment: release
+    concurrency:
+      group: stable-release-publish
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -74,6 +77,38 @@ jobs:
           fi
           test "$object_type" = commit
           test "$tag_sha" = "$GITHUB_SHA"
+      - name: Verify release commit remains on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status="$(gh api \
+            "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...main" \
+            --jq .status)"
+          test "$status" = ahead || test "$status" = identical
+      - name: Verify stable version is newest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          stable_refs="$(gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" \
+            --jq '.[].ref')"
+          STABLE_REFS="$stable_refs" python3 - <<'PY'
+          import os
+          import re
+
+          pattern = re.compile(
+              r"refs/tags/v(0|[1-9][0-9]*)\."
+              r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+          )
+          candidate = tuple(int(part) for part in os.environ["GITHUB_REF_NAME"][1:].split("."))
+          versions = [
+              tuple(int(part) for part in match.groups())
+              for ref in os.environ["STABLE_REFS"].splitlines()
+              if (match := pattern.fullmatch(ref)) is not None
+          ]
+          if not versions or candidate != max(versions):
+              raise SystemExit("release version is not the newest stable tag")
+          PY
       - name: Publish immutable release
         env:
           GH_TOKEN: ${{ github.token }}

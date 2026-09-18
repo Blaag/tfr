@@ -1,0 +1,220 @@
+#!/bin/sh
+set -eu
+
+GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_REPLACE_OBJECTS
+
+usage() {
+    cat <<'EOF'
+Usage: ./scripts/publish-release [--push]
+
+Validate that the current main commit is ready for a stable release.
+By default, no tag is created. Pass --push to create and push the tag that
+triggers the protected GitHub release workflow.
+EOF
+}
+
+fail() {
+    printf 'publish-release: %s\n' "$1" >&2
+    exit 2
+}
+
+push=false
+case "${1-}" in
+    "") ;;
+    --push) push=true ;;
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac
+if [ "$#" -gt 1 ]; then
+    usage >&2
+    exit 2
+fi
+
+command -v git >/dev/null 2>&1 || fail "git is required"
+command -v uv >/dev/null 2>&1 || fail "uv is required"
+
+repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+git_root=$(git -C "$repository" rev-parse --show-toplevel 2>/dev/null) || \
+    fail "the script must be run from a Git checkout"
+[ "$git_root" = "$repository" ] || fail "the script is not at the checkout root"
+
+fetch_url=$(git -C "$repository" remote get-url origin) || fail "origin has no fetch URL"
+fetch_urls=$(git -C "$repository" remote get-url --all origin) || \
+    fail "origin has no fetch URL"
+[ "$fetch_url" = "$fetch_urls" ] || fail "origin must have exactly one fetch URL"
+push_url=$(git -C "$repository" remote get-url --push origin) || fail "origin has no push URL"
+push_urls=$(git -C "$repository" remote get-url --push --all origin) || \
+    fail "origin has no push URL"
+[ "$push_url" = "$push_urls" ] || fail "origin must have exactly one push URL"
+[ "$fetch_url" = "$push_url" ] || fail "origin fetch and push URLs must be identical"
+remote_url=$fetch_url
+
+assert_clean_main() {
+    branch=$(git -C "$repository" branch --show-current)
+    [ "$branch" = "main" ] || fail "releases must be created from the main branch"
+
+    status=$(git -C "$repository" status --porcelain=v1 --untracked-files=all)
+    [ -z "$status" ] || fail "checkout has modified, staged, or untracked files"
+
+    for operation in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply BISECT_LOG; do
+        operation_path=$(git -C "$repository" rev-parse --path-format=absolute --git-path "$operation")
+        [ ! -e "$operation_path" ] || fail "a Git operation is still in progress: $operation"
+    done
+}
+
+fetch_main() {
+    git -C "$repository" fetch --quiet --no-tags "$remote_url" refs/heads/main || \
+        fail "cannot fetch origin/main"
+    head_commit=$(git -C "$repository" rev-parse HEAD)
+    remote_commit=$(git -C "$repository" rev-parse FETCH_HEAD)
+    if [ "$head_commit" = "$remote_commit" ]; then
+        return
+    fi
+    if git -C "$repository" merge-base --is-ancestor "$head_commit" "$remote_commit"; then
+        fail "local main is behind origin/main; update it and review the result"
+    fi
+    if git -C "$repository" merge-base --is-ancestor "$remote_commit" "$head_commit"; then
+        fail "local main contains commits that have not been pushed to origin/main"
+    fi
+    fail "local main has diverged from origin/main"
+}
+
+inspect_local_tag() {
+    local_tag=false
+    tag_object=""
+    if ! git -C "$repository" show-ref --verify --quiet "refs/tags/$tag"; then
+        return
+    fi
+    tag_object=$(git -C "$repository" rev-parse "refs/tags/$tag")
+    [ "$(git -C "$repository" cat-file -t "$tag_object")" = "tag" ] || \
+        fail "local release tag is not annotated: $tag"
+    tag_target=$(git -C "$repository" cat-file tag "$tag_object" | {
+        IFS=' ' read -r header target
+        [ "$header" = object ] || exit 1
+        printf '%s\n' "$target"
+    }) || fail "cannot inspect local tag object: $tag"
+    [ "$(git -C "$repository" cat-file -t "$tag_target")" = "commit" ] || \
+        fail "local release tag does not point directly to a commit: $tag"
+    [ "$tag_target" = "$head_commit" ] || fail "local release tag points to another commit: $tag"
+    local_tag=true
+}
+
+inspect_remote_tag() {
+    remote_tag_state=absent
+    remote_tag=$(git -C "$repository" ls-remote --tags --refs \
+        "$remote_url" "refs/tags/$tag") || fail "cannot inspect remote tag: $tag"
+    if [ -z "$remote_tag" ]; then
+        return 0
+    fi
+    set -- $remote_tag
+    [ "$#" -eq 2 ] || fail "remote returned an invalid tag reference: $tag"
+    if [ "$local_tag" = true ] && [ "$1" = "$tag_object" ]; then
+        remote_tag_state=matching
+        return
+    fi
+    fail "remote tag already exists with different content: $tag"
+}
+
+assert_newer_than_remote_tags() {
+    remote_tags=$(git -C "$repository" ls-remote --tags --refs "$remote_url" "refs/tags/v*") || \
+        fail "cannot inspect existing stable tags"
+    PYTHONHOME= PYTHONPATH= uv run --quiet --isolated --no-project --no-config --python 3.12 \
+        python -I -S -c '
+import re
+import sys
+
+candidate = tuple(int(part) for part in sys.argv[1].split("."))
+candidate_ref = f"refs/tags/v{sys.argv[1]}"
+versions = []
+for line in sys.argv[2].splitlines():
+    ref = line.split("\t", 1)[-1]
+    if ref == candidate_ref:
+        continue
+    match = re.fullmatch(r"refs/tags/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", ref)
+    if match is not None:
+        versions.append(tuple(int(part) for part in match.groups()))
+if versions and candidate <= max(versions):
+    latest = ".".join(str(part) for part in max(versions))
+    raise SystemExit(f"release version {sys.argv[1]} is not newer than remote v{latest}")
+' "$version" "$remote_tags" || fail "release version must advance the stable channel"
+}
+
+assert_clean_main
+fetch_main
+
+version=$(
+    PYTHONHOME= PYTHONPATH= uv run --quiet --isolated --no-project --no-config --python 3.12 \
+        python -I -S - "$repository/pyproject.toml" <<'PY'
+import re
+import sys
+import tomllib
+from pathlib import Path
+
+project = tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["project"]
+version = project.get("version")
+if project.get("name") != "tfr" or not isinstance(version, str):
+    raise SystemExit("pyproject.toml does not describe a versioned tfr project")
+if re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version) is None:
+    raise SystemExit("project.version must be a stable semantic version")
+print(version)
+PY
+) || fail "cannot read the release version"
+
+tag="v$version"
+head_commit=$(git -C "$repository" rev-parse HEAD)
+inspect_local_tag
+inspect_remote_tag
+if [ "$remote_tag_state" = matching ]; then
+    printf 'Release tag already exists on the verified remote: %s at %s\n' "$tag" "$head_commit"
+    exit 0
+fi
+assert_newer_than_remote_tags
+validated_tag_object=$tag_object
+
+printf 'Release check passed: %s at %s\n' "$tag" "$head_commit"
+if [ "$push" = false ]; then
+    printf 'No remote tag was created. Run ./scripts/publish-release --push to publish it.\n'
+    exit 0
+fi
+
+# Recheck immediately before creating the immutable release trigger.
+assert_clean_main
+fetch_main
+[ "$(git -C "$repository" rev-parse HEAD)" = "$head_commit" ] || \
+    fail "HEAD changed during release validation"
+inspect_local_tag
+if [ -n "$validated_tag_object" ] && [ "$tag_object" != "$validated_tag_object" ]; then
+    fail "local release tag changed during validation: $tag"
+fi
+inspect_remote_tag
+if [ "$remote_tag_state" = matching ]; then
+    printf 'Release tag already exists on the verified remote: %s at %s\n' "$tag" "$head_commit"
+    exit 0
+fi
+
+if [ "$local_tag" = false ]; then
+    git -C "$repository" tag -a "$tag" -m "Release $tag" "$head_commit" || \
+        fail "cannot create local release tag: $tag"
+    inspect_local_tag
+fi
+assert_newer_than_remote_tags
+tag_object_to_push=$tag_object
+if ! git -C "$repository" -c push.followTags=false push --no-follow-tags \
+    "$remote_url" "$tag_object_to_push:refs/tags/$tag"; then
+    inspect_local_tag
+    inspect_remote_tag
+    if [ "$remote_tag_state" = matching ]; then
+        printf 'Pushed %s. The protected GitHub release workflow will build and publish it.\n' "$tag"
+        exit 0
+    fi
+    fail "tag push failed; the verified local tag was retained for a safe retry"
+fi
+
+printf 'Pushed %s. The protected GitHub release workflow will build and publish it.\n' "$tag"

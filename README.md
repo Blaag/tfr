@@ -127,6 +127,13 @@ from `uv.lock`, creates an isolated relocatable environment, verifies the
 installed build identity, and only then activates it. Uncommitted and untracked
 files are rejected rather than silently included.
 
+Using the managed installation is optional. Running the installer does not
+remove or modify the checkout, its `.venv`, configuration files, logs, plugin
+state, or any running TFR process. It writes only the managed release tree under
+`~/.local/share/tfr` and the stable `~/.local/bin/tfr` launcher as persistent TFR
+installation outputs; `uv` can also use its cache and managed Python storage. It
+refuses to replace a launcher it did not create.
+
 Managed files use this layout:
 
 ```text
@@ -157,8 +164,26 @@ The checkout script also manages installed releases:
 again. Installed release directories are retained until removed manually. Use
 `--root` and `--bin-dir` to place a test or nonstandard installation elsewhere,
 and `--python` to select the Python 3.12-or-newer interpreter that `uv` should
-use. The installer refuses to replace an existing `~/.local/bin/tfr` that it
-did not create. Ensure `~/.local/bin` is in `PATH` before using `tfr` directly.
+use. Ensure `~/.local/bin` is in `PATH` before using `tfr` directly.
+
+The installer does not copy configuration. If the current configuration is at
+the default `~/.config/tfr/config.jsonc`, managed commands use it automatically.
+If configuration is kept in the checkout's ignored `.tfr` directory, continue
+passing its absolute path. Relative `worlds_file` and `agents_file` values are
+resolved relative to that main configuration file:
+
+```console
+checkout=$PWD
+./scripts/install-from-checkout
+~/.local/bin/tfr gateway --config "$checkout/.tfr/config.jsonc"
+~/.local/bin/tfr ui --config "$checkout/.tfr/config.jsonc"
+```
+
+There is no required migration. Existing `uv run tfr ...` commands continue to
+use the checkout environment. To adopt the managed installation, start future
+Gateway and UI processes through `~/.local/bin/tfr`; installing alone does not
+replace a process that is already running. Once an attached UI was started that
+way, `/reload` follows the managed `current` release.
 
 ## Stable Release Updates
 
@@ -181,12 +206,16 @@ The managed layout above is the activation and rollback foundation that a later
 opt-in stable-release staging command will reuse.
 
 Maintainers publish a release by updating `project.version` in `pyproject.toml`,
-committing that change, and pushing the matching immutable tag. The release
+committing and pushing that change, previewing `./scripts/publish-release`, then
+running `./scripts/publish-release --push`. The script validates a clean,
+synchronized `main` and pushes only the matching immutable tag. The release
 workflow tests the tag, embeds its exact commit in the wheel, and publishes the
 wheel, source distribution, and checksummed `update-manifest.json` together.
 Configure the `release` GitHub environment to require maintainer approval, and
 enable immutable releases plus protected release tags in the repository ruleset;
-the workflow also rejects commits that are not on `main`.
+the workflow also rejects commits that are not on `main`. See
+[MAINTAINER.md](MAINTAINER.md) for script responsibilities, release verification,
+and failure recovery.
 
 ## Remote Gateway
 
