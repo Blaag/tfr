@@ -881,10 +881,14 @@ async def run_gateway_ui(
             configuration.main.plugins.sources,
             plugins_directory=configuration.main.plugins.state_directory,
         )
-        for failure in plugin_source_failures:
-            print(f"tfr: plugin source {failure.repo}: {failure.error}", file=sys.stderr)
-        for notice in plugin_source_notices:
-            print(f"tfr: plugin source {notice.repo}: {notice.message}", file=sys.stderr)
+        plugin_source_messages = [
+            f"Plugin source {failure.repo}: {failure.error}"
+            for failure in plugin_source_failures
+        ]
+        plugin_source_messages.extend(
+            f"Plugin source {notice.repo}: {notice.message}"
+            for notice in plugin_source_notices
+        )
         plugins = await PluginManager.load(
             enabled=configuration.main.plugins.enabled,
             config=configuration.main.plugins.config,
@@ -945,6 +949,8 @@ async def run_gateway_ui(
         initial_scroll_to_end=True,
     )
     runtime.notify = lambda text: tui.add_notice(tui.active_alias, text)
+    for message in plugin_source_messages:
+        tui.add_notice(tui.active_alias, message)
     if resume_world in tui.views:
         tui.switch_world(resume_world)
     if client.history_reset:

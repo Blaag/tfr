@@ -26,6 +26,7 @@ from tfr.gateway_transport import (
     create_gateway_client_tls_context,
     create_gateway_server_tls_context,
 )
+from tfr.plugin_sources import PluginSourceFailure, PluginSourceNotice
 from tfr.plugins import PluginLifecycleEvent, PluginManager
 from tfr.updates import current_build
 
@@ -811,3 +812,71 @@ async def test_gateway_ui_closes_connected_client_when_plugin_configuration_fail
 
     client.stop.assert_awaited_once()
     event_bus.close.assert_awaited_once()
+
+
+async def test_gateway_ui_shows_plugin_source_messages_as_persistent_notices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_bus = EventBus()
+    client = SimpleNamespace(
+        sessions=(),
+        event_bus=event_bus,
+        command_bus=object(),
+        agent_worlds=frozenset(),
+        agents={},
+        gateway_build=current_build(),
+        initial_events=(),
+        history_reset=False,
+        history_truncated=False,
+        gateway_id=uuid4(),
+        stop=AsyncMock(),
+    )
+
+    async def connect(*_args: object, **_kwargs: object) -> object:
+        return client
+
+    async def load_sources(*_args: object, **_kwargs: object) -> tuple[object, ...]:
+        return (
+            (),
+            (PluginSourceFailure(repo="broken/plugins", error="checkout is invalid"),),
+            (
+                PluginSourceNotice(
+                    repo="owner/plugins",
+                    message="stable plugin release 0.1.2 is available (current 0.1.1)",
+                ),
+            ),
+        )
+
+    plugins = SimpleNamespace(
+        initialize_boss_selection=lambda *_args: None,
+        process_event=AsyncMock(),
+    )
+    notices: list[tuple[str, str]] = []
+
+    class FakeTui:
+        def __init__(self, **_kwargs: object) -> None:
+            self.active_alias = "alpha"
+            self.views = {"alpha": object()}
+            self.restart_requested = False
+
+        def add_notice(self, alias: str, message: str) -> None:
+            notices.append((alias, message))
+
+        async def run(self) -> int:
+            return 0
+
+    monkeypatch.setattr(GatewayClient, "connect", connect)
+    monkeypatch.setattr("tfr.gateway_client.load_plugin_sources", load_sources)
+    monkeypatch.setattr(PluginManager, "load", AsyncMock(return_value=plugins))
+    monkeypatch.setattr("tfr.tui.TfrTui", FakeTui)
+    configuration = UiConfiguration(main_path=Path("config.jsonc"), main=MainConfig())
+
+    assert await run_gateway_ui(configuration) == 0
+    assert notices == [
+        ("alpha", "Plugin source broken/plugins: checkout is invalid"),
+        (
+            "alpha",
+            "Plugin source owner/plugins: stable plugin release 0.1.2 is available "
+            "(current 0.1.1)",
+        ),
+    ]

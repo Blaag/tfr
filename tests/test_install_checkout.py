@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -382,7 +383,10 @@ def test_installed_build_probe_ignores_working_directory(
 
     build = _installed_build(Path(sys.executable))
 
-    assert build["version"] == "0.1.1"
+    project = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]
+    assert build["version"] == project["version"]
 
 
 def test_list_operation_does_not_require_a_repository(
