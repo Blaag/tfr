@@ -1977,6 +1977,48 @@ async def test_initial_snapshot_is_rendered_at_live_end_before_service_runtime_s
         assert await asyncio.wait_for(running, timeout=1) == 0
 
 
+async def test_startup_notices_follow_snapshot_and_remain_at_live_end() -> None:
+    with create_pipe_input() as input:
+        tui = make_tui(input=input)
+        tui.initial_events = tuple(
+            Event(
+                session_id=tui.views["alpha"].session.session_id,
+                world="alpha",
+                connection_generation=1,
+                sequence=sequence,
+                direction=Direction.INBOUND,
+                kind=EventKind.RAW_OUTPUT,
+                display_text=f"snapshot {sequence}\r\n",
+            )
+            for sequence in range(120)
+        )
+        for index in range(30):
+            tui.queue_startup_notice("alpha", f"Startup notice {index}")
+        started = asyncio.Event()
+
+        class Runtime:
+            async def start(self) -> None:
+                display = tui.views["alpha"].display
+                assert all(
+                    f"Startup notice {index}" in entry
+                    for index, entry in enumerate(display.entries[-30:])
+                )
+                assert display.pager.mode is PagerMode.FOLLOW
+                assert display.pager.visible_end == display.pager.total_rows
+                assert display.pager.visible_range[1] == len(display.rows)
+                started.set()
+
+            async def stop(self) -> None:
+                pass
+
+        tui.service_runtime = Runtime()
+        running = asyncio.create_task(tui.run())
+
+        await asyncio.wait_for(started.wait(), timeout=1)
+        input.send_bytes(b"\x11")
+        assert await asyncio.wait_for(running, timeout=1) == 0
+
+
 async def test_run_client_stops_runtime_when_tui_initialization_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -430,6 +430,7 @@ class TfrTui:
         self._screen_clear_seed = 0
         self.initial_events = tuple(initial_events)
         self.initial_scroll_to_end = initial_scroll_to_end
+        self._startup_notices: list[tuple[str, str]] = []
         self.replay_mode = replay_mode
         self.recent_input_lines = recent_input_lines
         self.aliases = [session.world for session in sessions]
@@ -1061,6 +1062,9 @@ class TfrTui:
         self.views[alias].clear_selection()
         self.views[alias].display.append(f"\x1b[33m-- {text} --\x1b[0m", recallable=False)
         self.application.invalidate()
+
+    def queue_startup_notice(self, alias: str, text: str) -> None:
+        self._startup_notices.append((alias, text))
 
     def _copy_selection(self, text: str) -> None:
         self.application.output.write_raw(_osc52_sequence(text))
@@ -1718,6 +1722,9 @@ class TfrTui:
             self._before_render(self.application)
             for event in self.initial_events:
                 self.handle_event(event)
+            for alias, text in self._startup_notices:
+                self.add_notice(alias, text)
+            self._startup_notices.clear()
             if self.initial_scroll_to_end:
                 for view in self.views.values():
                     view.display.pager.jump_to_end()

@@ -949,14 +949,20 @@ async def run_gateway_ui(
         initial_scroll_to_end=True,
     )
     runtime.notify = lambda text: tui.add_notice(tui.active_alias, text)
-    for message in plugin_source_messages:
-        tui.add_notice(tui.active_alias, message)
     if resume_world in tui.views:
         tui.switch_world(resume_world)
+    for message in plugin_source_messages:
+        tui.queue_startup_notice(tui.active_alias, message)
     if client.history_reset:
-        tui.add_notice(tui.active_alias, "Gateway restarted; loaded retained history")
+        tui.queue_startup_notice(
+            tui.active_alias,
+            "Gateway restarted; loaded retained history",
+        )
     elif client.history_truncated:
-        tui.add_notice(tui.active_alias, "Earlier gateway history is no longer retained")
+        tui.queue_startup_notice(
+            tui.active_alias,
+            "Earlier gateway history is no longer retained",
+        )
     result = await tui.run()
     if tui.restart_requested:
         os.environ[_RESTART_GATEWAY_ID] = str(client.gateway_id)

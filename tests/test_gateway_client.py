@@ -16,6 +16,8 @@ from tfr.core import EventBus
 from tfr.events import Actor, ActorType, CommandRequest, Direction, Event, EventKind
 from tfr.gateway import EventHistory, GatewayServer
 from tfr.gateway_client import (
+    _RESTART_GATEWAY_ID,
+    _RESTART_WORLD,
     GatewayClient,
     GatewayDisconnectedError,
     GatewayUiRuntime,
@@ -814,7 +816,7 @@ async def test_gateway_ui_closes_connected_client_when_plugin_configuration_fail
     event_bus.close.assert_awaited_once()
 
 
-async def test_gateway_ui_shows_plugin_source_messages_as_persistent_notices(
+async def test_gateway_ui_queues_plugin_source_messages_for_resumed_world(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     event_bus = EventBus()
@@ -856,11 +858,17 @@ async def test_gateway_ui_shows_plugin_source_messages_as_persistent_notices(
     class FakeTui:
         def __init__(self, **_kwargs: object) -> None:
             self.active_alias = "alpha"
-            self.views = {"alpha": object()}
+            self.views = {"alpha": object(), "beta": object()}
             self.restart_requested = False
 
-        def add_notice(self, alias: str, message: str) -> None:
+        def add_notice(self, _alias: str, _message: str) -> None:
+            raise AssertionError("startup notices must be queued until history is loaded")
+
+        def queue_startup_notice(self, alias: str, message: str) -> None:
             notices.append((alias, message))
+
+        def switch_world(self, alias: str) -> None:
+            self.active_alias = alias
 
         async def run(self) -> int:
             return 0
@@ -869,13 +877,15 @@ async def test_gateway_ui_shows_plugin_source_messages_as_persistent_notices(
     monkeypatch.setattr("tfr.gateway_client.load_plugin_sources", load_sources)
     monkeypatch.setattr(PluginManager, "load", AsyncMock(return_value=plugins))
     monkeypatch.setattr("tfr.tui.TfrTui", FakeTui)
+    monkeypatch.setenv(_RESTART_GATEWAY_ID, str(client.gateway_id))
+    monkeypatch.setenv(_RESTART_WORLD, "beta")
     configuration = UiConfiguration(main_path=Path("config.jsonc"), main=MainConfig())
 
     assert await run_gateway_ui(configuration) == 0
     assert notices == [
-        ("alpha", "Plugin source broken/plugins: checkout is invalid"),
+        ("beta", "Plugin source broken/plugins: checkout is invalid"),
         (
-            "alpha",
+            "beta",
             "Plugin source owner/plugins: stable plugin release 0.1.2 is available "
             "(current 0.1.1)",
         ),
