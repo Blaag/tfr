@@ -295,6 +295,212 @@
       "title": "ScreenClearConfig",
       "type": "object"
     },
+    "ThemeColorsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "accent": {
+          "anyOf": [
+            {
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Accent"
+        },
+        "background": {
+          "anyOf": [
+            {
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Background"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "info": {
+          "anyOf": [
+            {
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Info"
+        },
+        "muted": {
+          "anyOf": [
+            {
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Muted"
+        },
+        "overlay": {
+          "anyOf": [
+            {
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Overlay"
+        },
+        "secondary": {
+          "anyOf": [
+            {
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Secondary"
+        },
+        "selected_text": {
+          "anyOf": [
+            {
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selected Text"
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selection"
+        },
+        "success": {
+          "anyOf": [
+            {
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Success"
+        },
+        "surface": {
+          "anyOf": [
+            {
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Surface"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        },
+        "warning": {
+          "anyOf": [
+            {
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Warning"
+        }
+      },
+      "title": "ThemeColorsConfig",
+      "type": "object"
+    },
+    "ThemeConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "colors": {
+          "$ref": "#/$defs/ThemeColorsConfig"
+        },
+        "preset": {
+          "default": "default",
+          "enum": [
+            "default",
+            "catppuccin-latte",
+            "catppuccin-frappe",
+            "catppuccin-macchiato",
+            "catppuccin-mocha",
+            "gruvbox",
+            "tokyo-night",
+            "dracula",
+            "nord",
+            "solarized-dark",
+            "nightfly",
+            "kanagawa",
+            "1976"
+          ],
+          "title": "Preset",
+          "type": "string"
+        }
+      },
+      "title": "ThemeConfig",
+      "type": "object"
+    },
     "UiConfig": {
       "additionalProperties": false,
       "properties": {
@@ -315,10 +521,17 @@
           "type": "boolean"
         },
         "output_color": {
-          "default": "#d7d7d7",
-          "pattern": "^#[0-9a-fA-F]{6}$",
-          "title": "Output Color",
-          "type": "string"
+          "anyOf": [
+            {
+              "pattern": "^#[0-9a-fA-F]{6}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Color"
         },
         "pager": {
           "$ref": "#/$defs/PagerConfig"
@@ -343,6 +556,9 @@
           "default": false,
           "title": "Show Nospoof Prefix",
           "type": "boolean"
+        },
+        "theme": {
+          "$ref": "#/$defs/ThemeConfig"
         }
       },
       "title": "UiConfig",

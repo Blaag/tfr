@@ -23,6 +23,7 @@ from tfr.config import (
     AgentsConfig,
     ConfigurationBundle,
     MainConfig,
+    ThemeConfig,
     UpdateConfig,
     WorldConfig,
     WorldDefaults,
@@ -44,6 +45,8 @@ def make_tui(
     plugins: PluginManager | None = None,
     update_checker: UpdateChecker | None = None,
     gateway_build: BuildIdentity | None = None,
+    theme: ThemeConfig | None = None,
+    output_color: str | None = None,
 ) -> TfrTui:
     event_bus = EventBus()
     command_bus = CommandBus()
@@ -69,6 +72,8 @@ def make_tui(
         plugins=plugins,
         update_checker=update_checker,
         gateway_build=gateway_build,
+        theme=theme,
+        output_color=output_color,
         input=input or DummyInput(),
         output=DummyOutput(),
     )
@@ -76,6 +81,27 @@ def make_tui(
 
 def entry_point(name: str, plugin: object) -> SimpleNamespace:
     return SimpleNamespace(name=name, load=lambda: plugin)
+
+
+def test_catppuccin_theme_applies_to_ui_output_and_notices() -> None:
+    tui = make_tui(theme=ThemeConfig(preset="catppuccin-mocha"))
+
+    assert tui.normal_root.style == "class:application"
+    assert tui.theme.styles["application"] == "fg:#cdd6f4 bg:#1e1e2e"
+    assert tui.active_view.display.default_style == "fg:#cdd6f4"
+
+    tui.add_notice("alpha", "Themed notice")
+
+    assert "#f9e2af" in tui.active_view.display.rows[-1][0][0]
+
+
+def test_output_color_overrides_theme_plain_text_color() -> None:
+    tui = make_tui(
+        theme=ThemeConfig(preset="catppuccin-mocha"),
+        output_color="#010203",
+    )
+
+    assert tui.active_view.display.default_style == "fg:#010203"
 
 
 async def add_speaker_effects(
@@ -1217,6 +1243,7 @@ async def test_standalone_client_loads_all_plugin_capabilities(
         animations_enabled=True,
         low_bandwidth=False,
         output_color="#d7d7d7",
+        theme=ThemeConfig(),
         screen_clear=screen_clear,
         boss=boss,
     )

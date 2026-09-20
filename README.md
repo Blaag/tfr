@@ -367,7 +367,7 @@ their defaults but are not opened in UI mode:
   "ui": {
     "scrollback_lines": 20000,
     "recent_input_lines": 3,
-    "output_color": "#d7d7d7",
+    "theme": { "preset": "catppuccin-mocha" },
     "show_nospoof_prefix": false,
     "animations_enabled": true,
     "low_bandwidth": false,
@@ -445,6 +445,59 @@ the UI host, and `/sh` or `! command` runs on that host. Anyone who can read the
 shared token or control the UI has full Gateway command and connection-control
 authority, so retain the TLS, Tailscale ACL, and firewall protections described
 above.
+
+## Themes
+
+Available `ui.theme.preset` values are:
+
+- `default`
+- `catppuccin-latte`
+- `catppuccin-frappe`
+- `catppuccin-macchiato`
+- `catppuccin-mocha`
+- `gruvbox`
+- `tokyo-night`
+- `dracula`
+- `nord`
+- `solarized-dark`
+- `nightfly`
+- `kanagawa`
+- `1976`
+
+When `ui.theme` is omitted, TFR selects `default`, preserving its original
+terminal-dependent appearance. Every other preset applies an explicit
+foreground and background to the full UI, including world markers, borders,
+prompts, status bars, selection, boss views, and TFR-generated notices.
+The `1976` preset uses dark walnut and parchment neutrals with harvest gold,
+burnt orange, avocado green, and terracotta accents.
+
+Override any semantic role without redefining the component style map:
+
+```jsonc
+"ui": {
+  "theme": {
+    "preset": "catppuccin-mocha",
+    "colors": {
+      "accent": "#89b4fa",
+      "warning": "#f9e2af",
+      "selection": "#585b70",
+    },
+  },
+}
+```
+
+Available roles are `background`, `surface`, `overlay`, `text`, `muted`,
+`accent`, `secondary`, `info`, `success`, `warning`, `error`, `selection`, and
+`selected_text`. Colors must use `#RRGGBB` notation. The optional legacy
+`ui.output_color` setting remains supported and overrides only the default
+foreground of otherwise unstyled world output; when omitted, that output uses
+the theme's `text` color.
+
+World-provided ANSI colors and explicit plugin effect colors take precedence
+over the theme. This preserves server color semantics and plugin artwork while
+the surrounding TFR interface remains consistent. Catppuccin works best in a
+terminal and multiplexer configured for true color; Prompt Toolkit will
+otherwise approximate the RGB colors at the terminal's available color depth.
 
 ## Terminal Controls
 

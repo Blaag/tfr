@@ -934,6 +934,7 @@ async def run_gateway_ui(
         animations_enabled=configuration.main.ui.animations_enabled,
         low_bandwidth=configuration.main.ui.low_bandwidth,
         output_color=configuration.main.ui.output_color,
+        theme=configuration.main.ui.theme,
         screen_clear_mode=configuration.main.ui.screen_clear.mode,
         screen_clear_effect=configuration.main.ui.screen_clear.effect,
         boss_screen_mode=configuration.main.ui.boss.mode,

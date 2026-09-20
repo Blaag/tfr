@@ -792,11 +792,32 @@ Acceptance criteria:
   installation; keep Gateway activation and restart administrator-controlled.
 - [ ] Notify at UI startup when updates are available for Git-sourced plugins
   without fetching or applying them automatically.
-- [ ] Support skinning or theming the UI: configurable colors for borders,
-  the status bar, world markers, selection highlight, and the input prompt
-  (currently fixed `class:*` styles in `tui.py`), beyond the single existing
-  `ui.output_color` setting, ideally as named presets plus a way for plugins
-  to register their own.
+- [x] Support UI theming with the legacy appearance, all four Catppuccin
+  flavors, Gruvbox, Tokyo Night, Dracula, Nord, Solarized Dark, Nightfly, and
+  Kanagawa, and the warm earth-toned 1976 palette as named presets plus
+  semantic color overrides for backgrounds, borders, status bars, world
+  markers, selection, prompts, notices, and plain output. Preserve
+  world-provided ANSI and explicit plugin effect styles; a future plugin API
+  version can add namespaced plugin theme roles if needed.
+- [ ] Add a `sandstorm` screen-clear plugin that breaks the visible text into
+  wind-driven particles and sweeps them across the pane without changing the
+  retained scrollback.
+- [ ] Add a `doom_fire` screen-clear plugin with a bottom-fed cellular flame
+  simulation that consumes the display upward, distinct from the existing
+  per-character `flame` burn-and-smoke effect.
+- [ ] Add a `water_ripple` screen-clear plugin that dissolves text outward from
+  a central impact in expanding glyph-density rings, distinct from the existing
+  falling and sloshing `water` particle effect.
+- [ ] Add an `acid_rain` screen-clear plugin whose falling corrosive streaks
+  progressively dissolve the visible text while preserving retained scrollback.
+- [ ] Add a `/gag` plugin that accepts one or more regular expressions, lists
+  and removes active expressions, and suppresses matching inbound output from
+  the display without removing the canonical event from logging or replay.
+- [ ] Add a configurable speaker combo-streak plugin for consecutive speech or
+  poses from the same person. Show a short-lived animated progression such as
+  `x2!`, `x3!`, `SUPER!`, `DOMINATING!`, and `UNSTOPPABLE!`; evaluate an
+  end-of-line indicator after the speaker's text as the initial placement and
+  extend the display-decoration API if animating appended text requires it.
 
 ## Test Strategy
 
