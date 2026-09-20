@@ -8,6 +8,8 @@ import pytest
 from tfr.config import (
     ConfigurationError,
     credential_permission_warning,
+    default_config_directory,
+    default_config_path,
     load_configuration,
     load_ui_configuration,
 )
@@ -62,6 +64,26 @@ def write_configuration(directory: Path) -> Path:
     for path in directory.iterdir():
         path.chmod(0o600)
     return main_path
+
+
+def test_default_config_path_uses_xdg_config_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    xdg_config = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_config))
+
+    assert default_config_directory() == xdg_config / "tfr"
+    assert default_config_path() == xdg_config / "tfr" / "config.jsonc"
+
+
+def test_default_config_path_falls_back_to_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr("tfr.config.Path.home", lambda: tmp_path)
+
+    assert default_config_directory() == tmp_path / ".config" / "tfr"
+    assert default_config_path() == tmp_path / ".config" / "tfr" / "config.jsonc"
 
 
 def test_loads_jsonc_and_resolves_references(tmp_path: Path) -> None:

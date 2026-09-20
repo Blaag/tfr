@@ -305,11 +305,12 @@ All user configuration uses JSONC: JSON syntax with `//` and `/* */` comments
 and trailing comma support. Use the small `json-with-comments` package rather
 than a handwritten comment stripper.
 
-Default files:
+The default configuration directory is `$XDG_CONFIG_HOME/tfr` when
+`XDG_CONFIG_HOME` is set, and `~/.config/tfr` otherwise. It contains:
 
-- `~/.config/tfr/config.jsonc`
-- `~/.config/tfr/worlds.jsonc`
-- `~/.config/tfr/agents.jsonc`
+- `config.jsonc`
+- `worlds.jsonc`
+- `agents.jsonc`
 
 `config.jsonc` is the entry point and refers to the other files. Relative
 paths are resolved relative to the file containing them.
@@ -790,8 +791,11 @@ Acceptance criteria:
 - [ ] Add opt-in stable-release download and staging that verifies the manifest
   source, artifact size, and SHA-256 digest before activating the managed UI
   installation; keep Gateway activation and restart administrator-controlled.
-- [ ] Notify at UI startup when updates are available for Git-sourced plugins
-  without fetching or applying them automatically.
+- [x] Include stable Git-sourced plugin releases in `/update status|check` and
+  the UI's periodic update schedule without applying code while the UI is
+  running. Report successful `stable-auto` startup upgrades, preserve
+  notification-only `stable-notify`, and suppress duplicate availability
+  notices for the same release.
 - [x] Support UI theming with the legacy appearance, all four Catppuccin
   flavors, Gruvbox, Tokyo Night, Dracula, Nord, Solarized Dark, Nightfly, and
   Kanagawa, and the warm earth-toned 1976 palette as named presets plus
@@ -799,20 +803,23 @@ Acceptance criteria:
   markers, selection, prompts, notices, and plain output. Preserve
   world-provided ANSI and explicit plugin effect styles; a future plugin API
   version can add namespaced plugin theme roles if needed.
-- [ ] Add a `sandstorm` screen-clear plugin that breaks the visible text into
+- [x] Add a `sandstorm` screen-clear plugin that breaks the visible text into
   wind-driven particles and sweeps them across the pane without changing the
   retained scrollback.
-- [ ] Add a `doom_fire` screen-clear plugin with a bottom-fed cellular flame
+- [x] Add a `doom_fire` screen-clear plugin with a bottom-fed cellular flame
   simulation that consumes the display upward, distinct from the existing
   per-character `flame` burn-and-smoke effect.
-- [ ] Add a `water_ripple` screen-clear plugin that dissolves text outward from
+- [x] Add a `water_ripple` screen-clear plugin that dissolves text outward from
   a central impact in expanding glyph-density rings, distinct from the existing
   falling and sloshing `water` particle effect.
-- [ ] Add an `acid_rain` screen-clear plugin whose falling corrosive streaks
+- [x] Add an `acid_rain` screen-clear plugin whose falling corrosive streaks
   progressively dissolve the visible text while preserving retained scrollback.
-- [ ] Add a `/gag` plugin that accepts one or more regular expressions, lists
-  and removes active expressions, and suppresses matching inbound output from
-  the display without removing the canonical event from logging or replay.
+- [x] Add a `gag` plugin that loads persistent regular expressions per exact
+  world alias from plugin configuration, exposes `/gag [list]` to show the
+  active world's expressions, and suppresses matching inbound output from the
+  display without removing the canonical event from logging or replay. Bound
+  expression count and length, and time-limit matching so expensive expressions
+  fail open instead of stalling display processing.
 - [ ] Add a configurable speaker combo-streak plugin for consecutive speech or
   poses from the same person. Show a short-lived animated progression such as
   `x2!`, `x3!`, `SUPER!`, `DOMINATING!`, and `UNSTOPPABLE!`; evaluate an

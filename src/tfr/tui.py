@@ -39,6 +39,11 @@ from tfr.config import ConfigurationBundle, ThemeConfig
 from tfr.core import CommandBus, EventBus, UnknownSessionError
 from tfr.events import Actor, ActorType, CommandRequest, Direction, Event, EventKind
 from tfr.pager import DisplayBuffer, FormattedRow, PagerMode, rows_to_formatted_text
+from tfr.plugin_sources import (
+    PluginUpdateChecker,
+    PluginUpdateResult,
+    format_plugin_update_status,
+)
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.themes import ResolvedTheme, resolve_theme
@@ -358,6 +363,7 @@ class TfrTui:
         gateway_reconnect: Callable[[], Coroutine[Any, Any, str]] | None = None,
         restart_supported: bool = False,
         update_checker: UpdateChecker | None = None,
+        plugin_update_checker: PluginUpdateChecker | None = None,
         gateway_build: BuildIdentity | None = None,
         animations_enabled: bool = True,
         low_bandwidth: bool = False,
@@ -404,6 +410,7 @@ class TfrTui:
         self.gateway_reconnect = gateway_reconnect
         self.restart_supported = restart_supported
         self.update_checker = update_checker
+        self.plugin_update_checker = plugin_update_checker
         self.gateway_build = gateway_build
         self.restart_requested = False
         self.animations_enabled = animations_enabled
@@ -1396,7 +1403,7 @@ class TfrTui:
             "  /nospoof show|hide|status - control NOSPOOF prefix visibility",
             "  /lowbw [on|off|status] - suppress continuous UI animation",
             "  /animations [on|off|status] - enable continuous UI effects",
-            "  /update status|check - inspect stable UI and Gateway releases",
+            "  /update status|check - inspect stable TFR and plugin releases",
             "  /agent status|inspect|pause|resume|trigger|close - manage agents",
             "  /quit - exit TFR; //TEXT sends a literal leading slash",
             "",
@@ -1433,15 +1440,43 @@ class TfrTui:
         if parameters not in (["status"], ["check"]):
             self.add_notice(alias, "Usage: /update status|check")
             return
-        if self.update_checker is None or not self.update_checker.config.enabled:
+        core_enabled = self.update_checker is not None and self.update_checker.config.enabled
+        plugins_enabled = (
+            self.plugin_update_checker is not None and self.plugin_update_checker.enabled
+        )
+        if not core_enabled and not plugins_enabled:
             self.add_notice(alias, "Stable update checks are disabled")
             return
         if parameters == ["check"]:
-            self.add_notice(alias, "Checking for stable TFR updates...")
-            result = await self.update_checker.check()
+            scope = (
+                "TFR and plugin"
+                if core_enabled and plugins_enabled
+                else "plugin" if plugins_enabled else "TFR"
+            )
+            self.add_notice(alias, f"Checking for stable {scope} updates...")
+            if core_enabled and plugins_enabled:
+                result, plugin_results = await asyncio.gather(
+                    self.update_checker.check(),
+                    self.plugin_update_checker.check(),
+                )
+            elif core_enabled:
+                result = await self.update_checker.check()
+                plugin_results = ()
+            else:
+                result = None
+                plugin_results = await self.plugin_update_checker.check()
+            if self.plugin_update_checker is not None:
+                self.plugin_update_checker.mark_notified(plugin_results)
         else:
-            result = self.update_checker.result
-        self._show_update_status(result, available_only=False, alias=alias)
+            result = self.update_checker.result if self.update_checker is not None else None
+            plugin_results = (
+                self.plugin_update_checker.results
+                if self.plugin_update_checker is not None
+                else ()
+            )
+        if result is not None:
+            self._show_update_status(result, available_only=False, alias=alias)
+        self._show_plugin_update_status(plugin_results, available_only=False, alias=alias)
 
     def _show_update_status(
         self,
@@ -1457,6 +1492,18 @@ class TfrTui:
         for label, build in builds:
             if not available_only or result.available_for(build):
                 self.add_notice(target, format_update_status(label, build, result))
+
+    def _show_plugin_update_status(
+        self,
+        results: Sequence[PluginUpdateResult],
+        *,
+        available_only: bool,
+        alias: str | None = None,
+    ) -> None:
+        target = alias or self.active_alias
+        for result in results:
+            if not available_only or result.available:
+                self.add_notice(target, format_plugin_update_status(result))
 
     def _handle_nospoof_command(self, alias: str, parameters: list[str]) -> None:
         session = self.views[alias].session
@@ -1738,6 +1785,14 @@ class TfrTui:
                         lambda result: self._show_update_status(result, available_only=True)
                     )
                 )
+            if self.plugin_update_checker is not None and self.plugin_update_checker.enabled:
+                self._spawn(
+                    self.plugin_update_checker.run_periodically(
+                        lambda result: self._show_plugin_update_status(
+                            (result,), available_only=True
+                        )
+                    )
+                )
             self._animations_started = True
             self._sync_animation_task()
             handled_signals = [signal.SIGTERM]
@@ -1798,6 +1853,7 @@ async def run_client(bundle: ConfigurationBundle) -> int:
 
     runtime = await GatewayRuntime.from_configuration(bundle, plugin_scope="all")
     try:
+        plugin_source_notices = getattr(runtime, "plugin_source_notices", ())
         tui = TfrTui(
             sessions=runtime.sessions,
             manager=runtime.manager,
@@ -1822,7 +1878,19 @@ async def run_client(bundle: ConfigurationBundle) -> int:
             agents=runtime.agents,
             service_runtime=runtime,
             update_checker=UpdateChecker(bundle.main.updates),
+            plugin_update_checker=PluginUpdateChecker(
+                bundle.main.plugins.sources,
+                plugins_directory=bundle.main.plugins.state_directory,
+                config=bundle.main.updates,
+                notified_versions={
+                    notice.source_id: notice.available_version
+                    for notice in plugin_source_notices
+                    if notice.available_version is not None
+                },
+            ),
         )
+        for message in getattr(runtime, "plugin_source_messages", ()):
+            tui.queue_startup_notice(tui.active_alias, message)
     except BaseException:
         await runtime.stop()
         raise

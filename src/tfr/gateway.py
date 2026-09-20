@@ -39,7 +39,7 @@ from tfr.gateway_transport import (
     validate_gateway_token,
     validate_tcp_endpoint,
 )
-from tfr.plugin_sources import load_plugin_sources
+from tfr.plugin_sources import PluginSourceNotice, load_plugin_sources
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.updates import (
@@ -260,6 +260,8 @@ class GatewayRuntime:
         history: EventHistory,
         build: BuildIdentity | None = None,
         update_checker: UpdateChecker | None = None,
+        plugin_source_messages: tuple[str, ...] = (),
+        plugin_source_notices: tuple[PluginSourceNotice, ...] = (),
     ) -> None:
         self.event_bus = event_bus
         self.command_bus = command_bus
@@ -270,6 +272,8 @@ class GatewayRuntime:
         self.history = history
         self.build = build or current_build()
         self.update_checker = update_checker
+        self.plugin_source_messages = plugin_source_messages
+        self.plugin_source_notices = plugin_source_notices
         self.gateway_id = uuid4()
         self._started = False
         self._update_task: asyncio.Task[None] | None = None
@@ -305,9 +309,19 @@ class GatewayRuntime:
             plugins_directory=bundle.main.plugins.state_directory,
         )
         for failure in plugin_source_failures:
-            print(f"tfr: plugin source {failure.repo}: {failure.error}", file=sys.stderr)
+            print(f"tfr: plugin source {failure.source_id}: {failure.error}", file=sys.stderr)
         for notice in plugin_source_notices:
-            print(f"tfr: plugin source {notice.repo}: {notice.message}", file=sys.stderr)
+            print(f"tfr: plugin source {notice.source_id}: {notice.message}", file=sys.stderr)
+        plugin_source_messages = tuple(
+            [
+                f"Plugin source {failure.source_id}: {failure.error}"
+                for failure in plugin_source_failures
+            ]
+            + [
+                f"Plugin source {notice.source_id}: {notice.message}"
+                for notice in plugin_source_notices
+            ]
+        )
         plugins = await PluginManager.load(
             enabled=bundle.main.plugins.enabled,
             config=bundle.main.plugins.config,
@@ -341,6 +355,8 @@ class GatewayRuntime:
             update_checker=(
                 UpdateChecker(bundle.main.updates) if plugin_scope == "gateway" else None
             ),
+            plugin_source_messages=plugin_source_messages,
+            plugin_source_notices=plugin_source_notices,
         )
 
     async def start(self) -> None:

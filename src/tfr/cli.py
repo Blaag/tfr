@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--rollback-plugin",
-        metavar="REPO",
+        metavar="REPO[:PATH]",
         help="activate the previous verified stable release for a configured plugin source",
     )
     parser.add_argument(
@@ -128,7 +128,14 @@ def run(argv: Sequence[str] | None = None) -> int:
             return 2
         try:
             bundle = load_configuration(args.config)
-            matches = [
+            from tfr.plugin_sources import plugin_source_id
+
+            exact_matches = [
+                source
+                for source in bundle.main.plugins.sources
+                if plugin_source_id(source.repo, source.path) == args.rollback_plugin
+            ]
+            matches = exact_matches or [
                 source
                 for source in bundle.main.plugins.sources
                 if source.repo == args.rollback_plugin
@@ -145,19 +152,28 @@ def run(argv: Sequence[str] | None = None) -> int:
                 current_plugin_release,
                 rollback_plugin_release,
             )
-            from tfr.plugin_sources import normalize_repo_url, source_slug
+            from tfr.plugin_sources import normalize_repo_url, stable_source_slug
 
             repo_url = normalize_repo_url(source.repo)
             layout = PluginReleaseLayout(
                 (
                     bundle.main.plugins.state_directory.expanduser()
                     / "managed"
-                    / source_slug(repo_url)
+                    / stable_source_slug(source)
                 ).resolve()
             )
-            rollback_plugin_release(layout, repo_url=repo_url, source_path=source.path)
+            manifest_url = str(source.manifest_url)
+            rollback_plugin_release(
+                layout,
+                repo_url=repo_url,
+                manifest_url=manifest_url,
+                source_path=source.path,
+            )
             current = current_plugin_release(
-                layout, repo_url=repo_url, source_path=source.path
+                layout,
+                repo_url=repo_url,
+                manifest_url=manifest_url,
+                source_path=source.path,
             )
             if current is None:  # pragma: no cover - rollback guarantees a current release
                 raise ValueError("plugin rollback did not activate a release")

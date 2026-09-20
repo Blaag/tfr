@@ -4,6 +4,7 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,7 +18,7 @@ from tfr.plugin_releases import (
     install_plugin_release,
     rollback_plugin_release,
 )
-from tfr.plugin_sources import load_plugin_sources
+from tfr.plugin_sources import check_plugin_source_update, load_plugin_sources
 
 
 def git(repository: Path, *arguments: str) -> str:
@@ -69,7 +70,13 @@ def make_repository(tmp_path: Path) -> tuple[Path, str]:
     return repository, release_commit(repository, "0.1.0", marker="one")
 
 
-def manifest(version: str, commit: str) -> PluginReleaseManifest:
+def manifest(
+    version: str,
+    commit: str,
+    *,
+    tfr_minimum: str = "0.1.0",
+    tfr_maximum_exclusive: str = "0.2.0",
+) -> PluginReleaseManifest:
     content = {
         "schema_version": 1,
         "project": "fixture-plugin",
@@ -78,8 +85,8 @@ def manifest(version: str, commit: str) -> PluginReleaseManifest:
         "tag": f"v{version}",
         "commit": commit,
         "compatibility": {
-            "tfr_minimum": "0.1.0",
-            "tfr_maximum_exclusive": "0.2.0",
+            "tfr_minimum": tfr_minimum,
+            "tfr_maximum_exclusive": tfr_maximum_exclusive,
             "plugin_api_minimum": 1,
             "plugin_api_maximum": 1,
         },
@@ -155,6 +162,14 @@ def test_install_verifies_tag_commit_project_and_activates(tmp_path: Path) -> No
     assert current[1].version == "0.1.0"
     assert layout.current.readlink() == Path(f"releases/0.1.0+stable.{commit}")
 
+    with pytest.raises(PluginReleaseError, match="manifest does not match"):
+        current_plugin_release(
+            layout,
+            repo_url=f"file://{repository}",
+            manifest_url="https://other.invalid/plugin-manifest.json",
+            source_path=".",
+        )
+
 
 def test_install_rejects_lightweight_or_wrong_tag(tmp_path: Path) -> None:
     repository = tmp_path / "upstream"
@@ -225,6 +240,17 @@ def test_install_rejects_symlinks_that_escape_release(tmp_path: Path) -> None:
         )
 
 
+def test_managed_release_lock_has_a_bounded_wait(tmp_path: Path) -> None:
+    layout = PluginReleaseLayout(tmp_path / "managed")
+
+    with (
+        layout.lock(),
+        pytest.raises(PluginReleaseError, match="timed out waiting"),
+        layout.lock(timeout_seconds=0.01),
+    ):
+        pass
+
+
 async def test_stable_auto_and_notify_use_only_verified_releases(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -256,6 +282,29 @@ async def test_stable_auto_and_notify_use_only_verified_releases(
     assert failures == ()
     assert len(notices) == 1
     assert "0.1.1 is available" in notices[0].message
+    assert notices[0].available_version == "0.1.1"
+
+    _discovered, failures, notices = await load_plugin_sources(
+        (source,), plugins_directory=tmp_path / "plugins"
+    )
+    assert failures == ()
+    assert len(notices) == 1
+    assert notices[0].message == "updated stable plugin release to 0.1.1 (was 0.1.0)"
+    assert notices[0].available_version is None
+
+    third_commit = release_commit(repository, "0.1.2", marker="three")
+    monkeypatch.setattr(
+        "tfr.plugin_sources.fetch_plugin_release_manifest",
+        lambda _url, *, timeout=10: manifest("0.1.2", third_commit),
+    )
+    monkeypatch.setattr(
+        "tfr.plugin_sources.install_plugin_release",
+        lambda *_args, **_kwargs: pytest.fail("update checks must not install plugin code"),
+    )
+    result = check_plugin_source_update(source, tmp_path / "plugins", 7)
+    assert result.current_version == "0.1.1"
+    assert result.latest_version == "0.1.2"
+    assert result.available
 
 
 async def test_stable_source_uses_verified_current_release_when_offline(
@@ -284,3 +333,106 @@ async def test_stable_source_uses_verified_current_release_when_offline(
     assert failures == ()
     assert len(notices) == 1
     assert "update check failed" in notices[0].message
+
+
+async def test_stable_auto_recovers_from_an_incompatible_installed_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, first_commit = make_repository(tmp_path)
+    source = PluginSource(
+        repo=f"file://{repository}",
+        policy="stable-auto",
+        manifest_url="https://example.invalid/plugin-manifest.json",
+    )
+    old = manifest("0.1.0", first_commit, tfr_maximum_exclusive="0.1.5")
+    monkeypatch.setattr(
+        "tfr.plugin_releases.current_build", lambda: SimpleNamespace(version="0.1.4")
+    )
+    monkeypatch.setattr("tfr.plugin_sources.fetch_plugin_release_manifest", lambda _url: old)
+    await load_plugin_sources((source,), plugins_directory=tmp_path / "plugins")
+
+    second_commit = release_commit(repository, "0.1.1", marker="compatible")
+    latest = manifest("0.1.1", second_commit, tfr_minimum="0.1.5")
+    monkeypatch.setattr(
+        "tfr.plugin_releases.current_build", lambda: SimpleNamespace(version="0.1.5")
+    )
+    monkeypatch.setattr(
+        "tfr.plugin_sources.fetch_plugin_release_manifest",
+        lambda _url, *, timeout=10: latest,
+    )
+
+    discovered, failures, notices = await load_plugin_sources(
+        (source,), plugins_directory=tmp_path / "plugins"
+    )
+
+    assert [entry.name for entry in discovered] == ["fixture"]
+    assert failures == ()
+    assert notices[0].message == "updated stable plugin release to 0.1.1 (was 0.1.0)"
+
+
+async def test_stable_notify_reports_a_compatible_replacement_for_incompatible_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, first_commit = make_repository(tmp_path)
+    source = PluginSource(
+        repo=f"file://{repository}",
+        policy="stable-auto",
+        manifest_url="https://example.invalid/plugin-manifest.json",
+    )
+    old = manifest("0.1.0", first_commit, tfr_maximum_exclusive="0.1.5")
+    monkeypatch.setattr(
+        "tfr.plugin_releases.current_build", lambda: SimpleNamespace(version="0.1.4")
+    )
+    monkeypatch.setattr("tfr.plugin_sources.fetch_plugin_release_manifest", lambda _url: old)
+    await load_plugin_sources((source,), plugins_directory=tmp_path / "plugins")
+
+    second_commit = release_commit(repository, "0.1.1", marker="compatible")
+    latest = manifest("0.1.1", second_commit, tfr_minimum="0.1.5")
+    monkeypatch.setattr(
+        "tfr.plugin_releases.current_build", lambda: SimpleNamespace(version="0.1.5")
+    )
+    monkeypatch.setattr(
+        "tfr.plugin_sources.fetch_plugin_release_manifest",
+        lambda _url, *, timeout=10: latest,
+    )
+    notify = source.model_copy(update={"policy": "stable-notify"})
+
+    discovered, failures, notices = await load_plugin_sources(
+        (notify,), plugins_directory=tmp_path / "plugins"
+    )
+    result = check_plugin_source_update(notify, tmp_path / "plugins", 7)
+
+    assert discovered == notices == ()
+    assert len(failures) == 1
+    assert "compatible stable plugin release 0.1.1 is available" in failures[0].error
+    assert result.current_version == "0.1.0"
+    assert result.latest_version == "0.1.1"
+    assert result.available
+
+
+async def test_stable_source_keeps_compatible_current_when_latest_is_incompatible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, first_commit = make_repository(tmp_path)
+    source = PluginSource(
+        repo=f"file://{repository}",
+        policy="stable-auto",
+        manifest_url="https://example.invalid/plugin-manifest.json",
+    )
+    monkeypatch.setattr(
+        "tfr.plugin_sources.fetch_plugin_release_manifest",
+        lambda _url: manifest("0.1.0", first_commit),
+    )
+    await load_plugin_sources((source,), plugins_directory=tmp_path / "plugins")
+
+    second_commit = release_commit(repository, "0.1.1", marker="incompatible")
+    latest = manifest("0.1.1", second_commit, tfr_minimum="0.2.0", tfr_maximum_exclusive="0.3.0")
+    monkeypatch.setattr("tfr.plugin_sources.fetch_plugin_release_manifest", lambda _url: latest)
+
+    discovered, failures, notices = await load_plugin_sources(
+        (source,), plugins_directory=tmp_path / "plugins"
+    )
+
+    assert [entry.name for entry in discovered] == ["fixture"]
+    assert failures == ()
+    assert "latest release is incompatible" in notices[0].message
