@@ -94,7 +94,7 @@ def test_activation_and_rollback_swap_managed_pointers(tmp_path: Path) -> None:
     assert releases[second_id].current is True
     assert releases[first_id].previous is True
     assert os.readlink(layout.current) == f"releases/{second_id}"
-    assert layout.launcher.stat().st_mode & 0o111
+    assert layout.launcher.stat().st_mode & 0o777 == 0o700
     launcher = layout.launcher.read_text(encoding="utf-8")
     assert "current/bin/python" in launcher
     assert " -I -m tfr " in launcher

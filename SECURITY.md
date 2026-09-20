@@ -1,5 +1,19 @@
 # Security
 
+## Automated Security Checks
+
+GitHub secret scanning and push protection inspect committed and newly pushed
+content. CodeQL default setup scans Python and GitHub Actions with the extended
+security query suite. Dependabot monitors the locked `uv` dependency graph for
+known vulnerabilities, opens security updates without waiting for the routine
+update schedule, and proposes grouped weekly updates for Python packages and
+GitHub Actions.
+
+Pull requests run dependency review and fail when they introduce a known
+moderate-or-higher vulnerability in a runtime, development, or unknown-scope
+dependency. Automated pull requests and security alerts require maintainer
+review; TFR does not merge dependency changes automatically.
+
 ## Credentials
 
 TFR permits world passwords and model API keys in JSONC by design. Files that

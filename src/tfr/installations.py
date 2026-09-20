@@ -374,7 +374,7 @@ class InstallationLayout:
                 ) from exc
             if _LAUNCHER_MARKER not in existing:
                 raise InstallationError(f"refusing to replace unmanaged launcher: {self.launcher}")
-        _atomic_write(self.launcher, launcher.encode(), mode=0o755)
+        _atomic_write(self.launcher, launcher.encode(), mode=0o700)
         return self.launcher
 
     def _pointer_release_id(self, pointer: Path) -> str | None:

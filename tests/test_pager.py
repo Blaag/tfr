@@ -291,7 +291,7 @@ def test_url_at_remains_correct_after_a_width_resize() -> None:
 
     assert len(display.rows) > 1
     found = {display.url_at(row, 0) for row in range(len(display.rows))}
-    assert "http://example.com" in found
+    assert found == {None, "http://example.com"}
 
 
 def test_recent_rows_excludes_previous_recall_output() -> None:
