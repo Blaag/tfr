@@ -434,6 +434,19 @@ class PluginReleaseMetadata:
 
 
 def _run_git(*arguments: str, cwd: Path | None = None) -> str:
+    environment = os.environ.copy()
+    for name in tuple(environment):
+        if name.startswith("GIT_"):
+            environment.pop(name)
+    environment.update(
+        {
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GCM_INTERACTIVE": "Never",
+        }
+    )
     try:
         result = subprocess.run(
             ["git", *_GIT_OPTIONS, *arguments],
@@ -442,7 +455,7 @@ def _run_git(*arguments: str, cwd: Path | None = None) -> str:
             capture_output=True,
             text=True,
             timeout=_GIT_TIMEOUT_SECONDS,
-            env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"},
+            env=environment,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise PluginReleaseError(f"could not run git: {exc}") from exc
@@ -794,7 +807,10 @@ def install_plugin_release(
         )
         try:
             checkout = staging / "checkout"
-            _run_git("init", "--quiet", str(checkout))
+            empty_template = staging / ".git-template"
+            empty_template.mkdir()
+            _run_git("init", "--quiet", f"--template={empty_template}", str(checkout))
+            empty_template.rmdir()
             _run_git("-C", str(checkout), "remote", "add", "origin", repo_url)
             _run_git(
                 "-C",
