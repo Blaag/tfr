@@ -71,7 +71,9 @@ def test_loads_jsonc_and_resolves_references(tmp_path: Path) -> None:
 
     assert bundle.main.ui.scrollback_lines == 500
     assert bundle.main.ui.recent_input_lines == 3
-    assert bundle.main.ui.output_color == "#d7d7d7"
+    assert bundle.main.ui.output_color is None
+    assert bundle.main.ui.theme.preset == "default"
+    assert bundle.main.ui.theme.colors.text is None
     assert bundle.main.ui.animations_enabled is True
     assert bundle.main.ui.low_bandwidth is False
     assert bundle.main.ui.screen_clear.mode == "cycle"
@@ -289,6 +291,38 @@ def test_rejects_invalid_output_color(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ConfigurationError, match=r"ui\.output_color: String should match pattern"):
+        load_configuration(main_path)
+
+
+def test_loads_theme_preset_and_semantic_color_overrides(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"theme": {"preset": "catppuccin-mocha", '
+            '"colors": {"accent": "#112233", "warning": "#AABBCC"}}},',
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_configuration(main_path)
+
+    assert bundle.main.ui.theme.preset == "catppuccin-mocha"
+    assert bundle.main.ui.theme.colors.accent == "#112233"
+    assert bundle.main.ui.theme.colors.warning == "#AABBCC"
+
+
+def test_rejects_unknown_theme_and_invalid_override(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"theme": {"preset": "dracula", "colors": {"accent": "blue"}}},',
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match=r"ui\.theme\.(preset|colors\.accent)"):
         load_configuration(main_path)
 
 

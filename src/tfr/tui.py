@@ -35,12 +35,13 @@ from prompt_toolkit.styles import Style
 from tfr.agents import AgentRuntime
 from tfr.borders import BorderEdge, border_cell
 from tfr.clear_effects import ScreenClearContext
-from tfr.config import ConfigurationBundle
+from tfr.config import ConfigurationBundle, ThemeConfig
 from tfr.core import CommandBus, EventBus, UnknownSessionError
 from tfr.events import Actor, ActorType, CommandRequest, Direction, Event, EventKind
 from tfr.pager import DisplayBuffer, FormattedRow, PagerMode, rows_to_formatted_text
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.sessions import SessionManager, SessionState, WorldSession
+from tfr.themes import ResolvedTheme, resolve_theme
 from tfr.updates import (
     BuildIdentity,
     UpdateChecker,
@@ -361,6 +362,7 @@ class TfrTui:
         animations_enabled: bool = True,
         low_bandwidth: bool = False,
         output_color: str | None = None,
+        theme: ThemeConfig | None = None,
         screen_clear_mode: str = "cycle",
         screen_clear_effect: str | None = None,
         boss_screen_mode: str = "cycle",
@@ -406,6 +408,8 @@ class TfrTui:
         self.restart_requested = False
         self.animations_enabled = animations_enabled
         self.low_bandwidth = low_bandwidth
+        self.theme: ResolvedTheme = resolve_theme(theme, output_color=output_color)
+        resolved_output_color = self.theme.output_color if theme is not None else output_color
         self._animation_epoch = time.monotonic()
         self._animation_paused_at = self._animation_epoch if low_bandwidth else None
         self._border_frame_elapsed = 0.0
@@ -455,7 +459,9 @@ class TfrTui:
                     max_rows=scrollback_lines[alias],
                     pager_enabled=pager_enabled,
                     pager_overlap=pager_overlap,
-                    default_style=f"fg:{output_color}" if output_color is not None else "",
+                    default_style=(
+                        f"fg:{resolved_output_color}" if resolved_output_color is not None else ""
+                    ),
                 ),
                 is_agent=alias in agent_worlds,
                 recent_input_lines=recent_input_lines,
@@ -517,7 +523,8 @@ class TfrTui:
                 DynamicContainer(self._active_output_panel),
                 DynamicContainer(lambda: self.input_panels[self.active_alias]),
                 Window(content=FormattedTextControl(self.status_bar), height=1),
-            ]
+            ],
+            style="class:application",
         )
         self.boss_control = FormattedTextControl(
             self.boss_text,
@@ -538,24 +545,7 @@ class TfrTui:
             key_bindings=bindings,
             full_screen=True,
             mouse_support=True,
-            style=Style.from_dict(
-                {
-                    "world.active": "bold reverse",
-                    "world.inactive": "",
-                    "world.agent": "fg:#ffaf00",
-                    "world.unread": "bold fg:#5fd7ff",
-                    "input.prompt": "bold fg:#87afff",
-                    "input.recent": "fg:#87afaf",
-                    "status": "reverse",
-                    "status.more": "bold fg:#ffffff bg:#af0000",
-                    "status.lowbw": "bold fg:#000000 bg:#d7af00",
-                    "selection": "reverse",
-                    "border.output": "fg:#5f87af",
-                    "border.input": "fg:#87afff",
-                    "boss": "fg:#a8a8a8 bg:#1c1c1c",
-                    "boss.chart": "fg:#ffffff bg:#1c1c1c",
-                }
-            ),
+            style=Style.from_dict(dict(self.theme.styles)),
             before_render=self._before_render,
             input=input,
             output=output,
@@ -1060,7 +1050,9 @@ class TfrTui:
 
     def add_notice(self, alias: str, text: str) -> None:
         self.views[alias].clear_selection()
-        self.views[alias].display.append(f"\x1b[33m-- {text} --\x1b[0m", recallable=False)
+        self.views[alias].display.append(
+            self.theme.ansi_text("warning", f"-- {text} --"), recallable=False
+        )
         self.application.invalidate()
 
     def queue_startup_notice(self, alias: str, text: str) -> None:
@@ -1151,19 +1143,21 @@ class TfrTui:
             view.recent_commands.append(event.display_text)
         elif event.kind is EventKind.PLUGIN and event.display_text is not None:
             view.clear_selection()
-            view.display.append(f"\x1b[31m-- {event.display_text} --\x1b[0m")
+            view.display.append(self.theme.ansi_text("error", f"-- {event.display_text} --"))
             should_count = True
         elif event.kind is EventKind.CONNECTION:
             state = event.metadata.get("state")
             if state == SessionState.CONNECTED.value:
                 view.clear_selection()
-                view.display.append("\x1b[32m-- Connected --\x1b[0m")
+                view.display.append(self.theme.ansi_text("success", "-- Connected --"))
                 should_count = True
             elif state == SessionState.DISCONNECTED.value:
                 view.clear_selection()
                 reason = event.metadata.get("error")
                 suffix = f": {reason}" if reason else ""
-                view.display.append(f"\x1b[31m-- Disconnected{suffix} --\x1b[0m")
+                view.display.append(
+                    self.theme.ansi_text("error", f"-- Disconnected{suffix} --")
+                )
                 should_count = True
         if should_count and event.world != self.active_alias:
             view.unread_events += 1
@@ -1526,7 +1520,9 @@ class TfrTui:
         view = self.views[alias]
         recalled = view.display.recent_entries(count)
         view.clear_selection()
-        view.display.append(f"\x1b[33m-- Recall {count}\x1b[0m", recallable=False)
+        view.display.append(
+            self.theme.ansi_text("warning", f"-- Recall {count}"), recallable=False
+        )
         elapsed_seconds = self._animation_elapsed_seconds()
         for text, decorations in recalled:
             replayed = tuple(
@@ -1817,6 +1813,7 @@ async def run_client(bundle: ConfigurationBundle) -> int:
             animations_enabled=bundle.main.ui.animations_enabled,
             low_bandwidth=bundle.main.ui.low_bandwidth,
             output_color=bundle.main.ui.output_color,
+            theme=bundle.main.ui.theme,
             screen_clear_mode=bundle.main.ui.screen_clear.mode,
             screen_clear_effect=bundle.main.ui.screen_clear.effect,
             boss_screen_mode=bundle.main.ui.boss.mode,

@@ -5,7 +5,7 @@ import os
 import re
 import stat
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import jsonc
 from pydantic import (
@@ -111,10 +111,49 @@ class GatewayReconnectConfig(StrictModel):
     retry_interval_seconds: float = Field(default=3.0, gt=0)
 
 
+HexColor = Annotated[str, Field(pattern=r"^#[0-9a-fA-F]{6}$")]
+
+
+class ThemeColorsConfig(StrictModel):
+    background: HexColor | None = None
+    surface: HexColor | None = None
+    overlay: HexColor | None = None
+    text: HexColor | None = None
+    muted: HexColor | None = None
+    accent: HexColor | None = None
+    secondary: HexColor | None = None
+    info: HexColor | None = None
+    success: HexColor | None = None
+    warning: HexColor | None = None
+    error: HexColor | None = None
+    selection: HexColor | None = None
+    selected_text: HexColor | None = None
+
+
+class ThemeConfig(StrictModel):
+    preset: Literal[
+        "default",
+        "catppuccin-latte",
+        "catppuccin-frappe",
+        "catppuccin-macchiato",
+        "catppuccin-mocha",
+        "gruvbox",
+        "tokyo-night",
+        "dracula",
+        "nord",
+        "solarized-dark",
+        "nightfly",
+        "kanagawa",
+        "1976",
+    ] = "default"
+    colors: ThemeColorsConfig = Field(default_factory=ThemeColorsConfig)
+
+
 class UiConfig(StrictModel):
     scrollback_lines: PositiveInt = 20_000
     recent_input_lines: int = Field(default=3, ge=0, le=20)
-    output_color: str = Field(default="#d7d7d7", pattern=r"^#[0-9a-fA-F]{6}$")
+    output_color: HexColor | None = None
+    theme: ThemeConfig = Field(default_factory=ThemeConfig)
     show_nospoof_prefix: bool = False
     animations_enabled: bool = True
     low_bandwidth: bool = False

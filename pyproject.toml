@@ -1,6 +1,6 @@
 [project]
 name = "tfr"
-version = "0.1.3"
+version = "0.1.4"
 description = "A multi-world terminal client with auditable human and LLM sessions"
 readme = "README.md"
 license = "MIT"
