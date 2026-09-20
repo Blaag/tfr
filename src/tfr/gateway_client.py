@@ -32,7 +32,7 @@ from tfr.gateway_transport import (
     validate_tcp_endpoint,
 )
 from tfr.installations import managed_restart_command
-from tfr.plugin_sources import load_plugin_sources
+from tfr.plugin_sources import PluginUpdateChecker, load_plugin_sources
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.sessions import SessionManager, SessionState
 from tfr.updates import BuildIdentity, UpdateChecker, UpdateError
@@ -882,11 +882,11 @@ async def run_gateway_ui(
             plugins_directory=configuration.main.plugins.state_directory,
         )
         plugin_source_messages = [
-            f"Plugin source {failure.repo}: {failure.error}"
+            f"Plugin source {failure.source_id}: {failure.error}"
             for failure in plugin_source_failures
         ]
         plugin_source_messages.extend(
-            f"Plugin source {notice.repo}: {notice.message}"
+            f"Plugin source {notice.source_id}: {notice.message}"
             for notice in plugin_source_notices
         )
         plugins = await PluginManager.load(
@@ -921,6 +921,16 @@ async def run_gateway_ui(
         reconnect_config=configuration.main.ui.gateway_reconnect,
     )
     update_checker = UpdateChecker(configuration.main.updates)
+    plugin_update_checker = PluginUpdateChecker(
+        configuration.main.plugins.sources,
+        plugins_directory=configuration.main.plugins.state_directory,
+        config=configuration.main.updates,
+        notified_versions={
+            notice.source_id: notice.available_version
+            for notice in plugin_source_notices
+            if notice.available_version is not None
+        },
+    )
     tui = TfrTui(
         sessions=client.sessions,  # type: ignore[arg-type]
         manager=manager,
@@ -945,6 +955,7 @@ async def run_gateway_ui(
         gateway_reconnect=runtime.reconnect,
         restart_supported=True,
         update_checker=update_checker,
+        plugin_update_checker=plugin_update_checker,
         gateway_build=client.gateway_build,
         initial_events=client.initial_events,
         initial_scroll_to_end=True,

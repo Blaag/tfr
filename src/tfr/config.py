@@ -4,8 +4,9 @@ import json
 import os
 import re
 import stat
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 import jsonc
 from pydantic import (
@@ -188,6 +189,8 @@ class UpdateConfig(StrictModel):
     def manifest_uses_https(cls, value: AnyHttpUrl) -> AnyHttpUrl:
         if value.scheme != "https":
             raise ValueError("updates.manifest_url must use HTTPS")
+        if value.username is not None or value.password is not None:
+            raise ValueError("updates.manifest_url cannot contain credentials")
         return value
 
 
@@ -212,6 +215,22 @@ class PluginSource(StrictModel):
     policy: Literal["legacy", "pinned", "stable-auto", "stable-notify"] = "legacy"
     manifest_url: AnyHttpUrl | None = None
 
+    @field_validator("repo")
+    @classmethod
+    def repo_has_no_embedded_credentials(cls, value: str) -> str:
+        if "://" in value:
+            parsed = urlsplit(value)
+            if parsed.password is not None or (
+                parsed.scheme in {"http", "https"} and parsed.username is not None
+            ):
+                raise ValueError("plugin repository URLs cannot contain credentials")
+        return value
+
+    @field_validator("path")
+    @classmethod
+    def normalize_source_path(cls, value: str) -> str:
+        return PurePosixPath(value or ".").as_posix()
+
     @model_validator(mode="after")
     def validate_policy(self) -> PluginSource:
         full_commit = self.ref is not None and re.fullmatch(r"[0-9a-f]{40}", self.ref) is not None
@@ -227,6 +246,8 @@ class PluginSource(StrictModel):
                 )
             if self.manifest_url.scheme != "https":
                 raise ValueError("plugin source manifest_url must use HTTPS")
+            if self.manifest_url.username is not None or self.manifest_url.password is not None:
+                raise ValueError("plugin source manifest_url cannot contain credentials")
         elif self.manifest_url is not None:
             raise ValueError("legacy plugin sources cannot use manifest_url")
         return self

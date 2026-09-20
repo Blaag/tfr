@@ -1,18 +1,24 @@
 from __future__ import annotations
 
+import asyncio
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from tfr.config import PluginSource
+from tfr.config import PluginSource, UpdateConfig
 from tfr.plugin_sources import (
     PluginSourceError,
+    PluginUpdateChecker,
+    PluginUpdateResult,
     discover_source_entry_points,
+    format_plugin_update_status,
     load_plugin_sources,
     normalize_repo_url,
     source_slug,
+    stable_source_slug,
     sync_plugin_source,
 )
 
@@ -67,6 +73,18 @@ def test_source_slug_is_stable_and_ignores_git_suffix() -> None:
     assert a.startswith("tfr-plugins-fun-")
 
 
+def test_stable_source_slug_preserves_default_and_isolates_monorepo_paths() -> None:
+    root = PluginSource(
+        repo="owner/plugins",
+        policy="stable-auto",
+        manifest_url="https://example.invalid/root.json",
+    )
+    nested = root.model_copy(update={"path": "packages/extra"})
+
+    assert stable_source_slug(root) == source_slug(normalize_repo_url(root.repo))
+    assert stable_source_slug(nested) != stable_source_slug(root)
+
+
 def test_plugin_source_rejects_unsafe_repo_ref_and_path_values() -> None:
     with pytest.raises(ValidationError):
         PluginSource(repo="-not-a-flag")
@@ -76,6 +94,18 @@ def test_plugin_source_rejects_unsafe_repo_ref_and_path_values() -> None:
         PluginSource(repo="a/b", path="../escape")
     with pytest.raises(ValidationError):
         PluginSource(repo="a/b", path="/absolute")
+    with pytest.raises(ValidationError, match="cannot contain credentials"):
+        PluginSource(repo="https://user:token@example.com/plugins.git")
+    assert PluginSource(repo="ssh://git@example.com/plugins.git").repo.startswith("ssh://git@")
+    assert PluginSource(repo="a/b", path="./plugins//extra").path == "plugins/extra"
+    with pytest.raises(ValidationError, match="manifest_url cannot contain credentials"):
+        PluginSource(
+            repo="a/b",
+            policy="stable-auto",
+            manifest_url="https://token@example.com/plugin-manifest.json",
+        )
+    with pytest.raises(ValidationError, match="manifest_url cannot contain credentials"):
+        UpdateConfig(manifest_url="https://token@example.com/update-manifest.json")
 
 
 async def test_sync_plugin_source_clones_a_local_repository(tmp_path: Path) -> None:
@@ -205,6 +235,134 @@ def test_plugin_source_policy_validation() -> None:
             ref=commit,
             manifest_url="https://example.invalid/plugin-manifest.json",
         )
+
+
+async def test_plugin_update_checker_reports_stable_sources(tmp_path: Path) -> None:
+    source = PluginSource(
+        repo="owner/plugins",
+        policy="stable-notify",
+        manifest_url="https://example.invalid/plugin-manifest.json",
+    )
+    expected = PluginUpdateResult(
+        repo=source.repo,
+        policy=source.policy,
+        checked_at=datetime.now(UTC),
+        current_version="0.1.1",
+        latest_version="0.1.2",
+        release_url="https://example.invalid/releases/v0.1.2",
+    )
+    calls: list[tuple[PluginSource, Path, float]] = []
+
+    def check(
+        checked_source: PluginSource,
+        plugins_directory: Path,
+        timeout_seconds: float,
+    ) -> PluginUpdateResult:
+        calls.append((checked_source, plugins_directory, timeout_seconds))
+        return expected
+
+    checker = PluginUpdateChecker(
+        (PluginSource(repo="owner/legacy"), source),
+        plugins_directory=tmp_path,
+        config=UpdateConfig(timeout_seconds=7),
+        check_source=check,
+    )
+
+    assert checker.enabled
+    assert checker.results[0].checked_at is None
+    assert "not checked yet" in format_plugin_update_status(checker.results[0])
+
+    results = await checker.check()
+
+    assert results == (expected,)
+    assert calls == [(source, tmp_path, 7)]
+    assert results[0].available
+    assert format_plugin_update_status(results[0]) == (
+        "Plugin update available: owner/plugins 0.1.2 (current 0.1.1). "
+        "https://example.invalid/releases/v0.1.2"
+    )
+
+
+async def test_periodic_plugin_updates_suppress_an_already_reported_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = PluginSource(
+        repo="owner/plugins",
+        policy="stable-notify",
+        manifest_url="https://example.invalid/plugin-manifest.json",
+    )
+    result = PluginUpdateResult(
+        repo=source.repo,
+        policy=source.policy,
+        checked_at=datetime.now(UTC),
+        current_version="0.1.1",
+        latest_version="0.1.2",
+        release_url="https://example.invalid/releases/v0.1.2",
+    )
+    checker = PluginUpdateChecker(
+        (source,),
+        plugins_directory=tmp_path,
+        config=UpdateConfig(initial_delay_seconds=0, check_interval_seconds=300),
+        notified_versions={source.repo: "0.1.2"},
+        check_source=lambda _source, _directory, _timeout: result,
+    )
+    sleep_calls = 0
+
+    async def sleep(_delay: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("tfr.plugin_sources.asyncio.sleep", sleep)
+    notices: list[PluginUpdateResult] = []
+
+    with pytest.raises(asyncio.CancelledError):
+        await checker.run_periodically(notices.append)
+
+    assert notices == []
+
+
+async def test_manual_plugin_check_can_suppress_the_next_periodic_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = PluginSource(
+        repo="owner/plugins",
+        policy="stable-notify",
+        manifest_url="https://example.invalid/plugin-manifest.json",
+    )
+    result = PluginUpdateResult(
+        repo=source.repo,
+        policy=source.policy,
+        checked_at=datetime.now(UTC),
+        current_version="0.1.1",
+        latest_version="0.1.2",
+        release_url="https://example.invalid/releases/v0.1.2",
+    )
+    checker = PluginUpdateChecker(
+        (source,),
+        plugins_directory=tmp_path,
+        config=UpdateConfig(initial_delay_seconds=0, check_interval_seconds=300),
+        check_source=lambda _source, _directory, _timeout: result,
+    )
+    checker.mark_notified(await checker.check())
+    sleep_calls = 0
+
+    async def sleep(_delay: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("tfr.plugin_sources.asyncio.sleep", sleep)
+    notices: list[PluginUpdateResult] = []
+
+    with pytest.raises(asyncio.CancelledError):
+        await checker.run_periodically(notices.append)
+
+    assert notices == []
 
 
 async def test_sync_plugin_source_keeps_existing_checkout_when_fetch_fails(

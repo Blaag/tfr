@@ -26,6 +26,16 @@ def write_configuration(directory: Path, *, with_world: bool) -> Path:
     return main
 
 
+def test_parser_uses_xdg_default_config_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    args = build_parser().parse_args([])
+
+    assert args.config == tmp_path / "tfr" / "config.jsonc"
+
+
 def test_check_config_reports_counts(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     config = write_configuration(tmp_path, with_world=True)
 
@@ -272,6 +282,45 @@ def test_plugin_rollback_rejects_runtime_mode(capsys: pytest.CaptureFixture[str]
 
     assert result == 2
     assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_plugin_rollback_accepts_a_path_qualified_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = write_configuration(tmp_path, with_world=False)
+    config.write_text(
+        '{"schema_version": 1, "worlds_file": "worlds.jsonc", '
+        '"agents_file": "agents.jsonc", "logging": {"enabled": false}, '
+        '"plugins": {"state_directory": "plugin-state", "sources": ['
+        '{"repo": "owner/plugins", "path": "packages/one", "policy": "stable-notify", '
+        '"manifest_url": "https://example.invalid/one.json"},'
+        '{"repo": "owner/plugins", "path": "packages/two", "policy": "stable-notify", '
+        '"manifest_url": "https://example.invalid/two.json"}]}}',
+        encoding="utf-8",
+    )
+    options: dict[str, object] = {}
+
+    def fake_rollback(_layout: object, **received: object) -> Path:
+        options.update(received)
+        return tmp_path / "checkout"
+
+    monkeypatch.setattr("tfr.plugin_releases.rollback_plugin_release", fake_rollback)
+    monkeypatch.setattr(
+        "tfr.plugin_releases.current_plugin_release",
+        lambda *_args, **_kwargs: (
+            tmp_path / "checkout",
+            SimpleNamespace(version="0.1.0", commit="a" * 40),
+        ),
+    )
+
+    result = run(
+        ["--config", str(config), "--rollback-plugin", "owner/plugins:packages/two"]
+    )
+
+    assert result == 0
+    assert options["source_path"] == "packages/two"
+    assert options["manifest_url"] == "https://example.invalid/two.json"
 
 
 def test_version_includes_packaged_commit(

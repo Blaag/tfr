@@ -32,23 +32,27 @@ through `~/.local/bin/tfr`. Add `~/.local/bin` to `PATH` if you want to invoke
 Create a private working configuration from the supplied examples:
 
 ```console
-mkdir -p .tfr
-cp examples/config.jsonc examples/worlds.jsonc examples/agents.jsonc .tfr/
-chmod 600 .tfr/*.jsonc
+tfr_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/tfr"
+mkdir -p "$tfr_config_dir"
+chmod 700 "$tfr_config_dir"
+cp examples/config.jsonc examples/worlds.jsonc examples/agents.jsonc "$tfr_config_dir/"
+chmod 600 "$tfr_config_dir"/*.jsonc
 ```
 
-Edit `.tfr/worlds.jsonc` with the world addresses and logins you want to
-use. Edit `.tfr/agents.jsonc` if you want agent-controlled worlds. Check
-the complete configuration before connecting:
+TFR reads `config.jsonc` from that standard directory by default, regardless of
+the current directory or where the bootstrap repository was cloned. Edit
+`worlds.jsonc` there with the world addresses and logins you want to use. Edit
+`agents.jsonc` if you want agent-controlled worlds. Check the complete
+configuration before connecting:
 
 ```console
-~/.local/bin/tfr --check-config --config .tfr/config.jsonc
+~/.local/bin/tfr --check-config
 ```
 
 Start the persistent Gateway in one terminal:
 
 ```console
-~/.local/bin/tfr gateway --config .tfr/config.jsonc
+~/.local/bin/tfr gateway
 ```
 
 Leave that command running. A successful startup reports its socket:
@@ -61,7 +65,7 @@ Press Ctrl-C to stop the gateway.
 Attach the UI from a second terminal:
 
 ```console
-~/.local/bin/tfr ui --config .tfr/config.jsonc
+~/.local/bin/tfr ui
 ```
 
 You can attach multiple UIs to the same Gateway. `Ctrl-Q` or `/quit` closes only
@@ -76,8 +80,8 @@ The Gateway and UI use `$XDG_RUNTIME_DIR/tfr/gateway.sock` when
 pass the identical path to both commands:
 
 ```console
-~/.local/bin/tfr gateway --config .tfr/config.jsonc --socket /private/path/tfr.sock
-~/.local/bin/tfr ui --config .tfr/config.jsonc --socket /private/path/tfr.sock
+~/.local/bin/tfr gateway --socket /private/path/tfr.sock
+~/.local/bin/tfr ui --socket /private/path/tfr.sock
 ```
 
 The socket's existing parent directory must be owned by the current user and
@@ -89,7 +93,7 @@ For a single-process session without a persistent Gateway, use the legacy
 combined mode:
 
 ```console
-~/.local/bin/tfr --config .tfr/config.jsonc
+~/.local/bin/tfr
 ```
 
 ## Development
@@ -107,8 +111,12 @@ uv run pytest
 ```
 
 Example configuration is under [`examples/`](examples/). The default main
-configuration path is `~/.config/tfr/config.jsonc`. Credential-bearing files
-should be readable only by their owner (`0600` on POSIX systems).
+configuration path is `$XDG_CONFIG_HOME/tfr/config.jsonc` when
+`XDG_CONFIG_HOME` is set, otherwise `~/.config/tfr/config.jsonc`. Use
+`--config PATH` only to select a nonstandard main configuration. Referenced
+`worlds_file` and `agents_file` paths are resolved relative to that file.
+Credential-bearing files should be readable only by their owner (`0600` on
+POSIX systems).
 
 Running `tfr` without a mode starts the original combined client. For a
 persistent connection process, start `tfr gateway` and attach one or more
@@ -200,17 +208,15 @@ again. Installed release directories are retained until removed manually. Use
 and `--python` to select the Python 3.12-or-newer interpreter that `uv` should
 use. Ensure `~/.local/bin` is in `PATH` before using `tfr` directly.
 
-The installer does not copy configuration. If the current configuration is at
-the default `~/.config/tfr/config.jsonc`, managed commands use it automatically.
-If configuration is kept in the checkout's ignored `.tfr` directory, continue
-passing its absolute path. Relative `worlds_file` and `agents_file` values are
-resolved relative to that main configuration file:
+The installer does not copy configuration. Managed commands automatically use
+the standard configuration path described above. For a nonstandard location,
+continue passing its absolute path. Relative `worlds_file` and `agents_file`
+values are resolved relative to that main configuration file:
 
 ```console
-checkout=$PWD
 ./scripts/install-from-checkout --latest-stable
-~/.local/bin/tfr gateway --config "$checkout/.tfr/config.jsonc"
-~/.local/bin/tfr ui --config "$checkout/.tfr/config.jsonc"
+~/.local/bin/tfr gateway --config /private/path/config.jsonc
+~/.local/bin/tfr ui --config /private/path/config.jsonc
 ```
 
 There is no required migration. Existing `uv run tfr ...` commands continue to
@@ -222,18 +228,22 @@ way, `/reload` follows the managed `current` release.
 ## Stable Release Updates
 
 TFR checks the latest stable GitHub Release in the background after startup and
-then approximately every six hours. Checks are notification-only: they never
-download, install, or execute an artifact. Use `/update status` to inspect the
-cached result or `/update check` to refresh it immediately. An attached UI
-reports its own build and the remote Gateway build separately; update the
-Gateway through its administrator-controlled deployment and restart process.
+then approximately every six hours. The same schedule checks stable plugin
+sources configured on the UI host. These periodic checks are notification-only:
+they never download, install, or execute an artifact. Use `/update status` to
+inspect TFR and plugin results or `/update check` to refresh them immediately.
+An attached UI reports its own build and the remote Gateway build separately;
+update the Gateway through its administrator-controlled deployment and restart
+process.
 
-The release manifest is cached with its HTTP `ETag` under
-`~/.local/state/tfr/updates` by default. Network and validation failures do not
-interrupt startup or active sessions. Set `updates.enabled` to `false` to
-disable checks, or configure the timing, HTTPS manifest URL, and state directory
-under the top-level `updates` object. Only stable `vMAJOR.MINOR.PATCH` releases
-participate; prereleases and moving Git tags are not used.
+The TFR release manifest is cached with its HTTP `ETag` under
+`~/.local/state/tfr/updates` by default. Plugin results are held in memory and
+revalidated from each configured plugin manifest. Network and validation
+failures do not interrupt startup or active sessions. Set `updates.enabled` to
+`false` to disable periodic and `/update` checks, or configure the timing, HTTPS
+manifest URL, and state directory under the top-level `updates` object. Only
+stable `vMAJOR.MINOR.PATCH` releases participate; prereleases and moving Git tags
+are not used.
 
 Release notifications do not download or install the advertised artifact.
 Operators may explicitly run `./scripts/install-from-checkout --latest-stable`
@@ -289,7 +299,7 @@ private CA works with the UI's `--tls-ca` option. Keep the TLS private key mode
 address:
 
 ```console
-~/.local/bin/tfr gateway --config .tfr/config.jsonc \
+~/.local/bin/tfr gateway \
   --listen-host 100.x.y.z --listen-port 7347 \
   --token-file ~/.config/tfr/gateway.token \
   --tls-cert ~/.config/tfr/gateway.crt \
@@ -302,7 +312,7 @@ the Gateway's `worlds.jsonc`, `agents.jsonc`, world passwords, or provider keys.
 Connect using the certificate's MagicDNS hostname:
 
 ```console
-~/.local/bin/tfr ui --config .tfr/config.jsonc \
+~/.local/bin/tfr ui \
   --gateway-host gateway.example.ts.net --gateway-port 7347 \
   --token-file ~/.config/tfr/gateway.token
 ```
@@ -353,13 +363,14 @@ cd ~/tfr
 Create a private configuration directory on the UI host:
 
 ```console
-mkdir -p ~/.config/tfr
-chmod 700 ~/.config/tfr
+tfr_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/tfr"
+mkdir -p "$tfr_config_dir"
+chmod 700 "$tfr_config_dir"
 ```
 
-Then create `~/.config/tfr/config.jsonc` for UI preferences. A remote UI needs
-only the main configuration; the `worlds.jsonc` and `agents.jsonc` paths use
-their defaults but are not opened in UI mode:
+Then create `config.jsonc` in that directory for UI preferences. A remote UI
+needs only the main configuration; the `worlds.jsonc` and `agents.jsonc` paths
+use their defaults but are not opened in UI mode:
 
 ```jsonc
 {
@@ -385,7 +396,7 @@ Protect the configuration even though this UI-only file should not contain
 world or provider credentials:
 
 ```console
-chmod 600 ~/.config/tfr/config.jsonc
+chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/tfr/config.jsonc"
 ```
 
 Add entry-point names under `plugins.enabled` for whichever UI plugins you
@@ -417,7 +428,6 @@ Connect from the UI host using the hostname in the Gateway certificate:
 
 ```console
 ~/.local/bin/tfr ui \
-  --config ~/.config/tfr/config.jsonc \
   --gateway-host gateway.example.ts.net \
   --gateway-port 7347 \
   --token-file ~/.config/tfr/gateway.token
@@ -433,7 +443,6 @@ service. It can be started directly over SSH with a pseudo-terminal:
 ```console
 ssh -t USER@UI_HOST \
   '~/.local/bin/tfr ui \
-    --config ~/.config/tfr/config.jsonc \
     --gateway-host gateway.example.ts.net \
     --gateway-port 7347 \
     --token-file ~/.config/tfr/gateway.token'
@@ -682,13 +691,22 @@ falls back to `main`. If the manifest service is temporarily unreachable, TFR
 may continue with the current release only after revalidating its metadata,
 origin, tag, commit, project metadata, and clean checkout.
 
+When `stable-auto` installs a newer release during startup, TFR reports the old
+and new versions. Later releases discovered while the UI is running appear in
+the periodic update notice and `/update status|check`; they are activated only
+on a later startup or reload, before plugin import. `stable-notify` uses the same
+status integration but never activates a newer release automatically.
+
 Use `"policy": "stable-notify"` to bootstrap the current stable release but only
 report later compatible releases. To roll back, first change `stable-auto` to
 `stable-notify` so the next launch does not immediately update again, then run:
 
 ```sh
-tfr --config ~/.config/tfr/config.jsonc --rollback-plugin Blaag/tfr-plugins-public
+tfr --rollback-plugin Blaag/tfr-plugins-public
 ```
+
+For multiple stable projects in one repository, qualify the source with its configured path,
+for example `tfr --rollback-plugin owner/plugins:packages/extra`.
 
 For a repository without a release manifest, `pinned` selects and revalidates
 one exact lowercase 40-character commit:

@@ -845,6 +845,7 @@ async def test_gateway_ui_queues_plugin_source_messages_for_resumed_world(
                 PluginSourceNotice(
                     repo="owner/plugins",
                     message="stable plugin release 0.1.2 is available (current 0.1.1)",
+                    available_version="0.1.2",
                 ),
             ),
         )

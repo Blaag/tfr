@@ -23,6 +23,7 @@ from tfr.config import (
     AgentsConfig,
     ConfigurationBundle,
     MainConfig,
+    PluginSource,
     ThemeConfig,
     UpdateConfig,
     WorldConfig,
@@ -33,6 +34,7 @@ from tfr.core import CommandBus, EventBus
 from tfr.events import Actor, ActorType, Direction, Event, EventKind, Provenance
 from tfr.pager import PagerMode
 from tfr.plugin_api import BorderFragment, ScreenClearContext, TextDecoration, TextEffectKind
+from tfr.plugin_sources import PluginSourceNotice, PluginUpdateChecker, PluginUpdateResult
 from tfr.plugins import BossViewEvent, PluginManager
 from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.tui import TfrTui, _format_elapsed, _osc52_sequence, run_client
@@ -44,6 +46,7 @@ def make_tui(
     input: Input | None = None,
     plugins: PluginManager | None = None,
     update_checker: UpdateChecker | None = None,
+    plugin_update_checker: PluginUpdateChecker | None = None,
     gateway_build: BuildIdentity | None = None,
     theme: ThemeConfig | None = None,
     output_color: str | None = None,
@@ -71,6 +74,7 @@ def make_tui(
         pager_overlap=1,
         plugins=plugins,
         update_checker=update_checker,
+        plugin_update_checker=plugin_update_checker,
         gateway_build=gateway_build,
         theme=theme,
         output_color=output_color,
@@ -565,8 +569,28 @@ async def test_update_check_reports_ui_and_gateway_versions(tmp_path: Path) -> N
         build=BuildIdentity("1.0.0", "c" * 40),
         fetch=fetch,  # type: ignore[arg-type]
     )
+    plugin_source = PluginSource(
+        repo="owner/plugins",
+        policy="stable-notify",
+        manifest_url="https://example.invalid/plugin-manifest.json",
+    )
+    plugin_result = PluginUpdateResult(
+        repo=plugin_source.repo,
+        policy=plugin_source.policy,
+        checked_at=datetime.now(UTC),
+        current_version="0.4.0",
+        latest_version="0.5.0",
+        release_url="https://example.invalid/releases/v0.5.0",
+    )
+    plugin_checker = PluginUpdateChecker(
+        (plugin_source,),
+        plugins_directory=tmp_path / "plugins",
+        config=checker.config,
+        check_source=lambda _source, _directory, _timeout: plugin_result,
+    )
     tui = make_tui(
         update_checker=checker,
+        plugin_update_checker=plugin_checker,
         gateway_build=BuildIdentity("1.1.0", "d" * 40),
     )
     tui.active_view.display.resize(width=100, height=20)
@@ -574,9 +598,10 @@ async def test_update_check_reports_ui_and_gateway_versions(tmp_path: Path) -> N
     await tui._handle_client_command("alpha", "/update check")
 
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
-    assert "Checking for stable TFR updates" in text
+    assert "Checking for stable TFR and plugin updates" in text
     assert "UI update available: 1.2.3 (running 1.0.0" in text
     assert "Gateway update available: 1.2.3 (running 1.1.0" in text
+    assert "Plugin update available: owner/plugins 0.5.0 (current 0.4.0)" in text
 
 
 async def test_restart_is_available_only_for_gateway_attached_ui() -> None:
@@ -1213,6 +1238,14 @@ async def test_standalone_client_loads_all_plugin_capabilities(
         command_bus=CommandBus(),
         plugins=object(),
         agents=object(),
+        plugin_source_messages=("Plugin source owner/plugins: update available",),
+        plugin_source_notices=(
+            PluginSourceNotice(
+                repo="owner/plugins",
+                message="update available",
+                available_version="0.2.0",
+            ),
+        ),
     )
     received_scope: str | None = None
 
@@ -1226,9 +1259,16 @@ async def test_standalone_client_loads_all_plugin_capabilities(
         received_scope = plugin_scope
         return runtime
 
+    values: dict[str, object] = {}
+    notices: list[tuple[str, str]] = []
+
     class FakeTui:
-        def __init__(self, **_values: object) -> None:
-            pass
+        def __init__(self, **received: object) -> None:
+            values.update(received)
+            self.active_alias = "alpha"
+
+        def queue_startup_notice(self, alias: str, message: str) -> None:
+            notices.append((alias, message))
 
         async def run(self) -> int:
             return 17
@@ -1248,13 +1288,30 @@ async def test_standalone_client_loads_all_plugin_capabilities(
         boss=boss,
     )
     bundle = SimpleNamespace(
-        main=SimpleNamespace(ui=ui, updates=UpdateConfig(enabled=False)),
+        main=SimpleNamespace(
+            ui=ui,
+            updates=UpdateConfig(enabled=False),
+            plugins=SimpleNamespace(
+                sources=(
+                    PluginSource(
+                        repo="owner/plugins",
+                        policy="stable-notify",
+                        manifest_url="https://example.invalid/plugin-manifest.json",
+                    ),
+                ),
+                state_directory=Path("plugins"),
+            ),
+        ),
         worlds=SimpleNamespace(worlds={}),
         agents=SimpleNamespace(agents={}),
     )
 
     assert await run_client(bundle) == 17  # type: ignore[arg-type]
     assert received_scope == "all"
+    assert notices == [("alpha", "Plugin source owner/plugins: update available")]
+    checker = values["plugin_update_checker"]
+    assert isinstance(checker, PluginUpdateChecker)
+    assert ("owner/plugins", "0.2.0") in checker._notified
 
 
 async def test_low_bandwidth_stops_and_resumes_border_scheduler() -> None:

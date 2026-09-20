@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import tomllib
 import unicodedata
 import urllib.error
@@ -518,7 +519,7 @@ class PluginReleaseLayout:
             directory.chmod(0o700)
 
     @contextlib.contextmanager
-    def lock(self) -> Iterator[None]:
+    def lock(self, *, timeout_seconds: float | None = None) -> Iterator[None]:
         self.prepare()
         if fcntl is None:
             raise PluginReleaseError("managed plugin locking requires a POSIX host")
@@ -529,7 +530,20 @@ class PluginReleaseLayout:
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
                 raise PluginReleaseError("managed plugin lock is unsafe")
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            if timeout_seconds is None:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            else:
+                deadline = time.monotonic() + timeout_seconds
+                while True:
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise PluginReleaseError(
+                                "timed out waiting for the managed plugin lock"
+                            ) from None
+                        time.sleep(min(0.05, max(0, deadline - time.monotonic())))
             yield
         finally:
             with contextlib.suppress(OSError):
@@ -561,7 +575,12 @@ class PluginReleaseLayout:
             temporary.unlink(missing_ok=True)
 
     def validate_release(
-        self, release_id: str, *, repo_url: str | None = None, source_path: str = "."
+        self,
+        release_id: str,
+        *,
+        repo_url: str | None = None,
+        manifest_url: str | None = None,
+        source_path: str = ".",
     ) -> tuple[Path, PluginReleaseMetadata]:
         if _RELEASE_ID.fullmatch(release_id) is None:
             raise PluginReleaseError("plugin release ID is invalid")
@@ -584,6 +603,8 @@ class PluginReleaseLayout:
             raise PluginReleaseError("installed plugin metadata does not match its directory")
         if repo_url is not None and metadata.repo_url != repo_url:
             raise PluginReleaseError("installed plugin repository does not match configuration")
+        if manifest_url is not None and metadata.manifest_url != manifest_url:
+            raise PluginReleaseError("installed plugin manifest does not match configuration")
         checkout = release / "checkout"
         if not (checkout / ".git").is_dir():
             raise PluginReleaseError("installed plugin checkout is missing")
@@ -600,22 +621,42 @@ class PluginReleaseLayout:
         return checkout, metadata
 
     def current_release(
-        self, *, repo_url: str, source_path: str
+        self, *, repo_url: str, manifest_url: str | None = None, source_path: str
     ) -> tuple[Path, PluginReleaseMetadata] | None:
         release_id = self._pointer_release_id(self.current)
         if release_id is None:
             return None
-        return self.validate_release(release_id, repo_url=repo_url, source_path=source_path)
+        return self.validate_release(
+            release_id,
+            repo_url=repo_url,
+            manifest_url=manifest_url,
+            source_path=source_path,
+        )
 
-    def activate(self, release_id: str, *, repo_url: str, source_path: str) -> Path:
+    def activate(
+        self,
+        release_id: str,
+        *,
+        repo_url: str,
+        manifest_url: str | None = None,
+        source_path: str,
+    ) -> Path:
         checkout, _metadata = self.validate_release(
-            release_id, repo_url=repo_url, source_path=source_path
+            release_id,
+            repo_url=repo_url,
+            manifest_url=manifest_url,
+            source_path=source_path,
         )
         current = self._pointer_release_id(self.current)
         if current != release_id:
             previous = self._pointer_release_id(self.previous)
             if current is not None:
-                self.validate_release(current, repo_url=repo_url, source_path=source_path)
+                self.validate_release(
+                    current,
+                    repo_url=repo_url,
+                    manifest_url=manifest_url,
+                    source_path=source_path,
+                )
                 self._replace_pointer(self.previous, current)
             try:
                 self._replace_pointer(self.current, release_id)
@@ -628,15 +669,25 @@ class PluginReleaseLayout:
                 raise
         return checkout
 
-    def rollback(self, *, repo_url: str, source_path: str) -> Path:
+    def rollback(
+        self, *, repo_url: str, manifest_url: str | None = None, source_path: str
+    ) -> Path:
         previous = self._pointer_release_id(self.previous)
         if previous is None:
             raise PluginReleaseError("no previous plugin release is available")
         _checkout, metadata = self.validate_release(
-            previous, repo_url=repo_url, source_path=source_path
+            previous,
+            repo_url=repo_url,
+            manifest_url=manifest_url,
+            source_path=source_path,
         )
         _manifest_from_metadata(metadata).assert_compatible()
-        return self.activate(previous, repo_url=repo_url, source_path=source_path)
+        return self.activate(
+            previous,
+            repo_url=repo_url,
+            manifest_url=manifest_url,
+            source_path=source_path,
+        )
 
 
 def _verify_annotated_tag(checkout: Path, tag: str, commit: str) -> None:
@@ -718,7 +769,10 @@ def install_plugin_release(
             if release.name.startswith("."):
                 continue
             _checkout, existing = layout.validate_release(
-                release.name, repo_url=repo_url, source_path=source_path
+                release.name,
+                repo_url=repo_url,
+                manifest_url=manifest_url,
+                source_path=source_path,
             )
             if existing.version == manifest.version and existing.commit != manifest.commit:
                 raise PluginReleaseError(
@@ -730,7 +784,10 @@ def install_plugin_release(
         target = layout.releases / manifest.release_id
         if os.path.lexists(target):
             return layout.activate(
-                manifest.release_id, repo_url=repo_url, source_path=source_path
+                manifest.release_id,
+                repo_url=repo_url,
+                manifest_url=manifest_url,
+                source_path=source_path,
             )
         staging = Path(
             tempfile.mkdtemp(prefix=f".staging-{manifest.release_id}-", dir=layout.releases)
@@ -762,17 +819,36 @@ def install_plugin_release(
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
-        return layout.activate(manifest.release_id, repo_url=repo_url, source_path=source_path)
+        return layout.activate(
+            manifest.release_id,
+            repo_url=repo_url,
+            manifest_url=manifest_url,
+            source_path=source_path,
+        )
 
 
 def current_plugin_release(
-    layout: PluginReleaseLayout, *, repo_url: str, source_path: str
+    layout: PluginReleaseLayout,
+    *,
+    repo_url: str,
+    manifest_url: str | None = None,
+    source_path: str,
+    lock_timeout_seconds: float | None = None,
+    check_compatibility: bool = True,
 ) -> tuple[Path, PluginReleaseMetadata] | None:
-    with layout.lock():
-        current = layout.current_release(repo_url=repo_url, source_path=source_path)
-        if current is not None:
+    with layout.lock(timeout_seconds=lock_timeout_seconds):
+        current = layout.current_release(
+            repo_url=repo_url,
+            manifest_url=manifest_url,
+            source_path=source_path,
+        )
+        if current is not None and check_compatibility:
             _manifest_from_metadata(current[1]).assert_compatible()
         return current
+
+
+def assert_plugin_release_compatible(metadata: PluginReleaseMetadata) -> None:
+    _manifest_from_metadata(metadata).assert_compatible()
 
 
 def _manifest_from_metadata(metadata: PluginReleaseMetadata) -> PluginReleaseManifest:
@@ -794,7 +870,15 @@ def _manifest_from_metadata(metadata: PluginReleaseMetadata) -> PluginReleaseMan
 
 
 def rollback_plugin_release(
-    layout: PluginReleaseLayout, *, repo_url: str, source_path: str
+    layout: PluginReleaseLayout,
+    *,
+    repo_url: str,
+    manifest_url: str | None = None,
+    source_path: str,
 ) -> Path:
     with layout.lock():
-        return layout.rollback(repo_url=repo_url, source_path=source_path)
+        return layout.rollback(
+            repo_url=repo_url,
+            manifest_url=manifest_url,
+            source_path=source_path,
+        )

@@ -302,6 +302,7 @@ class _HttpsRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _fetch_manifest(url: str, etag: str | None, timeout: float) -> _FetchResult:
+    _https_url(url, "release manifest URL")
     headers = {
         "Accept": "application/json",
         "Cache-Control": "no-cache",
