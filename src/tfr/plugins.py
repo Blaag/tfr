@@ -681,6 +681,9 @@ class PluginManager:
         self._session_id = uuid4()
         self._sequence = 0
         self._failure_tasks: set[asyncio.Task[Any]] = set()
+        self.requested_plugins: tuple[str, ...] = ()
+        self._loaded_plugins: list[str] = []
+        self.load_failures: dict[str, str] = {}
         if scope != "gateway":
             from tfr.boss import BuiltinBossPlugin
 
@@ -698,6 +701,10 @@ class PluginManager:
             boss_emit=self.emit_boss_event,
             boss_view_emit=self._emit_for_boss_view,
         )
+
+    @property
+    def loaded_plugins(self) -> tuple[str, ...]:
+        return tuple(self._loaded_plugins)
 
     @classmethod
     async def load(
@@ -730,6 +737,7 @@ class PluginManager:
             else tuple(entry_points().select(group=PLUGIN_ENTRY_POINT_GROUP))
         )
         points = tuple(points) + tuple(extra_discovered)
+        manager.requested_plugins = tuple(dict.fromkeys(enabled))
         available: dict[str, DiscoveredPlugin] = {}
         duplicates: set[str] = set()
         for point in points:
@@ -739,11 +747,14 @@ class PluginManager:
                 available[point.name] = point
         for name in dict.fromkeys(enabled):
             if name in duplicates:
+                manager.load_failures[name] = "duplicate plugin entry points"
                 await manager.report_failure(name, "load", DuplicatePluginRegistration())
                 continue
             point = available.get(name)
             if point is None:
-                await manager.report_failure(name, "load", PluginNotFound())
+                error = PluginNotFound(f"no {PLUGIN_ENTRY_POINT_GROUP} entry point named {name}")
+                manager.load_failures[name] = str(error)
+                await manager.report_failure(name, "load", error)
                 continue
             registrations = (
                 manager.registry.commands,
@@ -777,7 +788,10 @@ class PluginManager:
                 for registration, snapshot in zip(registrations, snapshots, strict=True):
                     registration.clear()
                     registration.update(snapshot)
+                manager.load_failures[name] = type(exc).__name__
                 await manager.report_failure(name, "load", exc)
+            else:
+                manager._loaded_plugins.append(name)
         return manager
 
     def context(self, plugin: str, world: str) -> PluginCommandContext:

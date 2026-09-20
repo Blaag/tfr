@@ -537,9 +537,58 @@ async def test_help_lists_commands_keybindings_markers_and_loaded_plugins() -> N
     assert "/nospoof show|hide|status" in help_text
     assert "/recall X" in help_text
     assert "/update status|check" in help_text
+    assert "/plugins - show configured" in help_text
     assert "[H] human-operated world" in help_text
     assert "left-click selects a world" in help_text
     assert "/fixture (fixture) - run the harmless fixture" in help_text
+
+
+async def test_plugins_command_reports_loaded_and_missing_plugins() -> None:
+    tui = make_tui()
+
+    class Fixture:
+        def register(self, registrar: object, _config: object) -> None:
+            registrar.register_command(  # type: ignore[attr-defined]
+                "fixture", lambda _context, _arguments: None
+            )
+
+    tui.plugins = await PluginManager.load(
+        enabled=("fixture", "gag"),
+        config={},
+        event_bus=tui.event_bus,
+        command_bus=tui.command_bus,
+        targets={},
+        discovered=(entry_point("fixture", Fixture()),),
+    )
+
+    await tui._handle_client_command("alpha", "/plugins")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "fixture: loaded" in text
+    assert "gag: failed (no tfr.plugins.v1 entry point named gag)" in text
+
+
+async def test_plugins_command_does_not_expose_registration_error_details() -> None:
+    tui = make_tui()
+
+    class BrokenFixture:
+        def register(self, _registrar: object, _config: object) -> None:
+            raise ValueError("secret-token-value")
+
+    tui.plugins = await PluginManager.load(
+        enabled=("broken",),
+        config={},
+        event_bus=tui.event_bus,
+        command_bus=tui.command_bus,
+        targets={},
+        discovered=(entry_point("broken", BrokenFixture()),),
+    )
+
+    await tui._handle_client_command("alpha", "/plugins")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "broken: failed (ValueError)" in text
+    assert "secret-token-value" not in text
 
 
 async def test_update_check_reports_ui_and_gateway_versions(tmp_path: Path) -> None:
@@ -1093,7 +1142,23 @@ async def test_end_command_ends_an_active_screen_clear() -> None:
     assert tui._screen_clear_world is None
 
 
-async def test_paging_the_active_world_does_not_end_a_different_worlds_screen_clear() -> None:
+async def test_switching_worlds_ends_an_active_screen_clear() -> None:
+    tui = make_tui()
+    await add_screen_clear_effects(tui)
+    tui.animations_enabled = False
+    tui.active_view.display.append("first")
+    tui.start_screen_clear("alpha")
+    task = tui._screen_clear_task
+    assert task is not None
+
+    tui.switch_world("beta")
+
+    assert tui._screen_clear_task is None
+    assert tui._screen_clear_world is None
+    assert task.cancelling()
+
+
+async def test_paging_does_not_end_a_screen_clear_started_for_an_inactive_world() -> None:
     tui = make_tui()
     await add_screen_clear_effects(tui)
     tui.animations_enabled = False
@@ -1102,9 +1167,6 @@ async def test_paging_the_active_world_does_not_end_a_different_worlds_screen_cl
     assert tui._screen_clear_world == "beta"
     task = tui._screen_clear_task
     assert task is not None
-    # Switch away without touching beta's still-running clear animation.
-    tui.switch_world("alpha")
-
     page_up = next(
         binding for binding in tui.application.key_bindings.bindings if Keys.PageUp in binding.keys
     )
@@ -1786,6 +1848,25 @@ async def test_submitted_text_uses_active_human_session() -> None:
     assert request.text == "look"
     assert request.actor.type is ActorType.HUMAN
     assert request.actor.id == "operator"
+
+
+async def test_submitted_text_returns_scrolled_output_to_live() -> None:
+    tui = make_tui()
+    session = tui.active_view.session
+    session.state = SessionState.CONNECTED
+    tui.command_bus.register(session.session_id)
+    display = tui.active_view.display
+    display.resize(width=40, height=2)
+    for line in ("one", "two", "three", "four"):
+        display.append(line)
+    display.pager.jump_to_end()
+    display.pager.scroll_rows(-1)
+    assert display.pager.mode is PagerMode.SCROLLED
+
+    await tui.submit_text("alpha", ":eats a banana")
+
+    assert display.pager.mode is PagerMode.FOLLOW
+    assert display.pager.more_rows == 0
 
 
 async def test_shell_commands_suspend_terminal_without_using_world_bus(

@@ -825,6 +825,21 @@ Acceptance criteria:
   `x2!`, `x3!`, `SUPER!`, `DOMINATING!`, and `UNSTOPPABLE!`; evaluate an
   end-of-line indicator after the speaker's text as the initial placement and
   extend the display-decoration API if animating appended text requires it.
+- [ ] Build a mobile gateway client, evaluating a PWA before a native iOS app
+  to avoid App Store fees and approval overhead while retaining an installable
+  home-screen experience. The gateway already exchanges newline-delimited JSON
+  over authenticated TLS TCP and includes canonical ANSI-bearing text plus an
+  ANSI-stripped `plain_text` projection; browsers cannot use that raw socket
+  transport, so add an authenticated WebSocket transport (or justify gRPC-Web)
+  that preserves protocol versioning, cursors, reconnect/backfill, command
+  acknowledgements, and Tailscale-only deployment guidance. Define structured
+  display spans or a shared safe ANSI-to-style projection so mobile rendering
+  does not depend on terminal escape codes. Prototype swipe-left/right world
+  switching, unread markers, touch-friendly command history, dynamic type,
+  safe-area and keyboard handling, compact provenance, virtualized per-world
+  scrollback, explicit return-to-live behavior, and responsive layouts for
+  narrow screens. Compare PWA background/reconnect and notification limits
+  against a native Swift client before choosing the long-term platform.
 
 ## Test Strategy
 

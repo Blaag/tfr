@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import tfr.plugin_releases as plugin_releases
 from tfr.config import PluginSource
 from tfr.plugin_releases import (
     PluginReleaseError,
@@ -28,6 +30,26 @@ def git(repository: Path, *arguments: str) -> str:
         capture_output=True,
         text=True,
     ).stdout.strip()
+
+
+def test_git_commands_ignore_inherited_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, str] = {}
+
+    def run(arguments: list[str], **options: object) -> subprocess.CompletedProcess[str]:
+        captured.update(options["env"])  # type: ignore[arg-type]
+        return subprocess.CompletedProcess(arguments, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setenv("GIT_DIR", "/untrusted/repository")
+    monkeypatch.setenv("GIT_TEMPLATE_DIR", "/untrusted/templates")
+    monkeypatch.setattr(plugin_releases.subprocess, "run", run)
+
+    assert plugin_releases._run_git("status") == "ok"
+    assert "GIT_DIR" not in captured
+    assert "GIT_TEMPLATE_DIR" not in captured
+    assert captured["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert captured["GIT_CONFIG_NOSYSTEM"] == "1"
 
 
 def write_project(repository: Path, version: str, *, marker: str = "one") -> None:

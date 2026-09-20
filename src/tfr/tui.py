@@ -629,15 +629,11 @@ class TfrTui:
 
         @bindings.add("end")
         def jump_to_end(event: Any) -> None:
-            self._end_screen_clear_for(self.active_alias)
             if self.inspector_agent is not None:
                 self.inspector_window.vertical_scroll = 0
                 event.app.invalidate()
                 return
-            self.active_view.clear_selection()
-            self.active_view.display.pager.jump_to_end()
-            self._sync_animation_task(restart=True)
-            event.app.invalidate()
+            self._jump_to_end(self.active_alias)
 
         @bindings.add("c-r")
         def reconnect(_event: Any) -> None:
@@ -755,6 +751,13 @@ class TfrTui:
         # requested action visible right away instead.
         if self._screen_clear_world == alias:
             self._stop_screen_clear()
+
+    def _jump_to_end(self, alias: str) -> None:
+        self._end_screen_clear_for(alias)
+        self.views[alias].clear_selection()
+        self.views[alias].display.pager.jump_to_end()
+        self._sync_animation_task(restart=True)
+        self.application.invalidate()
 
     def start_screen_clear(self, alias: str) -> None:
         view = self.views[alias]
@@ -999,6 +1002,8 @@ class TfrTui:
         if alias not in self.views:
             self.add_notice(self.active_alias, f"Unknown world: {alias}")
             return
+        if alias != self.active_alias and self._screen_clear_world is not None:
+            self._stop_screen_clear()
         self.active_index = self.aliases.index(alias)
         self.inspector_agent = None
         self.active_view.unread_events = 0
@@ -1297,6 +1302,8 @@ class TfrTui:
             await self.command_bus.submit(request)
         except UnknownSessionError:
             self.add_notice(alias, "Connection is not accepting commands")
+        else:
+            self._jump_to_end(alias)
 
     async def _handle_client_command(self, alias: str, text: str) -> None:
         try:
@@ -1347,6 +1354,11 @@ class TfrTui:
                     self.add_notice(alias, result)
         elif command == "update":
             await self._handle_update_command(alias, parameters)
+        elif command == "plugins":
+            if parameters:
+                self.add_notice(alias, "Usage: /plugins")
+            else:
+                self.add_notice(alias, self._plugin_status_text())
         elif command in {"quit", "exit"}:
             get_app().exit(result=0)
         elif command == "world":
@@ -1369,11 +1381,7 @@ class TfrTui:
         elif command == "recall":
             self._handle_recall_command(alias, parameters)
         elif command == "end":
-            self._end_screen_clear_for(alias)
-            self.views[alias].clear_selection()
-            self.views[alias].display.pager.jump_to_end()
-            self._sync_animation_task(restart=True)
-            self.application.invalidate()
+            self._jump_to_end(alias)
         elif command == "agent":
             await self._handle_agent_command(alias, parameters)
         elif command == "nospoof":
@@ -1404,6 +1412,7 @@ class TfrTui:
             "  /lowbw [on|off|status] - suppress continuous UI animation",
             "  /animations [on|off|status] - enable continuous UI effects",
             "  /update status|check - inspect stable TFR and plugin releases",
+            "  /plugins - show configured, loaded, and failed plugins",
             "  /agent status|inspect|pause|resume|trigger|close - manage agents",
             "  /quit - exit TFR; //TEXT sends a literal leading slash",
             "",
@@ -1434,6 +1443,20 @@ class TfrTui:
             for command, (plugin, _handler) in sorted(self.plugins.registry.commands.items()):
                 description = self.plugins.registry.command_help.get(command, "plugin command")
                 lines.append(f"  /{command} ({plugin}) - {description}")
+        return "\n".join(lines)
+
+    def _plugin_status_text(self) -> str:
+        requested = self.plugins.requested_plugins
+        if not requested:
+            return "No plugins are configured in plugins.enabled."
+        loaded = set(self.plugins.loaded_plugins)
+        lines = ["Configured plugins"]
+        for name in requested:
+            if name in loaded:
+                lines.append(f"  {name}: loaded")
+            else:
+                reason = self.plugins.load_failures.get(name, "not loaded")
+                lines.append(f"  {name}: failed ({reason})")
         return "\n".join(lines)
 
     async def _handle_update_command(self, alias: str, parameters: list[str]) -> None:
