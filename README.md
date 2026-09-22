@@ -511,6 +511,9 @@ otherwise approximate the RGB colors at the terminal's available color depth.
 ## Terminal Controls
 
 - `Enter`: send input to the active world.
+- Pasting multiple lines sends them to the active `bare`, TinyMUSH, or TinyMUX
+  world as preflighted, server-escaped, paced `@emit` commands. Internal blank
+  lines and indentation are preserved; a single pasted line remains editable.
 - `F6`, `Ctrl+Right`, or `Option+Right`: switch to the next world.
 - `F5`, `Ctrl+Left`, or `Option+Left`: switch to the previous world.
 - `PageUp` and `PageDown`: navigate scrollback or advance `More` output.

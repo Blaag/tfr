@@ -53,6 +53,12 @@ from tfr.updates import (
     UpdateResult,
     format_update_status,
 )
+from tfr.world_text import escape_world_text
+
+_MULTILINE_PASTE_DELAY_SECONDS = 0.5
+_MULTILINE_PASTE_MAXIMUM_BYTES = 1_048_576
+_MULTILINE_PASTE_MAXIMUM_LINES = 10_000
+_MULTILINE_PASTE_MAXIMUM_COMMAND_BYTES = 7_000
 
 
 class ServiceRuntime(Protocol):
@@ -68,6 +74,35 @@ def _row_text(row: FormattedRow) -> str:
 def _osc52_sequence(text: str) -> str:
     payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
     return f"\x1b]52;c;{payload}\x07"
+
+
+def _multiline_paste_commands(text: str, *, server: str, encoding: str) -> tuple[str, ...]:
+    if server not in {"bare", "tinymush", "tinymux"}:
+        raise ValueError("multiline paste requires a bare, tinymush, or tinymux world")
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    if "\x00" in normalized:
+        raise ValueError("multiline paste contains a NUL character")
+    if len(normalized.encode("utf-8")) > _MULTILINE_PASTE_MAXIMUM_BYTES:
+        raise ValueError(f"multiline paste exceeds the {_MULTILINE_PASTE_MAXIMUM_BYTES} byte limit")
+    lines = normalized.split("\n")
+    if lines and not lines[-1]:
+        lines.pop()
+    if len(lines) > _MULTILINE_PASTE_MAXIMUM_LINES:
+        raise ValueError(f"multiline paste exceeds the {_MULTILINE_PASTE_MAXIMUM_LINES} line limit")
+    commands = tuple(f"@emit {escape_world_text(line, server)}" for line in lines)
+    for line_number, command in enumerate(commands, start=1):
+        try:
+            command_size = len(command.encode(encoding, errors="strict"))
+        except (LookupError, UnicodeEncodeError) as exc:
+            raise ValueError(
+                f"multiline paste line {line_number} cannot be encoded as {encoding}"
+            ) from exc
+        if command_size > _MULTILINE_PASTE_MAXIMUM_COMMAND_BYTES:
+            raise ValueError(
+                f"multiline paste line {line_number} exceeds the "
+                f"{_MULTILINE_PASTE_MAXIMUM_COMMAND_BYTES} byte command limit"
+            )
+    return commands
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -449,6 +484,7 @@ class TfrTui:
         self.inspector_agent: str | None = None
         self._event_queue: asyncio.Queue[Event] | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._active_multiline_pastes: set[str] = set()
         self.views: dict[str, WorldView] = {}
 
         for session in sessions:
@@ -638,6 +674,17 @@ class TfrTui:
         @bindings.add("c-r")
         def reconnect(_event: Any) -> None:
             self._spawn(self.reconnect_world(self.active_alias))
+
+        @bindings.add(Keys.BracketedPaste)
+        def bracketed_paste(event: Any) -> None:
+            text = event.data.replace("\r\n", "\n").replace("\r", "\n")
+            lines = text.split("\n")
+            if lines and not lines[-1]:
+                lines.pop()
+            if len(lines) <= 1:
+                event.current_buffer.insert_text(lines[0] if lines else "")
+                return
+            self._spawn(self.submit_multiline_paste(self.active_alias, text))
 
         @bindings.add("c-l")
         def clear_screen(_event: Any) -> None:
@@ -1304,6 +1351,50 @@ class TfrTui:
             self.add_notice(alias, "Connection is not accepting commands")
         else:
             self._jump_to_end(alias)
+
+    async def submit_multiline_paste(self, alias: str, text: str) -> None:
+        view = self.views[alias]
+        if view.session.state is not SessionState.CONNECTED:
+            self.add_notice(alias, "Not connected; multiline paste was not sent")
+            return
+        if alias in self._active_multiline_pastes:
+            self.add_notice(alias, "A multiline paste is already active for this world")
+            return
+        try:
+            commands = _multiline_paste_commands(
+                text,
+                server=view.session.config.server,
+                encoding=view.session.encoding,
+            )
+        except ValueError as exc:
+            self.add_notice(alias, str(exc))
+            return
+        if not commands:
+            return
+
+        self._active_multiline_pastes.add(alias)
+        self._jump_to_end(alias)
+        self.add_notice(alias, f"Sending multiline paste as {len(commands)} paced @emit lines")
+        try:
+            for line_number, command in enumerate(commands, start=1):
+                if line_number > 1:
+                    await asyncio.sleep(_MULTILINE_PASTE_DELAY_SECONDS)
+                await self.command_bus.submit(
+                    CommandRequest(
+                        session_id=view.session.session_id,
+                        world=alias,
+                        actor=Actor(ActorType.HUMAN, "operator"),
+                        text=command,
+                        metadata={
+                            "multiline_paste_line": line_number,
+                            "multiline_paste_total_lines": len(commands),
+                        },
+                    )
+                )
+        except (UnknownSessionError, ValueError):
+            self.add_notice(alias, "Connection stopped accepting the multiline paste")
+        finally:
+            self._active_multiline_pastes.discard(alias)
 
     async def _handle_client_command(self, alias: str, text: str) -> None:
         try:

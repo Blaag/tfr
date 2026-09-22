@@ -767,11 +767,19 @@ Acceptance criteria:
   after laptop sleep, using configurable or fixed retry counts and intervals so
   `/gateway reconnect` is not normally required.
 - [x] Add `/n` and `/p` shortcuts for switching to the next and previous worlds.
+- [ ] Add configurable world-switch aliases alongside each world in
+  `worlds.jsonc`, allowing shortcuts such as `/g` for `grapefruit` and `/j` for
+  `juicyfruit`. Validate alias syntax and reject duplicate world aliases;
+  detect collisions with core and plugin commands, with system commands always
+  taking priority rather than being shadowed by a world alias.
 - [ ] Create a `/stats` plugin with per-world received-versus-sent counts, top
   speakers, message histograms, speech-length statistics by speaker, UI output,
   and an explicit option to emit selected statistics to the world.
 - [x] Make display-affecting keys such as Page Up and Page Down immediately end
   an active screen-clear animation before performing the requested action.
+- [ ] Make low-bandwidth mode disable every animation, including screen-clear
+  plugin animations. Clearing the screen while `lowbw` is enabled must complete
+  immediately without rendering or scheduling animated effect frames.
 - [x] Detect HTTP and HTTPS URLs in chat output, render them underlined and
   clickable, and open them in a new tab through the operating system's default
   browser.
@@ -825,6 +833,12 @@ Acceptance criteria:
   `x2!`, `x3!`, `SUPER!`, `DOMINATING!`, and `UNSTOPPABLE!`; evaluate an
   end-of-line indicator after the speaker's text as the initial placement and
   extend the display-decoration API if animating appended text requires it.
+- [x] Detect bracketed multiline text pasted into the active world's input and
+  automatically send it as paced `@emit` commands, using the same server-aware
+  escaping and preflight validation as `/cat` so spaces, tabs, blank lines, and
+  other formatting survive without allowing pasted text to become unintended
+  world commands. Keep single-line paste editable and reject unsupported server
+  adapters before sending any line.
 - [ ] Build a mobile gateway client, evaluating a PWA before a native iOS app
   to avoid App Store fees and approval overhead while retaining an installable
   home-screen experience. The gateway already exchanges newline-delimited JSON
@@ -840,6 +854,7 @@ Acceptance criteria:
   scrollback, explicit return-to-live behavior, and responsive layouts for
   narrow screens. Compare PWA background/reconnect and notification limits
   against a native Swift client before choosing the long-term platform.
+- [ ] Fix speaker effects not working on poses.
 
 ## Test Strategy
 
