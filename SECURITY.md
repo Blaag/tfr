@@ -52,9 +52,10 @@ connections cannot consume local UI capacity. Treat possession of the token as
 full Gateway control, rotate it if exposed, and use Tailscale ACLs or a host
 firewall as an additional restriction.
 
-The gateway handshake exposes only world aliases, session IDs, connection
-states, server types, encodings, and agent status. It does not serialize world
-passwords, provider credentials, hosts, or complete configuration objects.
+The gateway handshake exposes only world names and switch aliases, session IDs,
+connection states, server types, encodings, and agent status. It does not
+serialize world passwords, provider credentials, hosts, or complete
+configuration objects.
 Attached UIs read only the main UI/plugin configuration file; they do not open
 the gateway's world or agent credential files.
 Each event and command acknowledgement is bounded to 1 MiB. Slow clients are

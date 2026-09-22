@@ -59,6 +59,35 @@ _MULTILINE_PASTE_DELAY_SECONDS = 0.5
 _MULTILINE_PASTE_MAXIMUM_BYTES = 1_048_576
 _MULTILINE_PASTE_MAXIMUM_LINES = 10_000
 _MULTILINE_PASTE_MAXIMUM_COMMAND_BYTES = 7_000
+_CORE_CLIENT_COMMANDS = frozenset(
+    {
+        "agent",
+        "animations",
+        "clear",
+        "connect",
+        "disconnect",
+        "end",
+        "exit",
+        "gateway",
+        "help",
+        "lowbw",
+        "n",
+        "next",
+        "nospoof",
+        "p",
+        "plugins",
+        "prev",
+        "previous",
+        "quit",
+        "recall",
+        "reconnect",
+        "reload",
+        "restart",
+        "sh",
+        "update",
+        "world",
+    }
+)
 
 
 class ServiceRuntime(Protocol):
@@ -480,6 +509,16 @@ class TfrTui:
         self.replay_mode = replay_mode
         self.recent_input_lines = recent_input_lines
         self.aliases = [session.world for session in sessions]
+        self.world_switch_aliases: dict[str, str] = {}
+        for session in sessions:
+            for shortcut in session.config.aliases:
+                previous = self.world_switch_aliases.get(shortcut)
+                if previous is not None:
+                    raise ValueError(
+                        f"duplicate world-switch alias {shortcut!r} for worlds "
+                        f"{previous!r} and {session.world!r}"
+                    )
+                self.world_switch_aliases[shortcut] = session.world
         self.active_index = 0
         self.inspector_agent: str | None = None
         self._event_queue: asyncio.Queue[Event] | None = None
@@ -596,6 +635,14 @@ class TfrTui:
         self.plugins.initialize_boss_selection(boss_screen_mode, boss_screen)
         self.plugins.set_notice_handler(self.add_notice)
         self.plugins.set_boss_state_handler(self._boss_state_changed)
+        shadowed = self._shadowed_world_aliases()
+        if shadowed:
+            details = ", ".join(f"/{name} ({reason})" for name, reason in shadowed.items())
+            for world in self.aliases:
+                self.queue_startup_notice(
+                    world,
+                    f"World-switch aliases shadowed by commands: {details}",
+                )
 
     @property
     def active_alias(self) -> str:
@@ -809,6 +856,10 @@ class TfrTui:
     def start_screen_clear(self, alias: str) -> None:
         view = self.views[alias]
         view.clear_selection()
+        if self.low_bandwidth:
+            view.display.clear_screen()
+            self._stop_screen_clear()
+            return
         elapsed_seconds = self._animation_elapsed_seconds()
         # Padded to the pane's true height (rather than however many rows
         # happen to be buffered) so the animation's floor always lands on
@@ -1485,8 +1536,22 @@ class TfrTui:
             command, tuple(parameters), alias
         ):
             pass
+        elif command in self.world_switch_aliases:
+            if parameters:
+                self.add_notice(alias, f"Usage: /{command}")
+            else:
+                self.switch_world(self.world_switch_aliases[command])
         else:
             self.add_notice(alias, f"Unknown client command: /{command}")
+
+    def _shadowed_world_aliases(self) -> dict[str, str]:
+        shadowed: dict[str, str] = {}
+        for command in self.world_switch_aliases:
+            if command in _CORE_CLIENT_COMMANDS:
+                shadowed[command] = "core command"
+            elif registered := self.plugins.registry.commands.get(command):
+                shadowed[command] = f"{registered[0]} plugin command"
+        return shadowed
 
     def help_text(self) -> str:
         lines = [
@@ -1519,7 +1584,7 @@ class TfrTui:
             "  Ctrl-L clear screen; Ctrl-R reconnect; F8 agent inspector",
             "  Ctrl-Q quit; Ctrl-C interrupt",
             "",
-            "Loaded plugin commands",
+            "World-switch aliases",
         ]
         if self.restart_supported:
             lines.insert(
@@ -1528,6 +1593,14 @@ class TfrTui:
             )
         if self.gateway_reconnect is not None:
             lines.insert(5, "  /gateway reconnect - reconnect this UI to the gateway")
+        shadowed = self._shadowed_world_aliases()
+        if not self.world_switch_aliases:
+            lines.append("  none")
+        else:
+            for command, world in sorted(self.world_switch_aliases.items()):
+                suffix = f"; shadowed by {shadowed[command]}" if command in shadowed else ""
+                lines.append(f"  /{command} - switch to {world}{suffix}")
+        lines.extend(("", "Loaded plugin commands"))
         if not self.plugins.registry.commands:
             lines.append("  none")
         else:
@@ -1721,6 +1794,8 @@ class TfrTui:
             self._animation_epoch += now - self._animation_paused_at
             self._animation_paused_at = None
         self.low_bandwidth = enabled
+        if enabled and self._screen_clear_world is not None:
+            self._stop_screen_clear()
 
     def _handle_animations_command(self, alias: str, parameters: list[str]) -> None:
         operation = parameters[0].casefold() if len(parameters) == 1 else ""

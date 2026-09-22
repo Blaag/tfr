@@ -375,6 +375,7 @@ editor completion and validation.
 
   "worlds": {
     "example-me": {
+      "aliases": ["me"],
       "host": "mux.example.org",
       "port": 4201,
       "server": "tinymux",
@@ -767,7 +768,7 @@ Acceptance criteria:
   after laptop sleep, using configurable or fixed retry counts and intervals so
   `/gateway reconnect` is not normally required.
 - [x] Add `/n` and `/p` shortcuts for switching to the next and previous worlds.
-- [ ] Add configurable world-switch aliases alongside each world in
+- [x] Add configurable world-switch aliases alongside each world in
   `worlds.jsonc`, allowing shortcuts such as `/g` for `grapefruit` and `/j` for
   `juicyfruit`. Validate alias syntax and reject duplicate world aliases;
   detect collisions with core and plugin commands, with system commands always
@@ -777,7 +778,7 @@ Acceptance criteria:
   and an explicit option to emit selected statistics to the world.
 - [x] Make display-affecting keys such as Page Up and Page Down immediately end
   an active screen-clear animation before performing the requested action.
-- [ ] Make low-bandwidth mode disable every animation, including screen-clear
+- [x] Make low-bandwidth mode disable every animation, including screen-clear
   plugin animations. Clearing the screen while `lowbw` is enabled must complete
   immediately without rendering or scheduling animated effect frames.
 - [x] Detect HTTP and HTTPS URLs in chat output, render them underlined and
@@ -854,7 +855,7 @@ Acceptance criteria:
   scrollback, explicit return-to-live behavior, and responsive layouts for
   narrow screens. Compare PWA background/reconnect and notification limits
   against a native Swift client before choosing the long-term platform.
-- [ ] Fix speaker effects not working on poses.
+- [x] Fix speaker effects not working on poses.
 
 ## Test Strategy
 

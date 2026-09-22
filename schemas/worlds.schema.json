@@ -112,6 +112,18 @@
     "WorldConfig": {
       "additionalProperties": false,
       "properties": {
+        "aliases": {
+          "default": [],
+          "items": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Aliases",
+          "type": "array"
+        },
         "autoconnect": {
           "default": false,
           "title": "Autoconnect",
