@@ -104,6 +104,28 @@ class FakeRuntime:
         raise AssertionError(f"unexpected control request: {world} {action}")
 
 
+def test_runtime_world_descriptors_include_switch_aliases() -> None:
+    session = SimpleNamespace(
+        world="alpha",
+        session_id=uuid4(),
+        state=SessionState.CONNECTED,
+        config=SimpleNamespace(server="tinymux", aliases=("a", "main")),
+        encoding="utf-8",
+        show_nospoof_prefix=False,
+    )
+    runtime = GatewayRuntime(
+        event_bus=EventBus(),
+        command_bus=SimpleNamespace(),  # type: ignore[arg-type]
+        sessions=[session],  # type: ignore[list-item]
+        manager=SimpleNamespace(sessions={"alpha": session}),  # type: ignore[arg-type]
+        plugins=None,  # type: ignore[arg-type]
+        agents=SimpleNamespace(controllers={}),  # type: ignore[arg-type]
+        history=SimpleNamespace(limits={"alpha": 100}),  # type: ignore[arg-type]
+    )
+
+    assert runtime.world_descriptors()[0]["aliases"] == ["a", "main"]
+
+
 async def test_server_handshake_backfill_command_ack_and_detach() -> None:
     bus = EventBus()
     history = EventHistory(bus, {"alpha": 10})

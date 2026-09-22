@@ -7,6 +7,8 @@ import pytest
 
 from tfr.config import (
     ConfigurationError,
+    WorldConfig,
+    WorldsConfig,
     credential_permission_warning,
     default_config_directory,
     default_config_path,
@@ -117,6 +119,68 @@ def test_loads_jsonc_and_resolves_references(tmp_path: Path) -> None:
     assert "world-secret" not in repr(bundle)
     assert "api-secret" not in repr(bundle)
     assert bundle.warnings == ()
+
+
+def test_world_switch_aliases_are_normalized(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    (tmp_path / "worlds.jsonc").write_text(
+        WORLDS.replace(
+            '"host": "localhost",',
+            '"aliases": ["BW", "bot_world"],\n      "host": "localhost",',
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_configuration(main_path)
+
+    assert bundle.worlds.worlds["bot-world"].aliases == ("bw", "bot_world")
+
+
+def test_rejects_invalid_and_duplicate_world_switch_aliases(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    worlds_path = tmp_path / "worlds.jsonc"
+    worlds_path.write_text(
+        WORLDS.replace(
+            '"host": "localhost",',
+            '"aliases": ["/bw"],\n      "host": "localhost",',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="String should match pattern"):
+        load_configuration(main_path)
+
+    worlds_path.write_text(
+        WORLDS.replace(
+            '"bot-world": {',
+            '"other-world": {"host": "localhost", "port": 4202, "aliases": ["bw"]},\n'
+            '    "bot-world": {"aliases": ["BW"],',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="duplicate world-switch alias 'bw'"):
+        load_configuration(main_path)
+
+
+def test_world_switch_alias_limits_are_enforced() -> None:
+    with pytest.raises(ValueError, match="at most 64 characters"):
+        WorldConfig(host="localhost", port=4201, aliases=("a" * 65,))
+    with pytest.raises(ValueError, match="at most 32 items"):
+        WorldConfig(
+            host="localhost",
+            port=4201,
+            aliases=tuple(f"alias_{index}" for index in range(33)),
+        )
+
+    worlds = {
+        f"world-{world_index}": WorldConfig(
+            host="localhost",
+            port=4201,
+            aliases=tuple(f"a{world_index}_{alias_index}" for alias_index in range(32)),
+        )
+        for world_index in range(9)
+    }
+    with pytest.raises(ValueError, match="more than 256 switch aliases"):
+        WorldsConfig(worlds=worlds)
 
 
 def test_ui_configuration_does_not_read_world_or_agent_files(tmp_path: Path) -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -57,6 +57,7 @@ def make_tui(
     theme: ThemeConfig | None = None,
     output_color: str | None = None,
     server: str = "generic",
+    world_aliases: Mapping[str, tuple[str, ...]] | None = None,
 ) -> TfrTui:
     event_bus = EventBus()
     command_bus = CommandBus()
@@ -66,6 +67,7 @@ def make_tui(
             config=WorldConfig(
                 host="localhost",
                 port=4201,
+                aliases=(world_aliases or {}).get(alias, ()),
                 autoconnect=False,
                 server=server,
             ),
@@ -890,6 +892,63 @@ async def test_n_and_p_are_shortcuts_for_next_and_previous_world() -> None:
     assert tui.active_alias == "alpha"
 
 
+async def test_world_switch_aliases_validate_arguments_and_switch_worlds() -> None:
+    tui = make_tui(world_aliases={"beta": ("B",)})
+
+    await tui._handle_client_command("alpha", "/b extra")
+    assert tui.active_alias == "alpha"
+    assert "Usage: /b" in fragment_list_to_text(tui.active_view.display.formatted_text())
+
+    await tui._handle_client_command("alpha", "/B")
+    assert tui.active_alias == "beta"
+
+
+async def test_core_and_plugin_commands_take_priority_over_world_aliases() -> None:
+    calls: list[str] = []
+
+    class AliasFixture:
+        def register(self, registrar: object, _config: object) -> None:
+            registrar.register_command(  # type: ignore[attr-defined]
+                "fixture",
+                lambda context, _arguments: calls.append(context.world),
+                help="run the fixture",
+            )
+
+    event_bus = EventBus()
+    command_bus = CommandBus()
+    plugins = await PluginManager.load(
+        enabled=("fixture",),
+        config={},
+        event_bus=event_bus,
+        command_bus=command_bus,
+        targets={},
+        discovered=(entry_point("fixture", AliasFixture()),),
+        scope="ui",
+    )
+    tui = make_tui(
+        plugins=plugins,
+        world_aliases={"alpha": ("n", "fixture"), "beta": ("b",)},
+    )
+
+    await tui._handle_client_command("alpha", "/n")
+    assert tui.active_alias == "beta"
+
+    tui.switch_world("alpha")
+    await tui._handle_client_command("alpha", "/fixture")
+    assert tui.active_alias == "alpha"
+    assert calls == ["alpha"]
+
+    help_text = tui.help_text()
+    assert "/b - switch to beta" in help_text
+    assert "/n - switch to alpha; shadowed by core command" in help_text
+    assert "/fixture - switch to alpha; shadowed by fixture plugin command" in help_text
+    assert {world for world, _text in tui._startup_notices} == {"alpha", "beta"}
+    assert all(
+        "World-switch aliases shadowed by commands" in text
+        for _world, text in tui._startup_notices
+    )
+
+
 async def test_nospoof_command_toggles_prefix_visibility() -> None:
     tui = make_tui()
     session = tui.active_view.session
@@ -987,6 +1046,61 @@ async def test_screen_clear_plugin_overlays_snapshot_then_reveals_new_output() -
 
     assert tui._screen_clear_world is None
     assert fragment_list_to_text(view.display.formatted_text()) == "new text"
+
+
+async def test_low_bandwidth_clears_immediately_without_scheduling_screen_effect() -> None:
+    tui = make_tui()
+    rendered = False
+
+    class ClearFixture:
+        def register(self, registrar: object, _config: object) -> None:
+            def render(_context: ScreenClearContext) -> tuple[tuple[str, str], ...]:
+                nonlocal rendered
+                rendered = True
+                return (("", "animated"),)
+
+            registrar.register_screen_clear_effect(  # type: ignore[attr-defined]
+                render,
+                duration_seconds=1,
+                frames_per_second=20,
+            )
+
+    tui.plugins = await PluginManager.load(
+        enabled=("clear-fixture",),
+        config={},
+        event_bus=tui.event_bus,
+        command_bus=tui.command_bus,
+        targets={},
+        discovered=(entry_point("clear-fixture", ClearFixture()),),
+        scope="ui",
+    )
+    tui._set_low_bandwidth(True)
+    tui.active_view.display.append("clear me")
+
+    tui.start_screen_clear("alpha")
+
+    assert tui.active_view.display.screen_is_cleared is True
+    assert tui._screen_clear_task is None
+    assert tui._screen_clear_world is None
+    assert tui._screen_clear_plugin is None
+    assert rendered is False
+
+
+async def test_enabling_low_bandwidth_cancels_active_screen_clear() -> None:
+    tui = make_tui()
+    await add_screen_clear_effects(tui)
+    tui.active_view.display.append("clear me")
+    tui.start_screen_clear("alpha")
+    task = tui._screen_clear_task
+    assert task is not None
+
+    tui._set_low_bandwidth(True)
+    await asyncio.sleep(0)
+
+    assert task.cancelled()
+    assert tui._screen_clear_task is None
+    assert tui._screen_clear_world is None
+    assert tui._screen_clear_plugin is None
 
 
 async def test_screen_clear_context_includes_visible_text_styles() -> None:

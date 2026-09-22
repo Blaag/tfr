@@ -299,9 +299,20 @@ class IdleConfig(StrictModel):
     command: str = Field(min_length=1)
 
 
+WorldSwitchAlias = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z][A-Za-z0-9_-]*$",
+    ),
+]
+
+
 class WorldConfig(StrictModel):
     host: str = Field(min_length=1)
     port: int = Field(ge=1, le=65_535)
+    aliases: tuple[WorldSwitchAlias, ...] = Field(default=(), max_length=32)
     server: Literal["bare", "generic", "rhost", "tinymush", "tinymux"] = "generic"
     encoding: str | None = None
     reconnect: bool | None = None
@@ -313,12 +324,33 @@ class WorldConfig(StrictModel):
     idle: IdleConfig | None = None
     startup_commands: tuple[str, ...] = ()
 
+    @field_validator("aliases")
+    @classmethod
+    def valid_world_switch_aliases(cls, aliases: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(alias.casefold() for alias in aliases)
+
 
 class WorldsConfig(StrictModel):
     schema_url: str | None = Field(default=None, alias="$schema")
     schema_version: Literal[1] = 1
     defaults: WorldDefaults = Field(default_factory=WorldDefaults)
     worlds: dict[str, WorldConfig] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def aliases_are_unique(self) -> WorldsConfig:
+        owners: dict[str, str] = {}
+        for world, config in self.worlds.items():
+            for alias in config.aliases:
+                previous = owners.get(alias)
+                if previous is not None:
+                    raise ValueError(
+                        f"duplicate world-switch alias {alias!r} for worlds "
+                        f"{previous!r} and {world!r}"
+                    )
+                owners[alias] = world
+        if len(owners) > 256:
+            raise ValueError("world configuration cannot define more than 256 switch aliases")
+        return self
 
 
 class ProviderConfig(StrictModel):

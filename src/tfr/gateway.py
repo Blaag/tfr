@@ -407,6 +407,7 @@ class GatewayRuntime:
                 "state": session.state.value,
                 "server": session.config.server,
                 "encoding": session.encoding,
+                "aliases": list(session.config.aliases),
                 "agent": session.world in agent_worlds,
                 "scrollback_lines": self.history.limits[session.world],
                 "show_nospoof_prefix": session.show_nospoof_prefix,

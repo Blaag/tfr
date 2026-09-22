@@ -66,6 +66,7 @@ class RemoteWorldSession:
         self.config = WorldConfig(
             host="gateway.invalid",
             port=1,
+            aliases=descriptor.get("aliases", ()),
             server=str(descriptor["server"]),
             encoding=str(descriptor["encoding"]),
             reconnect=False,
@@ -461,6 +462,11 @@ class GatewayClient:
                     for world in current_sessions.keys() & replacement_sessions.keys()
                 )
             )
+            aliases_changed = any(
+                current_sessions[world].config.aliases
+                != replacement_sessions[world].config.aliases
+                for world in current_sessions.keys() & replacement_sessions.keys()
+            )
             current_agents = set(self.agents.controllers) if self.agents is not None else set()
             replacement_agents = (
                 set(replacement.agents.controllers) if replacement.agents is not None else set()
@@ -468,6 +474,7 @@ class GatewayClient:
             if (
                 replacement.history_reset
                 or session_identity_changed
+                or aliases_changed
                 or current_agents != replacement_agents
             ):
                 await replacement.stop()

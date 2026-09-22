@@ -118,6 +118,14 @@ configuration path is `$XDG_CONFIG_HOME/tfr/config.jsonc` when
 Credential-bearing files should be readable only by their owner (`0600` on
 POSIX systems).
 
+Each world may define command-style switching shortcuts in `worlds.jsonc`, for
+example `"aliases": ["g"]` makes `/g` switch to that world. Alias names are
+case-insensitive, must use letters, digits, underscores, or hyphens, and must be
+unique across worlds. Each world may define up to 32 aliases of at most 64
+characters, with 256 aliases allowed across the configuration. Core and plugin
+commands take precedence over conflicting world aliases; `/help` identifies
+aliases that are shadowed.
+
 Running `tfr` without a mode starts the original combined client. For a
 persistent connection process, start `tfr gateway` and attach one or more
 terminals with `tfr ui`. Both use
@@ -531,9 +539,9 @@ ALIAS`, `/next` (`/n`), `/previous` (`/p`), `/connect`, `/disconnect`, `/reconne
 `/end`, `/nospoof show|hide|status`, `/animations on|off|status`,
 `/lowbw on|off|status`, `/clear`, `/boss`, `/sh`, `/reload`, `/restart`,
 `/gateway reconnect`, `/help`, and `/quit`, plus commands registered by enabled
-plugins. Begin input with `//` to send a literal
-leading slash. `/help` displays commands, loaded plugins, world markers, and
-keybindings.
+plugins and configured world-switch aliases such as `/g`. Begin input with `//`
+to send a literal leading slash. `/help` displays commands, aliases and any
+collisions, loaded plugins, world markers, and keybindings.
 
 After a laptop sleep or transient network loss, TFR verifies the Gateway
 connection is still alive on a background interval, and automatically retries

@@ -10,6 +10,7 @@
 
   "worlds": {
     "example-me": {
+      "aliases": ["me"],
       "host": "mux.example.org",
       "port": 4201,
       "server": "tinymux",
