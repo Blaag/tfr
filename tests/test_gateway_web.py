@@ -578,6 +578,26 @@ async def test_websocket_rejects_unpaired_client(tmp_path: Path) -> None:
         await bus.close()
 
 
+async def test_websocket_does_not_expose_history_cursor_exceptions(tmp_path: Path) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 5})
+    runtime = FakeRuntime(history)
+    gateway, client, token = await paired_client(tmp_path, runtime)
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        response = await client.get(
+            f"/ws?gateway_id={runtime.gateway_id}&after_cursor=999",
+            headers=headers,
+        )
+
+        assert response.status == 400
+        assert await response.text() == "History cursor is invalid or unavailable"
+        assert gateway._connection_counts == {}
+    finally:
+        await client.close()
+        await bus.close()
+
+
 async def test_revocation_closes_active_socket_and_invalidates_cookie(tmp_path: Path) -> None:
     bus = EventBus()
     history = EventHistory(bus, {"alpha": 5})

@@ -467,7 +467,7 @@ class WebGatewayServer:
         except ValueError as exc:
             async with self._session_lock:
                 self._release_connection(device.device_id)
-            raise web.HTTPBadRequest(text=str(exc)) from exc
+            raise web.HTTPBadRequest(text="History cursor is invalid or unavailable") from exc
         except BaseException:
             async with self._session_lock:
                 self._release_connection(device.device_id)
