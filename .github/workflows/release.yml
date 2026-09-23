@@ -23,12 +23,21 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen
       - run: uv run ruff check .
+      - run: node --check src/tfr/web/app.mjs
+      - run: node --test tests/test_web_pairing.mjs
       - run: >-
           uv run pytest -q
           -k 'not test_two_worlds_exchange_traffic_without_leakage'
       - name: Embed immutable build identity
         run: printf 'BUILD_COMMIT = "%s"\n' "$GITHUB_SHA" > src/tfr/_build.py
       - run: uv build
+      - name: Verify packaged web modules
+        run: |
+          wheels=(dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          assets="$(unzip -Z1 "${wheels[0]}")"
+          grep -Fxq 'tfr/web/app.mjs' <<<"$assets"
+          grep -Fxq 'tfr/web/pairing.mjs' <<<"$assets"
       - name: Build update manifest
         run: |
           wheels=(dist/*.whl)

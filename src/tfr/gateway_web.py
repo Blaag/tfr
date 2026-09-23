@@ -56,7 +56,8 @@ _VISIBLE_EVENT_KINDS = {
 _ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
-    "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/app.mjs": ("app.mjs", "text/javascript; charset=utf-8"),
+    "/pairing.mjs": ("pairing.mjs", "text/javascript; charset=utf-8"),
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
     "/sw.js": ("sw.js", "text/javascript; charset=utf-8"),
@@ -258,7 +259,7 @@ class WebGatewayServer:
                 web.post("/api/logout", self._logout),
                 web.get("/ws", self._websocket),
                 web.get(
-                    "/{asset:index.html|app.js|styles.css|manifest.webmanifest|sw.js|"
+                    "/{asset:index.html|app.mjs|pairing.mjs|styles.css|manifest.webmanifest|sw.js|"
                     "icon.svg|icon-512.png|apple-touch-icon.png}",
                     self._asset,
                 ),
@@ -350,32 +351,41 @@ class WebGatewayServer:
         self._validate_public_request(request, require_origin=True)
         tailscale_login = self._tailscale_login(request)
         now = time.monotonic()
-        attempts = self._pairing_attempts[tailscale_login]
-        while attempts and attempts[0] <= now - 60:
-            attempts.popleft()
+        for identity, identity_attempts in tuple(self._pairing_attempts.items()):
+            while identity_attempts and identity_attempts[0] <= now - 60:
+                identity_attempts.popleft()
+            if not identity_attempts:
+                self._pairing_attempts.pop(identity, None)
         while (
             self._global_pairing_attempts and self._global_pairing_attempts[0] <= now - 60
         ):
             self._global_pairing_attempts.popleft()
+        attempts = self._pairing_attempts.get(tailscale_login)
         if (
-            len(attempts) >= MAX_PAIRING_ATTEMPTS_PER_MINUTE
+            (attempts is not None and len(attempts) >= MAX_PAIRING_ATTEMPTS_PER_MINUTE)
             or len(self._global_pairing_attempts) >= MAX_GLOBAL_PAIRING_ATTEMPTS_PER_MINUTE
         ):
             return self._json_response({"error": "Pairing rate limit exceeded"}, status=429)
+        if attempts is None:
+            attempts = self._pairing_attempts[tailscale_login]
         attempts.append(now)
         self._global_pairing_attempts.append(now)
         try:
             value = await request.json(loads=json.loads)
         except (json.JSONDecodeError, UnicodeDecodeError):
             return self._json_response({"error": "Invalid JSON"}, status=400)
-        if not isinstance(value, dict) or set(value) != {"code"} or not isinstance(
-            value.get("code"), str
+        if (
+            not isinstance(value, dict)
+            or not {"code"} <= set(value) <= {"code", "retry_id"}
+            or not isinstance(value.get("code"), str)
+            or ("retry_id" in value and not isinstance(value["retry_id"], str))
         ):
             return self._json_response({"error": "Invalid pairing request"}, status=400)
         try:
             device, token = await self.devices.redeem(
                 value["code"],
                 tailscale_login,
+                value.get("retry_id"),
             )
         except ValueError as exc:
             return self._json_response({"error": str(exc)}, status=401)

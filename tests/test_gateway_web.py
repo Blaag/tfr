@@ -30,7 +30,8 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
     asset_directory = files("tfr").joinpath("web")
     assert {
         "index.html",
-        "app.js",
+        "app.mjs",
+        "pairing.mjs",
         "styles.css",
         "manifest.webmanifest",
         "sw.js",
@@ -249,6 +250,46 @@ async def test_pairing_requires_exact_origin_and_host(tmp_path: Path) -> None:
         await bus.close()
 
 
+async def test_pairing_retry_returns_the_same_device_cookie(tmp_path: Path) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 5})
+    runtime = FakeRuntime(history)
+    gateway = WebGatewayServer(
+        runtime,  # type: ignore[arg-type]
+        origin=ORIGIN,
+        host="127.0.0.1",
+        port=7348,
+        state_directory=tmp_path / "web",
+        snapshot_events=5,
+    )
+    client = TestClient(TestServer(gateway.application()))
+    await client.start_server()
+    code = parse_qs(urlsplit(gateway.create_pairing_url("Test iPhone")).fragment)["pair"][0]
+    try:
+        payload = {"code": code, "retry_id": "browser-a"}
+        first = await client.post("/api/pair", json=payload, headers=PUBLIC_HEADERS)
+        retry = await client.post("/api/pair", json=payload, headers=PUBLIC_HEADERS)
+        wrong_browser = await client.post(
+            "/api/pair",
+            json={"code": code, "retry_id": "browser-b"},
+            headers=PUBLIC_HEADERS,
+        )
+        wrong_identity = await client.post(
+            "/api/pair",
+            json=payload,
+            headers={**PUBLIC_HEADERS, "Tailscale-User-Login": "other@example.com"},
+        )
+
+        assert first.status == retry.status == 200
+        assert first.headers["Set-Cookie"] == retry.headers["Set-Cookie"]
+        assert wrong_browser.status == 401
+        assert wrong_identity.status == 401
+        assert len(gateway.device_descriptors()) == 1
+    finally:
+        await client.close()
+        await bus.close()
+
+
 async def test_pairing_rate_limit_is_isolated_by_tailscale_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -277,10 +318,18 @@ async def test_pairing_rate_limit_is_isolated_by_tailscale_identity(
             json={"code": "invalid"},
             headers={**PUBLIC_HEADERS, "Tailscale-User-Login": "other@example.com"},
         )
+        monkeypatch.setattr(gateway_web, "MAX_GLOBAL_PAIRING_ATTEMPTS_PER_MINUTE", 2)
+        globally_limited = await client.post(
+            "/api/pair",
+            json={"code": "invalid"},
+            headers={**PUBLIC_HEADERS, "Tailscale-User-Login": "third@example.com"},
+        )
 
         assert first.status == 401
         assert limited.status == 429
         assert other_identity.status == 401
+        assert globally_limited.status == 429
+        assert "third@example.com" not in gateway._pairing_attempts
     finally:
         await client.close()
         await bus.close()
