@@ -52,13 +52,60 @@ connections cannot consume local UI capacity. Treat possession of the token as
 full Gateway control, rotate it if exposed, and use Tailscale ACLs or a host
 firewall as an additional restriction.
 
-The gateway handshake exposes only world aliases, session IDs, connection
-states, server types, encodings, and agent status. It does not serialize world
-passwords, provider credentials, hosts, or complete configuration objects.
+The gateway handshake exposes only world names and switch aliases, session IDs,
+connection states, server types, encodings, and agent status. It does not
+serialize world passwords, provider credentials, hosts, or complete
+configuration objects.
 Attached UIs read only the main UI/plugin configuration file; they do not open
 the gateway's world or agent credential files.
 Each event and command acknowledgement is bounded to 1 MiB. Slow clients are
 detached when their event queue fills and can reconnect for retained backfill.
+
+### Web Gateway
+
+The optional mobile PWA is served by a separate HTTP/WebSocket listener that is
+restricted to `127.0.0.1` or `::1`. Deploy it behind private Tailscale Serve,
+never Tailscale Funnel, and configure one exact HTTPS origin. The service rejects
+unexpected Host and Origin values and does not enable CORS. Tailscale access
+controls remain a second boundary rather than replacing application
+authentication. TFR requires the `Tailscale-User-Login` header injected by Serve
+and binds each paired credential to that identity. Funnel traffic does not carry
+the identity header and is rejected.
+
+Mobile devices pair through a high-entropy, single-use, ten-minute code created
+over the owner-only Gateway Unix socket. Redemption sets an opaque
+`Secure`, `HttpOnly`, `SameSite=Strict`, host-only cookie. Only token digests and
+non-secret device metadata are persisted, in an owner-only directory and regular
+file with atomic replacement. `tfr devices` lists paired devices and
+`tfr revoke-device` invalidates a credential and closes its active sockets.
+Credentials expire after 180 days.
+
+Paired devices have chat scope, not normal Gateway-client authority. The web
+protocol accepts human world commands and ping requests only. It rejects
+connection controls, agent controls, remote actor selection, arbitrary metadata,
+sensitivity flags, and unknown fields. A bounded per-device request ledger makes
+command retries idempotent while the Gateway process remains running. An
+acknowledgement means the command entered the command bus, not that the remote
+world executed it. Pairing grants the device only the non-agent worlds present at
+that time; descriptors, history, live events, and commands are all filtered to
+that fixed allowlist.
+
+The browser receives an explicit projection rather than serialized internal
+events. Telnet, plugin-internal, and agent audit events are excluded; arbitrary
+metadata, model/provider details, session IDs, and canonical ANSI text are not
+sent. Visible text is reduced to safe plain text and the PWA constructs DOM text
+nodes rather than interpreting world output as HTML. Static responses use a
+restrictive Content Security Policy and authenticated responses are marked
+`no-store`. The service worker caches only the public application shell.
+
+The PWA stores only non-command interface state such as the selected world and
+Gateway identity in browser storage. Drafts, command history, transcript data,
+and the active cursor remain in memory so command text is not retained across a
+cold launch. A cold launch requests a fresh bounded retained-history snapshot;
+an in-page reconnect resumes from its active cursor. Clear site data before
+transferring or disposing of a paired phone. iOS can suspend background
+WebSockets; the PWA reconnects and requests retained backfill when foregrounded
+rather than sending commands offline.
 
 ## Logs
 

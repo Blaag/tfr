@@ -53,6 +53,41 @@ from tfr.updates import (
     UpdateResult,
     format_update_status,
 )
+from tfr.world_text import escape_world_text
+
+_MULTILINE_PASTE_DELAY_SECONDS = 0.5
+_MULTILINE_PASTE_MAXIMUM_BYTES = 1_048_576
+_MULTILINE_PASTE_MAXIMUM_LINES = 10_000
+_MULTILINE_PASTE_MAXIMUM_COMMAND_BYTES = 7_000
+_CORE_CLIENT_COMMANDS = frozenset(
+    {
+        "agent",
+        "animations",
+        "clear",
+        "connect",
+        "disconnect",
+        "end",
+        "exit",
+        "gateway",
+        "help",
+        "lowbw",
+        "n",
+        "next",
+        "nospoof",
+        "p",
+        "plugins",
+        "prev",
+        "previous",
+        "quit",
+        "recall",
+        "reconnect",
+        "reload",
+        "restart",
+        "sh",
+        "update",
+        "world",
+    }
+)
 
 
 class ServiceRuntime(Protocol):
@@ -68,6 +103,35 @@ def _row_text(row: FormattedRow) -> str:
 def _osc52_sequence(text: str) -> str:
     payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
     return f"\x1b]52;c;{payload}\x07"
+
+
+def _multiline_paste_commands(text: str, *, server: str, encoding: str) -> tuple[str, ...]:
+    if server not in {"bare", "tinymush", "tinymux"}:
+        raise ValueError("multiline paste requires a bare, tinymush, or tinymux world")
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    if "\x00" in normalized:
+        raise ValueError("multiline paste contains a NUL character")
+    if len(normalized.encode("utf-8")) > _MULTILINE_PASTE_MAXIMUM_BYTES:
+        raise ValueError(f"multiline paste exceeds the {_MULTILINE_PASTE_MAXIMUM_BYTES} byte limit")
+    lines = normalized.split("\n")
+    if lines and not lines[-1]:
+        lines.pop()
+    if len(lines) > _MULTILINE_PASTE_MAXIMUM_LINES:
+        raise ValueError(f"multiline paste exceeds the {_MULTILINE_PASTE_MAXIMUM_LINES} line limit")
+    commands = tuple(f"@emit {escape_world_text(line, server)}" for line in lines)
+    for line_number, command in enumerate(commands, start=1):
+        try:
+            command_size = len(command.encode(encoding, errors="strict"))
+        except (LookupError, UnicodeEncodeError) as exc:
+            raise ValueError(
+                f"multiline paste line {line_number} cannot be encoded as {encoding}"
+            ) from exc
+        if command_size > _MULTILINE_PASTE_MAXIMUM_COMMAND_BYTES:
+            raise ValueError(
+                f"multiline paste line {line_number} exceeds the "
+                f"{_MULTILINE_PASTE_MAXIMUM_COMMAND_BYTES} byte command limit"
+            )
+    return commands
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -445,10 +509,21 @@ class TfrTui:
         self.replay_mode = replay_mode
         self.recent_input_lines = recent_input_lines
         self.aliases = [session.world for session in sessions]
+        self.world_switch_aliases: dict[str, str] = {}
+        for session in sessions:
+            for shortcut in session.config.aliases:
+                previous = self.world_switch_aliases.get(shortcut)
+                if previous is not None:
+                    raise ValueError(
+                        f"duplicate world-switch alias {shortcut!r} for worlds "
+                        f"{previous!r} and {session.world!r}"
+                    )
+                self.world_switch_aliases[shortcut] = session.world
         self.active_index = 0
         self.inspector_agent: str | None = None
         self._event_queue: asyncio.Queue[Event] | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._active_multiline_pastes: set[str] = set()
         self.views: dict[str, WorldView] = {}
 
         for session in sessions:
@@ -560,6 +635,14 @@ class TfrTui:
         self.plugins.initialize_boss_selection(boss_screen_mode, boss_screen)
         self.plugins.set_notice_handler(self.add_notice)
         self.plugins.set_boss_state_handler(self._boss_state_changed)
+        shadowed = self._shadowed_world_aliases()
+        if shadowed:
+            details = ", ".join(f"/{name} ({reason})" for name, reason in shadowed.items())
+            for world in self.aliases:
+                self.queue_startup_notice(
+                    world,
+                    f"World-switch aliases shadowed by commands: {details}",
+                )
 
     @property
     def active_alias(self) -> str:
@@ -638,6 +721,17 @@ class TfrTui:
         @bindings.add("c-r")
         def reconnect(_event: Any) -> None:
             self._spawn(self.reconnect_world(self.active_alias))
+
+        @bindings.add(Keys.BracketedPaste)
+        def bracketed_paste(event: Any) -> None:
+            text = event.data.replace("\r\n", "\n").replace("\r", "\n")
+            lines = text.split("\n")
+            if lines and not lines[-1]:
+                lines.pop()
+            if len(lines) <= 1:
+                event.current_buffer.insert_text(lines[0] if lines else "")
+                return
+            self._spawn(self.submit_multiline_paste(self.active_alias, text))
 
         @bindings.add("c-l")
         def clear_screen(_event: Any) -> None:
@@ -762,6 +856,10 @@ class TfrTui:
     def start_screen_clear(self, alias: str) -> None:
         view = self.views[alias]
         view.clear_selection()
+        if self.low_bandwidth:
+            view.display.clear_screen()
+            self._stop_screen_clear()
+            return
         elapsed_seconds = self._animation_elapsed_seconds()
         # Padded to the pane's true height (rather than however many rows
         # happen to be buffered) so the animation's floor always lands on
@@ -1305,6 +1403,50 @@ class TfrTui:
         else:
             self._jump_to_end(alias)
 
+    async def submit_multiline_paste(self, alias: str, text: str) -> None:
+        view = self.views[alias]
+        if view.session.state is not SessionState.CONNECTED:
+            self.add_notice(alias, "Not connected; multiline paste was not sent")
+            return
+        if alias in self._active_multiline_pastes:
+            self.add_notice(alias, "A multiline paste is already active for this world")
+            return
+        try:
+            commands = _multiline_paste_commands(
+                text,
+                server=view.session.config.server,
+                encoding=view.session.encoding,
+            )
+        except ValueError as exc:
+            self.add_notice(alias, str(exc))
+            return
+        if not commands:
+            return
+
+        self._active_multiline_pastes.add(alias)
+        self._jump_to_end(alias)
+        self.add_notice(alias, f"Sending multiline paste as {len(commands)} paced @emit lines")
+        try:
+            for line_number, command in enumerate(commands, start=1):
+                if line_number > 1:
+                    await asyncio.sleep(_MULTILINE_PASTE_DELAY_SECONDS)
+                await self.command_bus.submit(
+                    CommandRequest(
+                        session_id=view.session.session_id,
+                        world=alias,
+                        actor=Actor(ActorType.HUMAN, "operator"),
+                        text=command,
+                        metadata={
+                            "multiline_paste_line": line_number,
+                            "multiline_paste_total_lines": len(commands),
+                        },
+                    )
+                )
+        except (UnknownSessionError, ValueError):
+            self.add_notice(alias, "Connection stopped accepting the multiline paste")
+        finally:
+            self._active_multiline_pastes.discard(alias)
+
     async def _handle_client_command(self, alias: str, text: str) -> None:
         try:
             arguments = shlex.split(text[1:])
@@ -1394,8 +1536,22 @@ class TfrTui:
             command, tuple(parameters), alias
         ):
             pass
+        elif command in self.world_switch_aliases:
+            if parameters:
+                self.add_notice(alias, f"Usage: /{command}")
+            else:
+                self.switch_world(self.world_switch_aliases[command])
         else:
             self.add_notice(alias, f"Unknown client command: /{command}")
+
+    def _shadowed_world_aliases(self) -> dict[str, str]:
+        shadowed: dict[str, str] = {}
+        for command in self.world_switch_aliases:
+            if command in _CORE_CLIENT_COMMANDS:
+                shadowed[command] = "core command"
+            elif registered := self.plugins.registry.commands.get(command):
+                shadowed[command] = f"{registered[0]} plugin command"
+        return shadowed
 
     def help_text(self) -> str:
         lines = [
@@ -1428,7 +1584,7 @@ class TfrTui:
             "  Ctrl-L clear screen; Ctrl-R reconnect; F8 agent inspector",
             "  Ctrl-Q quit; Ctrl-C interrupt",
             "",
-            "Loaded plugin commands",
+            "World-switch aliases",
         ]
         if self.restart_supported:
             lines.insert(
@@ -1437,6 +1593,14 @@ class TfrTui:
             )
         if self.gateway_reconnect is not None:
             lines.insert(5, "  /gateway reconnect - reconnect this UI to the gateway")
+        shadowed = self._shadowed_world_aliases()
+        if not self.world_switch_aliases:
+            lines.append("  none")
+        else:
+            for command, world in sorted(self.world_switch_aliases.items()):
+                suffix = f"; shadowed by {shadowed[command]}" if command in shadowed else ""
+                lines.append(f"  /{command} - switch to {world}{suffix}")
+        lines.extend(("", "Loaded plugin commands"))
         if not self.plugins.registry.commands:
             lines.append("  none")
         else:
@@ -1630,6 +1794,8 @@ class TfrTui:
             self._animation_epoch += now - self._animation_paused_at
             self._animation_paused_at = None
         self.low_bandwidth = enabled
+        if enabled and self._screen_clear_world is not None:
+            self._stop_screen_clear()
 
     def _handle_animations_command(self, alias: str, parameters: list[str]) -> None:
         operation = parameters[0].casefold() if len(parameters) == 1 else ""

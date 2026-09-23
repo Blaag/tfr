@@ -21,6 +21,7 @@ from tfr.gateway_client import (
     GatewayClient,
     GatewayDisconnectedError,
     GatewayUiRuntime,
+    RemoteWorldSession,
     run_gateway_ui,
 )
 from tfr.gateway_protocol import GatewayProtocolError
@@ -59,6 +60,7 @@ class FakeRuntime:
         self.history = history
         self.commands: list[CommandRequest] = []
         self.agent_controls: list[tuple[str, str]] = []
+        self.aliases = ["a"]
 
     def world_descriptors(self) -> list[dict[str, object]]:
         return [
@@ -68,6 +70,7 @@ class FakeRuntime:
                 "state": "connected",
                 "server": "bare",
                 "encoding": "utf-8",
+                "aliases": self.aliases,
                 "agent": False,
             }
         ]
@@ -137,6 +140,7 @@ async def test_client_receives_snapshot_live_events_and_command_acks() -> None:
         assert client.gateway_build is not None
         assert client.gateway_build.version == current_build().version
         assert client.gateway_build.protocol == 1
+        assert client.sessions[0].config.aliases == ("a",)
         await bus.publish(make_event(1))
         received = await asyncio.wait_for(queue.get(), timeout=1)
         assert received.canonical_text == "line 1"
@@ -206,6 +210,19 @@ async def test_new_ui_can_rebuild_display_from_retained_gateway_history() -> Non
     socket_path.parent.rmdir()
 
 
+def test_remote_world_session_defaults_missing_aliases_for_older_gateways() -> None:
+    descriptor = FakeRuntime(SimpleNamespace()).world_descriptors()[0]  # type: ignore[arg-type]
+    descriptor.pop("aliases")
+
+    session = RemoteWorldSession(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        descriptor,
+        show_nospoof_prefix=False,
+    )
+
+    assert session.config.aliases == ()
+
+
 async def test_client_reconnects_and_restores_only_missed_events() -> None:
     bus = EventBus()
     history = EventHistory(bus, {"alpha": 10})
@@ -251,6 +268,30 @@ async def test_client_reconnect_requires_reload_after_gateway_restart() -> None:
     try:
         await client.stop()
         runtime.gateway_id = uuid4()
+
+        with pytest.raises(GatewayDisconnectedError, match=r"use /reload"):
+            await client.reconnect()
+    finally:
+        await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+    socket_path.parent.rmdir()
+
+
+async def test_client_reconnect_requires_reload_when_world_aliases_change() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    socket_path = Path("/tmp") / f"tfr-test-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    client.start()
+    try:
+        await client.stop()
+        runtime.aliases = ["changed"]
 
         with pytest.raises(GatewayDisconnectedError, match=r"use /reload"):
             await client.reconnect()

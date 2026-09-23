@@ -118,6 +118,14 @@ configuration path is `$XDG_CONFIG_HOME/tfr/config.jsonc` when
 Credential-bearing files should be readable only by their owner (`0600` on
 POSIX systems).
 
+Each world may define command-style switching shortcuts in `worlds.jsonc`, for
+example `"aliases": ["g"]` makes `/g` switch to that world. Alias names are
+case-insensitive, must use letters, digits, underscores, or hyphens, and must be
+unique across worlds. Each world may define up to 32 aliases of at most 64
+characters, with 256 aliases allowed across the configuration. Core and plugin
+commands take precedence over conflicting world aliases; `/help` identifies
+aliases that are shadowed.
+
 Running `tfr` without a mode starts the original combined client. For a
 persistent connection process, start `tfr gateway` and attach one or more
 terminals with `tfr ui`. Both use
@@ -324,6 +332,81 @@ cannot be disabled. Tailscale ACLs should additionally restrict port `7347` to
 the intended UI devices. `/reload` preserves these command-line connection
 options because it replaces the UI with the same arguments.
 
+## Mobile PWA
+
+The Gateway can serve an installable, iPhone-oriented web client through
+[Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve). The PWA uses a
+separate chat-only protocol and revocable device credentials; it never receives
+the shared full-control Gateway token. The backend listens only on loopback and
+expects Tailscale Serve to provide the configured HTTPS origin.
+
+Choose the Gateway machine's HTTPS MagicDNS URL and add this top-level block to
+`config.jsonc`:
+
+```jsonc
+"web_gateway": {
+  "enabled": true,
+  "origin": "https://gateway.example.ts.net",
+  "listen_host": "127.0.0.1",
+  "listen_port": 7348,
+  "state_directory": "~/.local/state/tfr/web",
+  "snapshot_events": 2000,
+},
+```
+
+Start or restart `tfr gateway` normally. It will report the loopback web
+listener in addition to the private Unix socket. Publish that loopback service
+inside the tailnet with Tailscale Serve:
+
+```console
+tailscale serve --bg http://127.0.0.1:7348
+tailscale serve status
+```
+
+Use `tailscale serve`, not `tailscale funnel`; Funnel would make the endpoint
+public. The configured `origin` must exactly match the HTTPS URL reported by
+Serve, including a non-default port if one is used. Keep a Tailscale grant or ACL
+that limits access to the intended phone and administrator identities. TFR also
+requires the `Tailscale-User-Login` identity header added by Serve and binds each
+device credential to the identity that redeemed its pairing link; Funnel traffic
+does not carry this header and is rejected.
+
+Create a ten-minute, single-use pairing link through the Gateway's owner-only
+Unix socket:
+
+```console
+tfr pair --device-name "My iPhone"
+```
+
+Open the printed URL on the phone while Tailscale is connected. The pairing
+secret is in the URL fragment and is removed before the PWA makes a request, but
+the URL should still be treated as a short-lived secret and kept out of shell
+transcripts and messages. In Safari, use Share > Add to Home Screen after
+pairing.
+
+List and revoke paired devices locally:
+
+```console
+tfr devices
+tfr revoke-device --device-id eb4fd272-a20a-444e-8b4d-93f2e0ad2713
+```
+
+Add `--socket PATH` to these commands when the Gateway uses a non-default Unix
+socket. Revocation invalidates the credential and closes any active PWA socket.
+Deleting `web_gateway.state_directory` revokes every device, but normal
+administration should use `revoke-device`. Device credentials expire after 180
+days and authorize only non-agent worlds that existed when the link was created.
+Pair again after adding a world that the phone should access.
+
+The PWA provides retained and live world output, world switching, unread counts,
+per-world drafts and bounded command history, command submission, safe links,
+and reconnect/backfill. It intentionally does not provide agent controls, world
+connection controls, local shell access, plugin UI, or offline command queues.
+iOS may suspend its WebSocket in the background; returning to the app reconnects
+from the last committed cursor. If retained history no longer covers the gap,
+the app reports that truncation instead of pretending the transcript is
+complete.
+
 ## Separate Linux UI Host
 
 The UI can run on a Linux computer other than the Gateway host. Install the
@@ -511,6 +594,9 @@ otherwise approximate the RGB colors at the terminal's available color depth.
 ## Terminal Controls
 
 - `Enter`: send input to the active world.
+- Pasting multiple lines sends them to the active `bare`, TinyMUSH, or TinyMUX
+  world as preflighted, server-escaped, paced `@emit` commands. Internal blank
+  lines and indentation are preserved; a single pasted line remains editable.
 - `F6`, `Ctrl+Right`, or `Option+Right`: switch to the next world.
 - `F5`, `Ctrl+Left`, or `Option+Left`: switch to the previous world.
 - `PageUp` and `PageDown`: navigate scrollback or advance `More` output.
@@ -528,9 +614,9 @@ ALIAS`, `/next` (`/n`), `/previous` (`/p`), `/connect`, `/disconnect`, `/reconne
 `/end`, `/nospoof show|hide|status`, `/animations on|off|status`,
 `/lowbw on|off|status`, `/clear`, `/boss`, `/sh`, `/reload`, `/restart`,
 `/gateway reconnect`, `/help`, and `/quit`, plus commands registered by enabled
-plugins. Begin input with `//` to send a literal
-leading slash. `/help` displays commands, loaded plugins, world markers, and
-keybindings.
+plugins and configured world-switch aliases such as `/g`. Begin input with `//`
+to send a literal leading slash. `/help` displays commands, aliases and any
+collisions, loaded plugins, world markers, and keybindings.
 
 After a laptop sleep or transient network loss, TFR verifies the Gateway
 connection is still alive on a background interval, and automatically retries

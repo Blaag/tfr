@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0d1717">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="TFR">
+    <meta name="format-detection" content="telephone=no">
+    <title>TFR Field Console</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+    <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <main id="pairing" class="pairing" hidden>
+      <section class="pairing-panel" aria-labelledby="pairing-title">
+        <div class="signal-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+        <p class="eyebrow">Private field console</p>
+        <h1 id="pairing-title">Pair this device</h1>
+        <p id="pairing-message">
+          On the Gateway host, create a one-time link with
+          <code>tfr pair --device-name "My iPhone"</code>, then open that link here.
+        </p>
+        <p class="fine-print">The link expires after ten minutes and works once.</p>
+      </section>
+    </main>
+
+    <main id="console" class="console" hidden>
+      <header class="topbar">
+        <button id="world-button" class="world-button" type="button" aria-haspopup="dialog">
+          <span id="world-signal" class="world-signal" aria-hidden="true"></span>
+          <span class="world-heading">
+            <span class="eyebrow">Active world</span>
+            <strong id="world-name">Select world</strong>
+          </span>
+          <span class="chevron" aria-hidden="true">⌄</span>
+        </button>
+        <div id="connection-state" class="connection-state" role="status">Offline</div>
+      </header>
+
+      <section id="history-notice" class="history-notice" hidden></section>
+      <section id="transcript" class="transcript" aria-live="polite" aria-label="World transcript">
+        <ol id="event-list" class="event-list"></ol>
+        <div id="empty-state" class="empty-state">
+          <span class="empty-glyph" aria-hidden="true">∿</span>
+          <p>Waiting for a signal.</p>
+        </div>
+      </section>
+
+      <button id="return-live" class="return-live" type="button" hidden>
+        <span id="return-live-count"></span>
+        Return to live
+      </button>
+
+      <form id="composer" class="composer">
+        <div class="history-controls" aria-label="Command history">
+          <button id="history-older" type="button" aria-label="Older command">↑</button>
+          <button id="history-newer" type="button" aria-label="Newer command">↓</button>
+        </div>
+        <label class="command-field">
+          <span class="sr-only">Command</span>
+          <input id="command-input" type="text" enterkeyhint="send" autocomplete="off"
+                 autocapitalize="none" spellcheck="false" placeholder="Send to world…">
+        </label>
+        <button id="send-button" class="send-button" type="submit">Send</button>
+      </form>
+    </main>
+
+    <dialog id="world-dialog" class="world-dialog">
+      <form method="dialog" class="world-sheet">
+        <header>
+          <div>
+            <p class="eyebrow">Gateway worlds</p>
+            <h2>Change frequency</h2>
+          </div>
+          <button class="close-button" value="cancel" aria-label="Close world picker">×</button>
+        </header>
+        <div id="world-list" class="world-list"></div>
+        <button id="unpair-device" class="unpair-device" type="button">Unpair this phone</button>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" hidden></div>
+  </body>
+</html>

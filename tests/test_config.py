@@ -7,6 +7,8 @@ import pytest
 
 from tfr.config import (
     ConfigurationError,
+    WorldConfig,
+    WorldsConfig,
     credential_permission_warning,
     default_config_directory,
     default_config_path,
@@ -109,6 +111,12 @@ def test_loads_jsonc_and_resolves_references(tmp_path: Path) -> None:
         bundle.main.updates.state_directory
         == Path("~/.local/state/tfr/updates").expanduser().resolve()
     )
+    assert bundle.main.web_gateway.enabled is False
+    assert bundle.main.web_gateway.origin is None
+    assert (
+        bundle.main.web_gateway.state_directory
+        == Path("~/.local/state/tfr/web").expanduser().resolve()
+    )
     assert bundle.worlds_path == (tmp_path / "worlds.jsonc").resolve()
     assert bundle.agents_path == (tmp_path / "agents.jsonc").resolve()
     assert bundle.worlds.worlds["bot-world"].login is not None
@@ -117,6 +125,68 @@ def test_loads_jsonc_and_resolves_references(tmp_path: Path) -> None:
     assert "world-secret" not in repr(bundle)
     assert "api-secret" not in repr(bundle)
     assert bundle.warnings == ()
+
+
+def test_world_switch_aliases_are_normalized(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    (tmp_path / "worlds.jsonc").write_text(
+        WORLDS.replace(
+            '"host": "localhost",',
+            '"aliases": ["BW", "bot_world"],\n      "host": "localhost",',
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_configuration(main_path)
+
+    assert bundle.worlds.worlds["bot-world"].aliases == ("bw", "bot_world")
+
+
+def test_rejects_invalid_and_duplicate_world_switch_aliases(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    worlds_path = tmp_path / "worlds.jsonc"
+    worlds_path.write_text(
+        WORLDS.replace(
+            '"host": "localhost",',
+            '"aliases": ["/bw"],\n      "host": "localhost",',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="String should match pattern"):
+        load_configuration(main_path)
+
+    worlds_path.write_text(
+        WORLDS.replace(
+            '"bot-world": {',
+            '"other-world": {"host": "localhost", "port": 4202, "aliases": ["bw"]},\n'
+            '    "bot-world": {"aliases": ["BW"],',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="duplicate world-switch alias 'bw'"):
+        load_configuration(main_path)
+
+
+def test_world_switch_alias_limits_are_enforced() -> None:
+    with pytest.raises(ValueError, match="at most 64 characters"):
+        WorldConfig(host="localhost", port=4201, aliases=("a" * 65,))
+    with pytest.raises(ValueError, match="at most 32 items"):
+        WorldConfig(
+            host="localhost",
+            port=4201,
+            aliases=tuple(f"alias_{index}" for index in range(33)),
+        )
+
+    worlds = {
+        f"world-{world_index}": WorldConfig(
+            host="localhost",
+            port=4201,
+            aliases=tuple(f"a{world_index}_{alias_index}" for alias_index in range(32)),
+        )
+        for world_index in range(9)
+    }
+    with pytest.raises(ValueError, match="more than 256 switch aliases"):
+        WorldsConfig(worlds=worlds)
 
 
 def test_ui_configuration_does_not_read_world_or_agent_files(tmp_path: Path) -> None:
@@ -190,6 +260,34 @@ def test_updates_require_https_and_resolve_state_directory(tmp_path: Path) -> No
         encoding="utf-8",
     )
     with pytest.raises(ConfigurationError, match="updates.manifest_url must use HTTPS"):
+        load_configuration(main_path)
+
+
+def test_web_gateway_requires_root_https_origin_and_resolves_state(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"scrollback_lines": 500,}, "web_gateway": {'
+            '"enabled": true, "origin": "https://gateway.example.ts.net", '
+            '"state_directory": "web-state"},',
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_configuration(main_path)
+
+    assert bundle.main.web_gateway.canonical_origin == "https://gateway.example.ts.net"
+    assert bundle.main.web_gateway.state_directory == (tmp_path / "web-state").resolve()
+
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"scrollback_lines": 500,}, "web_gateway": {"enabled": true},',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="origin is required"):
         load_configuration(main_path)
 
 

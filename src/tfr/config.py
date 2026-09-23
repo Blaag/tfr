@@ -194,6 +194,34 @@ class UpdateConfig(StrictModel):
         return value
 
 
+class WebGatewayConfig(StrictModel):
+    enabled: bool = False
+    origin: AnyHttpUrl | None = None
+    listen_host: Literal["127.0.0.1", "::1"] = "127.0.0.1"
+    listen_port: int = Field(default=7348, ge=1, le=65_535)
+    state_directory: Path = Path("~/.local/state/tfr/web")
+    snapshot_events: int = Field(default=2_000, ge=1, le=5_000)
+
+    @model_validator(mode="after")
+    def valid_browser_origin(self) -> WebGatewayConfig:
+        if self.enabled and self.origin is None:
+            raise ValueError("web_gateway.origin is required when the web gateway is enabled")
+        if self.origin is None:
+            return self
+        parsed = urlsplit(str(self.origin))
+        if parsed.scheme != "https":
+            raise ValueError("web_gateway.origin must use HTTPS")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("web_gateway.origin cannot contain credentials")
+        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            raise ValueError("web_gateway.origin must not contain a path, query, or fragment")
+        return self
+
+    @property
+    def canonical_origin(self) -> str | None:
+        return str(self.origin).rstrip("/") if self.origin is not None else None
+
+
 _PLUGIN_SOURCE_REPO = re.compile(r"^(?!-)[A-Za-z0-9](?:[A-Za-z0-9._~:/@%+-]*[A-Za-z0-9])?$")
 _PLUGIN_SOURCE_REF = re.compile(r"^(?!-)[A-Za-z0-9](?:[A-Za-z0-9._/+-]*[A-Za-z0-9])?$")
 _PLUGIN_SOURCE_PATH = re.compile(r"^(?!/)(?!.*\.\.)[A-Za-z0-9._/+-]*$")
@@ -268,6 +296,7 @@ class MainConfig(StrictModel):
     ui: UiConfig = Field(default_factory=UiConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     updates: UpdateConfig = Field(default_factory=UpdateConfig)
+    web_gateway: WebGatewayConfig = Field(default_factory=WebGatewayConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
 
 
@@ -299,9 +328,20 @@ class IdleConfig(StrictModel):
     command: str = Field(min_length=1)
 
 
+WorldSwitchAlias = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z][A-Za-z0-9_-]*$",
+    ),
+]
+
+
 class WorldConfig(StrictModel):
     host: str = Field(min_length=1)
     port: int = Field(ge=1, le=65_535)
+    aliases: tuple[WorldSwitchAlias, ...] = Field(default=(), max_length=32)
     server: Literal["bare", "generic", "rhost", "tinymush", "tinymux"] = "generic"
     encoding: str | None = None
     reconnect: bool | None = None
@@ -313,12 +353,33 @@ class WorldConfig(StrictModel):
     idle: IdleConfig | None = None
     startup_commands: tuple[str, ...] = ()
 
+    @field_validator("aliases")
+    @classmethod
+    def valid_world_switch_aliases(cls, aliases: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(alias.casefold() for alias in aliases)
+
 
 class WorldsConfig(StrictModel):
     schema_url: str | None = Field(default=None, alias="$schema")
     schema_version: Literal[1] = 1
     defaults: WorldDefaults = Field(default_factory=WorldDefaults)
     worlds: dict[str, WorldConfig] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def aliases_are_unique(self) -> WorldsConfig:
+        owners: dict[str, str] = {}
+        for world, config in self.worlds.items():
+            for alias in config.aliases:
+                previous = owners.get(alias)
+                if previous is not None:
+                    raise ValueError(
+                        f"duplicate world-switch alias {alias!r} for worlds "
+                        f"{previous!r} and {world!r}"
+                    )
+                owners[alias] = world
+        if len(owners) > 256:
+            raise ValueError("world configuration cannot define more than 256 switch aliases")
+        return self
 
 
 class ProviderConfig(StrictModel):
@@ -492,6 +553,14 @@ def load_ui_configuration(main_path: Path | str | None = None) -> UiConfiguratio
                 update={
                     "state_directory": _resolve_path(
                         main.updates.state_directory,
+                        relative_to=resolved_main.parent,
+                    )
+                }
+            ),
+            "web_gateway": main.web_gateway.model_copy(
+                update={
+                    "state_directory": _resolve_path(
+                        main.web_gateway.state_directory,
                         relative_to=resolved_main.parent,
                     )
                 }

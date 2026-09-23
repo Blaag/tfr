@@ -375,6 +375,7 @@ editor completion and validation.
 
   "worlds": {
     "example-me": {
+      "aliases": ["me"],
       "host": "mux.example.org",
       "port": 4201,
       "server": "tinymux",
@@ -767,11 +768,32 @@ Acceptance criteria:
   after laptop sleep, using configurable or fixed retry counts and intervals so
   `/gateway reconnect` is not normally required.
 - [x] Add `/n` and `/p` shortcuts for switching to the next and previous worlds.
+- [x] Add configurable world-switch aliases alongside each world in
+  `worlds.jsonc`, allowing shortcuts such as `/g` for `grapefruit` and `/j` for
+  `juicyfruit`. Validate alias syntax and reject duplicate world aliases;
+  detect collisions with core and plugin commands, with system commands always
+  taking priority rather than being shadowed by a world alias.
 - [ ] Create a `/stats` plugin with per-world received-versus-sent counts, top
   speakers, message histograms, speech-length statistics by speaker, UI output,
   and an explicit option to emit selected statistics to the world.
 - [x] Make display-affecting keys such as Page Up and Page Down immediately end
   an active screen-clear animation before performing the requested action.
+- [x] Make low-bandwidth mode disable every animation, including screen-clear
+  plugin animations. Clearing the screen while `lowbw` is enabled must complete
+  immediately without rendering or scheduling animated effect frames.
+- [ ] Add a configurable input typing-fade effect where each newly typed
+  character appears in a bright highlight and independently fades to the normal
+  input color over a configurable duration. Preserve cursor movement, selection,
+  editing, paste, and Unicode grapheme behavior; render immediately in the normal
+  color when animations or low-bandwidth mode are disabled, and keep redraw work
+  bounded while typing rapidly.
+- [ ] Add optional submit-time spell checking controlled by
+  `/spellcheck on|off|status`. When the user presses Enter, automatically apply
+  only high-confidence corrections before sending, while preserving commands,
+  URLs, names, punctuation, and world-specific terms. Briefly animate or
+  highlight every corrected word in the input/recent-command display so the
+  changes are unmistakable, retain an undo path, and perform correction locally
+  without sending draft text to an external service.
 - [x] Detect HTTP and HTTPS URLs in chat output, render them underlined and
   clickable, and open them in a new tab through the operating system's default
   browser.
@@ -825,6 +847,17 @@ Acceptance criteria:
   `x2!`, `x3!`, `SUPER!`, `DOMINATING!`, and `UNSTOPPABLE!`; evaluate an
   end-of-line indicator after the speaker's text as the initial placement and
   extend the display-decoration API if animating appended text requires it.
+- [x] Detect bracketed multiline text pasted into the active world's input and
+  automatically send it as paced `@emit` commands, using the same server-aware
+  escaping and preflight validation as `/cat` so spaces, tabs, blank lines, and
+  other formatting survive without allowing pasted text to become unintended
+  world commands. Keep single-line paste editable and reject unsupported server
+  adapters before sending any line.
+- [ ] Let the terminal UI accept a pasted clipboard image and convert it locally
+  into aspect-correct ASCII art with ANSI color. Bound source size, output
+  dimensions, palette, conversion work, and emitted line length; provide an
+  editable preview and explicit confirmation before sending paced, server-aware
+  `@emit` lines, and never upload the source image to an external service.
 - [ ] Build a mobile gateway client, evaluating a PWA before a native iOS app
   to avoid App Store fees and approval overhead while retaining an installable
   home-screen experience. The gateway already exchanges newline-delimited JSON
@@ -840,6 +873,7 @@ Acceptance criteria:
   scrollback, explicit return-to-live behavior, and responsive layouts for
   narrow screens. Compare PWA background/reconnect and notification limits
   against a native Swift client before choosing the long-term platform.
+- [x] Fix speaker effects not working on poses.
 
 ## Test Strategy
 

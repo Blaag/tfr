@@ -24,3 +24,12 @@ def test_checked_in_schemas_match_models(tmp_path: Path) -> None:
         assert checked_in_path.read_text(encoding="utf-8") == generated_path.read_text(
             encoding="utf-8"
         )
+
+
+def test_world_alias_schema_exposes_runtime_syntax_and_size_limits() -> None:
+    schema = SCHEMA_MODELS["worlds.schema.json"].model_json_schema()
+    aliases = schema["$defs"]["WorldConfig"]["properties"]["aliases"]
+
+    assert aliases["maxItems"] == 32
+    assert aliases["items"]["maxLength"] == 64
+    assert aliases["items"]["pattern"] == "^[A-Za-z][A-Za-z0-9_-]*$"

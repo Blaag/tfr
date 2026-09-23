@@ -56,6 +56,17 @@
     "state_directory": "~/.local/state/tfr/updates",
   },
 
+  // Private iPhone PWA served through Tailscale Serve. Set enabled to true and
+  // use this Gateway host's exact HTTPS MagicDNS origin.
+  "web_gateway": {
+    "enabled": false,
+    // "origin": "https://gateway.example.ts.net",
+    "listen_host": "127.0.0.1",
+    "listen_port": 7348,
+    "state_directory": "~/.local/state/tfr/web",
+    "snapshot_events": 2000,
+  },
+
   "plugins": {
     // Every visual plugin from tfr-plugins-public, using their built-in
     // defaults ({}). See that repository's README for what each plugin does
@@ -67,6 +78,7 @@
       "border_reflection",
       "film_burn",
       "flame",
+      "gag",
       "speaker_effects",
       "terminal_reveal",
       "vortex",
@@ -84,6 +96,12 @@
       "border_reflection": {},
       "film_burn": {},
       "flame": {},
+      "gag": {
+        "worlds": {
+          // Keys are exact world names from worlds.jsonc, not switch aliases.
+          // "example-me": ["^A noisy line$", "repeated message \\d+"],
+        },
+      },
       "speaker_effects": {},
       "terminal_reveal": {},
       "vortex": {},
