@@ -781,6 +781,19 @@ Acceptance criteria:
 - [x] Make low-bandwidth mode disable every animation, including screen-clear
   plugin animations. Clearing the screen while `lowbw` is enabled must complete
   immediately without rendering or scheduling animated effect frames.
+- [ ] Add a configurable input typing-fade effect where each newly typed
+  character appears in a bright highlight and independently fades to the normal
+  input color over a configurable duration. Preserve cursor movement, selection,
+  editing, paste, and Unicode grapheme behavior; render immediately in the normal
+  color when animations or low-bandwidth mode are disabled, and keep redraw work
+  bounded while typing rapidly.
+- [ ] Add optional submit-time spell checking controlled by
+  `/spellcheck on|off|status`. When the user presses Enter, automatically apply
+  only high-confidence corrections before sending, while preserving commands,
+  URLs, names, punctuation, and world-specific terms. Briefly animate or
+  highlight every corrected word in the input/recent-command display so the
+  changes are unmistakable, retain an undo path, and perform correction locally
+  without sending draft text to an external service.
 - [x] Detect HTTP and HTTPS URLs in chat output, render them underlined and
   clickable, and open them in a new tab through the operating system's default
   browser.
@@ -840,6 +853,11 @@ Acceptance criteria:
   other formatting survive without allowing pasted text to become unintended
   world commands. Keep single-line paste editable and reject unsupported server
   adapters before sending any line.
+- [ ] Let the terminal UI accept a pasted clipboard image and convert it locally
+  into aspect-correct ASCII art with ANSI color. Bound source size, output
+  dimensions, palette, conversion work, and emitted line length; provide an
+  editable preview and explicit confirmation before sending paced, server-aware
+  `@emit` lines, and never upload the source image to an external service.
 - [ ] Build a mobile gateway client, evaluating a PWA before a native iOS app
   to avoid App Store fees and approval overhead while retaining an installable
   home-screen experience. The gateway already exchanges newline-delimited JSON
