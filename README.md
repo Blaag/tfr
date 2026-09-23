@@ -371,8 +371,10 @@ requires the `Tailscale-User-Login` identity header added by Serve and binds eac
 device credential to the identity that redeemed its pairing link; Funnel traffic
 does not carry this header and is rejected.
 
-Create a ten-minute, single-use pairing link through the Gateway's owner-only
-Unix socket:
+Create a ten-minute, single-device pairing link through the Gateway's owner-only
+Unix socket. A lost browser response may safely retry the exchange from the same
+browser and Tailscale identity without creating another device, provided the
+Gateway has not restarted and the link has not expired:
 
 ```console
 tfr pair --device-name "My iPhone"

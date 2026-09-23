@@ -126,6 +126,15 @@ class PairingChallenge:
     allowed_worlds: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class RedeemedPairing:
+    device: DeviceRecord
+    token: str
+    tailscale_login: str
+    retry_id: str | None
+    expires_at: float
+
+
 class DeviceStore:
     def __init__(self, state_directory: Path | str, origin: str) -> None:
         self.state_directory = Path(state_directory).expanduser()
@@ -133,6 +142,8 @@ class DeviceStore:
         self.origin = origin.rstrip("/")
         self._devices: dict[str, DeviceRecord] = {}
         self._pairings: dict[str, PairingChallenge] = {}
+        self._redeemed_pairings: dict[str, RedeemedPairing] = {}
+        self._redemption_expirations: dict[str, asyncio.TimerHandle] = {}
         self._lock = asyncio.Lock()
         self._load()
 
@@ -157,6 +168,11 @@ class DeviceStore:
             for digest, challenge in self._pairings.items()
             if challenge.expires_at > now
         }
+        self._redeemed_pairings = {
+            digest: redemption
+            for digest, redemption in self._redeemed_pairings.items()
+            if redemption.expires_at > now
+        }
         code = secrets.token_urlsafe(PAIRING_CODE_BYTES)
         self._pairings[self._digest(code)] = PairingChallenge(
             label=label,
@@ -165,7 +181,12 @@ class DeviceStore:
         )
         return f"{self.origin}/#pair={quote(code, safe='')}"
 
-    async def redeem(self, code: str, tailscale_login: str) -> tuple[DeviceRecord, str]:
+    async def redeem(
+        self,
+        code: str,
+        tailscale_login: str,
+        retry_id: str | None = None,
+    ) -> tuple[DeviceRecord, str]:
         if not isinstance(code, str) or len(code) > 128 or not code.isascii():
             raise ValueError("pairing code is invalid")
         if (
@@ -174,9 +195,27 @@ class DeviceStore:
             or not tailscale_login.isprintable()
         ):
             raise ValueError("Tailscale identity is invalid")
+        if retry_id is not None and (
+            not isinstance(retry_id, str)
+            or not 1 <= len(retry_id) <= 128
+            or not retry_id.isascii()
+        ):
+            raise ValueError("pairing retry ID is invalid")
         async with self._lock:
-            challenge = self._pairings.pop(self._digest(code), None)
-            if challenge is None or challenge.expires_at <= time.time():
+            now = time.time()
+            code_digest = self._digest(code)
+            redemption = self._redeemed_pairings.get(code_digest)
+            if redemption is not None:
+                if redemption.expires_at <= now:
+                    self._clear_redemption(code_digest)
+                else:
+                    if redemption.tailscale_login != tailscale_login or not secrets.compare_digest(
+                        redemption.retry_id or "", retry_id or ""
+                    ):
+                        raise ValueError("pairing code is invalid or expired")
+                    return redemption.device, redemption.token
+            challenge = self._pairings.pop(code_digest, None)
+            if challenge is None or challenge.expires_at <= now:
                 raise ValueError("pairing code is invalid or expired")
             token = secrets.token_urlsafe(DEVICE_TOKEN_BYTES)
             created_at = datetime.now(UTC)
@@ -197,8 +236,31 @@ class DeviceStore:
                 self._save()
             except BaseException:
                 self._devices.pop(record.token_digest, None)
+                self._pairings[code_digest] = challenge
                 raise
+            self._redeemed_pairings[code_digest] = RedeemedPairing(
+                device=record,
+                token=token,
+                tailscale_login=tailscale_login,
+                retry_id=retry_id,
+                expires_at=challenge.expires_at,
+            )
+            self._redemption_expirations[code_digest] = asyncio.get_running_loop().call_later(
+                max(0.0, challenge.expires_at - time.time()),
+                self._expire_redemption,
+                code_digest,
+            )
             return record, token
+
+    def _expire_redemption(self, code_digest: str) -> None:
+        self._redeemed_pairings.pop(code_digest, None)
+        self._redemption_expirations.pop(code_digest, None)
+
+    def _clear_redemption(self, code_digest: str) -> None:
+        self._redeemed_pairings.pop(code_digest, None)
+        expiration = self._redemption_expirations.pop(code_digest, None)
+        if expiration is not None:
+            expiration.cancel()
 
     def authenticate(self, token: str | None) -> DeviceRecord | None:
         if token is None or not token.isascii() or len(token) > 128:
@@ -253,6 +315,9 @@ class DeviceStore:
             except BaseException:
                 self._devices[digest] = record
                 raise
+            for code_digest, redemption in tuple(self._redeemed_pairings.items()):
+                if redemption.device.device_id == device_id:
+                    self._clear_redemption(code_digest)
             return True
 
     def _load(self) -> None:
