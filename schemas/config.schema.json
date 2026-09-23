@@ -614,6 +614,61 @@
       },
       "title": "UpdateConfig",
       "type": "object"
+    },
+    "WebGatewayConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "listen_host": {
+          "default": "127.0.0.1",
+          "enum": [
+            "127.0.0.1",
+            "::1"
+          ],
+          "title": "Listen Host",
+          "type": "string"
+        },
+        "listen_port": {
+          "default": 7348,
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Listen Port",
+          "type": "integer"
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "format": "uri",
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Origin"
+        },
+        "snapshot_events": {
+          "default": 2000,
+          "maximum": 5000,
+          "minimum": 1,
+          "title": "Snapshot Events",
+          "type": "integer"
+        },
+        "state_directory": {
+          "default": "~/.local/state/tfr/web",
+          "format": "path",
+          "title": "State Directory",
+          "type": "string"
+        }
+      },
+      "title": "WebGatewayConfig",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -653,6 +708,9 @@
     },
     "updates": {
       "$ref": "#/$defs/UpdateConfig"
+    },
+    "web_gateway": {
+      "$ref": "#/$defs/WebGatewayConfig"
     },
     "worlds_file": {
       "default": "worlds.jsonc",

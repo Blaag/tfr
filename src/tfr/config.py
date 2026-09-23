@@ -194,6 +194,34 @@ class UpdateConfig(StrictModel):
         return value
 
 
+class WebGatewayConfig(StrictModel):
+    enabled: bool = False
+    origin: AnyHttpUrl | None = None
+    listen_host: Literal["127.0.0.1", "::1"] = "127.0.0.1"
+    listen_port: int = Field(default=7348, ge=1, le=65_535)
+    state_directory: Path = Path("~/.local/state/tfr/web")
+    snapshot_events: int = Field(default=2_000, ge=1, le=5_000)
+
+    @model_validator(mode="after")
+    def valid_browser_origin(self) -> WebGatewayConfig:
+        if self.enabled and self.origin is None:
+            raise ValueError("web_gateway.origin is required when the web gateway is enabled")
+        if self.origin is None:
+            return self
+        parsed = urlsplit(str(self.origin))
+        if parsed.scheme != "https":
+            raise ValueError("web_gateway.origin must use HTTPS")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("web_gateway.origin cannot contain credentials")
+        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            raise ValueError("web_gateway.origin must not contain a path, query, or fragment")
+        return self
+
+    @property
+    def canonical_origin(self) -> str | None:
+        return str(self.origin).rstrip("/") if self.origin is not None else None
+
+
 _PLUGIN_SOURCE_REPO = re.compile(r"^(?!-)[A-Za-z0-9](?:[A-Za-z0-9._~:/@%+-]*[A-Za-z0-9])?$")
 _PLUGIN_SOURCE_REF = re.compile(r"^(?!-)[A-Za-z0-9](?:[A-Za-z0-9._/+-]*[A-Za-z0-9])?$")
 _PLUGIN_SOURCE_PATH = re.compile(r"^(?!/)(?!.*\.\.)[A-Za-z0-9._/+-]*$")
@@ -268,6 +296,7 @@ class MainConfig(StrictModel):
     ui: UiConfig = Field(default_factory=UiConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     updates: UpdateConfig = Field(default_factory=UpdateConfig)
+    web_gateway: WebGatewayConfig = Field(default_factory=WebGatewayConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
 
 
@@ -524,6 +553,14 @@ def load_ui_configuration(main_path: Path | str | None = None) -> UiConfiguratio
                 update={
                     "state_directory": _resolve_path(
                         main.updates.state_directory,
+                        relative_to=resolved_main.parent,
+                    )
+                }
+            ),
+            "web_gateway": main.web_gateway.model_copy(
+                update={
+                    "state_directory": _resolve_path(
+                        main.web_gateway.state_directory,
                         relative_to=resolved_main.parent,
                     )
                 }

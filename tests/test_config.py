@@ -111,6 +111,12 @@ def test_loads_jsonc_and_resolves_references(tmp_path: Path) -> None:
         bundle.main.updates.state_directory
         == Path("~/.local/state/tfr/updates").expanduser().resolve()
     )
+    assert bundle.main.web_gateway.enabled is False
+    assert bundle.main.web_gateway.origin is None
+    assert (
+        bundle.main.web_gateway.state_directory
+        == Path("~/.local/state/tfr/web").expanduser().resolve()
+    )
     assert bundle.worlds_path == (tmp_path / "worlds.jsonc").resolve()
     assert bundle.agents_path == (tmp_path / "agents.jsonc").resolve()
     assert bundle.worlds.worlds["bot-world"].login is not None
@@ -254,6 +260,34 @@ def test_updates_require_https_and_resolve_state_directory(tmp_path: Path) -> No
         encoding="utf-8",
     )
     with pytest.raises(ConfigurationError, match="updates.manifest_url must use HTTPS"):
+        load_configuration(main_path)
+
+
+def test_web_gateway_requires_root_https_origin_and_resolves_state(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"scrollback_lines": 500,}, "web_gateway": {'
+            '"enabled": true, "origin": "https://gateway.example.ts.net", '
+            '"state_directory": "web-state"},',
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_configuration(main_path)
+
+    assert bundle.main.web_gateway.canonical_origin == "https://gateway.example.ts.net"
+    assert bundle.main.web_gateway.state_directory == (tmp_path / "web-state").resolve()
+
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"scrollback_lines": 500,}, "web_gateway": {"enabled": true},',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="origin is required"):
         load_configuration(main_path)
 
 

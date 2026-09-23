@@ -105,6 +105,50 @@ def test_ui_mode_attaches_to_the_gateway(tmp_path: Path, monkeypatch: pytest.Mon
     assert called_with == socket_path
 
 
+def test_pair_mode_requests_a_device_link_without_loading_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    socket_path = tmp_path / "gateway.sock"
+    received: list[object] = []
+
+    async def fake_pair(path: Path | None, label: str) -> str:
+        received.extend((path, label))
+        return "https://gateway.example.ts.net/#pair=secret"
+
+    monkeypatch.setattr("tfr.gateway_admin.create_device_pairing_url", fake_pair)
+
+    result = run(["pair", "--socket", str(socket_path), "--device-name", "My iPhone"])
+
+    assert result == 0
+    assert received == [socket_path, "My iPhone"]
+    assert capsys.readouterr().out == "https://gateway.example.ts.net/#pair=secret\n"
+
+
+def test_devices_mode_lists_paired_devices(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def fake_list(_path: Path | None) -> list[dict[str, object]]:
+        return [
+            {
+                "device_id": "eb4fd272-a20a-444e-8b4d-93f2e0ad2713",
+                "label": "My iPhone",
+                "scope": "chat",
+                "created_at": "2026-09-23T12:00:00Z",
+                "expires_at": "2027-03-22T12:00:00Z",
+                "allowed_worlds": ["alpha"],
+                "tailscale_login": "black@example.com",
+            }
+        ]
+
+    monkeypatch.setattr("tfr.gateway_admin.list_web_devices", fake_list)
+
+    assert run(["devices"]) == 0
+    assert "My iPhone  black@example.com  chat  alpha" in capsys.readouterr().out
+
+
 def test_gateway_mode_passes_authenticated_tls_listener_options(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

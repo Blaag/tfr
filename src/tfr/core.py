@@ -81,8 +81,18 @@ class CommandBus:
         self._queues.pop(session_id, None)
 
     async def submit(self, request: CommandRequest) -> None:
+        queue = self._queue_for(request)
+        await queue.put(request)
+
+    def submit_nowait(self, request: CommandRequest) -> None:
+        queue = self._queue_for(request)
         try:
-            queue = self._queues[request.session_id]
+            queue.put_nowait(request)
+        except asyncio.QueueFull as exc:
+            raise RuntimeError("command queue is full") from exc
+
+    def _queue_for(self, request: CommandRequest) -> asyncio.Queue[CommandRequest]:
+        try:
+            return self._queues[request.session_id]
         except KeyError as exc:
             raise UnknownSessionError(f"session {request.session_id} is not registered") from exc
-        await queue.put(request)

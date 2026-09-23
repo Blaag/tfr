@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import heapq
 import hmac
 import os
 import signal
@@ -10,7 +11,7 @@ import ssl
 import stat
 import sys
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -74,6 +75,7 @@ class HistorySnapshot:
 class HistorySubscription:
     snapshot: HistorySnapshot
     queue: asyncio.Queue[SequencedEvent | None]
+    worlds: frozenset[str] | None = None
 
 
 class EventHistory:
@@ -126,32 +128,72 @@ class EventHistory:
         if self._queue is not None:
             await self._queue.join()
 
-    async def subscribe(self, after_cursor: int | None) -> HistorySubscription:
+    async def subscribe(
+        self,
+        after_cursor: int | None,
+        *,
+        include_history: bool = True,
+        worlds: frozenset[str] | None = None,
+        maximum_events: int | None = None,
+    ) -> HistorySubscription:
+        if maximum_events is not None and maximum_events < 1:
+            raise ValueError("history snapshot limit must be positive")
         async with self._lock:
             if after_cursor is not None and (after_cursor < 0 or after_cursor > self._cursor):
                 raise ValueError("history cursor is outside the available range")
-            retained = sorted(
-                (
-                    item
-                    for history in self._history.values()
+            candidates = (
+                item
+                for world, history in self._history.items()
+                if worlds is None or world in worlds
+                for item in history
+                if after_cursor is None or item.cursor > after_cursor
+            )
+            if not include_history:
+                retained: list[SequencedEvent] = []
+                available_count = 0
+            elif maximum_events is None:
+                retained = sorted(candidates, key=lambda item: item.cursor)
+                available_count = len(retained)
+            else:
+                retained = sorted(
+                    heapq.nlargest(maximum_events, candidates, key=lambda item: item.cursor),
+                    key=lambda item: item.cursor,
+                )
+                available_count = sum(
+                    1
+                    for world, history in self._history.items()
+                    if worlds is None or world in worlds
                     for item in history
                     if after_cursor is None or item.cursor > after_cursor
-                ),
-                key=lambda item: item.cursor,
-            )
+                )
             oldest = min(
-                (item.cursor for history in self._history.values() for item in history),
+                (
+                    item.cursor
+                    for world, history in self._history.items()
+                    if worlds is None or world in worlds
+                    for item in history
+                ),
                 default=self._cursor + 1,
             )
             snapshot = HistorySnapshot(
                 events=tuple(retained),
                 cursor=self._cursor,
                 oldest_cursor=oldest,
-                truncated=after_cursor is not None and after_cursor < self._dropped_through,
+                truncated=(
+                    include_history
+                    and (
+                        available_count > len(retained)
+                        or (
+                            after_cursor is not None
+                            and after_cursor < self._dropped_through
+                        )
+                    )
+                ),
             )
             subscription = HistorySubscription(
                 snapshot=snapshot,
                 queue=asyncio.Queue(maxsize=self.subscriber_queue_size),
+                worlds=worlds,
             )
             self._subscribers.add(subscription)
             return subscription
@@ -176,6 +218,11 @@ class EventHistory:
                         self._dropped_through = max(self._dropped_through, history[0].cursor)
                     history.append(item)
                     for subscription in tuple(self._subscribers):
+                        if (
+                            subscription.worlds is not None
+                            and event.world not in subscription.worlds
+                        ):
+                            continue
                         if subscription.queue.full():
                             self._subscribers.discard(subscription)
                             self._close_subscription(subscription)
@@ -448,6 +495,48 @@ class GatewayRuntime:
         causation_id: UUID | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> None:
+        request = self._command_request(
+            world=world,
+            text=text,
+            client_id=client_id,
+            request_id=request_id,
+            sensitive=sensitive,
+            actor=actor,
+            correlation_id=correlation_id,
+            causation_id=causation_id,
+            metadata=metadata,
+        )
+        await self.command_bus.submit(request)
+
+    def submit_command_nowait(
+        self,
+        *,
+        world: str,
+        text: str,
+        client_id: str,
+        request_id: UUID,
+    ) -> None:
+        request = self._command_request(
+            world=world,
+            text=text,
+            client_id=client_id,
+            request_id=request_id,
+        )
+        self.command_bus.submit_nowait(request)
+
+    def _command_request(
+        self,
+        *,
+        world: str,
+        text: str,
+        client_id: str,
+        request_id: UUID,
+        sensitive: bool = False,
+        actor: Actor | None = None,
+        correlation_id: UUID | None = None,
+        causation_id: UUID | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> CommandRequest:
         session = self.session_for(world)
         if len(text) > MAX_COMMAND_CHARACTERS:
             raise ValueError("command text exceeds the gateway limit")
@@ -460,7 +549,7 @@ class GatewayRuntime:
             raise ValueError("remote commands must have a human or plugin actor")
         if request_actor.type is ActorType.HUMAN:
             request_actor = Actor(ActorType.HUMAN, f"ui:{client_id}")
-        request = CommandRequest(
+        return CommandRequest(
             session_id=session.session_id,
             world=world,
             actor=request_actor,
@@ -471,7 +560,6 @@ class GatewayRuntime:
             causation_id=causation_id,
             metadata={**dict(metadata or {}), "gateway_connection_id": client_id},
         )
-        await self.command_bus.submit(request)
 
     async def control(self, *, world: str, action: str) -> None:
         session = self.session_for(world)
@@ -520,6 +608,9 @@ class GatewayServer:
         tcp_port: int = DEFAULT_GATEWAY_PORT,
         tcp_auth_token: str | None = None,
         tcp_ssl_context: ssl.SSLContext | None = None,
+        pairing_url_factory: Callable[[str], str] | None = None,
+        device_list_factory: Callable[[], list[dict[str, Any]]] | None = None,
+        device_revoke_factory: Callable[[UUID], Awaitable[bool]] | None = None,
     ) -> None:
         if (
             maximum_clients < 1
@@ -552,6 +643,9 @@ class GatewayServer:
             validate_gateway_token(tcp_auth_token)
         self.tcp_auth_token = tcp_auth_token
         self.tcp_ssl_context = tcp_ssl_context
+        self.pairing_url_factory = pairing_url_factory
+        self.device_list_factory = device_list_factory
+        self.device_revoke_factory = device_revoke_factory
         self._server: asyncio.Server | None = None
         self._tcp_server: asyncio.Server | None = None
         self._socket_identity: tuple[int, int] | None = None
@@ -734,6 +828,11 @@ class GatewayServer:
                 self._pending_tcp_clients.pop(task)
                 self._tcp_clients.add(task)
             client_id = self._client_id(hello.get("client_id"))
+            admin = hello.get("admin", False)
+            if not isinstance(admin, bool):
+                raise GatewayProtocolError("admin must be a boolean")
+            if admin and auth_token is not None:
+                raise GatewayProtocolError("gateway administration requires the local socket")
             connection_id = str(uuid4())
             requested_gateway = hello.get("gateway_id")
             if requested_gateway is not None and not isinstance(requested_gateway, str):
@@ -745,9 +844,13 @@ class GatewayServer:
                 or after_cursor < 0
             ):
                 raise GatewayProtocolError("after_cursor must be a non-negative integer or null")
-            history_reset = requested_gateway not in {None, str(self.runtime.gateway_id)}
+            history_reset = (
+                requested_gateway not in {None, str(self.runtime.gateway_id)}
+                or (requested_gateway is None and after_cursor is not None)
+            )
             subscription = await self.runtime.history.subscribe(
-                None if history_reset else after_cursor
+                None if history_reset else after_cursor,
+                include_history=not admin,
             )
             snapshot = subscription.snapshot
             if len(snapshot.events) > MAX_SNAPSHOT_EVENTS:
@@ -778,7 +881,13 @@ class GatewayServer:
                 name=f"tfr-gateway-events-{client_id}",
             )
             receiver = asyncio.create_task(
-                self._receive_requests(reader, connection_id, writer, write_lock),
+                self._receive_requests(
+                    reader,
+                    connection_id,
+                    writer,
+                    write_lock,
+                    allow_admin=auth_token is None,
+                ),
                 name=f"tfr-gateway-requests-{connection_id}",
             )
             done, pending = await asyncio.wait(
@@ -829,9 +938,17 @@ class GatewayServer:
         client_id: str,
         writer: asyncio.StreamWriter,
         write_lock: asyncio.Lock,
+        *,
+        allow_admin: bool,
     ) -> None:
         while message := await read_message(reader):
-            await self._handle_request(message, client_id, writer, write_lock)
+            await self._handle_request(
+                message,
+                client_id,
+                writer,
+                write_lock,
+                allow_admin=allow_admin,
+            )
 
     async def _handle_request(
         self,
@@ -839,8 +956,11 @@ class GatewayServer:
         client_id: str,
         writer: asyncio.StreamWriter,
         write_lock: asyncio.Lock,
+        *,
+        allow_admin: bool,
     ) -> None:
         request_id_value = message.get("request_id")
+        result: dict[str, Any] | None = None
         try:
             request_id = UUID(str(request_id_value))
         except (TypeError, ValueError, AttributeError):
@@ -898,6 +1018,33 @@ class GatewayServer:
                 await self.runtime.agent_control(name=name, action=action)
             elif message_type == "ping":
                 pass
+            elif message_type == "pair_device":
+                if not allow_admin or self.pairing_url_factory is None:
+                    raise ValueError("web device pairing is unavailable")
+                if set(message) != {"type", "protocol", "request_id", "label"}:
+                    raise ValueError("pair_device has invalid fields")
+                label = message.get("label")
+                if not isinstance(label, str):
+                    raise ValueError("device label must be a string")
+                result = {"pairing_url": self.pairing_url_factory(label)}
+            elif message_type == "list_devices":
+                if not allow_admin or self.device_list_factory is None:
+                    raise ValueError("web device administration is unavailable")
+                if set(message) != {"type", "protocol", "request_id"}:
+                    raise ValueError("list_devices has invalid fields")
+                result = {"devices": self.device_list_factory()}
+            elif message_type == "revoke_device":
+                if not allow_admin or self.device_revoke_factory is None:
+                    raise ValueError("web device administration is unavailable")
+                if set(message) != {"type", "protocol", "request_id", "device_id"}:
+                    raise ValueError("revoke_device has invalid fields")
+                try:
+                    device_id = UUID(str(message.get("device_id")))
+                except (TypeError, ValueError, AttributeError):
+                    raise ValueError("device_id must be a UUID") from None
+                if not await self.device_revoke_factory(device_id):
+                    raise ValueError(f"unknown web device: {device_id}")
+                result = {"device_id": str(device_id)}
             else:
                 raise ValueError(f"unsupported request type: {message_type}")
         except (UnknownSessionError, RuntimeError, ValueError) as exc:
@@ -912,11 +1059,14 @@ class GatewayServer:
                 lock=write_lock,
             )
             return
-        await write_message(
-            writer,
-            {"type": "ack", "request_id": str(request_id), "ok": True},
-            lock=write_lock,
-        )
+        acknowledgement: dict[str, Any] = {
+            "type": "ack",
+            "request_id": str(request_id),
+            "ok": True,
+        }
+        if result is not None:
+            acknowledgement["result"] = result
+        await write_message(writer, acknowledgement, lock=write_lock)
 
     @staticmethod
     def _client_id(value: Any) -> str:
@@ -961,6 +1111,19 @@ async def run_gateway(
             raise ValueError("network gateway requires --token-file, --tls-cert, and --tls-key")
         tcp_auth_token = load_gateway_token(token_file)
         tcp_ssl_context = create_gateway_server_tls_context(tls_certificate, tls_private_key)
+    web_server = None
+    if bundle.main.web_gateway.enabled:
+        from tfr.gateway_web import WebGatewayServer
+
+        assert bundle.main.web_gateway.canonical_origin is not None
+        web_server = WebGatewayServer(
+            runtime,
+            origin=bundle.main.web_gateway.canonical_origin,
+            host=bundle.main.web_gateway.listen_host,
+            port=bundle.main.web_gateway.listen_port,
+            state_directory=bundle.main.web_gateway.state_directory,
+            snapshot_events=bundle.main.web_gateway.snapshot_events,
+        )
     server = GatewayServer(
         runtime,
         path or default_gateway_socket(),
@@ -968,6 +1131,9 @@ async def run_gateway(
         tcp_port=listen_port,
         tcp_auth_token=tcp_auth_token,
         tcp_ssl_context=tcp_ssl_context,
+        pairing_url_factory=(web_server.create_pairing_url if web_server is not None else None),
+        device_list_factory=(web_server.device_descriptors if web_server is not None else None),
+        device_revoke_factory=(web_server.revoke_device if web_server is not None else None),
     )
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -975,10 +1141,18 @@ async def run_gateway(
     try:
         await server.start(start_serving=False)
         await runtime.start()
+        if web_server is not None:
+            await web_server.start()
         await server.start_serving()
         print(f"TFR Gateway listening on {server.path}", flush=True)
         for address in server.tcp_addresses:
             print(f"TFR Gateway listening with TLS on {address[0]}:{address[1]}", flush=True)
+        if web_server is not None:
+            print(
+                "TFR Web Gateway listening on "
+                f"http://{web_server.host}:{web_server.port} for {web_server.origin}",
+                flush=True,
+            )
         print("Press Ctrl-C to stop the gateway.", flush=True)
         for handled_signal in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             try:
@@ -991,5 +1165,7 @@ async def run_gateway(
     finally:
         for handled_signal in installed_signals:
             loop.remove_signal_handler(handled_signal)
+        if web_server is not None:
+            await web_server.stop()
         await server.stop()
         await runtime.stop()

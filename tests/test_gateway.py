@@ -56,6 +56,38 @@ async def test_history_assigns_global_cursors_and_reports_truncation() -> None:
         await bus.close()
 
 
+async def test_history_snapshot_filters_worlds_and_bounds_before_delivery() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10, "beta": 10})
+    history.start()
+    try:
+        for sequence in range(4):
+            await bus.publish(make_event("alpha", sequence))
+            await bus.publish(make_event("beta", sequence))
+        await history.flush()
+
+        subscription = await history.subscribe(
+            None,
+            worlds=frozenset({"alpha"}),
+            maximum_events=2,
+        )
+
+        assert [item.event.world for item in subscription.snapshot.events] == ["alpha", "alpha"]
+        assert [item.cursor for item in subscription.snapshot.events] == [5, 7]
+        assert subscription.snapshot.truncated is True
+
+        await bus.publish(make_event("beta", 4))
+        await bus.publish(make_event("alpha", 4))
+        await history.flush()
+        live = await asyncio.wait_for(subscription.queue.get(), timeout=1)
+        assert live is not None
+        assert live.event.world == "alpha"
+        assert subscription.queue.empty()
+    finally:
+        await history.stop()
+        await bus.close()
+
+
 def test_oversized_event_fallback_is_always_protocol_safe() -> None:
     event = make_event("alpha", 0)
     event = Event(
@@ -197,6 +229,27 @@ async def test_server_handshake_backfill_command_ack_and_detach() -> None:
         await writer.wait_closed()
         await asyncio.sleep(0)
         assert server._server is not None
+
+        reader, writer = await asyncio.open_unix_connection(socket_path, limit=MAX_MESSAGE_BYTES)
+        writer.write(
+            encode_message(
+                {
+                    "type": "hello",
+                    "client_id": str(uuid4()),
+                    "gateway_id": None,
+                    "after_cursor": 1,
+                }
+            )
+        )
+        await writer.drain()
+        reset_hello = await read_message(reader)
+        reset_backfill = await read_message(reader)
+        assert reset_hello is not None
+        assert reset_hello["history_reset"] is True
+        assert reset_backfill is not None
+        assert reset_backfill["cursor"] == 1
+        writer.close()
+        await writer.wait_closed()
     finally:
         await server.stop()
         await history.stop()

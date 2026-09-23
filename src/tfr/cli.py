@@ -5,6 +5,7 @@ import asyncio
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from uuid import UUID
 
 from tfr.config import (
     ConfigurationError,
@@ -28,8 +29,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "mode",
         nargs="?",
-        choices=("ui", "gateway"),
-        help="attach a terminal UI to a gateway or run the persistent gateway",
+        choices=("ui", "gateway", "pair", "devices", "revoke-device"),
+        help="run a client, the Gateway, or local web-device administration",
     )
     parser.add_argument(
         "--config",
@@ -56,6 +57,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--socket",
         type=Path,
         help="gateway Unix socket path",
+    )
+    parser.add_argument(
+        "--device-name",
+        help="pair mode: label for the mobile device",
+    )
+    parser.add_argument(
+        "--device-id",
+        help="revoke-device mode: paired device UUID",
     )
     parser.add_argument(
         "--listen-host",
@@ -120,6 +129,8 @@ def run(argv: Sequence[str] | None = None) -> int:
             or args.replay is not None
             or args.socket is not None
             or network_arguments
+            or args.device_name is not None
+            or args.device_id is not None
         ):
             print(
                 "tfr: --rollback-plugin cannot be combined with runtime or transport options",
@@ -196,6 +207,8 @@ def run(argv: Sequence[str] | None = None) -> int:
             or args.mode is not None
             or args.socket is not None
             or network_arguments
+            or args.device_name is not None
+            or args.device_id is not None
         ):
             print(
                 "tfr: --replay cannot be combined with gateway mode, --socket, or --check-config",
@@ -211,6 +224,57 @@ def run(argv: Sequence[str] | None = None) -> int:
             return 2
         except KeyboardInterrupt:
             return 130
+
+    if args.mode in {"pair", "devices", "revoke-device"}:
+        expected_device_name = args.mode == "pair"
+        expected_device_id = args.mode == "revoke-device"
+        if (
+            args.check_config
+            or network_arguments
+            or (args.device_name is not None) != expected_device_name
+            or (args.device_id is not None) != expected_device_id
+        ):
+            print(
+                "tfr: web device administration accepts only --socket plus its required "
+                "device option",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            from tfr.gateway_admin import (
+                create_device_pairing_url,
+                list_web_devices,
+                revoke_web_device,
+            )
+
+            if args.mode == "pair":
+                print(asyncio.run(create_device_pairing_url(args.socket, args.device_name)))
+            elif args.mode == "devices":
+                devices = asyncio.run(list_web_devices(args.socket))
+                if not devices:
+                    print("No paired web devices.")
+                for device in devices:
+                    worlds = ",".join(str(world) for world in device["allowed_worlds"])
+                    print(
+                        f"{device['device_id']}  {device['label']}  "
+                        f"{device['tailscale_login']}  {device['scope']}  {worlds}  "
+                        f"expires {device['expires_at']}"
+                    )
+            else:
+                try:
+                    device_id = UUID(args.device_id)
+                except (TypeError, ValueError, AttributeError):
+                    raise ValueError("--device-id must be a UUID") from None
+                asyncio.run(revoke_web_device(args.socket, device_id))
+                print(f"Revoked web device {device_id}.")
+            return 0
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            print(f"tfr: pairing error: {exc}", file=sys.stderr)
+            return 2
+
+    if args.device_name is not None or args.device_id is not None:
+        print("tfr: web device options require a device administration mode", file=sys.stderr)
+        return 2
 
     if args.check_config and (args.socket is not None or network_arguments):
         print("tfr: transport options cannot be combined with --check-config", file=sys.stderr)

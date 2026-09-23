@@ -86,6 +86,34 @@ async def test_command_bus_rejects_unknown_session() -> None:
         await bus.submit(request)
 
 
+def test_command_bus_nowait_rejects_backpressure_and_unknown_sessions() -> None:
+    bus = CommandBus()
+    session_id = uuid4()
+    queue = bus.register(session_id, maxsize=1)
+    request = CommandRequest(
+        session_id=session_id,
+        world="example",
+        actor=Actor(ActorType.HUMAN, "operator"),
+        text="look",
+    )
+
+    bus.submit_nowait(request)
+
+    assert queue.get_nowait() is request
+    bus.submit_nowait(request)
+    with pytest.raises(RuntimeError, match="queue is full"):
+        bus.submit_nowait(request)
+    with pytest.raises(UnknownSessionError):
+        bus.submit_nowait(
+            CommandRequest(
+                session_id=uuid4(),
+                world="missing",
+                actor=Actor(ActorType.HUMAN, "operator"),
+                text="look",
+            )
+        )
+
+
 def test_command_bus_rejects_duplicate_registration() -> None:
     bus = CommandBus()
     session_id = uuid4()
