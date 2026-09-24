@@ -317,7 +317,7 @@ class WebGatewayServer:
         origins = request.headers.getall("Origin", [])
         if require_origin and origins != [self.origin]:
             raise web.HTTPForbidden(text="Unexpected origin")
-        if allow_missing_origin and origins not in ([], [self.origin]):
+        if allow_missing_origin and origins not in ([], [self.origin], ["null"]):
             raise web.HTTPForbidden(text="Unexpected origin")
         self._tailscale_login(request)
 
