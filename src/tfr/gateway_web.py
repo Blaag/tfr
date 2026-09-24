@@ -385,7 +385,6 @@ class WebGatewayServer:
             device, token = await self.devices.redeem(
                 value["code"],
                 tailscale_login,
-                value.get("retry_id"),
             )
         except ValueError as exc:
             return self._json_response({"error": str(exc)}, status=401)

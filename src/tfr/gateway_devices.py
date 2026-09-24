@@ -131,7 +131,6 @@ class RedeemedPairing:
     device: DeviceRecord
     token: str
     tailscale_login: str
-    retry_id: str | None
     expires_at: float
 
 
@@ -185,7 +184,6 @@ class DeviceStore:
         self,
         code: str,
         tailscale_login: str,
-        retry_id: str | None = None,
     ) -> tuple[DeviceRecord, str]:
         if not isinstance(code, str) or len(code) > 128 or not code.isascii():
             raise ValueError("pairing code is invalid")
@@ -195,12 +193,6 @@ class DeviceStore:
             or not tailscale_login.isprintable()
         ):
             raise ValueError("Tailscale identity is invalid")
-        if retry_id is not None and (
-            not isinstance(retry_id, str)
-            or not 1 <= len(retry_id) <= 128
-            or not retry_id.isascii()
-        ):
-            raise ValueError("pairing retry ID is invalid")
         async with self._lock:
             now = time.time()
             code_digest = self._digest(code)
@@ -209,9 +201,7 @@ class DeviceStore:
                 if redemption.expires_at <= now:
                     self._clear_redemption(code_digest)
                 else:
-                    if redemption.tailscale_login != tailscale_login or not secrets.compare_digest(
-                        redemption.retry_id or "", retry_id or ""
-                    ):
+                    if redemption.tailscale_login != tailscale_login:
                         raise ValueError("pairing code is invalid or expired")
                     return redemption.device, redemption.token
             challenge = self._pairings.pop(code_digest, None)
@@ -242,7 +232,6 @@ class DeviceStore:
                 device=record,
                 token=token,
                 tailscale_login=tailscale_login,
-                retry_id=retry_id,
                 expires_at=challenge.expires_at,
             )
             self._redemption_expirations[code_digest] = asyncio.get_running_loop().call_later(

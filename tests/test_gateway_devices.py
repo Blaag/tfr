@@ -53,8 +53,8 @@ async def test_pairing_code_retry_is_atomic_and_idempotent(tmp_path: Path) -> No
     code = pairing_code(store.create_pairing_url("Phone", ("alpha",)))
 
     results = await asyncio.gather(
-        store.redeem(code, "black@example.com", "browser-a"),
-        store.redeem(code, "black@example.com", "browser-a"),
+        store.redeem(code, "black@example.com"),
+        store.redeem(code, "black@example.com"),
         return_exceptions=True,
     )
 
@@ -62,10 +62,9 @@ async def test_pairing_code_retry_is_atomic_and_idempotent(tmp_path: Path) -> No
     assert results[0] == results[1]
     assert len(store.device_descriptors()) == 1
 
+    assert await store.redeem(code, "black@example.com") == results[0]
     with pytest.raises(ValueError, match="invalid or expired"):
-        await store.redeem(code, "black@example.com", "browser-b")
-    with pytest.raises(ValueError, match="invalid or expired"):
-        await store.redeem(code, "other@example.com", "browser-a")
+        await store.redeem(code, "other@example.com")
 
 
 async def test_pairing_retry_secret_expires_and_is_cleared_on_revoke(
@@ -75,22 +74,20 @@ async def test_pairing_retry_secret_expires_and_is_cleared_on_revoke(
     monkeypatch.setattr(gateway_devices, "PAIRING_TTL_SECONDS", 0.01)
     store = DeviceStore(tmp_path / "web", "https://gateway.example.ts.net")
     code = pairing_code(store.create_pairing_url("Phone", ("alpha",)))
-    device, _token = await store.redeem(code, "black@example.com", "browser-a")
+    device, _token = await store.redeem(code, "black@example.com")
 
     await asyncio.sleep(0.03)
     assert not store._redeemed_pairings
     with pytest.raises(ValueError, match="invalid or expired"):
-        await store.redeem(code, "black@example.com", "browser-a")
+        await store.redeem(code, "black@example.com")
 
     monkeypatch.setattr(gateway_devices, "PAIRING_TTL_SECONDS", 600)
     second_code = pairing_code(store.create_pairing_url("Phone", ("alpha",)))
-    second_device, _token = await store.redeem(
-        second_code, "black@example.com", "browser-b"
-    )
+    second_device, _token = await store.redeem(second_code, "black@example.com")
     assert await store.revoke(second_device.device_id) is True
     assert not store._redeemed_pairings
     with pytest.raises(ValueError, match="invalid or expired"):
-        await store.redeem(second_code, "black@example.com", "browser-b")
+        await store.redeem(second_code, "black@example.com")
 
     assert await store.revoke(device.device_id) is True
 
