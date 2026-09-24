@@ -66,11 +66,13 @@ detached when their event queue fills and can reconnect for retained backfill.
 The optional mobile PWA is served by a separate HTTP/WebSocket listener that is
 restricted to `127.0.0.1` or `::1`. Deploy it behind private Tailscale Serve,
 never Tailscale Funnel, and configure one exact HTTPS origin. The service rejects
-unexpected Host and Origin values and does not enable CORS. Tailscale access
-controls remain a second boundary rather than replacing application
-authentication. TFR requires the `Tailscale-User-Login` header injected by Serve
-and binds each paired credential to that identity. Funnel traffic does not carry
-the identity header and is rejected.
+unexpected Host and Origin values and does not enable CORS. Safari may omit
+`Origin` from the top-level pairing form; that endpoint accepts an absent value
+but rejects any non-matching value and still requires the high-entropy code and
+Serve identity. Tailscale access controls remain a second boundary rather than
+replacing application authentication. TFR requires the `Tailscale-User-Login`
+header injected by Serve and binds each paired credential to that identity.
+Funnel traffic does not carry the identity header and is rejected.
 
 Mobile devices pair through a high-entropy, single-credential, ten-minute code created
 over the owner-only Gateway Unix socket. Concurrent or lost-response retries from

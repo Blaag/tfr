@@ -304,12 +304,20 @@ class WebGatewayServer:
         )
         return response
 
-    def _validate_public_request(self, request: web.Request, *, require_origin: bool) -> None:
+    def _validate_public_request(
+        self,
+        request: web.Request,
+        *,
+        require_origin: bool,
+        allow_missing_origin: bool = False,
+    ) -> None:
         hosts = request.headers.getall("Host", [])
         if hosts != [self.expected_host]:
             raise web.HTTPForbidden(text="Unexpected host")
         origins = request.headers.getall("Origin", [])
         if require_origin and origins != [self.origin]:
+            raise web.HTTPForbidden(text="Unexpected origin")
+        if allow_missing_origin and origins not in ([], [self.origin]):
             raise web.HTTPForbidden(text="Unexpected origin")
         self._tailscale_login(request)
 
@@ -412,7 +420,11 @@ class WebGatewayServer:
         return response
 
     async def _pair_page(self, request: web.Request) -> web.Response:
-        self._validate_public_request(request, require_origin=True)
+        self._validate_public_request(
+            request,
+            require_origin=False,
+            allow_missing_origin=True,
+        )
         tailscale_login = self._tailscale_login(request)
         if not self._record_pairing_attempt(tailscale_login):
             return web.Response(
