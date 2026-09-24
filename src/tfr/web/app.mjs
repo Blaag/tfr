@@ -54,9 +54,6 @@ const state = {
 };
 
 const pairingCoordinator = createPairingCoordinator(pairFromFragment);
-const pairingRetryId = Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
-  byte.toString(16).padStart(2, "0"),
-).join("");
 
 function readStorage(key) {
   try {
@@ -484,7 +481,7 @@ async function pairFromFragment(code) {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code, retry_id: pairingRetryId }),
+      body: JSON.stringify({ code }),
     });
   } catch {
     elements.pairingMessage.textContent = "Gateway unavailable. Pairing will retry when online.";

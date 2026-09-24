@@ -269,7 +269,7 @@ async def test_pairing_retry_returns_the_same_device_cookie(tmp_path: Path) -> N
         payload = {"code": code, "retry_id": "browser-a"}
         first = await client.post("/api/pair", json=payload, headers=PUBLIC_HEADERS)
         retry = await client.post("/api/pair", json=payload, headers=PUBLIC_HEADERS)
-        wrong_browser = await client.post(
+        other_browser = await client.post(
             "/api/pair",
             json={"code": code, "retry_id": "browser-b"},
             headers=PUBLIC_HEADERS,
@@ -282,7 +282,8 @@ async def test_pairing_retry_returns_the_same_device_cookie(tmp_path: Path) -> N
 
         assert first.status == retry.status == 200
         assert first.headers["Set-Cookie"] == retry.headers["Set-Cookie"]
-        assert wrong_browser.status == 401
+        assert other_browser.status == 200
+        assert first.headers["Set-Cookie"] == other_browser.headers["Set-Cookie"]
         assert wrong_identity.status == 401
         assert len(gateway.device_descriptors()) == 1
     finally:

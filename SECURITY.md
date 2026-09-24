@@ -72,18 +72,19 @@ authentication. TFR requires the `Tailscale-User-Login` header injected by Serve
 and binds each paired credential to that identity. Funnel traffic does not carry
 the identity header and is rejected.
 
-Mobile devices pair through a high-entropy, single-device, ten-minute code created
+Mobile devices pair through a high-entropy, single-credential, ten-minute code created
 over the owner-only Gateway Unix socket. Concurrent or lost-response retries from
-the same browser and Tailscale identity return the same credential until the code
-expires or the Gateway restarts; another browser or identity is rejected. The
-temporary plaintext recovery credential is erased at expiry or revocation and is
-never persisted. Browser isolation applies to current clients that send a random
-retry identifier; legacy clients remain limited to identity binding. Redemption
-sets an opaque `Secure`, `HttpOnly`, `SameSite=Strict`, host-only cookie. Only
-token digests and non-secret device metadata are persisted, in an owner-only
-directory and regular file with atomic replacement. `tfr devices` lists paired
-devices and `tfr revoke-device` invalidates a credential and closes its active
-sockets. Credentials expire after 180 days.
+the same Tailscale identity return the same credential until the code expires or
+the Gateway restarts; another identity is rejected. This accommodates browser
+reloads and WebKit context changes, so the pairing URL remains a bearer secret
+within that identity until expiry. The temporary plaintext recovery credential
+is released from application-held references at expiry or revocation and is
+never persisted. Redemption sets an opaque `Secure`, `HttpOnly`,
+`SameSite=Strict`, host-only cookie. Only token
+digests and non-secret device metadata are persisted, in an owner-only directory
+and regular file with atomic replacement. `tfr devices` lists paired devices and
+`tfr revoke-device` invalidates a credential and closes its active sockets.
+Credentials expire after 180 days.
 
 Paired devices have chat scope, not normal Gateway-client authority. The web
 protocol accepts human world commands and ping requests only. It rejects
