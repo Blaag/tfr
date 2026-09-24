@@ -344,6 +344,37 @@ async def test_navigation_pairing_sets_cookie_and_redirects(tmp_path: Path) -> N
         await bus.close()
 
 
+async def test_navigation_pairing_accepts_opaque_ios_origin(tmp_path: Path) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 5})
+    runtime = FakeRuntime(history)
+    gateway = WebGatewayServer(
+        runtime,  # type: ignore[arg-type]
+        origin=ORIGIN,
+        host="127.0.0.1",
+        port=7348,
+        state_directory=tmp_path / "web",
+        snapshot_events=5,
+    )
+    client = TestClient(TestServer(gateway.application()))
+    await client.start_server()
+    code = parse_qs(urlsplit(gateway.create_pairing_url("Test iPhone")).fragment)["pair"][0]
+    try:
+        response = await client.post(
+            "/pair",
+            data={"code": code},
+            headers={**NAVIGATION_HEADERS, "Origin": "null"},
+            allow_redirects=False,
+        )
+
+        assert response.status == 303
+        assert response.headers["Location"] == "/?pairing=complete"
+        assert "Set-Cookie" in response.headers
+    finally:
+        await client.close()
+        await bus.close()
+
+
 async def test_navigation_pairing_rejects_invalid_and_malformed_forms(tmp_path: Path) -> None:
     bus = EventBus()
     history = EventHistory(bus, {"alpha": 5})

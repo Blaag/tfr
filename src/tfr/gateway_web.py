@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import sys
 import time
 from collections import OrderedDict, defaultdict, deque
 from collections.abc import Mapping
@@ -317,7 +318,12 @@ class WebGatewayServer:
         origins = request.headers.getall("Origin", [])
         if require_origin and origins != [self.origin]:
             raise web.HTTPForbidden(text="Unexpected origin")
-        if allow_missing_origin and origins not in ([], [self.origin]):
+        if allow_missing_origin and origins not in ([], [self.origin], ["null"]):
+            print(
+                f"TFR Web rejected navigation Origin header: {origins!r}",
+                file=sys.stderr,
+                flush=True,
+            )
             raise web.HTTPForbidden(text="Unexpected origin")
         self._tailscale_login(request)
 
