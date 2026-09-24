@@ -360,11 +360,19 @@ class WebGatewayServer:
 
     async def _session(self, request: web.Request) -> web.Response:
         self._validate_public_request(request, require_origin=False)
+        cookie_diagnostics = []
+        tailscale_login = self._tailscale_login(request)
+        for name in (SESSION_COOKIE, IOS_LAX_SESSION_COOKIE, PLAIN_STRICT_SESSION_COOKIE):
+            token = request.cookies.get(name)
+            device = self.devices.authenticate(token)
+            identity_matches = device is not None and device.tailscale_login == tailscale_login
+            cookie_diagnostics.append(
+                f"{name}=length:{len(token) if token is not None else 0},"
+                f"valid:{device is not None},"
+                f"identity_match:{identity_matches}"
+            )
         print(
-            "TFR Web session cookies present: "
-            f"primary={SESSION_COOKIE in request.cookies} "
-            f"host_lax={IOS_LAX_SESSION_COOKIE in request.cookies} "
-            f"plain_strict={PLAIN_STRICT_SESSION_COOKIE in request.cookies}",
+            f"TFR Web session cookie diagnostics: {' '.join(cookie_diagnostics)}",
             file=sys.stderr,
             flush=True,
         )
