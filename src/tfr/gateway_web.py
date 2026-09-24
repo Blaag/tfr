@@ -4,7 +4,6 @@ import asyncio
 import contextlib
 import hashlib
 import json
-import sys
 import time
 from collections import OrderedDict, defaultdict, deque
 from collections.abc import Mapping
@@ -23,8 +22,6 @@ from tfr.gateway_devices import DeviceRecord, DeviceStore
 
 WEB_PROTOCOL_VERSION = 1
 SESSION_COOKIE = "__Host-tfr_session"
-IOS_LAX_SESSION_COOKIE = "__Host-tfr_session_lax"
-PLAIN_STRICT_SESSION_COOKIE = "tfr_session_strict"
 TAILSCALE_LOGIN_HEADER = "Tailscale-User-Login"
 MAX_WEB_MESSAGE_BYTES = 65_536
 MAX_COMMANDS_PER_MINUTE = 30
@@ -321,11 +318,6 @@ class WebGatewayServer:
         if require_origin and origins != [self.origin]:
             raise web.HTTPForbidden(text="Unexpected origin")
         if allow_missing_origin and origins not in ([], [self.origin], ["null"]):
-            print(
-                f"TFR Web rejected navigation Origin header: {origins!r}",
-                file=sys.stderr,
-                flush=True,
-            )
             raise web.HTTPForbidden(text="Unexpected origin")
         self._tailscale_login(request)
 
@@ -337,18 +329,10 @@ class WebGatewayServer:
         return values[0]
 
     def _authenticate(self, request: web.Request) -> DeviceRecord | None:
-        tailscale_login = self._tailscale_login(request)
-        for name in (SESSION_COOKIE, IOS_LAX_SESSION_COOKIE, PLAIN_STRICT_SESSION_COOKIE):
-            device = self.devices.authenticate(request.cookies.get(name))
-            if device is not None and device.tailscale_login == tailscale_login:
-                if name != SESSION_COOKIE:
-                    print(
-                        f"TFR Web accepted diagnostic session cookie: {name}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                return device
-        return None
+        device = self.devices.authenticate(request.cookies.get(SESSION_COOKIE))
+        if device is None or device.tailscale_login != self._tailscale_login(request):
+            return None
+        return device
 
     @staticmethod
     def _json_response(value: Mapping[str, Any], *, status: int = 200) -> web.Response:
@@ -360,22 +344,6 @@ class WebGatewayServer:
 
     async def _session(self, request: web.Request) -> web.Response:
         self._validate_public_request(request, require_origin=False)
-        cookie_diagnostics = []
-        tailscale_login = self._tailscale_login(request)
-        for name in (SESSION_COOKIE, IOS_LAX_SESSION_COOKIE, PLAIN_STRICT_SESSION_COOKIE):
-            token = request.cookies.get(name)
-            device = self.devices.authenticate(token)
-            identity_matches = device is not None and device.tailscale_login == tailscale_login
-            cookie_diagnostics.append(
-                f"{name}=length:{len(token) if token is not None else 0},"
-                f"valid:{device is not None},"
-                f"identity_match:{identity_matches}"
-            )
-        print(
-            f"TFR Web session cookie diagnostics: {' '.join(cookie_diagnostics)}",
-            file=sys.stderr,
-            flush=True,
-        )
         device = self._authenticate(request)
         return self._json_response(
             {
@@ -415,22 +383,6 @@ class WebGatewayServer:
     def _set_session_cookie(response: web.StreamResponse, token: str) -> None:
         response.set_cookie(
             SESSION_COOKIE,
-            token,
-            secure=True,
-            httponly=True,
-            samesite="Strict",
-            path="/",
-        )
-        response.set_cookie(
-            IOS_LAX_SESSION_COOKIE,
-            token,
-            secure=True,
-            httponly=True,
-            samesite="Lax",
-            path="/",
-        )
-        response.set_cookie(
-            PLAIN_STRICT_SESSION_COOKIE,
             token,
             secure=True,
             httponly=True,
@@ -515,24 +467,6 @@ class WebGatewayServer:
         response.headers["Clear-Site-Data"] = '"cache", "storage"'
         response.set_cookie(
             SESSION_COOKIE,
-            "",
-            max_age=0,
-            secure=True,
-            httponly=True,
-            samesite="Strict",
-            path="/",
-        )
-        response.set_cookie(
-            IOS_LAX_SESSION_COOKIE,
-            "",
-            max_age=0,
-            secure=True,
-            httponly=True,
-            samesite="Lax",
-            path="/",
-        )
-        response.set_cookie(
-            PLAIN_STRICT_SESSION_COOKIE,
             "",
             max_age=0,
             secure=True,
