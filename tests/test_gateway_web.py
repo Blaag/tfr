@@ -45,6 +45,12 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
     } <= {asset.name for asset in asset_directory.iterdir()}
 
 
+def test_pwa_hidden_state_overrides_layout_display() -> None:
+    styles = files("tfr").joinpath("web", "styles.css").read_text(encoding="utf-8")
+    assert "[hidden]" in styles
+    assert "display: none !important" in styles
+
+
 def make_event(
     *,
     kind: EventKind = EventKind.RAW_OUTPUT,
