@@ -1,64 +1,39 @@
-export function createPairingCoordinator(pair) {
-  let code = null;
-  let inFlight = null;
-  let initializing = true;
-  let resumePending = false;
+export function submitPairing(document, code) {
+  const form = document.createElement("form");
+  form.method = "post";
+  form.action = "/pair";
+  form.hidden = true;
 
-  async function attempt() {
-    if (!code) return "none";
-    if (inFlight) return inFlight;
-    const attemptedCode = code;
-    const attemptPromise = pair(attemptedCode);
-    inFlight = attemptPromise;
-    try {
-      const result = await attemptPromise;
-      if (result !== "unreachable" && code === attemptedCode) code = null;
-      return result;
-    } finally {
-      if (inFlight === attemptPromise) inFlight = null;
-    }
-  }
+  const input = document.createElement("input");
+  input.type = "hidden";
+  input.name = "code";
+  input.value = code;
+  form.append(input);
 
-  return {
-    get code() {
-      return code;
-    },
-    setCode(value) {
-      code = value;
-    },
-    finishInitialization() {
-      initializing = false;
-      const pending = resumePending;
-      resumePending = false;
-      return pending;
-    },
-    attempt,
-    async resume() {
-      if (initializing) {
-        resumePending = true;
-        return "initializing";
-      }
-      return attempt();
-    },
-  };
+  document.body.append(form);
+  form.submit();
 }
 
-export async function pairingResponse(response) {
-  let value;
-  try {
-    value = await response.json();
-  } catch {
-    return response.ok
-      ? { result: "unreachable" }
-      : { result: "rejected", message: "Pairing failed" };
-  }
-  if (response.status === 429 || response.status >= 500) return { result: "unreachable" };
-  const object = value !== null && typeof value === "object" ? value : {};
-  if (!response.ok) {
-    return {
-      result: "rejected",
-      message: typeof object.error === "string" ? object.error : "Pairing failed",
-    };
-  }
-  return object.paired === true ? { result: "paired" } : { result: "unreachable" };
+export function createPairingSubmission(submit, schedule) {
+  let pending = false;
+  let generation = 0;
+
+  return {
+    start(code, delay = 0) {
+      if (pending) return false;
+      pending = true;
+      generation += 1;
+      const submissionGeneration = generation;
+      if (delay > 0) {
+        schedule(() => {
+          if (pending && generation === submissionGeneration) submit(code);
+        }, delay);
+      } else submit(code);
+      return true;
+    },
+    reset() {
+      pending = false;
+      generation += 1;
+    },
+  };
 }
