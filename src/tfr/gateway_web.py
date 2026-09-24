@@ -256,6 +256,7 @@ class WebGatewayServer:
             [
                 web.get("/api/session", self._session),
                 web.post("/api/pair", self._pair),
+                web.post("/pair", self._pair_page),
                 web.post("/api/logout", self._logout),
                 web.get("/ws", self._websocket),
                 web.get(
@@ -347,9 +348,7 @@ class WebGatewayServer:
             }
         )
 
-    async def _pair(self, request: web.Request) -> web.Response:
-        self._validate_public_request(request, require_origin=True)
-        tailscale_login = self._tailscale_login(request)
+    def _record_pairing_attempt(self, tailscale_login: str) -> bool:
         now = time.monotonic()
         for identity, identity_attempts in tuple(self._pairing_attempts.items()):
             while identity_attempts and identity_attempts[0] <= now - 60:
@@ -365,11 +364,29 @@ class WebGatewayServer:
             (attempts is not None and len(attempts) >= MAX_PAIRING_ATTEMPTS_PER_MINUTE)
             or len(self._global_pairing_attempts) >= MAX_GLOBAL_PAIRING_ATTEMPTS_PER_MINUTE
         ):
-            return self._json_response({"error": "Pairing rate limit exceeded"}, status=429)
+            return False
         if attempts is None:
             attempts = self._pairing_attempts[tailscale_login]
         attempts.append(now)
         self._global_pairing_attempts.append(now)
+        return True
+
+    @staticmethod
+    def _set_session_cookie(response: web.StreamResponse, token: str) -> None:
+        response.set_cookie(
+            SESSION_COOKIE,
+            token,
+            secure=True,
+            httponly=True,
+            samesite="Strict",
+            path="/",
+        )
+
+    async def _pair(self, request: web.Request) -> web.Response:
+        self._validate_public_request(request, require_origin=True)
+        tailscale_login = self._tailscale_login(request)
+        if not self._record_pairing_attempt(tailscale_login):
+            return self._json_response({"error": "Pairing rate limit exceeded"}, status=429)
         try:
             value = await request.json(loads=json.loads)
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -391,14 +408,42 @@ class WebGatewayServer:
         response = self._json_response(
             {"paired": True, "device": {"id": str(device.device_id), "label": device.label}}
         )
-        response.set_cookie(
-            SESSION_COOKIE,
-            token,
-            secure=True,
-            httponly=True,
-            samesite="Strict",
-            path="/",
+        self._set_session_cookie(response, token)
+        return response
+
+    async def _pair_page(self, request: web.Request) -> web.Response:
+        self._validate_public_request(request, require_origin=True)
+        tailscale_login = self._tailscale_login(request)
+        if not self._record_pairing_attempt(tailscale_login):
+            return web.Response(
+                status=303,
+                headers={
+                    "Location": "/?pairing=retry",
+                    "Cache-Control": "no-store",
+                    "Retry-After": "5",
+                },
+            )
+        if request.content_type != "application/x-www-form-urlencoded":
+            return web.Response(text="Invalid pairing request", status=400)
+        try:
+            value = await request.post()
+        except (LookupError, ValueError):
+            return web.Response(text="Invalid pairing request", status=400)
+        codes = value.getall("code", [])
+        if set(value) != {"code"} or len(codes) != 1 or not isinstance(codes[0], str):
+            return web.Response(text="Invalid pairing request", status=400)
+        try:
+            _device, token = await self.devices.redeem(codes[0], tailscale_login)
+        except ValueError:
+            return web.Response(
+                status=303,
+                headers={"Location": "/?pairing=invalid", "Cache-Control": "no-store"},
+            )
+        response = web.Response(
+            status=303,
+            headers={"Location": "/?pairing=complete", "Cache-Control": "no-store"},
         )
+        self._set_session_cookie(response, token)
         return response
 
     async def _logout(self, request: web.Request) -> web.Response:

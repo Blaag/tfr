@@ -381,10 +381,10 @@ tfr pair --device-name "My iPhone"
 ```
 
 Open the printed URL on the phone while Tailscale is connected. The pairing
-secret is in the URL fragment and is removed before the PWA makes a request, but
-the URL should still be treated as a short-lived secret and kept out of shell
-transcripts and messages. In Safari, use Share > Add to Home Screen after
-pairing.
+secret is in the URL fragment, removed from browser history before submission,
+and retained only in tab-scoped session storage for bounded recovery attempts.
+The URL should still be treated as a short-lived secret and kept out of shell
+transcripts and messages. In Safari, use Share > Add to Home Screen after pairing.
 
 List and revoke paired devices locally:
 

@@ -86,6 +86,12 @@ and regular file with atomic replacement. `tfr devices` lists paired devices and
 `tfr revoke-device` invalidates a credential and closes its active sockets.
 Credentials expire after 180 days.
 
+The browser removes the pairing fragment from history before a same-origin
+top-level form submission. It temporarily retains the code in tab-scoped session
+storage for at most three navigation attempts, then clears it after successful
+session verification or terminal rejection. This avoids placing the code in a
+query string or relying on WebKit to persist a cookie from a fetch response.
+
 Paired devices have chat scope, not normal Gateway-client authority. The web
 protocol accepts human world commands and ping requests only. It rejects
 connection controls, agent controls, remote actor selection, arbitrary metadata,

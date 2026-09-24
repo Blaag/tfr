@@ -291,6 +291,84 @@ async def test_pairing_retry_returns_the_same_device_cookie(tmp_path: Path) -> N
         await bus.close()
 
 
+async def test_navigation_pairing_sets_cookie_and_redirects(tmp_path: Path) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 5})
+    runtime = FakeRuntime(history)
+    gateway = WebGatewayServer(
+        runtime,  # type: ignore[arg-type]
+        origin=ORIGIN,
+        host="127.0.0.1",
+        port=7348,
+        state_directory=tmp_path / "web",
+        snapshot_events=5,
+    )
+    client = TestClient(TestServer(gateway.application()))
+    await client.start_server()
+    code = parse_qs(urlsplit(gateway.create_pairing_url("Test iPhone")).fragment)["pair"][0]
+    try:
+        response = await client.post(
+            "/pair",
+            data={"code": code},
+            headers=PUBLIC_HEADERS,
+            allow_redirects=False,
+        )
+
+        assert response.status == 303
+        assert response.headers["Location"] == "/?pairing=complete"
+        cookie = SimpleCookie()
+        cookie.load(response.headers["Set-Cookie"])
+        token = cookie[SESSION_COOKIE].value
+        session = await client.get(
+            "/api/session",
+            headers={**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"},
+        )
+        assert (await session.json())["paired"] is True
+    finally:
+        await client.close()
+        await bus.close()
+
+
+async def test_navigation_pairing_rejects_invalid_and_malformed_forms(tmp_path: Path) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 5})
+    runtime = FakeRuntime(history)
+    gateway = WebGatewayServer(
+        runtime,  # type: ignore[arg-type]
+        origin=ORIGIN,
+        host="127.0.0.1",
+        port=7348,
+        state_directory=tmp_path / "web",
+        snapshot_events=5,
+    )
+    client = TestClient(TestServer(gateway.application()))
+    await client.start_server()
+    try:
+        invalid = await client.post(
+            "/pair",
+            data={"code": "invalid"},
+            headers=PUBLIC_HEADERS,
+            allow_redirects=False,
+        )
+        malformed = await client.post(
+            "/pair",
+            data=b"code=invalid",
+            headers={
+                **PUBLIC_HEADERS,
+                "Content-Type": "application/x-www-form-urlencoded; charset=not-a-charset",
+            },
+            allow_redirects=False,
+        )
+
+        assert invalid.status == 303
+        assert invalid.headers["Location"] == "/?pairing=invalid"
+        assert "Set-Cookie" not in invalid.headers
+        assert malformed.status == 400
+    finally:
+        await client.close()
+        await bus.close()
+
+
 async def test_pairing_rate_limit_is_isolated_by_tailscale_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -325,12 +403,21 @@ async def test_pairing_rate_limit_is_isolated_by_tailscale_identity(
             json={"code": "invalid"},
             headers={**PUBLIC_HEADERS, "Tailscale-User-Login": "third@example.com"},
         )
+        form_limited = await client.post(
+            "/pair",
+            data={"code": "invalid"},
+            headers={**PUBLIC_HEADERS, "Tailscale-User-Login": "fourth@example.com"},
+            allow_redirects=False,
+        )
 
         assert first.status == 401
         assert limited.status == 429
         assert other_identity.status == 401
         assert globally_limited.status == 429
+        assert form_limited.status == 303
+        assert form_limited.headers["Location"] == "/?pairing=retry"
         assert "third@example.com" not in gateway._pairing_attempts
+        assert "fourth@example.com" not in gateway._pairing_attempts
     finally:
         await client.close()
         await bus.close()

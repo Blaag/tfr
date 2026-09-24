@@ -1,9 +1,10 @@
-import { createPairingCoordinator, pairingResponse } from "./pairing.mjs";
+import { createPairingSubmission, submitPairing } from "./pairing.mjs";
 
 const MAX_EVENTS_PER_WORLD = 2500;
 const MAX_RENDERED_EVENTS = 500;
 const MAX_COMMAND_HISTORY = 50;
 const MAX_STORED_COMMAND_CHARACTERS = 4096;
+const MAX_PAIRING_ATTEMPTS = 3;
 const RECONNECT_DELAYS = [500, 1000, 2000, 4000, 8000, 15000];
 
 const elements = {
@@ -52,8 +53,11 @@ const state = {
   pending: new Map(),
   toastTimer: null,
 };
-
-const pairingCoordinator = createPairingCoordinator(pairFromFragment);
+const pairingSubmission = createPairingSubmission(
+  (code) => submitPairing(document, code),
+  (callback, delay) => window.setTimeout(callback, delay),
+);
+let pairingRecoveryTimer = null;
 
 function readStorage(key) {
   try {
@@ -77,6 +81,60 @@ function safeRemove(key) {
   } catch {
     // Storage is optional; the live session remains usable without it.
   }
+}
+
+function readSessionStorage(key) {
+  try {
+    return sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function storeSession(key, value) {
+  try {
+    sessionStorage.setItem(key, value);
+  } catch {
+    // The initial navigation can still succeed when tab-scoped storage is unavailable.
+  }
+}
+
+function clearPairingState() {
+  window.clearTimeout(pairingRecoveryTimer);
+  pairingRecoveryTimer = null;
+  pairingSubmission.reset();
+  try {
+    sessionStorage.removeItem("tfr.pairingCode");
+    sessionStorage.removeItem("tfr.pairingAttempts");
+  } catch {
+    // Nothing else retains the pairing secret after the fragment is removed.
+  }
+}
+
+function postPairing(code, delay = 0) {
+  const parsedAttempts = Number.parseInt(
+    readSessionStorage("tfr.pairingAttempts") || "0",
+    10,
+  );
+  const attempts = Number.isFinite(parsedAttempts) ? Math.max(0, parsedAttempts) : 0;
+  if (attempts >= MAX_PAIRING_ATTEMPTS) {
+    clearPairingState();
+    elements.pairing.hidden = false;
+    elements.console.hidden = true;
+    elements.pairingMessage.textContent =
+      "Pairing could not be completed. Create a new pairing link on the Gateway.";
+    return;
+  }
+  if (!pairingSubmission.start(code, delay)) return;
+  storeSession("tfr.pairingAttempts", String(attempts + 1));
+  elements.pairing.hidden = false;
+  elements.console.hidden = true;
+  elements.pairingMessage.textContent =
+    delay > 0 ? "Pairing is busy. Retrying shortly…" : "Pairing this device with the Gateway…";
+  pairingRecoveryTimer = window.setTimeout(() => {
+    pairingSubmission.reset();
+    resume();
+  }, delay + 15000);
 }
 
 function setConnection(label, kind = "") {
@@ -472,30 +530,6 @@ function moveHistory(direction) {
   elements.commandInput.focus({ preventScroll: true });
 }
 
-async function pairFromFragment(code) {
-  elements.pairing.hidden = false;
-  elements.pairingMessage.textContent = "Pairing this device with the Gateway…";
-  let response;
-  try {
-    response = await fetch("/api/pair", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code }),
-    });
-  } catch {
-    elements.pairingMessage.textContent = "Gateway unavailable. Pairing will retry when online.";
-    return "unreachable";
-  }
-  const outcome = await pairingResponse(response);
-  if (outcome.result === "unreachable") {
-    elements.pairingMessage.textContent = "Gateway unavailable. Pairing will retry when online.";
-  } else if (outcome.result === "rejected") {
-    elements.pairingMessage.textContent = outcome.message;
-  }
-  return outcome.result;
-}
-
 async function sessionState() {
   try {
     const response = await fetch("/api/session", { cache: "no-store", credentials: "same-origin" });
@@ -546,62 +580,76 @@ async function unpairDevice() {
 }
 
 async function start() {
-  try {
-    for (const key of ["tfr.cursor", "tfr.drafts", "tfr.commandHistory"]) safeRemove(key);
-    const pairingCode = new URLSearchParams(location.hash.slice(1)).get("pair");
-    if (pairingCode) history.replaceState(null, "", `${location.pathname}${location.search}`);
-    pairingCoordinator.setCode(pairingCode);
-    let session = await sessionState();
-    if (pairingCode) {
-      const pairing = await pairingCoordinator.attempt();
-      if (pairing === "paired") session = "paired";
-    }
-    const paired = session === "paired";
-    if (session === "unreachable") {
-      elements.pairing.hidden = !pairingCoordinator.code;
-      elements.console.hidden = Boolean(pairingCoordinator.code);
-      if (!pairingCoordinator.code) {
-        setConnection("Offline", "error");
-        scheduleReconnect();
-      }
-      return;
-    }
-    elements.pairing.hidden = paired;
-    elements.console.hidden = !paired;
-    if (!paired) {
-      await clearLocalData();
-      if (!pairingCode) {
-        elements.pairingMessage.textContent =
-          'On the Gateway host, run tfr pair --device-name "My iPhone", then open that link here.';
-      }
-      return;
-    }
-    connect();
-  } finally {
-    if (pairingCoordinator.finishInitialization()) queueMicrotask(() => resume());
+  for (const key of ["tfr.cursor", "tfr.drafts", "tfr.commandHistory"]) safeRemove(key);
+  const fragmentCode = new URLSearchParams(location.hash.slice(1)).get("pair");
+  if (fragmentCode) {
+    storeSession("tfr.pairingCode", fragmentCode);
+    storeSession("tfr.pairingAttempts", "0");
+    history.replaceState(null, "", `${location.pathname}${location.search}`);
   }
+  const pairingCode = fragmentCode || readSessionStorage("tfr.pairingCode");
+  const pairingResult = new URLSearchParams(location.search).get("pairing");
+  if (pairingResult) {
+    history.replaceState(null, "", location.pathname);
+    const redirectedSession = await sessionState();
+    if (redirectedSession === "paired") {
+      clearPairingState();
+      elements.pairing.hidden = true;
+      elements.console.hidden = false;
+      connect();
+      return;
+    }
+    if (pairingResult === "invalid") {
+      clearPairingState();
+      elements.pairing.hidden = false;
+      elements.console.hidden = true;
+      elements.pairingMessage.textContent =
+        "Pairing code is invalid or expired. Create a new pairing link on the Gateway.";
+      return;
+    }
+    if (pairingResult === "retry" && pairingCode) {
+      postPairing(pairingCode, 5000);
+      return;
+    }
+  }
+  if (pairingCode) {
+    postPairing(pairingCode);
+    return;
+  }
+  const session = await sessionState();
+  const paired = session === "paired";
+  if (session === "unreachable") {
+    setConnection("Offline", "error");
+    scheduleReconnect();
+    return;
+  }
+  elements.pairing.hidden = paired;
+  elements.console.hidden = !paired;
+  if (!paired) {
+    await clearLocalData();
+    elements.pairingMessage.textContent =
+      'On the Gateway host, run tfr pair --device-name "My iPhone", then open that link here.';
+    return;
+  }
+  connect();
 }
 
 async function resume() {
-  const hadPairingCode = Boolean(pairingCoordinator.code);
-  const pairing = await pairingCoordinator.resume();
-  if (pairing === "initializing") return;
-  if (hadPairingCode) {
-    if (pairing === "unreachable") return;
-    if (pairing !== "paired") return;
-    elements.pairing.hidden = true;
-    elements.console.hidden = false;
-  } else {
-    const session = await sessionState();
-    if (session === "unreachable") return;
-    if (session === "unpaired") {
-      await clearLocalData();
-      elements.console.hidden = true;
-      elements.pairing.hidden = false;
-      elements.pairingMessage.textContent =
-        "This device is not paired. Create a new pairing link on the Gateway.";
-      return;
-    }
+  const session = await sessionState();
+  if (session === "unreachable") return;
+  const pairingCode = readSessionStorage("tfr.pairingCode");
+  if (session === "paired") clearPairingState();
+  if (session === "unpaired" && pairingCode) {
+    postPairing(pairingCode);
+    return;
+  }
+  if (session === "unpaired") {
+    await clearLocalData();
+    elements.console.hidden = true;
+    elements.pairing.hidden = false;
+    elements.pairingMessage.textContent =
+      "This device is not paired. Create a new pairing link on the Gateway.";
+    return;
   }
   connect();
 }
@@ -639,6 +687,12 @@ elements.transcript.addEventListener("scroll", () => {
   updateReturnLive();
 });
 window.addEventListener("online", resume);
+window.addEventListener("pageshow", (event) => {
+  if (!event.persisted) return;
+  window.clearTimeout(pairingRecoveryTimer);
+  pairingSubmission.reset();
+  resume();
+});
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") resume();
 });
