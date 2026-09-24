@@ -24,6 +24,10 @@ PUBLIC_HEADERS = {
     "Origin": ORIGIN,
     "Tailscale-User-Login": "black@example.com",
 }
+NAVIGATION_HEADERS = {
+    "Host": "gateway.example.ts.net",
+    "Tailscale-User-Login": "black@example.com",
+}
 
 
 def test_all_pwa_assets_are_in_the_python_package() -> None:
@@ -232,6 +236,17 @@ async def test_pairing_requires_exact_origin_and_host(tmp_path: Path) -> None:
             },
         )
         assert response.status == 403
+        response = await client.post(
+            "/pair",
+            data={"code": "invalid"},
+            headers={
+                "Host": "gateway.example.ts.net",
+                "Origin": "https://evil.test",
+                "Tailscale-User-Login": "black@example.com",
+            },
+            allow_redirects=False,
+        )
+        assert response.status == 403
         response = await client.get(
             "/api/session",
             headers={
@@ -310,7 +325,7 @@ async def test_navigation_pairing_sets_cookie_and_redirects(tmp_path: Path) -> N
         response = await client.post(
             "/pair",
             data={"code": code},
-            headers=PUBLIC_HEADERS,
+            headers=NAVIGATION_HEADERS,
             allow_redirects=False,
         )
 
