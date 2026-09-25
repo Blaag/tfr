@@ -11,7 +11,13 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from tfr.agents import AgentInspection
-from tfr.config import GatewayReconnectConfig, UiConfiguration, WorldConfig, WorldDefaults
+from tfr.config import (
+    GatewayReconnectConfig,
+    UiConfiguration,
+    WorldCapabilitiesConfig,
+    WorldConfig,
+    WorldDefaults,
+)
 from tfr.core import EventBus
 from tfr.events import CommandRequest, Event
 from tfr.gateway import default_gateway_socket
@@ -63,12 +69,21 @@ class RemoteWorldSession:
         self.world = str(descriptor["world"])
         self.session_id = UUID(str(descriptor["session_id"]))
         self.state = SessionState(str(descriptor["state"]))
+        connection_generation = descriptor.get("connection_generation", 0)
+        if (
+            not isinstance(connection_generation, int)
+            or isinstance(connection_generation, bool)
+            or connection_generation < 0
+        ):
+            raise ValueError("connection_generation must be a non-negative integer")
+        self.connection_generation = connection_generation
         self.config = WorldConfig(
             host="gateway.invalid",
             port=1,
             aliases=descriptor.get("aliases", ()),
             server=str(descriptor["server"]),
             encoding=str(descriptor["encoding"]),
+            capabilities=self._capabilities(descriptor),
             reconnect=False,
             autoconnect=False,
         )
@@ -85,6 +100,16 @@ class RemoteWorldSession:
         ):
             raise ValueError("scrollback_lines must be a positive integer")
         self.scrollback_lines = scrollback_lines
+
+    @staticmethod
+    def _capabilities(descriptor: Mapping[str, Any]) -> WorldCapabilitiesConfig:
+        value = descriptor.get("capabilities", {})
+        if not isinstance(value, Mapping):
+            raise ValueError("capabilities must be an object")
+        unicode = value.get("unicode", False)
+        if not isinstance(unicode, bool):
+            raise ValueError("capabilities.unicode must be a boolean")
+        return WorldCapabilitiesConfig(unicode=unicode)
 
     @property
     def encoding(self) -> str:
@@ -486,6 +511,7 @@ class GatewayClient:
             for world, session in current_sessions.items():
                 updated = replacement_sessions[world]
                 session.state = updated.state
+                session.connection_generation = updated.connection_generation
                 session.config = updated.config
                 session.defaults = updated.defaults
                 session.scrollback_lines = updated.scrollback_lines
@@ -533,6 +559,7 @@ class GatewayClient:
                 "causation_id": (
                     str(request.causation_id) if request.causation_id is not None else None
                 ),
+                "expected_connection_generation": request.expected_connection_generation,
                 "metadata": dict(request.metadata),
             },
             request.request_id,
@@ -641,7 +668,9 @@ class GatewayClient:
             return
         state = event.metadata.get("state")
         with contextlib.suppress(ValueError, KeyError):
-            self._session_for(event.world).state = SessionState(str(state))
+            session = self._session_for(event.world)
+            session.state = SessionState(str(state))
+            session.connection_generation = event.connection_generation
 
     def _session_for(self, world: str) -> RemoteWorldSession:
         try:

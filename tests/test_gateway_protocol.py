@@ -41,7 +41,7 @@ async def test_reads_and_versions_json_line_messages() -> None:
 
     message = await read_message(reader)
 
-    assert message == {"type": "hello", "client_id": "example", "protocol": 1}
+    assert message == {"type": "hello", "client_id": "example", "protocol": 2}
     assert await read_message(reader) is None
 
 
@@ -56,7 +56,7 @@ def test_event_message_round_trips() -> None:
 
 async def test_rejects_an_unsupported_protocol_version() -> None:
     reader = asyncio.StreamReader()
-    reader.feed_data(b'{"type":"hello","protocol":99}\n')
+    reader.feed_data(b'{"type":"hello","protocol":1}\n')
 
     with pytest.raises(GatewayProtocolError, match="unsupported protocol"):
         await read_message(reader)

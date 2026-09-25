@@ -109,6 +109,18 @@
       "title": "TlsConfig",
       "type": "object"
     },
+    "WorldCapabilitiesConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "unicode": {
+          "default": false,
+          "title": "Unicode",
+          "type": "boolean"
+        }
+      },
+      "title": "WorldCapabilitiesConfig",
+      "type": "object"
+    },
     "WorldConfig": {
       "additionalProperties": false,
       "properties": {
@@ -128,6 +140,9 @@
           "default": false,
           "title": "Autoconnect",
           "type": "boolean"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/WorldCapabilitiesConfig"
         },
         "encoding": {
           "anyOf": [

@@ -599,6 +599,15 @@ otherwise approximate the RGB colors at the terminal's available color depth.
 - Pasting multiple lines sends them to the active `bare`, TinyMUSH, or TinyMUX
   world as preflighted, server-escaped, paced `@emit` commands. Internal blank
   lines and indentation are preserved; a single pasted line remains editable.
+- `/image` reads an image from the local macOS clipboard, or from the Linux
+  clipboard when `wl-paste` or `xclip` is installed. Windows clipboard images
+  are not yet supported. It renders an aspect-correct 72-column ANSI-colored
+  preview and sends it only after Enter confirms. Use `+`/`-` to adjust its
+  width up to 80 columns, `A` for ASCII, `U` for Unicode Braille when enabled
+  for that world, or Escape to cancel. `/image PATH` loads a BMP, GIF, ICO,
+  JPEG, PNG, TIFF, or WebP file instead, including on Windows or an SSH host
+  where the desktop clipboard is unavailable. `--width`, `--ascii`, and
+  `--unicode` can select the initial preview settings.
 - `F6`, `Ctrl+Right`, or `Option+Right`: switch to the next world.
 - `F5`, `Ctrl+Left`, or `Option+Left`: switch to the previous world.
 - `PageUp` and `PageDown`: navigate scrollback or advance `More` output.
@@ -614,11 +623,26 @@ otherwise approximate the RGB colors at the terminal's available color depth.
 Input beginning with `/` is a client command. Available commands are `/world
 ALIAS`, `/next` (`/n`), `/previous` (`/p`), `/connect`, `/disconnect`, `/reconnect`,
 `/end`, `/nospoof show|hide|status`, `/animations on|off|status`,
-`/lowbw on|off|status`, `/clear`, `/boss`, `/sh`, `/reload`, `/restart`,
+`/lowbw on|off|status`, `/clear`, `/boss`, `/image`, `/sh`, `/reload`, `/restart`,
 `/gateway reconnect`, `/help`, and `/quit`, plus commands registered by enabled
 plugins and configured world-switch aliases such as `/g`. Begin input with `//`
 to send a literal leading slash. `/help` displays commands, aliases and any
 collisions, loaded plugins, world markers, and keybindings.
+
+Image output uses portable ASCII glyphs unless the target world explicitly
+declares that it preserves Unicode in `worlds.jsonc`:
+
+```jsonc
+"capabilities": {
+  "unicode": true,
+}
+```
+
+This setting is a trust declaration about the world and its clients, not an
+encoding autodetection mechanism. The configured world encoding must still be
+able to encode every generated glyph. Browsers and other clients that strip
+ANSI color retain the ASCII or Braille shape, although narrow displays may wrap
+rows selected for a wider shared transcript.
 
 After a laptop sleep or transient network loss, TFR verifies the Gateway
 connection is still alive on a background interval, and automatically retries

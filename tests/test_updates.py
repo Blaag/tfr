@@ -32,7 +32,7 @@ def manifest_data(*, version: str = "1.2.3") -> dict[str, object]:
         "version": version,
         "tag": f"v{version}",
         "commit": "a" * 40,
-        "protocol": {"minimum": 1, "maximum": 1},
+        "protocol": {"minimum": 2, "maximum": 2},
         "release_url": f"https://github.com/Blaag/tfr/releases/tag/v{version}",
         "artifact": {
             "url": f"https://github.com/Blaag/tfr/releases/download/v{version}/tfr.whl",
@@ -245,7 +245,7 @@ def test_release_manifest_builder_uses_protocol_and_artifact_digest(tmp_path: Pa
     )
     manifest = ReleaseManifest.from_json(output.read_bytes())
 
-    assert manifest.protocol_minimum == 1
-    assert manifest.protocol_maximum == 1
+    assert manifest.protocol_minimum == 2
+    assert manifest.protocol_maximum == 2
     assert manifest.artifact.size == 5
     assert manifest.artifact.sha256 == hashlib.sha256(b"wheel").hexdigest()

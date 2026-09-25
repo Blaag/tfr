@@ -120,11 +120,22 @@ def test_loads_jsonc_and_resolves_references(tmp_path: Path) -> None:
     assert bundle.worlds_path == (tmp_path / "worlds.jsonc").resolve()
     assert bundle.agents_path == (tmp_path / "agents.jsonc").resolve()
     assert bundle.worlds.worlds["bot-world"].login is not None
+    assert bundle.worlds.worlds["bot-world"].capabilities.unicode is False
     assert bundle.worlds.worlds["bot-world"].login.password.get_secret_value() == "world-secret"
     assert bundle.agents.providers["local"].api_key.get_secret_value() == "api-secret"
     assert "world-secret" not in repr(bundle)
     assert "api-secret" not in repr(bundle)
     assert bundle.warnings == ()
+
+
+def test_world_unicode_capability_is_explicitly_enabled() -> None:
+    world = WorldConfig(
+        host="localhost",
+        port=4201,
+        capabilities={"unicode": True},
+    )
+
+    assert world.capabilities.unicode is True
 
 
 def test_world_switch_aliases_are_normalized(tmp_path: Path) -> None:

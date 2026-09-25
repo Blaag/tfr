@@ -452,8 +452,12 @@ class GatewayRuntime:
                 "world": session.world,
                 "session_id": str(session.session_id),
                 "state": session.state.value,
+                "connection_generation": session.connection_generation,
                 "server": session.config.server,
                 "encoding": session.encoding,
+                "capabilities": {
+                    "unicode": session.config.capabilities.unicode,
+                },
                 "aliases": list(session.config.aliases),
                 "agent": session.world in agent_worlds,
                 "scrollback_lines": self.history.limits[session.world],
@@ -493,6 +497,7 @@ class GatewayRuntime:
         actor: Actor | None = None,
         correlation_id: UUID | None = None,
         causation_id: UUID | None = None,
+        expected_connection_generation: int | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> None:
         request = self._command_request(
@@ -504,6 +509,7 @@ class GatewayRuntime:
             actor=actor,
             correlation_id=correlation_id,
             causation_id=causation_id,
+            expected_connection_generation=expected_connection_generation,
             metadata=metadata,
         )
         await self.command_bus.submit(request)
@@ -535,6 +541,7 @@ class GatewayRuntime:
         actor: Actor | None = None,
         correlation_id: UUID | None = None,
         causation_id: UUID | None = None,
+        expected_connection_generation: int | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> CommandRequest:
         session = self.session_for(world)
@@ -542,6 +549,11 @@ class GatewayRuntime:
             raise ValueError("command text exceeds the gateway limit")
         if any(character in text for character in "\r\n\0"):
             raise ValueError("command text cannot contain CR, LF, or NUL")
+        if (
+            expected_connection_generation is not None
+            and expected_connection_generation != session.connection_generation
+        ):
+            raise ValueError("world connection changed before command submission")
         request_actor = actor or Actor(ActorType.HUMAN, f"ui:{client_id}")
         if len(request_actor.id) > MAX_ACTOR_ID_CHARACTERS:
             raise ValueError("remote actor ID exceeds the gateway limit")
@@ -558,6 +570,7 @@ class GatewayRuntime:
             sensitive=sensitive,
             correlation_id=correlation_id,
             causation_id=causation_id,
+            expected_connection_generation=expected_connection_generation,
             metadata={**dict(metadata or {}), "gateway_connection_id": client_id},
         )
 
@@ -988,6 +1001,15 @@ class GatewayServer:
                     message.get("correlation_id"), "correlation_id"
                 )
                 causation_id = self._optional_uuid(message.get("causation_id"), "causation_id")
+                expected_generation = message.get("expected_connection_generation")
+                if expected_generation is not None and (
+                    not isinstance(expected_generation, int)
+                    or isinstance(expected_generation, bool)
+                    or expected_generation < 0
+                ):
+                    raise ValueError(
+                        "expected_connection_generation must be a non-negative integer or null"
+                    )
                 metadata = message.get("metadata", {})
                 if not isinstance(metadata, dict):
                     raise ValueError("metadata must be an object")
@@ -1000,6 +1022,7 @@ class GatewayServer:
                     actor=actor,
                     correlation_id=correlation_id,
                     causation_id=causation_id,
+                    expected_connection_generation=expected_generation,
                     metadata=metadata,
                 )
             elif message_type == "control":
@@ -1047,7 +1070,7 @@ class GatewayServer:
                 result = {"device_id": str(device_id)}
             else:
                 raise ValueError(f"unsupported request type: {message_type}")
-        except (UnknownSessionError, RuntimeError, ValueError) as exc:
+        except (TypeError, UnknownSessionError, RuntimeError, ValueError) as exc:
             await write_message(
                 writer,
                 {
