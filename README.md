@@ -601,13 +601,14 @@ otherwise approximate the RGB colors at the terminal's available color depth.
   lines and indentation are preserved; a single pasted line remains editable.
 - `/image` reads an image from the local macOS clipboard, or from the Linux
   clipboard when `wl-paste` or `xclip` is installed. Windows clipboard images
-  are not yet supported. It renders an aspect-correct 72-column ANSI-colored
-  preview and sends it only after Enter confirms. Use `+`/`-` to adjust its
-  width up to 80 columns, `A` for ASCII, `U` for Unicode Braille when enabled
-  for that world, or Escape to cancel. `/image PATH` loads a BMP, GIF, ICO,
-  JPEG, PNG, TIFF, or WebP file instead, including on Windows or an SSH host
-  where the desktop clipboard is unavailable. `--width`, `--ascii`, and
-  `--unicode` can select the initial preview settings.
+  are not yet supported. It renders an aspect-correct 72-column preview and
+  sends it only after Enter confirms. Use `+`/`-` to adjust its width up to 80
+  columns, `A` for ASCII, `U` for Unicode Braille when enabled for that world,
+  or Escape to cancel. `/image PATH` loads a BMP, GIF, ICO, JPEG, PNG, TIFF, or
+  WebP file instead, including on Windows or an SSH host where the desktop
+  clipboard is unavailable. `--width`, `--ascii`, and `--unicode` select the
+  initial preview settings. ASCII output is uncolored grayscale by default;
+  `--withcolor` restores xterm-256 ANSI color for worlds that preserve it.
 - `F6`, `Ctrl+Right`, or `Option+Right`: switch to the next world.
 - `F5`, `Ctrl+Left`, or `Option+Left`: switch to the previous world.
 - `PageUp` and `PageDown`: navigate scrollback or advance `More` output.

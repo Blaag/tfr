@@ -173,6 +173,7 @@ def render_image(
     *,
     width: int = DEFAULT_IMAGE_WIDTH,
     mode: ImageGlyphMode = "ascii",
+    with_color: bool = False,
 ) -> RenderedImage:
     if not 1 <= width <= MAXIMUM_IMAGE_WIDTH:
         raise ValueError(f"image width must be between 1 and {MAXIMUM_IMAGE_WIDTH}")
@@ -186,10 +187,11 @@ def render_image(
         height = MAXIMUM_IMAGE_HEIGHT
     sample_size = (width, height) if mode == "ascii" else (width * 2, height * 4)
     sampled = image.convert("RGBA").resize(sample_size, Image.Resampling.LANCZOS)
-    colors = _quantized_colors(sampled)
     if mode == "ascii":
+        colors = _quantized_colors(sampled) if with_color else None
         lines = _render_ascii(sampled, colors)
     else:
+        colors = _quantized_colors(sampled)
         lines = _render_braille(sampled, colors, width, height)
 
     for line in lines:
@@ -214,9 +216,9 @@ def _quantized_colors(image: Image.Image) -> Image.Image:
     ).convert("RGB")
 
 
-def _render_ascii(image: Image.Image, colors: Image.Image) -> list[str]:
+def _render_ascii(image: Image.Image, colors: Image.Image | None) -> list[str]:
     pixels = image.load()
-    color_pixels = colors.load()
+    color_pixels = colors.load() if colors is not None else None
     lines = []
     for y in range(image.height):
         cells = []
@@ -227,7 +229,8 @@ def _render_ascii(image: Image.Image, colors: Image.Image) -> list[str]:
                 continue
             luminance = (299 * red + 587 * green + 114 * blue) // 1000
             glyph = _ASCII_GLYPHS[luminance * (len(_ASCII_GLYPHS) - 1) // 255]
-            cells.append((glyph, _xterm_color(*color_pixels[x, y])))
+            color = _xterm_color(*color_pixels[x, y]) if color_pixels is not None else None
+            cells.append((glyph, color))
         lines.append(_ansi_line(cells))
     return lines
 

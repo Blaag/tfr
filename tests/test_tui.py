@@ -2017,10 +2017,10 @@ def test_multiline_paste_preflight_rejects_unsupported_worlds_and_long_lines() -
 
 
 def test_image_parameters_are_bounded_and_unambiguous() -> None:
-    assert TfrTui._parse_image_parameters([]) == (72, None, None)
+    assert TfrTui._parse_image_parameters([]) == (72, None, False, None)
     assert TfrTui._parse_image_parameters(
-        ["--width", "80", "--unicode", "picture with spaces.png"]
-    ) == (80, "braille", Path("picture with spaces.png"))
+        ["--width", "80", "--ascii", "--withcolor", "picture with spaces.png"]
+    ) == (80, "ascii", True, Path("picture with spaces.png"))
     with pytest.raises(ValueError, match="between 1 and 80"):
         TfrTui._parse_image_parameters(["--width", "81"])
     with pytest.raises(ValueError, match="only one"):
@@ -2034,13 +2034,19 @@ async def test_image_preview_defaults_to_world_capability_and_preserves_draft(
 ) -> None:
     tui = make_tui(server="tinymux", unicode=True)
     tui.active_view.input_buffer.text = "unfinished draft"
-    modes: list[str] = []
+    render_options: list[tuple[str, bool]] = []
 
     def clipboard_image() -> Image.Image:
         return Image.new("RGB", (4, 4), "white")
 
-    def renderer(image: Image.Image, *, width: int, mode: str) -> SimpleNamespace:
-        modes.append(mode)
+    def renderer(
+        image: Image.Image,
+        *,
+        width: int,
+        mode: str,
+        with_color: bool,
+    ) -> SimpleNamespace:
+        render_options.append((mode, with_color))
         return SimpleNamespace(lines=("⣿",), width=width, height=1, mode=mode)
 
     monkeypatch.setattr("tfr.tui.load_clipboard_image", clipboard_image)
@@ -2048,7 +2054,7 @@ async def test_image_preview_defaults_to_world_capability_and_preserves_draft(
 
     await tui.open_image_preview("alpha", [])
 
-    assert modes == ["braille"]
+    assert render_options == [("braille", False)]
     assert tui.image_preview is not None
     assert tui.image_preview.commands == ("@emit ⣿",)
     assert tui.active_view.input_buffer.text == "unfinished draft"
@@ -2056,6 +2062,45 @@ async def test_image_preview_defaults_to_world_capability_and_preserves_draft(
     tui.switch_world("beta")
 
     assert tui.active_alias == "alpha"
+
+    tui.image_preview = None
+    await tui.open_image_preview("alpha", ["--ascii"])
+
+    assert render_options[-1] == ("ascii", False)
+
+
+async def test_ascii_image_preview_defaults_to_grayscale_and_accepts_color(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tui = make_tui(server="tinymux")
+    render_options: list[tuple[str, bool]] = []
+
+    monkeypatch.setattr(
+        "tfr.tui.load_clipboard_image",
+        lambda: Image.new("RGB", (4, 4), "white"),
+    )
+
+    def renderer(
+        image: Image.Image,
+        *,
+        width: int,
+        mode: str,
+        with_color: bool,
+    ) -> SimpleNamespace:
+        render_options.append((mode, with_color))
+        return SimpleNamespace(lines=("@@",), width=width, height=1, mode=mode)
+
+    monkeypatch.setattr("tfr.tui.render_image", renderer)
+
+    await tui.open_image_preview("alpha", [])
+    assert render_options == [("ascii", False)]
+    assert tui.image_preview is not None
+    assert "ASCII grayscale" in fragment_list_to_text(tui.image_preview_text())
+
+    tui.image_preview = None
+    await tui.open_image_preview("alpha", ["--withcolor"])
+    assert render_options[-1] == ("ascii", True)
+    assert "ASCII color" in fragment_list_to_text(tui.image_preview_text())
 
 
 async def test_image_preview_rejects_connection_change_during_source_work(
