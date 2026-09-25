@@ -855,7 +855,8 @@ Acceptance criteria:
   adapters before sending any line.
 - [x] Let the terminal UI explicitly read a clipboard image or local path and
   convert it locally into aspect-correct ASCII or per-world-gated Unicode
-  Braille art with ANSI color. Bound source size, output dimensions, palette,
+  Braille art, defaulting non-Unicode ASCII output to uncolored grayscale with
+  explicit ANSI color opt-in. Bound source size, output dimensions, palette,
   conversion work, and emitted line length; provide an adjustable preview and
   explicit confirmation before sending paced, server-aware `@emit` lines, and
   never upload the source image to an external service.

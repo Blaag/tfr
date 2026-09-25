@@ -16,7 +16,7 @@ from tfr.image_art import (
 )
 
 
-def test_ascii_render_is_aspect_correct_bounded_and_colored() -> None:
+def test_ascii_render_is_aspect_correct_bounded_and_grayscale_by_default() -> None:
     image = Image.new("RGB", (400, 200), (255, 0, 0))
 
     rendered = render_image(image, width=72, mode="ascii")
@@ -25,7 +25,19 @@ def test_ascii_render_is_aspect_correct_bounded_and_colored() -> None:
     assert rendered.height == 18
     assert len(rendered.lines) == 18
     assert all(len(strip_ansi(line)) == 72 for line in rendered.lines)
-    assert all(line.endswith("\x1b[0m") for line in rendered.lines)
+    assert all("\x1b[" not in line for line in rendered.lines)
+    assert all(0x20 <= ord(character) <= 0x7E for line in rendered.lines for character in line)
+
+
+def test_ascii_render_can_include_xterm_color() -> None:
+    rendered = render_image(
+        Image.new("RGB", (4, 2), (255, 0, 0)),
+        width=4,
+        mode="ascii",
+        with_color=True,
+    )
+
+    assert rendered.lines[0].endswith("\x1b[0m")
     assert "\x1b[38;5;" in rendered.lines[0]
 
 
@@ -40,6 +52,7 @@ def test_braille_render_uses_unicode_cells_and_transparent_blanks() -> None:
     assert rendered.height == 1
     assert plain[0] == "⡇"
     assert plain[1:] == ""
+    assert "\x1b[38;5;" in rendered.lines[0]
 
 
 def test_render_rejects_unbounded_geometry_and_source_work() -> None:

@@ -153,10 +153,11 @@ explicit command, or reads an explicitly named local file. It accepts only an
 allowlist of raster formats decoded in-process and renders the source locally
 with bounded file size, pixel count, output geometry, palette, and command size.
 The source image is never placed in an event, log, or Gateway message. Preview
-confirmation emits only generated ASCII or configured Unicode Braille glyphs
-and fixed xterm-256 foreground SGR sequences through the same server-aware
-escaping and pacing used for multiline paste. Clipboard image access does not
-cross SSH; `/image PATH` reads the SSH host's filesystem.
+confirmation emits only generated ASCII or configured Unicode Braille glyphs.
+ASCII output is uncolored by default; explicit color output and Braille use
+fixed xterm-256 foreground SGR sequences. All output passes through the same
+server-aware escaping and pacing used for multiline paste. Clipboard image
+access does not cross SSH; `/image PATH` reads the SSH host's filesystem.
 
 ## Plugins
 

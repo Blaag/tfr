@@ -118,6 +118,7 @@ class ImagePreview:
     unicode_allowed: bool
     requested_width: int
     requested_mode: ImageGlyphMode
+    requested_with_color: bool
     connection_generation: int
     server: str
     encoding: str
@@ -922,7 +923,11 @@ class TfrTui:
         preview = self.image_preview
         if preview is None:
             return []
-        mode = "Unicode Braille" if preview.rendered.mode == "braille" else "ASCII"
+        mode = (
+            "Unicode Braille"
+            if preview.rendered.mode == "braille"
+            else "ASCII color" if preview.requested_with_color else "ASCII grayscale"
+        )
         controls = (
             f"Image preview for {preview.alias}: {preview.rendered.width}x"
             f"{preview.rendered.height}, {mode}\n"
@@ -976,6 +981,7 @@ class TfrTui:
                         preview.image,
                         width=selected_width,
                         mode=selected_mode,
+                        with_color=preview.requested_with_color,
                     )
                 commands = self._image_commands(preview.alias, rendered)
             except ValueError as exc:
@@ -1734,7 +1740,7 @@ class TfrTui:
             self.add_notice(alias, "An image operation is already active")
             return
         try:
-            width, requested_mode, path = self._parse_image_parameters(parameters)
+            width, requested_mode, with_color, path = self._parse_image_parameters(parameters)
         except ValueError as exc:
             self.add_notice(alias, str(exc))
             return
@@ -1760,7 +1766,13 @@ class TfrTui:
                     load_image_file if path is not None else load_clipboard_image,
                     *([path] if path is not None else []),
                 )
-                rendered = await asyncio.to_thread(render_image, image, width=width, mode=mode)
+                rendered = await asyncio.to_thread(
+                    render_image,
+                    image,
+                    width=width,
+                    mode=mode,
+                    with_color=with_color,
+                )
             commands = _emit_commands(
                 rendered.lines,
                 server=source_server,
@@ -1786,6 +1798,7 @@ class TfrTui:
             unicode_allowed=unicode_allowed,
             requested_width=width,
             requested_mode=rendered.mode,
+            requested_with_color=with_color,
             connection_generation=source_generation,
             server=source_server,
             encoding=source_encoding,
@@ -1796,9 +1809,10 @@ class TfrTui:
     @staticmethod
     def _parse_image_parameters(
         parameters: list[str],
-    ) -> tuple[int, ImageGlyphMode | None, Path | None]:
+    ) -> tuple[int, ImageGlyphMode | None, bool, Path | None]:
         width = DEFAULT_IMAGE_WIDTH
         mode: ImageGlyphMode | None = None
+        with_color = False
         path: Path | None = None
         index = 0
         while index < len(parameters):
@@ -1806,7 +1820,10 @@ class TfrTui:
             if parameter == "--width":
                 index += 1
                 if index >= len(parameters):
-                    raise ValueError("Usage: /image [--width 1-80] [--ascii|--unicode] [path]")
+                    raise ValueError(
+                        "Usage: /image [--width 1-80] [--ascii|--unicode] "
+                        "[--withcolor] [path]"
+                    )
                 try:
                     width = int(parameters[index])
                 except ValueError as exc:
@@ -1819,14 +1836,19 @@ class TfrTui:
                 if mode is not None:
                     raise ValueError("select only one image glyph mode")
                 mode = "braille"
+            elif parameter == "--withcolor":
+                with_color = True
             elif parameter.startswith("--") or path is not None:
-                raise ValueError("Usage: /image [--width 1-80] [--ascii|--unicode] [path]")
+                raise ValueError(
+                    "Usage: /image [--width 1-80] [--ascii|--unicode] "
+                    "[--withcolor] [path]"
+                )
             else:
                 path = Path(parameter).expanduser()
             index += 1
         if not 1 <= width <= MAXIMUM_IMAGE_WIDTH:
             raise ValueError(f"image width must be between 1 and {MAXIMUM_IMAGE_WIDTH}")
-        return width, mode, path
+        return width, mode, with_color, path
 
     async def _handle_client_command(self, alias: str, text: str) -> None:
         try:
@@ -1944,7 +1966,7 @@ class TfrTui:
             "  ! command - run one local shell command; !!TEXT sends a literal !",
             "  /world ALIAS - switch worlds; /next (/n) and /previous (/p) also switch",
             "  /connect, /disconnect, /reconnect - manage the active connection",
-            "  /image [--width N] [--ascii|--unicode] [path] - preview and send an image",
+            "  /image [--width N] [--ascii|--unicode] [--withcolor] [path] - send an image",
             "  /clear [status|cycle|random|lock EFFECT] - clear output or select its effect",
             "  /recall X - show the last X retained lines for the active world",
             "  /end - return to live output",
