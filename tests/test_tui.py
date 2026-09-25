@@ -10,6 +10,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from PIL import Image
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.formatted_text import fragment_list_to_text
 from prompt_toolkit.input import DummyInput, Input, create_pipe_input
@@ -26,6 +27,7 @@ from tfr.config import (
     PluginSource,
     ThemeConfig,
     UpdateConfig,
+    WorldCapabilitiesConfig,
     WorldConfig,
     WorldDefaults,
     WorldsConfig,
@@ -57,6 +59,7 @@ def make_tui(
     theme: ThemeConfig | None = None,
     output_color: str | None = None,
     server: str = "generic",
+    unicode: bool = False,
     world_aliases: Mapping[str, tuple[str, ...]] | None = None,
 ) -> TfrTui:
     event_bus = EventBus()
@@ -70,6 +73,7 @@ def make_tui(
                 aliases=(world_aliases or {}).get(alias, ()),
                 autoconnect=False,
                 server=server,
+                capabilities=WorldCapabilitiesConfig(unicode=unicode),
             ),
             defaults=WorldDefaults(),
             event_bus=event_bus,
@@ -2010,6 +2014,206 @@ def test_multiline_paste_preflight_rejects_unsupported_worlds_and_long_lines() -
         _multiline_paste_commands("x" * 7_001 + "\ntwo", server="tinymux", encoding="utf-8")
     with pytest.raises(ValueError, match="NUL"):
         _multiline_paste_commands("one\ntwo\x00", server="tinymux", encoding="utf-8")
+
+
+def test_image_parameters_are_bounded_and_unambiguous() -> None:
+    assert TfrTui._parse_image_parameters([]) == (72, None, None)
+    assert TfrTui._parse_image_parameters(
+        ["--width", "80", "--unicode", "picture with spaces.png"]
+    ) == (80, "braille", Path("picture with spaces.png"))
+    with pytest.raises(ValueError, match="between 1 and 80"):
+        TfrTui._parse_image_parameters(["--width", "81"])
+    with pytest.raises(ValueError, match="only one"):
+        TfrTui._parse_image_parameters(["--ascii", "--unicode"])
+    with pytest.raises(ValueError, match="Usage"):
+        TfrTui._parse_image_parameters(["one.png", "two.png"])
+
+
+async def test_image_preview_defaults_to_world_capability_and_preserves_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tui = make_tui(server="tinymux", unicode=True)
+    tui.active_view.input_buffer.text = "unfinished draft"
+    modes: list[str] = []
+
+    def clipboard_image() -> Image.Image:
+        return Image.new("RGB", (4, 4), "white")
+
+    def renderer(image: Image.Image, *, width: int, mode: str) -> SimpleNamespace:
+        modes.append(mode)
+        return SimpleNamespace(lines=("⣿",), width=width, height=1, mode=mode)
+
+    monkeypatch.setattr("tfr.tui.load_clipboard_image", clipboard_image)
+    monkeypatch.setattr("tfr.tui.render_image", renderer)
+
+    await tui.open_image_preview("alpha", [])
+
+    assert modes == ["braille"]
+    assert tui.image_preview is not None
+    assert tui.image_preview.commands == ("@emit ⣿",)
+    assert tui.active_view.input_buffer.text == "unfinished draft"
+
+    tui.switch_world("beta")
+
+    assert tui.active_alias == "alpha"
+
+
+async def test_image_preview_rejects_connection_change_during_source_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tui = make_tui(server="tinymux")
+    session = tui.active_view.session
+
+    def clipboard_image() -> Image.Image:
+        session.connection_generation += 1
+        return Image.new("RGB", (4, 4), "white")
+
+    monkeypatch.setattr("tfr.tui.load_clipboard_image", clipboard_image)
+
+    await tui.open_image_preview("alpha", ["--ascii"])
+
+    assert tui.image_preview is None
+    assert "connection changed" in tui.active_view.display.entries[-1]
+
+
+async def test_image_preview_rejects_unicode_without_world_capability() -> None:
+    tui = make_tui(server="tinymux")
+
+    await tui.open_image_preview("alpha", ["--unicode"])
+
+    assert tui.image_preview is None
+    assert "Unicode image glyphs are disabled" in tui.active_view.display.entries[-1]
+
+
+async def test_invalid_image_options_do_not_latch_operation_guard() -> None:
+    tui = make_tui(server="tinymux")
+
+    await tui.open_image_preview("alpha", ["--width", "invalid"])
+    await tui.open_image_preview("alpha", ["--unicode"])
+
+    assert tui._image_operation_active is False
+    assert "Unicode image glyphs are disabled" in tui.active_view.display.entries[-1]
+
+
+async def test_confirmed_image_sends_paced_preflighted_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tui = make_tui(server="tinymux")
+    session = tui.active_view.session
+    session.state = SessionState.CONNECTED
+    queue = tui.command_bus.register(session.session_id)
+    sleeps: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("tfr.tui.asyncio.sleep", sleep)
+    await tui._submit_paced_commands(
+        "alpha",
+        ("@emit first", "@emit second"),
+        source="image",
+        metadata={"image_width": 72, "image_height": 2, "image_mode": "ascii"},
+    )
+
+    requests = [queue.get_nowait(), queue.get_nowait()]
+    assert [request.text for request in requests] == ["@emit first", "@emit second"]
+    assert sleeps == [0.5]
+    assert requests[0].metadata == {
+        "image_width": 72,
+        "image_height": 2,
+        "image_mode": "ascii",
+        "image_line": 1,
+        "image_total_lines": 2,
+    }
+
+
+async def test_paced_transfer_stops_when_connection_generation_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tui = make_tui(server="tinymux")
+    session = tui.active_view.session
+    session.state = SessionState.CONNECTED
+    queue = tui.command_bus.register(session.session_id)
+
+    async def sleep(_delay: float) -> None:
+        session.connection_generation += 1
+
+    monkeypatch.setattr("tfr.tui.asyncio.sleep", sleep)
+
+    await tui._submit_paced_commands(
+        "alpha",
+        ("@emit first", "@emit second"),
+        source="image",
+    )
+
+    assert queue.get_nowait().text == "@emit first"
+    assert queue.empty()
+    assert "stopped accepting" in tui.active_view.display.entries[-1]
+
+
+async def test_paced_transfer_rejects_stale_pinned_generation() -> None:
+    tui = make_tui(server="tinymux")
+    session = tui.active_view.session
+    session.state = SessionState.CONNECTED
+    queue = tui.command_bus.register(session.session_id)
+    generation = session.connection_generation
+    session.connection_generation += 1
+
+    await tui._submit_paced_commands(
+        "alpha",
+        ("@emit first",),
+        source="image",
+        expected_generation=generation,
+        expected_server="tinymux",
+        expected_encoding=session.encoding,
+    )
+
+    assert queue.empty()
+    assert "was not sent" in tui.active_view.display.entries[-1]
+
+
+async def test_paced_transfer_blocks_other_input() -> None:
+    tui = make_tui(server="tinymux")
+    session = tui.active_view.session
+    session.state = SessionState.CONNECTED
+    queue = tui.command_bus.register(session.session_id)
+    tui._active_multiline_pastes.add("alpha")
+
+    await tui.submit_text("alpha", "look")
+    await tui.submit_text("alpha", "/reconnect")
+
+    assert queue.empty()
+    assert "paced transfer is active" in tui.active_view.display.entries[-1]
+
+
+async def test_reserved_transfer_releases_when_disconnected() -> None:
+    tui = make_tui(server="tinymux")
+    tui._active_multiline_pastes.add("alpha")
+
+    await tui._submit_paced_commands(
+        "alpha",
+        ("@emit one",),
+        source="image",
+        reserved=True,
+    )
+
+    assert "alpha" not in tui._active_multiline_pastes
+
+
+async def test_image_preflight_rejects_unencodable_braille_before_sending() -> None:
+    tui = make_tui(server="tinymux", unicode=True)
+    session = tui.active_view.session
+    session.config = session.config.model_copy(update={"encoding": "ascii"})
+    session.state = SessionState.CONNECTED
+    queue = tui.command_bus.register(session.session_id)
+
+    with pytest.raises(ValueError, match="cannot be encoded as ascii"):
+        tui._image_commands(
+            "alpha",
+            SimpleNamespace(lines=("⣿",), width=1, height=1, mode="braille"),
+        )
+
+    assert queue.empty()
 
 
 async def test_multiline_paste_sends_first_line_immediately_then_paces_remaining(

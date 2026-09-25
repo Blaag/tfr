@@ -141,7 +141,12 @@ def test_runtime_world_descriptors_include_switch_aliases() -> None:
         world="alpha",
         session_id=uuid4(),
         state=SessionState.CONNECTED,
-        config=SimpleNamespace(server="tinymux", aliases=("a", "main")),
+        connection_generation=3,
+        config=SimpleNamespace(
+            server="tinymux",
+            aliases=("a", "main"),
+            capabilities=SimpleNamespace(unicode=True),
+        ),
         encoding="utf-8",
         show_nospoof_prefix=False,
     )
@@ -156,6 +161,8 @@ def test_runtime_world_descriptors_include_switch_aliases() -> None:
     )
 
     assert runtime.world_descriptors()[0]["aliases"] == ["a", "main"]
+    assert runtime.world_descriptors()[0]["connection_generation"] == 3
+    assert runtime.world_descriptors()[0]["capabilities"] == {"unicode": True}
 
 
 async def test_server_handshake_backfill_command_ack_and_detach() -> None:
@@ -196,7 +203,7 @@ async def test_server_handshake_backfill_command_ack_and_detach() -> None:
         assert hello["cursor"] == 1
         assert hello["worlds"][0]["world"] == "alpha"
         assert hello["build"]["version"] == current_build().version
-        assert hello["build"]["protocol"] == 1
+        assert hello["build"]["protocol"] == 2
         assert backfill is not None
         assert backfill["type"] == "event"
         assert backfill["cursor"] == 1
@@ -218,7 +225,7 @@ async def test_server_handshake_backfill_command_ack_and_detach() -> None:
             "type": "ack",
             "request_id": str(request_id),
             "ok": True,
-            "protocol": 1,
+            "protocol": 2,
         }
         assert len(runtime.commands) == 1
         assert runtime.commands[0][0:2] == ("alpha", "look")
@@ -326,6 +333,28 @@ async def test_gateway_rejects_multiline_commands_before_submission() -> None:
             request_id=uuid4(),
         )
     assert command_bus.requests == []
+
+
+async def test_gateway_rejects_stale_connection_generation() -> None:
+    session = SimpleNamespace(world="alpha", session_id=uuid4(), connection_generation=2)
+    runtime = GatewayRuntime(
+        event_bus=EventBus(),
+        command_bus=SimpleNamespace(),  # type: ignore[arg-type]
+        sessions=[session],  # type: ignore[list-item]
+        manager=SimpleNamespace(sessions={"alpha": session}),  # type: ignore[arg-type]
+        plugins=None,  # type: ignore[arg-type]
+        agents=SimpleNamespace(controllers={}),  # type: ignore[arg-type]
+        history=EventHistory(EventBus(), {"alpha": 1}),
+    )
+
+    with pytest.raises(ValueError, match="connection changed"):
+        runtime._command_request(
+            world="alpha",
+            text="look",
+            client_id=str(uuid4()),
+            request_id=uuid4(),
+            expected_connection_generation=1,
+        )
 
 
 async def test_gateway_preserves_sensitive_human_commands() -> None:

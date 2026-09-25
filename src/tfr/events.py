@@ -138,12 +138,18 @@ class CommandRequest:
     correlation_id: UUID | None = None
     causation_id: UUID | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    expected_connection_generation: int | None = None
 
     def __post_init__(self) -> None:
         if not self.world:
             raise ValueError("world cannot be empty")
         if not self.text:
             raise ValueError("command text cannot be empty")
+        if (
+            self.expected_connection_generation is not None
+            and self.expected_connection_generation < 0
+        ):
+            raise ValueError("expected connection generation cannot be negative")
         object.__setattr__(self, "metadata", _freeze(self.metadata))
 
 

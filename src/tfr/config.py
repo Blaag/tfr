@@ -323,6 +323,10 @@ class ProvenanceConfig(StrictModel):
     show_prefix: bool | None = None
 
 
+class WorldCapabilitiesConfig(StrictModel):
+    unicode: bool = False
+
+
 class IdleConfig(StrictModel):
     after_seconds: PositiveInt
     command: str = Field(min_length=1)
@@ -350,6 +354,7 @@ class WorldConfig(StrictModel):
     login: LoginConfig | None = None
     autoconnect: bool = False
     provenance: ProvenanceConfig = Field(default_factory=ProvenanceConfig)
+    capabilities: WorldCapabilitiesConfig = Field(default_factory=WorldCapabilitiesConfig)
     idle: IdleConfig | None = None
     startup_commands: tuple[str, ...] = ()
 

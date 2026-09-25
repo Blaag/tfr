@@ -853,11 +853,12 @@ Acceptance criteria:
   other formatting survive without allowing pasted text to become unintended
   world commands. Keep single-line paste editable and reject unsupported server
   adapters before sending any line.
-- [ ] Let the terminal UI accept a pasted clipboard image and convert it locally
-  into aspect-correct ASCII art with ANSI color. Bound source size, output
-  dimensions, palette, conversion work, and emitted line length; provide an
-  editable preview and explicit confirmation before sending paced, server-aware
-  `@emit` lines, and never upload the source image to an external service.
+- [x] Let the terminal UI explicitly read a clipboard image or local path and
+  convert it locally into aspect-correct ASCII or per-world-gated Unicode
+  Braille art with ANSI color. Bound source size, output dimensions, palette,
+  conversion work, and emitted line length; provide an adjustable preview and
+  explicit confirmation before sending paced, server-aware `@emit` lines, and
+  never upload the source image to an external service.
 - [ ] Build a mobile gateway client, evaluating a PWA before a native iOS app
   to avoid App Store fees and approval overhead while retaining an installable
   home-screen experience. The gateway already exchanges newline-delimited JSON

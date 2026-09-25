@@ -13,9 +13,11 @@ import time
 import webbrowser
 from collections import deque
 from collections.abc import Callable, Coroutine, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Protocol
 
+from PIL import Image
 from prompt_toolkit import Application
 from prompt_toolkit.application import get_app
 from prompt_toolkit.buffer import Buffer
@@ -33,11 +35,21 @@ from prompt_toolkit.output import Output
 from prompt_toolkit.styles import Style
 
 from tfr.agents import AgentRuntime
+from tfr.ansi import safe_ansi_formatted_text
 from tfr.borders import BorderEdge, border_cell
 from tfr.clear_effects import ScreenClearContext
 from tfr.config import ConfigurationBundle, ThemeConfig
 from tfr.core import CommandBus, EventBus, UnknownSessionError
 from tfr.events import Actor, ActorType, CommandRequest, Direction, Event, EventKind
+from tfr.image_art import (
+    DEFAULT_IMAGE_WIDTH,
+    MAXIMUM_IMAGE_WIDTH,
+    ImageGlyphMode,
+    RenderedImage,
+    load_clipboard_image,
+    load_image_file,
+    render_image,
+)
 from tfr.pager import DisplayBuffer, FormattedRow, PagerMode, rows_to_formatted_text
 from tfr.plugin_sources import (
     PluginUpdateChecker,
@@ -70,6 +82,7 @@ _CORE_CLIENT_COMMANDS = frozenset(
         "exit",
         "gateway",
         "help",
+        "image",
         "lowbw",
         "n",
         "next",
@@ -96,6 +109,22 @@ class ServiceRuntime(Protocol):
     async def stop(self) -> None: ...
 
 
+@dataclass(slots=True)
+class ImagePreview:
+    alias: str
+    image: Image.Image
+    rendered: RenderedImage
+    commands: tuple[str, ...]
+    unicode_allowed: bool
+    requested_width: int
+    requested_mode: ImageGlyphMode
+    connection_generation: int
+    server: str
+    encoding: str
+    rendering: bool = False
+    error: str | None = None
+
+
 def _row_text(row: FormattedRow) -> str:
     return "".join(text for _style, text in row)
 
@@ -105,33 +134,49 @@ def _osc52_sequence(text: str) -> str:
     return f"\x1b]52;c;{payload}\x07"
 
 
-def _multiline_paste_commands(text: str, *, server: str, encoding: str) -> tuple[str, ...]:
+def _emit_commands(
+    lines: Sequence[str],
+    *,
+    server: str,
+    encoding: str,
+    source: str,
+) -> tuple[str, ...]:
     if server not in {"bare", "tinymush", "tinymux"}:
-        raise ValueError("multiline paste requires a bare, tinymush, or tinymux world")
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    if "\x00" in normalized:
-        raise ValueError("multiline paste contains a NUL character")
-    if len(normalized.encode("utf-8")) > _MULTILINE_PASTE_MAXIMUM_BYTES:
-        raise ValueError(f"multiline paste exceeds the {_MULTILINE_PASTE_MAXIMUM_BYTES} byte limit")
-    lines = normalized.split("\n")
-    if lines and not lines[-1]:
-        lines.pop()
+        raise ValueError(f"{source} requires a bare, tinymush, or tinymux world")
+    text = "\n".join(lines)
+    if "\x00" in text:
+        raise ValueError(f"{source} contains a NUL character")
+    if len(text.encode("utf-8")) > _MULTILINE_PASTE_MAXIMUM_BYTES:
+        raise ValueError(f"{source} exceeds the {_MULTILINE_PASTE_MAXIMUM_BYTES} byte limit")
     if len(lines) > _MULTILINE_PASTE_MAXIMUM_LINES:
-        raise ValueError(f"multiline paste exceeds the {_MULTILINE_PASTE_MAXIMUM_LINES} line limit")
+        raise ValueError(f"{source} exceeds the {_MULTILINE_PASTE_MAXIMUM_LINES} line limit")
     commands = tuple(f"@emit {escape_world_text(line, server)}" for line in lines)
     for line_number, command in enumerate(commands, start=1):
         try:
             command_size = len(command.encode(encoding, errors="strict"))
         except (LookupError, UnicodeEncodeError) as exc:
             raise ValueError(
-                f"multiline paste line {line_number} cannot be encoded as {encoding}"
+                f"{source} line {line_number} cannot be encoded as {encoding}"
             ) from exc
         if command_size > _MULTILINE_PASTE_MAXIMUM_COMMAND_BYTES:
             raise ValueError(
-                f"multiline paste line {line_number} exceeds the "
+                f"{source} line {line_number} exceeds the "
                 f"{_MULTILINE_PASTE_MAXIMUM_COMMAND_BYTES} byte command limit"
             )
     return commands
+
+
+def _multiline_paste_commands(text: str, *, server: str, encoding: str) -> tuple[str, ...]:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    if lines and not lines[-1]:
+        lines.pop()
+    return _emit_commands(
+        lines,
+        server=server,
+        encoding=encoding,
+        source="multiline paste",
+    )
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -524,6 +569,9 @@ class TfrTui:
         self._event_queue: asyncio.Queue[Event] | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._active_multiline_pastes: set[str] = set()
+        self._image_operation_active = False
+        self._image_work_lock = asyncio.Lock()
+        self.image_preview: ImagePreview | None = None
         self.views: dict[str, WorldView] = {}
 
         for session in sessions:
@@ -621,7 +669,26 @@ class TfrTui:
             always_hide_cursor=True,
             style="class:boss",
         )
-        root = DynamicContainer(lambda: self.boss_window if self.boss_mode else self.normal_root)
+        self.image_preview_control = FormattedTextControl(
+            self.image_preview_text,
+            focusable=True,
+            key_bindings=self._create_image_preview_bindings(),
+            show_cursor=False,
+            modal=True,
+        )
+        self.image_preview_window = Window(
+            content=self.image_preview_control,
+            wrap_lines=False,
+            always_hide_cursor=True,
+            style="class:application",
+        )
+        root = DynamicContainer(
+            lambda: (
+                self.image_preview_window
+                if self.image_preview is not None
+                else self.boss_window if self.boss_mode else self.normal_root
+            )
+        )
         self.application: Application[int] = Application(
             layout=Layout(root, focused_element=self.active_view.input_buffer),
             key_bindings=bindings,
@@ -668,13 +735,15 @@ class TfrTui:
         @bindings.add("c-right")
         @bindings.add("f6")
         def next_world(_event: Any) -> None:
-            self.switch_relative(1)
+            if self.image_preview is None:
+                self.switch_relative(1)
 
         @bindings.add("escape", "left")
         @bindings.add("c-left")
         @bindings.add("f5")
         def previous_world(_event: Any) -> None:
-            self.switch_relative(-1)
+            if self.image_preview is None:
+                self.switch_relative(-1)
 
         @bindings.add("pageup")
         def page_up(event: Any) -> None:
@@ -720,7 +789,13 @@ class TfrTui:
 
         @bindings.add("c-r")
         def reconnect(_event: Any) -> None:
-            self._spawn(self.reconnect_world(self.active_alias))
+            if self.active_alias in self._active_multiline_pastes:
+                self.add_notice(
+                    self.active_alias,
+                    "Wait for the paced transfer before reconnecting",
+                )
+            else:
+                self._spawn(self.reconnect_world(self.active_alias))
 
         @bindings.add(Keys.BracketedPaste)
         def bracketed_paste(event: Any) -> None:
@@ -760,6 +835,76 @@ class TfrTui:
 
         return bindings
 
+    def _create_image_preview_bindings(self) -> KeyBindings:
+        bindings = KeyBindings()
+
+        @bindings.add("escape")
+        def cancel(event: Any) -> None:
+            self.image_preview = None
+            event.app.layout.focus(self.active_view.input_buffer)
+            event.app.invalidate()
+
+        @bindings.add("enter")
+        def confirm(event: Any) -> None:
+            preview = self.image_preview
+            if preview is None or preview.error is not None or preview.rendering:
+                return
+            view = self.views[preview.alias]
+            if (
+                view.session.state is not SessionState.CONNECTED
+                or view.session.connection_generation != preview.connection_generation
+                or view.session.config.server != preview.server
+                or view.session.encoding != preview.encoding
+            ):
+                preview.error = "World connection changed; cancel and create a new image preview"
+                event.app.invalidate()
+                return
+            if preview.alias in self._active_multiline_pastes:
+                preview.error = f"A paced transfer is already active for {preview.alias}"
+                event.app.invalidate()
+                return
+            self.image_preview = None
+            self._active_multiline_pastes.add(preview.alias)
+            event.app.layout.focus(self.active_view.input_buffer)
+            self._spawn(
+                self._submit_paced_commands(
+                    preview.alias,
+                    preview.commands,
+                    source="image",
+                    metadata={
+                        "image_width": preview.rendered.width,
+                        "image_height": preview.rendered.height,
+                        "image_mode": preview.rendered.mode,
+                    },
+                    reserved=True,
+                    expected_generation=preview.connection_generation,
+                    expected_server=preview.server,
+                    expected_encoding=preview.encoding,
+                )
+            )
+            event.app.invalidate()
+
+        @bindings.add("+")
+        @bindings.add("=")
+        def wider(_event: Any) -> None:
+            self._resize_image_preview(1)
+
+        @bindings.add("-")
+        def narrower(_event: Any) -> None:
+            self._resize_image_preview(-1)
+
+        @bindings.add("a")
+        def ascii_mode(_event: Any) -> None:
+            self._set_image_preview_mode("ascii")
+
+        @bindings.add("u")
+        def unicode_mode(_event: Any) -> None:
+            preview = self.image_preview
+            if preview is not None and preview.unicode_allowed:
+                self._set_image_preview_mode("braille")
+
+        return bindings
+
     def _create_boss_bindings(self) -> KeyBindings:
         bindings = KeyBindings()
 
@@ -772,6 +917,80 @@ class TfrTui:
             pass
 
         return bindings
+
+    def image_preview_text(self) -> StyleAndTextTuples:
+        preview = self.image_preview
+        if preview is None:
+            return []
+        mode = "Unicode Braille" if preview.rendered.mode == "braille" else "ASCII"
+        controls = (
+            f"Image preview for {preview.alias}: {preview.rendered.width}x"
+            f"{preview.rendered.height}, {mode}\n"
+            "+/- width  A ASCII"
+            + ("  U Unicode" if preview.unicode_allowed else "")
+            + "  Enter send  Esc cancel\n\n"
+        )
+        output: StyleAndTextTuples = [("class:notice", controls)]
+        if preview.error is not None:
+            output.append(("class:notice", preview.error))
+            return output
+        if preview.rendering:
+            output.append(("class:notice", "Updating preview...\n\n"))
+        for index, line in enumerate(preview.rendered.lines):
+            output.extend(safe_ansi_formatted_text(line))
+            if index + 1 < len(preview.rendered.lines):
+                output.append(("", "\n"))
+        return output
+
+    def _resize_image_preview(self, amount: int) -> None:
+        preview = self.image_preview
+        if preview is None:
+            return
+        width = min(MAXIMUM_IMAGE_WIDTH, max(1, preview.requested_width + amount))
+        if width != preview.requested_width:
+            preview.requested_width = width
+            self._schedule_image_preview_render()
+
+    def _set_image_preview_mode(self, mode: ImageGlyphMode) -> None:
+        preview = self.image_preview
+        if preview is None or preview.requested_mode == mode:
+            return
+        preview.requested_mode = mode
+        self._schedule_image_preview_render()
+
+    def _schedule_image_preview_render(self) -> None:
+        preview = self.image_preview
+        if preview is None or preview.rendering:
+            return
+        preview.rendering = True
+        self._spawn(self._rerender_image_preview(preview))
+
+    async def _rerender_image_preview(self, preview: ImagePreview) -> None:
+        while self.image_preview is preview:
+            selected_width = preview.requested_width
+            selected_mode = preview.requested_mode
+            try:
+                async with self._image_work_lock:
+                    rendered = await asyncio.to_thread(
+                        render_image,
+                        preview.image,
+                        width=selected_width,
+                        mode=selected_mode,
+                    )
+                commands = self._image_commands(preview.alias, rendered)
+            except ValueError as exc:
+                preview.error = str(exc)
+            else:
+                preview.rendered = rendered
+                preview.commands = commands
+                preview.error = None
+            if (
+                selected_width == preview.requested_width
+                and selected_mode == preview.requested_mode
+            ):
+                break
+        preview.rendering = False
+        self.application.invalidate()
 
     def _active_output_window(self) -> Window:
         if self.inspector_agent is not None:
@@ -1097,6 +1316,8 @@ class TfrTui:
         self.switch_world(self.aliases[(self.active_index + amount) % len(self.aliases)])
 
     def switch_world(self, alias: str) -> None:
+        if self.image_preview is not None:
+            return
         if alias not in self.views:
             self.add_notice(self.active_alias, f"Unknown world: {alias}")
             return
@@ -1367,6 +1588,9 @@ class TfrTui:
         return [("", "\n".join(lines))]
 
     async def submit_text(self, alias: str, text: str) -> None:
+        if alias in self._active_multiline_pastes:
+            self.add_notice(alias, "A paced transfer is active; input was not sent")
+            return
         if text.startswith("!!"):
             text = text[1:]
         elif text.startswith("!"):
@@ -1423,29 +1647,186 @@ class TfrTui:
         if not commands:
             return
 
-        self._active_multiline_pastes.add(alias)
+        await self._submit_paced_commands(alias, commands, source="multiline_paste")
+
+    async def _submit_paced_commands(
+        self,
+        alias: str,
+        commands: Sequence[str],
+        *,
+        source: str,
+        metadata: dict[str, Any] | None = None,
+        reserved: bool = False,
+        expected_generation: int | None = None,
+        expected_server: str | None = None,
+        expected_encoding: str | None = None,
+    ) -> None:
+        view = self.views[alias]
+        label = "image" if source == "image" else "multiline paste"
+        generation = (
+            expected_generation
+            if expected_generation is not None
+            else view.session.connection_generation
+        )
+        if (
+            view.session.state is not SessionState.CONNECTED
+            or view.session.connection_generation != generation
+            or (expected_server is not None and view.session.config.server != expected_server)
+            or (expected_encoding is not None and view.session.encoding != expected_encoding)
+        ):
+            self.add_notice(alias, f"Not connected; {label} was not sent")
+            if reserved:
+                self._active_multiline_pastes.discard(alias)
+            return
+        if alias in self._active_multiline_pastes and not reserved:
+            self.add_notice(alias, f"A paced transfer is already active for {alias}")
+            return
+
+        if not reserved:
+            self._active_multiline_pastes.add(alias)
         self._jump_to_end(alias)
-        self.add_notice(alias, f"Sending multiline paste as {len(commands)} paced @emit lines")
+        self.add_notice(alias, f"Sending {label} as {len(commands)} paced @emit lines")
         try:
             for line_number, command in enumerate(commands, start=1):
                 if line_number > 1:
                     await asyncio.sleep(_MULTILINE_PASTE_DELAY_SECONDS)
+                if (
+                    view.session.state is not SessionState.CONNECTED
+                    or view.session.connection_generation != generation
+                ):
+                    raise ConnectionError
+                line_metadata = dict(metadata or {})
+                line_metadata.update(
+                    {
+                        f"{source}_line": line_number,
+                        f"{source}_total_lines": len(commands),
+                    }
+                )
                 await self.command_bus.submit(
                     CommandRequest(
                         session_id=view.session.session_id,
                         world=alias,
                         actor=Actor(ActorType.HUMAN, "operator"),
                         text=command,
-                        metadata={
-                            "multiline_paste_line": line_number,
-                            "multiline_paste_total_lines": len(commands),
-                        },
+                        expected_connection_generation=generation,
+                        metadata=line_metadata,
                     )
                 )
-        except (UnknownSessionError, ValueError):
-            self.add_notice(alias, "Connection stopped accepting the multiline paste")
+        except (ConnectionError, OSError, UnknownSessionError, ValueError):
+            self.add_notice(alias, f"Connection stopped accepting the {label}")
         finally:
             self._active_multiline_pastes.discard(alias)
+
+    def _image_commands(self, alias: str, rendered: RenderedImage) -> tuple[str, ...]:
+        view = self.views[alias]
+        return _emit_commands(
+            rendered.lines,
+            server=view.session.config.server,
+            encoding=view.session.encoding,
+            source="image",
+        )
+
+    async def open_image_preview(self, alias: str, parameters: list[str]) -> None:
+        if self.replay_mode:
+            self.add_notice(alias, "Image sending is unavailable in replay mode")
+            return
+        if self._image_operation_active or self.image_preview is not None:
+            self.add_notice(alias, "An image operation is already active")
+            return
+        try:
+            width, requested_mode, path = self._parse_image_parameters(parameters)
+        except ValueError as exc:
+            self.add_notice(alias, str(exc))
+            return
+        view = self.views[alias]
+        source_generation = view.session.connection_generation
+        source_server = view.session.config.server
+        source_encoding = view.session.encoding
+        unicode_allowed = view.session.config.capabilities.unicode
+        mode: ImageGlyphMode = requested_mode or ("braille" if unicode_allowed else "ascii")
+        if mode == "braille" and not unicode_allowed:
+            self.add_notice(alias, "Unicode image glyphs are disabled for this world")
+            return
+        self._image_operation_active = True
+        try:
+            _emit_commands(
+                (),
+                server=view.session.config.server,
+                encoding=view.session.encoding,
+                source="image",
+            )
+            async with self._image_work_lock:
+                image = await asyncio.to_thread(
+                    load_image_file if path is not None else load_clipboard_image,
+                    *([path] if path is not None else []),
+                )
+                rendered = await asyncio.to_thread(render_image, image, width=width, mode=mode)
+            commands = _emit_commands(
+                rendered.lines,
+                server=source_server,
+                encoding=source_encoding,
+                source="image",
+            )
+            if (
+                view.session.connection_generation != source_generation
+                or view.session.config.server != source_server
+                or view.session.encoding != source_encoding
+            ):
+                raise ValueError("world connection changed while creating the preview")
+        except (OSError, ValueError) as exc:
+            self.add_notice(alias, f"Image preview failed: {exc}")
+            return
+        finally:
+            self._image_operation_active = False
+        self.image_preview = ImagePreview(
+            alias=alias,
+            image=image,
+            rendered=rendered,
+            commands=commands,
+            unicode_allowed=unicode_allowed,
+            requested_width=width,
+            requested_mode=rendered.mode,
+            connection_generation=source_generation,
+            server=source_server,
+            encoding=source_encoding,
+        )
+        self.application.layout.focus(self.image_preview_control)
+        self.application.invalidate()
+
+    @staticmethod
+    def _parse_image_parameters(
+        parameters: list[str],
+    ) -> tuple[int, ImageGlyphMode | None, Path | None]:
+        width = DEFAULT_IMAGE_WIDTH
+        mode: ImageGlyphMode | None = None
+        path: Path | None = None
+        index = 0
+        while index < len(parameters):
+            parameter = parameters[index]
+            if parameter == "--width":
+                index += 1
+                if index >= len(parameters):
+                    raise ValueError("Usage: /image [--width 1-80] [--ascii|--unicode] [path]")
+                try:
+                    width = int(parameters[index])
+                except ValueError as exc:
+                    raise ValueError("image width must be an integer") from exc
+            elif parameter == "--ascii":
+                if mode is not None:
+                    raise ValueError("select only one image glyph mode")
+                mode = "ascii"
+            elif parameter == "--unicode":
+                if mode is not None:
+                    raise ValueError("select only one image glyph mode")
+                mode = "braille"
+            elif parameter.startswith("--") or path is not None:
+                raise ValueError("Usage: /image [--width 1-80] [--ascii|--unicode] [path]")
+            else:
+                path = Path(parameter).expanduser()
+            index += 1
+        if not 1 <= width <= MAXIMUM_IMAGE_WIDTH:
+            raise ValueError(f"image width must be between 1 and {MAXIMUM_IMAGE_WIDTH}")
+        return width, mode, path
 
     async def _handle_client_command(self, alias: str, text: str) -> None:
         try:
@@ -1462,6 +1843,8 @@ class TfrTui:
                 self.add_notice(alias, "Usage: /help")
             else:
                 self.add_notice(alias, self.help_text())
+        elif command == "image":
+            await self.open_image_preview(alias, parameters)
         elif command == "sh":
             if parameters:
                 self.add_notice(alias, "Usage: /sh")
@@ -1561,6 +1944,7 @@ class TfrTui:
             "  ! command - run one local shell command; !!TEXT sends a literal !",
             "  /world ALIAS - switch worlds; /next (/n) and /previous (/p) also switch",
             "  /connect, /disconnect, /reconnect - manage the active connection",
+            "  /image [--width N] [--ascii|--unicode] [path] - preview and send an image",
             "  /clear [status|cycle|random|lock EFFECT] - clear output or select its effect",
             "  /recall X - show the last X retained lines for the active world",
             "  /end - return to live output",

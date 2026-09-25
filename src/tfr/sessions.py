@@ -321,6 +321,11 @@ class WorldSession:
         assert self._command_queue is not None
         while True:
             request = await self._command_queue.get()
+            if (
+                request.expected_connection_generation is not None
+                and request.expected_connection_generation != self.connection_generation
+            ):
+                continue
             await self._send_command(writer, request)
             if self._quit_requested:
                 return

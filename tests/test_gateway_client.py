@@ -68,8 +68,10 @@ class FakeRuntime:
                 "world": "alpha",
                 "session_id": "63f755aa-e407-4f78-ae05-f9d62c23f765",
                 "state": "connected",
+                "connection_generation": 1,
                 "server": "bare",
                 "encoding": "utf-8",
+                "capabilities": {"unicode": True},
                 "aliases": self.aliases,
                 "agent": False,
             }
@@ -99,6 +101,7 @@ class FakeRuntime:
         actor: Actor | None = None,
         correlation_id: UUID | None = None,
         causation_id: UUID | None = None,
+        expected_connection_generation: int | None = None,
         metadata: object = None,
     ) -> None:
         self.commands.append(
@@ -111,6 +114,7 @@ class FakeRuntime:
                 sensitive=sensitive,
                 correlation_id=correlation_id,
                 causation_id=causation_id,
+                expected_connection_generation=expected_connection_generation,
                 metadata=metadata if isinstance(metadata, dict) else {},
             )
         )
@@ -139,7 +143,7 @@ async def test_client_receives_snapshot_live_events_and_command_acks() -> None:
         assert [event.canonical_text for event in client.initial_events] == ["line 0"]
         assert client.gateway_build is not None
         assert client.gateway_build.version == current_build().version
-        assert client.gateway_build.protocol == 1
+        assert client.gateway_build.protocol == 2
         assert client.sessions[0].config.aliases == ("a",)
         await bus.publish(make_event(1))
         received = await asyncio.wait_for(queue.get(), timeout=1)
@@ -210,9 +214,10 @@ async def test_new_ui_can_rebuild_display_from_retained_gateway_history() -> Non
     socket_path.parent.rmdir()
 
 
-def test_remote_world_session_defaults_missing_aliases_for_older_gateways() -> None:
+def test_remote_world_session_defaults_new_fields_for_older_gateways() -> None:
     descriptor = FakeRuntime(SimpleNamespace()).world_descriptors()[0]  # type: ignore[arg-type]
     descriptor.pop("aliases")
+    descriptor.pop("capabilities")
 
     session = RemoteWorldSession(
         SimpleNamespace(),  # type: ignore[arg-type]
@@ -221,6 +226,19 @@ def test_remote_world_session_defaults_missing_aliases_for_older_gateways() -> N
     )
 
     assert session.config.aliases == ()
+    assert session.config.capabilities.unicode is False
+
+
+def test_remote_world_session_rejects_invalid_capabilities() -> None:
+    descriptor = FakeRuntime(SimpleNamespace()).world_descriptors()[0]  # type: ignore[arg-type]
+    descriptor["capabilities"] = {"unicode": "yes"}
+
+    with pytest.raises(ValueError, match="capabilities.unicode must be a boolean"):
+        RemoteWorldSession(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            descriptor,
+            show_nospoof_prefix=False,
+        )
 
 
 async def test_client_reconnects_and_restores_only_missed_events() -> None:

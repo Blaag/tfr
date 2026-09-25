@@ -5,6 +5,8 @@ import contextlib
 import ssl
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import trustme
@@ -82,6 +84,41 @@ def test_text_framer_splits_oversized_lines() -> None:
     framer = TextFramer(maximum_frame_characters=4)
 
     assert framer.feed("abcdefghij\n") == ("abcd", "efgh", "ij\n")
+
+
+async def test_write_loop_drops_command_for_stale_connection_generation() -> None:
+    sink = MemorySink()
+    event_bus = EventBus([sink])
+    command_bus = CommandBus()
+    session = make_session(
+        world="alpha",
+        host="127.0.0.1",
+        port=1,
+        sink=sink,
+        event_bus=event_bus,
+        command_bus=command_bus,
+    )
+    queue = command_bus.register(session.session_id)
+    session._command_queue = queue
+    session.connection_generation = 2
+    writer = SimpleNamespace(write=lambda _data: None, drain=AsyncMock())
+    await queue.put(
+        CommandRequest(
+            session_id=session.session_id,
+            world="alpha",
+            actor=Actor(ActorType.HUMAN, "operator"),
+            text="stale",
+            expected_connection_generation=1,
+        )
+    )
+    task = asyncio.create_task(session._write_loop(writer))  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    writer.drain.assert_not_awaited()
+    assert sink.events == []
 
 
 async def test_two_worlds_exchange_traffic_without_leakage() -> None:
