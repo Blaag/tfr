@@ -126,6 +126,21 @@ characters, with 256 aliases allowed across the configuration. Core and plugin
 commands take precedence over conflicting world aliases; `/help` identifies
 aliases that are shadowed.
 
+Add aliases to the world entry without the leading `/`. For example, this makes
+`/d` switch to the world named `dragon`:
+
+```jsonc
+{
+  "worlds": {
+    "dragon": {
+      "aliases": ["d"],
+      "host": "dragon.example.org",
+      "port": 4201,
+    },
+  },
+}
+```
+
 Running `tfr` without a mode starts the original combined client. For a
 persistent connection process, start `tfr gateway` and attach one or more
 terminals with `tfr ui`. Both use
