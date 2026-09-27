@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from uuid import uuid4
 
 import pytest
@@ -55,6 +56,27 @@ async def test_bounded_subscriber_drops_oldest_event() -> None:
     await bus.publish(second)
 
     assert await queue.get() is second
+
+
+async def test_bounded_backpressure_subscriber_blocks_instead_of_dropping() -> None:
+    bus = EventBus()
+    queue = bus.subscribe(maxsize=1, backpressure=True)
+    first = make_event(1)
+    second = make_event(2)
+
+    await bus.publish(first)
+    blocked = asyncio.create_task(bus.publish(second))
+    await asyncio.sleep(0)
+
+    assert blocked.done() is False
+    assert await queue.get() is first
+    await blocked
+    assert await queue.get() is second
+
+
+def test_backpressure_subscriber_requires_a_bound() -> None:
+    with pytest.raises(ValueError, match="bounded queue"):
+        EventBus().subscribe(backpressure=True)
 
 
 async def test_command_bus_routes_by_session() -> None:

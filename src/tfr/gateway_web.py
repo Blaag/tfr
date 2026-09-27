@@ -7,6 +7,8 @@ import json
 import time
 from collections import OrderedDict, defaultdict, deque
 from collections.abc import Mapping
+from datetime import UTC, datetime
+from email.utils import format_datetime
 from importlib.resources import files
 from typing import Any
 from urllib.parse import urlsplit
@@ -57,7 +59,11 @@ _ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.mjs": ("app.mjs", "text/javascript; charset=utf-8"),
+    "/command.mjs": ("command.mjs", "text/javascript; charset=utf-8"),
+    "/event-details.mjs": ("event-details.mjs", "text/javascript; charset=utf-8"),
+    "/linkify.mjs": ("linkify.mjs", "text/javascript; charset=utf-8"),
     "/pairing.mjs": ("pairing.mjs", "text/javascript; charset=utf-8"),
+    "/swipe.mjs": ("swipe.mjs", "text/javascript; charset=utf-8"),
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
     "/sw.js": ("sw.js", "text/javascript; charset=utf-8"),
@@ -70,7 +76,12 @@ _ASSETS = {
 def browser_event(cursor: int, event: Event) -> dict[str, Any] | None:
     if not _browser_event_allowed(event):
         return None
-    raw_text = event.display_text or event.plain_text or event.canonical_text or ""
+    message_text = event.metadata.get("message_text")
+    raw_text = (
+        message_text
+        if event.provenance is not None and isinstance(message_text, str)
+        else event.display_text or event.plain_text or event.canonical_text or ""
+    )
     source_text, source_truncated = _bounded_utf8(raw_text, MAX_WEB_EVENT_SOURCE_BYTES)
     text = terminal_plain_text(source_text)
     encoded_text = text.encode("utf-8")
@@ -105,6 +116,25 @@ def browser_event(cursor: int, event: Event) -> dict[str, Any] | None:
         }
         if provenance:
             value["event"]["provenance"] = provenance
+    if event.spoof is not None:
+        value["event"]["spoof_status"] = event.spoof.status.value
+        if event.spoof.reason is not None:
+            value["event"]["spoof_reason"] = event.spoof.reason.value
+        if event.spoof.suspected_sender is not None:
+            value["event"]["spoof_sender"] = _bounded_visible_text(
+                event.spoof.suspected_sender, MAX_WEB_PROVENANCE_BYTES
+            )
+            assert event.spoof.attribution_confidence is not None
+            value["event"]["spoof_sender_confidence"] = (
+                event.spoof.attribution_confidence.value
+            )
+        start, end = event.spoof.speaker_span
+        if 0 <= start < end <= len(text):
+            value["event"]["text_runs"] = [
+                {"text": text[:start]},
+                {"text": text[start:end], "role": "speaker"},
+                {"text": text[end:]},
+            ]
     if event.kind is EventKind.CONNECTION:
         state = event.metadata.get("state")
         if isinstance(state, str):
@@ -256,12 +286,14 @@ class WebGatewayServer:
             [
                 web.get("/api/session", self._session),
                 web.post("/api/pair", self._pair),
+                web.get("/pair", self._pair_redirect),
                 web.post("/pair", self._pair_page),
                 web.post("/api/logout", self._logout),
                 web.get("/ws", self._websocket),
                 web.get(
-                    "/{asset:index.html|app.mjs|pairing.mjs|styles.css|manifest.webmanifest|sw.js|"
-                    "icon.svg|icon-512.png|apple-touch-icon.png}",
+                    "/{asset:index.html|app.mjs|command.mjs|event-details.mjs|linkify.mjs|"
+                    "pairing.mjs|swipe.mjs|styles.css|manifest.webmanifest|sw.js|icon.svg|icon-512.png|"
+                    "apple-touch-icon.png}",
                     self._asset,
                 ),
                 web.get("/", self._asset),
@@ -380,10 +412,17 @@ class WebGatewayServer:
         return True
 
     @staticmethod
-    def _set_session_cookie(response: web.StreamResponse, token: str) -> None:
+    def _set_session_cookie(
+        response: web.StreamResponse,
+        token: str,
+        device: DeviceRecord,
+    ) -> None:
+        remaining_seconds = max(0, int((device.expires_at - datetime.now(UTC)).total_seconds()))
         response.set_cookie(
             SESSION_COOKIE,
             token,
+            max_age=remaining_seconds,
+            expires=format_datetime(device.expires_at.astimezone(UTC), usegmt=True),
             secure=True,
             httponly=True,
             samesite="Strict",
@@ -416,8 +455,15 @@ class WebGatewayServer:
         response = self._json_response(
             {"paired": True, "device": {"id": str(device.device_id), "label": device.label}}
         )
-        self._set_session_cookie(response, token)
+        self._set_session_cookie(response, token, device)
         return response
+
+    async def _pair_redirect(self, request: web.Request) -> web.Response:
+        self._validate_public_request(request, require_origin=False)
+        return web.Response(
+            status=303,
+            headers={"Location": "/", "Cache-Control": "no-store"},
+        )
 
     async def _pair_page(self, request: web.Request) -> web.Response:
         self._validate_public_request(
@@ -445,7 +491,7 @@ class WebGatewayServer:
         if set(value) != {"code"} or len(codes) != 1 or not isinstance(codes[0], str):
             return web.Response(text="Invalid pairing request", status=400)
         try:
-            _device, token = await self.devices.redeem(codes[0], tailscale_login)
+            device, token = await self.devices.redeem(codes[0], tailscale_login)
         except ValueError:
             return web.Response(
                 status=303,
@@ -455,7 +501,7 @@ class WebGatewayServer:
             status=303,
             headers={"Location": "/?pairing=complete", "Cache-Control": "no-store"},
         )
-        self._set_session_cookie(response, token)
+        self._set_session_cookie(response, token, device)
         return response
 
     async def _logout(self, request: web.Request) -> web.Response:
@@ -705,6 +751,7 @@ class WebGatewayServer:
                 "type": "hello",
                 "protocol": WEB_PROTOCOL_VERSION,
                 "gateway_id": str(self.runtime.gateway_id),
+                "build": self.runtime.build.as_dict(),
                 "cursor": str(subscription.snapshot.cursor),
                 "history_truncated": snapshot_truncated,
                 "history_reset": history_reset,

@@ -59,6 +59,17 @@ class ServerAdapter(Protocol):
     def parse(self, text: str, *, show_prefix: bool = False) -> ParsedInbound: ...
 
 
+def _starts_with_speaker(message: str, sender_name: str | None) -> bool:
+    if not sender_name or message[: len(sender_name)].casefold() != sender_name.casefold():
+        return False
+    suffix = message[len(sender_name) :]
+    if not suffix or suffix[0].isspace():
+        return True
+    if len(suffix) < 2 or suffix[:2].casefold() not in {"'s", "\u2019s"}:
+        return False
+    return len(suffix) == 2 or suffix[2].isspace()
+
+
 def classify_message(
     message: str,
     *,
@@ -75,7 +86,7 @@ def classify_message(
     if source == "saypose":
         if _SAY.search(visible) or _OWN_SAY.search(visible):
             return Classification(EventKind.SAY, Confidence.INFERRED)
-        if sender_name and visible.startswith(sender_name):
+        if _starts_with_speaker(visible, sender_name):
             return Classification(EventKind.POSE, Confidence.INFERRED)
         return Classification(EventKind.SPEECH, Confidence.HIGH)
 
@@ -83,7 +94,7 @@ def classify_message(
         return Classification(EventKind.PAGE, Confidence.INFERRED)
     if _SAY.search(visible) or _OWN_SAY.search(visible):
         return Classification(EventKind.SAY, Confidence.INFERRED)
-    if sender_name and visible.startswith(sender_name):
+    if _starts_with_speaker(visible, sender_name):
         return Classification(EventKind.POSE, Confidence.INFERRED)
     return Classification(EventKind.RAW_OUTPUT, Confidence.UNKNOWN)
 

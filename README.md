@@ -400,6 +400,9 @@ secret is in the URL fragment, removed from browser history before submission,
 and retained only in tab-scoped session storage for bounded recovery attempts.
 The URL should still be treated as a short-lived secret and kept out of shell
 transcripts and messages. In Safari, use Share > Add to Home Screen after pairing.
+If an already-installed Home Screen app later needs to be paired again, open the
+app and paste a new pairing link into its pairing screen. Safari and the installed
+app can use separate cookie storage, so this avoids removing and reinstalling it.
 
 List and revoke paired devices locally:
 
@@ -938,6 +941,9 @@ source tag. Prefixes are retained in canonical logs even when hidden from the
 display. Set the initial behavior with `provenance.show_prefix`, then use
 `/nospoof show`, `/nospoof hide`, or `/nospoof status` at runtime. This affects
 future display only and never removes provenance from canonical logs.
+When NOSPOOF is enabled, TFR also compares apparent say and known pose speakers
+with server attribution. Spoofed speaker names use a persistent inverse marker
+in both the terminal UI and PWA, independent of normal text effects.
 
 See [SECURITY.md](SECURITY.md) for credential, TLS, logging, plugin, and agent
 security boundaries. See [LICENSES.md](LICENSES.md) for the reviewed runtime

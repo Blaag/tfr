@@ -860,7 +860,7 @@ Acceptance criteria:
   conversion work, and emitted line length; provide an adjustable preview and
   explicit confirmation before sending paced, server-aware `@emit` lines, and
   never upload the source image to an external service.
-- [ ] Build a mobile gateway client, evaluating a PWA before a native iOS app
+- [x] Build a mobile gateway client, evaluating a PWA before a native iOS app
   to avoid App Store fees and approval overhead while retaining an installable
   home-screen experience. The gateway already exchanges newline-delimited JSON
   over authenticated TLS TCP and includes canonical ANSI-bearing text plus an
@@ -874,7 +874,10 @@ Acceptance criteria:
   safe-area and keyboard handling, compact provenance, virtualized per-world
   scrollback, explicit return-to-live behavior, and responsive layouts for
   narrow screens. Compare PWA background/reconnect and notification limits
-  against a native Swift client before choosing the long-term platform.
+  against a native Swift client before choosing the long-term platform. The PWA
+  implementation and initial iPhone validation are complete; structured ANSI
+  spans, accessibility testing, and the longer platform pilot remain follow-up
+  work.
 - [x] Fix speaker effects not working on poses.
 
 ## Test Strategy

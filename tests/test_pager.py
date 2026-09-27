@@ -3,7 +3,7 @@ from __future__ import annotations
 from prompt_toolkit.formatted_text import fragment_list_to_text
 
 from tfr.ansi import terminal_plain_text
-from tfr.pager import DisplayBuffer, PagerMode, PagerState, wrap_ansi_text
+from tfr.pager import DisplayBuffer, PagerMode, PagerState, StaticStyleSpan, wrap_ansi_text
 from tfr.text_effects import TextDecoration, TextEffectKind, validate_decorations
 
 
@@ -370,6 +370,45 @@ def test_decorations_render_after_ansi_parsing_without_changing_wrapping() -> No
     assert any("fg:#e6c965" in style for style, _text in rows[0])
 
 
+def test_static_security_style_composes_with_ansi_and_animation() -> None:
+    decoration = TextDecoration(
+        start=0,
+        end=5,
+        effect=TextEffectKind.CAPITALIZATION_ROLL,
+        base_color="#a9914a",
+        accent_color="#e6c965",
+        interval_seconds=0.5,
+    )
+
+    rows = wrap_ansi_text(
+        "\x1b[1mAlice\x1b[0m says, hello",
+        30,
+        decorations=(decoration,),
+        style_spans=(StaticStyleSpan(0, 5, "reverse"),),
+        elapsed_seconds=0.6,
+        animations_enabled=True,
+    )
+
+    speaker = [(style, text) for style, text in rows[0] if "reverse" in style]
+    assert fragment_list_to_text(speaker) == "aLice"
+    assert all("bold" in style for style, _text in speaker)
+
+
+def test_static_security_style_survives_reflow_and_recall() -> None:
+    span = StaticStyleSpan(0, 3, "reverse")
+    display = DisplayBuffer(max_rows=20, width=20, height=4, pager_enabled=False)
+    display.append('Bob says, "Hello"', style_spans=(span,))
+
+    display.resize(width=5, height=4)
+    styled = "".join(
+        text for row in display.visible_rows() for style, text in row if "reverse" in style
+    )
+    recalled = display.recent_entries(4)
+
+    assert styled == "Bob"
+    assert recalled == (('Bob says, "Hello"', (), (span,)),)
+
+
 def test_url_underline_survives_the_per_frame_decoration_rewrap() -> None:
     # visible_rows() re-wraps entries that carry an active decoration fresh
     # on every frame (for animation), which previously dropped the URL
@@ -480,7 +519,7 @@ def test_recent_entries_preserve_decorations_and_clip_partial_wrapped_entries() 
     full = display.recent_entries(2)
     partial = display.recent_entries(1)
 
-    assert full == (("abcdefghij", (decoration,)),)
+    assert full == (("abcdefghij", (decoration,), ()),)
     assert partial[0][0] == "fghij"
     assert [(item.start, item.end) for item in partial[0][1]] == [(0, 3)]
 

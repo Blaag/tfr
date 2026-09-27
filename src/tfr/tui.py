@@ -35,12 +35,12 @@ from prompt_toolkit.output import Output
 from prompt_toolkit.styles import Style
 
 from tfr.agents import AgentRuntime
-from tfr.ansi import safe_ansi_formatted_text
+from tfr.ansi import safe_ansi_formatted_text, terminal_plain_text
 from tfr.borders import BorderEdge, border_cell
 from tfr.clear_effects import ScreenClearContext
 from tfr.config import ConfigurationBundle, ThemeConfig
 from tfr.core import CommandBus, EventBus, UnknownSessionError
-from tfr.events import Actor, ActorType, CommandRequest, Direction, Event, EventKind
+from tfr.events import Actor, ActorType, CommandRequest, Direction, Event, EventKind, SpoofStatus
 from tfr.image_art import (
     DEFAULT_IMAGE_WIDTH,
     MAXIMUM_IMAGE_WIDTH,
@@ -50,7 +50,13 @@ from tfr.image_art import (
     load_image_file,
     render_image,
 )
-from tfr.pager import DisplayBuffer, FormattedRow, PagerMode, rows_to_formatted_text
+from tfr.pager import (
+    DisplayBuffer,
+    FormattedRow,
+    PagerMode,
+    StaticStyleSpan,
+    rows_to_formatted_text,
+)
 from tfr.plugin_sources import (
     PluginUpdateChecker,
     PluginUpdateResult,
@@ -1468,7 +1474,30 @@ class TfrTui:
                     for decoration in decorations
                 )
                 view.clear_selection()
-                view.display.append(display_text, decorations=decorations)
+                style_spans: tuple[StaticStyleSpan, ...] = ()
+                if event.spoof is not None and event.spoof.status is SpoofStatus.SPOOFED:
+                    plain_display = terminal_plain_text(display_text)
+                    message_text = event.metadata.get("message_text")
+                    plain_message = (
+                        terminal_plain_text(message_text) if isinstance(message_text, str) else None
+                    )
+                    message_start = (
+                        plain_display.find(plain_message) if plain_message is not None else -1
+                    )
+                    if message_start >= 0:
+                        start, end = event.spoof.speaker_span
+                        style_spans = (
+                            StaticStyleSpan(
+                                start=message_start + start,
+                                end=message_start + end,
+                                style="reverse",
+                            ),
+                        )
+                view.display.append(
+                    display_text,
+                    decorations=decorations,
+                    style_spans=style_spans,
+                )
                 should_count = True
         elif (
             event.direction is Direction.OUTBOUND
@@ -2164,12 +2193,17 @@ class TfrTui:
             self.theme.ansi_text("warning", f"-- Recall {count}"), recallable=False
         )
         elapsed_seconds = self._animation_elapsed_seconds()
-        for text, decorations in recalled:
+        for text, decorations, style_spans in recalled:
             replayed = tuple(
                 replace(decoration, phase_offset_seconds=-elapsed_seconds)
                 for decoration in decorations
             )
-            view.display.append(text, decorations=replayed, recallable=False)
+            view.display.append(
+                text,
+                decorations=replayed,
+                style_spans=style_spans,
+                recallable=False,
+            )
         view.display.pager.jump_to_end()
         self._sync_animation_task(restart=True)
         self.application.invalidate()

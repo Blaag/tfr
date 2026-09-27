@@ -5,6 +5,7 @@ import codecs
 import contextlib
 import ssl
 import time
+from collections import deque
 from collections.abc import Sequence
 from enum import StrEnum
 from typing import Any
@@ -22,8 +23,10 @@ from tfr.events import (
     Event,
     EventKind,
     Provenance,
+    SpoofAssessment,
     outbound_audit_event,
 )
+from tfr.spoofing import assess_spoofing
 from tfr.telnet import TelnetCodec, TelnetEvent, escape_iac
 
 
@@ -37,6 +40,9 @@ class SessionState(StrEnum):
 
 class ConnectionEnded(ConnectionError):
     pass
+
+
+MAX_NOSPOOF_SENDERS = 256
 
 
 class TextFramer:
@@ -145,6 +151,10 @@ class WorldSession:
         self._runner: asyncio.Task[None] | None = None
         self._last_command_activity = 0.0
         self._quit_requested = False
+        self._nospoof_senders: deque[str] = deque(maxlen=MAX_NOSPOOF_SENDERS)
+        self._expect_nospoof_continuation = False
+        if config.login is not None:
+            self._remember_nospoof_sender(config.login.character)
 
     @property
     def encoding(self) -> str:
@@ -232,6 +242,10 @@ class WorldSession:
             **connect_options,
         )
         self.connection_generation += 1
+        self._nospoof_senders.clear()
+        self._expect_nospoof_continuation = False
+        if self.config.login is not None:
+            self._remember_nospoof_sender(self.config.login.character)
         self._connected_event.set()
         self._last_command_activity = asyncio.get_running_loop().time()
         await self._set_state(
@@ -405,6 +419,7 @@ class WorldSession:
         if request.actor.type is ActorType.HUMAN and request.text.strip().casefold() == "quit":
             self._quit_requested = True
         encoded = request.text.encode(self.encoding, errors="strict")
+        self._expect_nospoof_continuation = False
         async with self._wire_lock:
             writer.write(escape_iac(encoded) + b"\r\n")
             await writer.drain()
@@ -412,6 +427,18 @@ class WorldSession:
 
     async def _publish_inbound(self, text: str) -> None:
         parsed = self.adapter.parse(text, show_prefix=self.show_nospoof_prefix)
+        missing_nospoof_prefix = self._expect_nospoof_continuation
+        if parsed.provenance is not None:
+            self._expect_nospoof_continuation = True
+            if parsed.provenance.sender_name:
+                self._remember_nospoof_sender(parsed.provenance.sender_name)
+        spoof = assess_spoofing(
+            parsed.message_text,
+            kind=parsed.kind,
+            provenance=parsed.provenance,
+            known_senders=self._nospoof_senders,
+            missing_nospoof_prefix=missing_nospoof_prefix,
+        )
         await self._publish(
             direction=Direction.INBOUND,
             kind=parsed.kind,
@@ -419,11 +446,19 @@ class WorldSession:
             plain_text=parsed.plain_text,
             display_text=parsed.display_text,
             provenance=parsed.provenance,
+            spoof=spoof,
             parser_name=parsed.parser_name,
             parser_version=parsed.parser_version,
             confidence=parsed.confidence,
             metadata={"message_text": parsed.message_text},
         )
+
+    def _remember_nospoof_sender(self, sender: str) -> None:
+        normalized = sender.casefold()
+        retained = [item for item in self._nospoof_senders if item.casefold() != normalized]
+        self._nospoof_senders.clear()
+        self._nospoof_senders.extend(retained)
+        self._nospoof_senders.append(sender)
 
     async def _publish_telnet(self, event: TelnetEvent) -> None:
         await self._publish(
@@ -456,6 +491,7 @@ class WorldSession:
         display_text: str | None = None,
         actor: Actor | None = None,
         provenance: Provenance | None = None,
+        spoof: SpoofAssessment | None = None,
         parser_name: str | None = None,
         parser_version: str | None = None,
         confidence: Confidence = Confidence.UNKNOWN,
@@ -475,6 +511,7 @@ class WorldSession:
                 display_text=display_text,
                 actor=actor,
                 provenance=provenance,
+                spoof=spoof,
                 parser_name=parser_name,
                 parser_version=parser_version,
                 confidence=confidence,

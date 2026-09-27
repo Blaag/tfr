@@ -1,4 +1,8 @@
-import { createPairingSubmission, submitPairing } from "./pairing.mjs";
+import { createPairingSubmission, pairingCodeFromLink, submitPairing } from "./pairing.mjs";
+import { normalizeWorldCommand } from "./command.mjs";
+import { eventDetailRows } from "./event-details.mjs";
+import { linkParts } from "./linkify.mjs";
+import { swipeDirection } from "./swipe.mjs";
 
 const MAX_EVENTS_PER_WORLD = 2500;
 const MAX_RENDERED_EVENTS = 500;
@@ -6,12 +10,18 @@ const MAX_COMMAND_HISTORY = 50;
 const MAX_STORED_COMMAND_CHARACTERS = 4096;
 const MAX_PAIRING_ATTEMPTS = 3;
 const RECONNECT_DELAYS = [500, 1000, 2000, 4000, 8000, 15000];
+const HEARTBEAT_INTERVAL_MS = 20000;
+const HEARTBEAT_TIMEOUT_MS = 8000;
+const MIN_TEXT_SIZE = -2;
+const MAX_TEXT_SIZE = 4;
 
 const elements = {
   pairing: document.querySelector("#pairing"),
   pairingMessage: document.querySelector("#pairing-message"),
+  pairingForm: document.querySelector("#pairing-form"),
+  pairingLink: document.querySelector("#pairing-link"),
   console: document.querySelector("#console"),
-  worldButton: document.querySelector("#world-button"),
+  settingsButton: document.querySelector("#settings-button"),
   worldName: document.querySelector("#world-name"),
   worldSignal: document.querySelector("#world-signal"),
   connectionState: document.querySelector("#connection-state"),
@@ -24,11 +34,25 @@ const elements = {
   composer: document.querySelector("#composer"),
   commandInput: document.querySelector("#command-input"),
   sendButton: document.querySelector("#send-button"),
-  historyOlder: document.querySelector("#history-older"),
-  historyNewer: document.querySelector("#history-newer"),
-  worldDialog: document.querySelector("#world-dialog"),
+  historyButton: document.querySelector("#history-button"),
+  historyDialog: document.querySelector("#history-dialog"),
+  historyDialogWorld: document.querySelector("#history-dialog-world"),
+  historyEmpty: document.querySelector("#history-empty"),
+  historyList: document.querySelector("#history-list"),
+  settingsDialog: document.querySelector("#settings-dialog"),
   worldList: document.querySelector("#world-list"),
+  gatewayVersion: document.querySelector("#gateway-version"),
+  eventDialog: document.querySelector("#event-dialog"),
+  eventDialogWorld: document.querySelector("#event-dialog-world"),
+  eventDetails: document.querySelector("#event-details"),
+  textSmaller: document.querySelector("#text-smaller"),
+  textReset: document.querySelector("#text-reset"),
+  textLarger: document.querySelector("#text-larger"),
+  motionPreference: document.querySelector("#motion-preference"),
+  lineWrap: document.querySelector("#line-wrap"),
   unpairDevice: document.querySelector("#unpair-device"),
+  updateNotice: document.querySelector("#update-notice"),
+  applyUpdate: document.querySelector("#apply-update"),
   toast: document.querySelector("#toast"),
 };
 
@@ -44,20 +68,71 @@ const state = {
   events: new Map(),
   eventIds: new Map(),
   unread: new Map(),
+  reading: new Map(),
   selectedWorld: readStorage("tfr.selectedWorld"),
-  atLive: true,
-  unseenLive: 0,
   drafts: {},
   commandHistory: {},
   historyIndex: null,
   pending: new Map(),
   toastTimer: null,
+  heartbeatTimer: null,
+  heartbeatTimeout: null,
+  heartbeatRequestId: null,
+  serviceWorkerRegistration: null,
+  reloadingForUpdate: false,
 };
 const pairingSubmission = createPairingSubmission(
   (code) => submitPairing(document, code),
   (callback, delay) => window.setTimeout(callback, delay),
 );
 let pairingRecoveryTimer = null;
+let viewportTimer = null;
+let historyNoticeTimer = null;
+let transcriptTouch = null;
+let suppressTranscriptClickUntil = 0;
+let transcriptPointerTarget = null;
+let pendingLiveEvents = [];
+let liveRenderFrame = null;
+
+function updateViewportHeight() {
+  const viewport = window.visualViewport;
+  const height = viewport?.height || window.innerHeight;
+  const inputFocused = document.activeElement === elements.commandInput;
+  const offsetTop = inputFocused ? viewport?.offsetTop || 0 : 0;
+  document.documentElement.style.setProperty("--viewport-height", `${height}px`);
+  document.documentElement.style.setProperty("--viewport-offset-top", `${offsetTop}px`);
+}
+
+function scheduleViewportUpdate() {
+  updateViewportHeight();
+  window.requestAnimationFrame(updateViewportHeight);
+  window.clearTimeout(viewportTimer);
+  viewportTimer = window.setTimeout(updateViewportHeight, 250);
+}
+
+function setInputModality(modality) {
+  document.documentElement.dataset.inputModality = modality;
+}
+
+function showHistoryNotice(message, duration = 0) {
+  window.clearTimeout(historyNoticeTimer);
+  historyNoticeTimer = null;
+  elements.historyNotice.textContent = message;
+  elements.historyNotice.hidden = !message;
+  if (message && duration > 0) {
+    historyNoticeTimer = window.setTimeout(() => {
+      elements.historyNotice.hidden = true;
+      elements.historyNotice.textContent = "";
+      historyNoticeTimer = null;
+    }, duration);
+  }
+}
+
+scheduleViewportUpdate();
+window.addEventListener("resize", scheduleViewportUpdate);
+window.addEventListener("orientationchange", scheduleViewportUpdate);
+window.visualViewport?.addEventListener("resize", scheduleViewportUpdate);
+window.visualViewport?.addEventListener("scroll", scheduleViewportUpdate);
 
 function readStorage(key) {
   try {
@@ -82,6 +157,66 @@ function safeRemove(key) {
     // Storage is optional; the live session remains usable without it.
   }
 }
+
+function readingState(world = state.selectedWorld) {
+  if (!world) return { atLive: true, unseenLive: 0, scrollTop: 0 };
+  let reading = state.reading.get(world);
+  if (!reading) {
+    reading = { atLive: true, unseenLive: 0, scrollTop: 0 };
+    state.reading.set(world, reading);
+  }
+  return reading;
+}
+
+function textSizePreference() {
+  const parsed = Number.parseInt(readStorage("tfr.textSize") || "0", 10);
+  return Number.isInteger(parsed) ? Math.max(MIN_TEXT_SIZE, Math.min(MAX_TEXT_SIZE, parsed)) : 0;
+}
+
+function applyTextSize(value) {
+  const size = Math.max(MIN_TEXT_SIZE, Math.min(MAX_TEXT_SIZE, value));
+  if (size === 0) {
+    document.documentElement.removeAttribute("data-text-size");
+    safeRemove("tfr.textSize");
+  } else {
+    document.documentElement.dataset.textSize = String(size);
+    safeStore("tfr.textSize", String(size));
+  }
+  elements.textSmaller.disabled = size === MIN_TEXT_SIZE;
+  elements.textLarger.disabled = size === MAX_TEXT_SIZE;
+  elements.textReset.disabled = size === 0;
+}
+
+function applyMotionPreference(value) {
+  const motion = ["system", "reduced", "full"].includes(value) ? value : "system";
+  if (motion === "system") {
+    document.documentElement.removeAttribute("data-motion");
+    safeRemove("tfr.motion");
+  } else {
+    document.documentElement.dataset.motion = motion;
+    safeStore("tfr.motion", motion);
+  }
+  elements.motionPreference.value = motion;
+}
+
+function lineWrapPreference() {
+  return readStorage("tfr.lineWrap") !== "off";
+}
+
+function applyLineWrap(enabled) {
+  elements.lineWrap.checked = enabled;
+  if (enabled) {
+    document.documentElement.removeAttribute("data-line-wrap");
+    safeRemove("tfr.lineWrap");
+  } else {
+    document.documentElement.dataset.lineWrap = "off";
+    safeStore("tfr.lineWrap", "off");
+  }
+}
+
+applyTextSize(textSizePreference());
+applyMotionPreference(readStorage("tfr.motion") || "system");
+applyLineWrap(lineWrapPreference());
 
 function readSessionStorage(key) {
   try {
@@ -161,6 +296,39 @@ function updateWorldHeader() {
   elements.worldSignal.className = `world-signal ${world?.state || ""}`.trim();
   elements.commandInput.disabled = !world || !state.ready;
   elements.sendButton.disabled = !world || !state.ready;
+  elements.historyButton.disabled = !world;
+}
+
+function restoreHistoryCommand(text) {
+  if (!state.selectedWorld) return;
+  elements.commandInput.value = text;
+  state.drafts[state.selectedWorld] = text.slice(0, MAX_STORED_COMMAND_CHARACTERS);
+  state.historyIndex = null;
+  elements.historyDialog.close();
+  window.requestAnimationFrame(() => {
+    elements.commandInput.focus({ preventScroll: true });
+    elements.commandInput.setSelectionRange(text.length, text.length);
+    scheduleViewportUpdate();
+  });
+}
+
+function openHistoryDialog() {
+  const world = currentWorld();
+  if (!world || elements.historyDialog.open) return;
+  elements.commandInput.blur();
+  elements.historyDialogWorld.textContent = world.world;
+  const history = state.commandHistory[world.world] || [];
+  const buttons = [...history].reverse().map((text) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = text;
+    button.addEventListener("click", () => restoreHistoryCommand(text));
+    return button;
+  });
+  elements.historyList.replaceChildren(...buttons);
+  elements.historyEmpty.hidden = buttons.length > 0;
+  elements.historyDialog.showModal();
+  scheduleViewportUpdate();
 }
 
 function renderWorlds() {
@@ -194,113 +362,193 @@ function renderWorlds() {
   }
 }
 
-function selectWorld(worldName) {
+function selectWorld(worldName, { focusInput = true } = {}) {
   if (state.selectedWorld) {
     state.drafts[state.selectedWorld] = elements.commandInput.value.slice(
       0,
       MAX_STORED_COMMAND_CHARACTERS,
     );
+    readingState().scrollTop = elements.transcript.scrollTop;
   }
   state.selectedWorld = worldName;
   safeStore("tfr.selectedWorld", worldName);
   state.unread.set(worldName, 0);
-  state.unseenLive = 0;
-  state.atLive = true;
   state.historyIndex = null;
   elements.commandInput.value = state.drafts[worldName] || "";
   updateWorldHeader();
   renderWorlds();
-  renderTranscript({ scrollToLive: true });
-  elements.worldDialog.close();
-  elements.commandInput.focus({ preventScroll: true });
+  renderTranscript({ restorePosition: true });
+  if (elements.settingsDialog.open) elements.settingsDialog.close();
+  if (focusInput) elements.commandInput.focus({ preventScroll: true });
+}
+
+function switchWorld(direction) {
+  if (state.worlds.length < 2 || !state.selectedWorld) return;
+  const current = state.worlds.findIndex((world) => world.world === state.selectedWorld);
+  if (current < 0) return;
+  const next = (current + direction + state.worlds.length) % state.worlds.length;
+  elements.commandInput.blur();
+  selectWorld(state.worlds[next].world, { focusInput: false });
+  scheduleViewportUpdate();
 }
 
 function appendTextWithLinks(container, text) {
-  const pattern = /https?:\/\/[^\s<>"']+/gi;
-  let offset = 0;
-  for (const match of text.matchAll(pattern)) {
-    if (match.index > offset) {
-      container.append(document.createTextNode(text.slice(offset, match.index)));
-    }
-    try {
-      const url = new URL(match[0]);
-      if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error();
+  for (const part of linkParts(text)) {
+    if (part.type === "link") {
       const link = document.createElement("a");
-      link.href = url.href;
+      link.href = part.href;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
-      link.textContent = match[0];
+      link.textContent = part.text;
       container.append(link);
-    } catch {
-      container.append(document.createTextNode(match[0]));
+    } else {
+      container.append(document.createTextNode(part.text));
     }
-    offset = match.index + match[0].length;
   }
-  if (offset < text.length) container.append(document.createTextNode(text.slice(offset)));
+}
+
+function appendEventText(container, event) {
+  const runs = event.text_runs;
+  if (
+    !Array.isArray(runs) ||
+    !runs.every(
+      (run) =>
+        run &&
+        typeof run.text === "string" &&
+        (run.role === undefined || run.role === "speaker"),
+    ) ||
+    runs.map((run) => run.text).join("") !== (event.text || "")
+  ) {
+    appendTextWithLinks(container, event.text || "");
+    return;
+  }
+  for (const run of runs) {
+    if (run.role === "speaker") {
+      const speaker = document.createElement("span");
+      if (event.spoof_status === "spoofed") speaker.className = "spoofed-speaker";
+      appendTextWithLinks(speaker, run.text);
+      container.append(speaker);
+    } else {
+      appendTextWithLinks(container, run.text);
+    }
+  }
 }
 
 function eventNode(event) {
   const item = document.createElement("li");
   item.className = `event ${event.direction}`;
   item.dataset.eventId = event.id;
-
-  const time = document.createElement("time");
-  const timestamp = new Date(event.timestamp);
-  time.dateTime = event.timestamp;
-  time.textContent = Number.isNaN(timestamp.valueOf())
-    ? "--:--"
-    : timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  item.tabIndex = 0;
+  item.setAttribute("role", "button");
+  item.setAttribute("aria-haspopup", "dialog");
+  item.setAttribute(
+    "aria-label",
+    `${event.spoof_status === "spoofed" ? "Spoofed speaker. " : ""}Inspect ${event.kind?.replaceAll("_", " ") || "event"} details`,
+  );
 
   const body = document.createElement("div");
   body.className = "event-body";
   const text = document.createElement("p");
   text.className = "event-text";
-  appendTextWithLinks(text, event.text || "");
+  appendEventText(text, event);
   body.append(text);
 
-  const sender = event.provenance?.sender_name;
-  const source = event.provenance?.server_source;
-  if (sender || source || event.redacted) {
-    const meta = document.createElement("div");
-    meta.className = "event-meta";
-    meta.textContent = [sender, source, event.redacted ? "redacted" : null]
-      .filter(Boolean)
-      .join(" · ");
-    body.append(meta);
-  }
-  item.append(time, body);
+  item.append(body);
   return item;
 }
 
-function renderTranscript({ scrollToLive = false } = {}) {
+function eventById(eventId) {
+  return (state.events.get(state.selectedWorld) || []).find((event) => event.id === eventId);
+}
+
+function formatEventTime(value) {
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.valueOf())) return value || "Unknown";
+  return timestamp.toLocaleString([], { dateStyle: "medium", timeStyle: "long" });
+}
+
+function openEventDetails(item, { pointerActivated = false } = {}) {
+  const event = eventById(item?.dataset.eventId);
+  if (!event || elements.eventDialog.open) return;
+  if (pointerActivated) item.blur();
+  elements.commandInput.blur();
+  elements.eventDialogWorld.textContent = event.world;
+  const rows = eventDetailRows(event).map(([label, rawValue]) => {
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const detail = document.createElement("dd");
+    if (label === "Time") {
+      const time = document.createElement("time");
+      time.dateTime = rawValue;
+      time.textContent = formatEventTime(rawValue);
+      detail.append(time);
+    } else {
+      detail.textContent = rawValue;
+    }
+    const row = document.createElement("div");
+    row.append(term, detail);
+    return row;
+  });
+  elements.eventDetails.replaceChildren(...rows);
+  elements.eventDialog.showModal();
+  scheduleViewportUpdate();
+}
+
+function renderTranscript({ scrollToLive = false, restorePosition = false } = {}) {
+  if (liveRenderFrame !== null) window.cancelAnimationFrame(liveRenderFrame);
+  liveRenderFrame = null;
+  pendingLiveEvents = [];
   const events = state.events.get(state.selectedWorld) || [];
   const visible = events.slice(-MAX_RENDERED_EVENTS);
+  const reading = readingState();
   elements.eventList.replaceChildren(...visible.map(eventNode));
   elements.emptyState.hidden = visible.length > 0;
-  if (scrollToLive) {
+  if (scrollToLive || reading.atLive) {
     requestAnimationFrame(() => {
       elements.transcript.scrollTop = elements.transcript.scrollHeight;
-      state.atLive = true;
-      state.unseenLive = 0;
+      reading.atLive = true;
+      reading.unseenLive = 0;
+      reading.scrollTop = elements.transcript.scrollTop;
+      updateReturnLive();
+    });
+  } else if (restorePosition) {
+    requestAnimationFrame(() => {
+      elements.transcript.scrollTop = reading.scrollTop;
       updateReturnLive();
     });
   }
 }
 
-function appendLiveEvent(event) {
-  elements.eventList.append(eventNode(event));
+function flushLiveEvents() {
+  liveRenderFrame = null;
+  const events = pendingLiveEvents;
+  pendingLiveEvents = [];
+  const reading = readingState();
+  const visible = events.filter((event) => event.world === state.selectedWorld);
+  if (!visible.length) return;
+  if (visible.length >= MAX_RENDERED_EVENTS) {
+    elements.eventList.replaceChildren(...visible.slice(-MAX_RENDERED_EVENTS).map(eventNode));
+  } else {
+    const fragment = document.createDocumentFragment();
+    for (const event of visible) fragment.append(eventNode(event));
+    elements.eventList.append(fragment);
+  }
   while (elements.eventList.children.length > MAX_RENDERED_EVENTS) {
     elements.eventList.firstElementChild?.remove();
   }
   elements.emptyState.hidden = true;
-  requestAnimationFrame(() => {
-    elements.transcript.scrollTop = elements.transcript.scrollHeight;
-  });
+  if (reading.atLive) elements.transcript.scrollTop = elements.transcript.scrollHeight;
+}
+
+function appendLiveEvent(event) {
+  pendingLiveEvents.push(event);
+  if (liveRenderFrame === null) liveRenderFrame = requestAnimationFrame(flushLiveEvents);
 }
 
 function updateReturnLive() {
-  elements.returnLive.hidden = state.atLive || state.unseenLive === 0;
-  elements.returnLiveCount.textContent = state.unseenLive > 0 ? String(state.unseenLive) : "";
+  const reading = readingState();
+  elements.returnLive.hidden = reading.atLive || reading.unseenLive === 0;
+  elements.returnLiveCount.textContent = reading.unseenLive > 0 ? String(reading.unseenLive) : "";
 }
 
 function addEvent(message) {
@@ -331,23 +579,29 @@ function addEvent(message) {
   } else {
     return;
   }
+  const reading = readingState(event.world);
   if (event.world !== state.selectedWorld) {
     state.unread.set(event.world, (state.unread.get(event.world) || 0) + 1);
+    if (!reading.atLive) reading.unseenLive += 1;
     renderWorlds();
     return;
   }
-  if (state.ready && !state.atLive) {
-    state.unseenLive += 1;
+  if (state.ready && !reading.atLive) {
+    reading.unseenLive += 1;
     updateReturnLive();
   }
-  if (state.atLive) appendLiveEvent(event);
-  updateWorldHeader();
+  if (reading.atLive) appendLiveEvent(event);
+  if (event.connection_state) {
+    updateWorldHeader();
+    renderWorlds();
+  }
 }
 
 function resetGatewayState() {
   state.events.clear();
   state.eventIds.clear();
   state.unread.clear();
+  state.reading.clear();
   state.cursor = null;
   safeRemove("tfr.cursor");
 }
@@ -361,6 +615,12 @@ function handleMessage(message) {
     }
     state.gatewayId = message.gateway_id;
     safeStore("tfr.gatewayId", state.gatewayId);
+    const buildVersion = message.build?.version;
+    const buildCommit = message.build?.commit;
+    elements.gatewayVersion.textContent =
+      typeof buildVersion === "string"
+        ? `${buildVersion}${typeof buildCommit === "string" ? ` (${buildCommit.slice(0, 8)})` : ""}`
+        : "Unknown";
     state.worlds = Array.isArray(message.worlds) ? message.worlds : [];
     if (!state.worlds.some((world) => world.world === state.selectedWorld)) {
       state.selectedWorld = state.worlds[0]?.world || null;
@@ -369,10 +629,13 @@ function handleMessage(message) {
       safeStore("tfr.selectedWorld", state.selectedWorld);
       elements.commandInput.value = state.drafts[state.selectedWorld] || "";
     }
-    elements.historyNotice.hidden = !message.history_truncated && !message.history_reset;
-    elements.historyNotice.textContent = message.history_reset
-      ? "The Gateway restarted. Showing a fresh retained history."
-      : "Older retained history was omitted from this mobile snapshot.";
+    if (message.history_reset) {
+      showHistoryNotice("The Gateway restarted. Showing a fresh retained history.", 6000);
+    } else if (message.history_truncated) {
+      showHistoryNotice("Older retained history was omitted from this mobile snapshot.");
+    } else {
+      showHistoryNotice("");
+    }
     renderWorlds();
     updateWorldHeader();
     return;
@@ -393,10 +656,16 @@ function handleMessage(message) {
     elements.console.hidden = false;
     setConnection("Live", "online");
     updateWorldHeader();
-    renderTranscript({ scrollToLive: true });
+    renderTranscript({ restorePosition: true });
+    startHeartbeat();
     return;
   }
   if (message.type === "ack") {
+    if (message.request_id === state.heartbeatRequestId) {
+      clearHeartbeatTimeout();
+      scheduleHeartbeat();
+      return;
+    }
     const pending = state.pending.get(message.request_id);
     state.pending.delete(message.request_id);
     if (message.ok !== true) {
@@ -405,8 +674,6 @@ function handleMessage(message) {
         state.drafts[pending.world] = pending.text.slice(0, MAX_STORED_COMMAND_CHARACTERS);
         if (pending.world === state.selectedWorld) elements.commandInput.value = pending.text;
       }
-    } else if (pending) {
-      showToast("Command accepted");
     }
     return;
   }
@@ -421,6 +688,54 @@ function socketUrl() {
   if (state.gatewayId) url.searchParams.set("gateway_id", state.gatewayId);
   if (state.gatewayId && state.cursor) url.searchParams.set("after_cursor", state.cursor);
   return url;
+}
+
+function clearHeartbeatTimeout() {
+  window.clearTimeout(state.heartbeatTimeout);
+  state.heartbeatTimeout = null;
+  state.heartbeatRequestId = null;
+}
+
+function stopHeartbeat() {
+  window.clearTimeout(state.heartbeatTimer);
+  state.heartbeatTimer = null;
+  clearHeartbeatTimeout();
+}
+
+function scheduleHeartbeat(delay = HEARTBEAT_INTERVAL_MS) {
+  window.clearTimeout(state.heartbeatTimer);
+  state.heartbeatTimer = window.setTimeout(sendHeartbeat, delay);
+}
+
+function sendHeartbeat() {
+  window.clearTimeout(state.heartbeatTimer);
+  state.heartbeatTimer = null;
+  if (document.visibilityState !== "visible") {
+    scheduleHeartbeat();
+    return;
+  }
+  const socket = state.socket;
+  if (!state.ready || !socket || socket.readyState !== WebSocket.OPEN) return;
+  clearHeartbeatTimeout();
+  const requestId = crypto.randomUUID();
+  state.heartbeatRequestId = requestId;
+  try {
+    socket.send(JSON.stringify({ type: "ping", request_id: requestId }));
+  } catch {
+    socket.close();
+    return;
+  }
+  state.heartbeatTimeout = window.setTimeout(() => {
+    if (state.socket === socket && state.heartbeatRequestId === requestId) {
+      setConnection("Reconnecting", "error");
+      socket.close();
+    }
+  }, HEARTBEAT_TIMEOUT_MS);
+}
+
+function startHeartbeat() {
+  stopHeartbeat();
+  scheduleHeartbeat();
 }
 
 function connect() {
@@ -442,6 +757,7 @@ function connect() {
   });
   socket.addEventListener("close", async (event) => {
     if (state.socket !== socket) return;
+    stopHeartbeat();
     state.socket = null;
     state.ready = false;
     updateWorldHeader();
@@ -461,7 +777,7 @@ function connect() {
       elements.console.hidden = true;
       elements.pairing.hidden = false;
       elements.pairingMessage.textContent =
-        "This device session expired or was revoked. Create a new pairing link on the Gateway.";
+        "This device session expired or was revoked. Create a new link and paste it below.";
       return;
     }
     setConnection(navigator.onLine ? "Reconnecting" : "Offline", "error");
@@ -480,7 +796,7 @@ function scheduleReconnect() {
 function sendCommand(event) {
   event.preventDefault();
   const world = currentWorld();
-  const text = elements.commandInput.value;
+  const text = normalizeWorldCommand(elements.commandInput.value);
   if (!world || !state.ready || !state.socket || state.socket.readyState !== WebSocket.OPEN) {
     showToast("Gateway is not ready");
     return;
@@ -514,6 +830,10 @@ function sendCommand(event) {
   state.drafts[world.world] = "";
   state.historyIndex = null;
   elements.commandInput.value = "";
+  window.requestAnimationFrame(() => {
+    elements.commandInput.focus({ preventScroll: true });
+    scheduleViewportUpdate();
+  });
 }
 
 function moveHistory(direction) {
@@ -541,6 +861,7 @@ async function sessionState() {
 }
 
 async function clearLocalData() {
+  stopHeartbeat();
   state.socket?.close();
   state.gatewayId = null;
   state.cursor = null;
@@ -548,6 +869,7 @@ async function clearLocalData() {
   state.drafts = {};
   state.commandHistory = {};
   state.pending.clear();
+  state.reading.clear();
   for (const key of [
     "tfr.gatewayId",
     "tfr.cursor",
@@ -619,6 +941,8 @@ async function start() {
   const session = await sessionState();
   const paired = session === "paired";
   if (session === "unreachable") {
+    elements.pairing.hidden = true;
+    elements.console.hidden = false;
     setConnection("Offline", "error");
     scheduleReconnect();
     return;
@@ -628,7 +952,7 @@ async function start() {
   if (!paired) {
     await clearLocalData();
     elements.pairingMessage.textContent =
-      'On the Gateway host, run tfr pair --device-name "My iPhone", then open that link here.';
+      'On the Gateway host, run tfr pair --device-name "My iPhone", then paste that link below.';
     return;
   }
   connect();
@@ -651,10 +975,65 @@ async function resume() {
       "This device is not paired. Create a new pairing link on the Gateway.";
     return;
   }
-  connect();
+  if (state.socket?.readyState === WebSocket.OPEN && state.ready) {
+    sendHeartbeat();
+  } else {
+    connect();
+  }
 }
 
-elements.worldButton.addEventListener("click", () => elements.worldDialog.showModal());
+function showWaitingServiceWorker(worker) {
+  if (!worker) return;
+  elements.updateNotice.hidden = false;
+}
+
+function openSettingsDialog(event) {
+  if (elements.settingsDialog.open) return;
+  event?.preventDefault();
+  elements.commandInput.blur();
+  elements.settingsDialog.showModal();
+  scheduleViewportUpdate();
+}
+
+function watchServiceWorkerRegistration(registration) {
+  state.serviceWorkerRegistration = registration;
+  showWaitingServiceWorker(registration.waiting);
+  registration.addEventListener("updatefound", () => {
+    const worker = registration.installing;
+    if (!worker) return;
+    worker.addEventListener("statechange", () => {
+      if (worker.state === "installed" && navigator.serviceWorker.controller) {
+        showWaitingServiceWorker(worker);
+      }
+    });
+  });
+}
+
+async function checkForApplicationUpdate() {
+  try {
+    await state.serviceWorkerRegistration?.update();
+  } catch {
+    // Update checks are best-effort while the Gateway or tailnet is unavailable.
+  }
+}
+
+elements.settingsButton.addEventListener("pointerdown", (event) => {
+  if (event.pointerType === "touch") openSettingsDialog(event);
+});
+elements.settingsButton.addEventListener("click", openSettingsDialog);
+elements.pairingForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const code = pairingCodeFromLink(elements.pairingLink.value.trim(), location.origin);
+  elements.pairingLink.value = "";
+  if (!code) {
+    elements.pairingMessage.textContent =
+      "That is not a valid pairing link for this TFR Gateway. Create a new link and try again.";
+    return;
+  }
+  storeSession("tfr.pairingCode", code);
+  storeSession("tfr.pairingAttempts", "0");
+  postPairing(code);
+});
 elements.unpairDevice.addEventListener("click", unpairDevice);
 elements.composer.addEventListener("submit", sendCommand);
 elements.commandInput.addEventListener("input", () => {
@@ -666,7 +1045,10 @@ elements.commandInput.addEventListener("input", () => {
   state.historyIndex = null;
 });
 elements.commandInput.addEventListener("keydown", (event) => {
-  if (event.key === "ArrowUp" && elements.commandInput.selectionStart === 0) {
+  if (event.key === "Enter" && !event.isComposing) {
+    event.preventDefault();
+    elements.composer.requestSubmit(elements.sendButton);
+  } else if (event.key === "ArrowUp" && elements.commandInput.selectionStart === 0) {
     event.preventDefault();
     moveHistory(-1);
   } else if (
@@ -677,16 +1059,111 @@ elements.commandInput.addEventListener("keydown", (event) => {
     moveHistory(1);
   }
 });
-elements.historyOlder.addEventListener("click", () => moveHistory(-1));
-elements.historyNewer.addEventListener("click", () => moveHistory(1));
+elements.commandInput.addEventListener("focus", scheduleViewportUpdate);
+elements.commandInput.addEventListener("blur", scheduleViewportUpdate);
+elements.historyButton.addEventListener("click", openHistoryDialog);
+elements.historyDialog.addEventListener("close", () => elements.historyList.replaceChildren());
+elements.textSmaller.addEventListener("click", () => applyTextSize(textSizePreference() - 1));
+elements.textReset.addEventListener("click", () => applyTextSize(0));
+elements.textLarger.addEventListener("click", () => applyTextSize(textSizePreference() + 1));
+elements.motionPreference.addEventListener("change", () => {
+  applyMotionPreference(elements.motionPreference.value);
+});
+elements.lineWrap.addEventListener("change", () => {
+  applyLineWrap(elements.lineWrap.checked);
+});
+elements.applyUpdate.addEventListener("click", () => {
+  const worker = state.serviceWorkerRegistration?.waiting;
+  if (!worker) return;
+  state.reloadingForUpdate = true;
+  elements.applyUpdate.disabled = true;
+  worker.postMessage({ type: "SKIP_WAITING" });
+});
 elements.returnLive.addEventListener("click", () => renderTranscript({ scrollToLive: true }));
+elements.eventList.addEventListener("pointerdown", (event) => {
+  setInputModality("pointer");
+  transcriptPointerTarget = event.target.closest("a") ? null : event.target.closest(".event");
+});
+elements.eventList.addEventListener("pointercancel", () => {
+  transcriptPointerTarget = null;
+});
+elements.eventList.addEventListener("click", (event) => {
+  const item = event.target.closest(".event");
+  const pointerActivated = item !== null && item === transcriptPointerTarget;
+  transcriptPointerTarget = null;
+  if (
+    performance.now() < suppressTranscriptClickUntil ||
+    event.target.closest("a") ||
+    window.getSelection()?.toString()
+  ) {
+    return;
+  }
+  openEventDetails(item, { pointerActivated });
+});
+elements.eventList.addEventListener("keydown", (event) => {
+  setInputModality("keyboard");
+  if ((event.key !== "Enter" && event.key !== " ") || event.target.closest("a")) return;
+  const item = event.target.closest(".event");
+  if (!item) return;
+  event.preventDefault();
+  openEventDetails(item);
+});
+elements.transcript.addEventListener(
+  "touchstart",
+  (event) => {
+    setInputModality("pointer");
+    if (document.activeElement?.classList?.contains("event")) document.activeElement.blur();
+    if (event.touches.length !== 1 || event.target.closest?.("a")) {
+      transcriptTouch = null;
+      return;
+    }
+    const touch = event.touches[0];
+    transcriptTouch = { x: touch.clientX, y: touch.clientY, time: performance.now() };
+  },
+  { passive: true },
+);
+elements.transcript.addEventListener(
+  "touchend",
+  (event) => {
+    const start = transcriptTouch;
+    transcriptTouch = null;
+    if (!start || event.changedTouches.length !== 1 || window.getSelection()?.toString()) return;
+    const touch = event.changedTouches[0];
+    const direction = swipeDirection(start, {
+      x: touch.clientX,
+      y: touch.clientY,
+      time: performance.now(),
+    });
+    const moved = Math.hypot(touch.clientX - start.x, touch.clientY - start.y) > 10;
+    if (moved) suppressTranscriptClickUntil = performance.now() + 500;
+    if (direction && lineWrapPreference()) {
+      switchWorld(direction);
+    }
+  },
+  { passive: true },
+);
+document.addEventListener("keydown", () => setInputModality("keyboard"), { capture: true });
+document.addEventListener("pointerdown", () => setInputModality("pointer"), { capture: true });
+elements.transcript.addEventListener("touchcancel", () => {
+  transcriptTouch = null;
+});
 elements.transcript.addEventListener("scroll", () => {
   const distance = elements.transcript.scrollHeight - elements.transcript.scrollTop - elements.transcript.clientHeight;
-  state.atLive = distance < 36;
-  if (state.atLive) state.unseenLive = 0;
+  const reading = readingState();
+  const wasAtLive = reading.atLive;
+  reading.atLive = distance < 36;
+  reading.scrollTop = elements.transcript.scrollTop;
+  if (!wasAtLive && reading.atLive && reading.unseenLive > 0) {
+    renderTranscript({ scrollToLive: true });
+    return;
+  }
+  if (reading.atLive) reading.unseenLive = 0;
   updateReturnLive();
 });
-window.addEventListener("online", resume);
+window.addEventListener("online", () => {
+  resume();
+  checkForApplicationUpdate();
+});
 window.addEventListener("pageshow", (event) => {
   if (!event.persisted) return;
   window.clearTimeout(pairingRecoveryTimer);
@@ -694,11 +1171,24 @@ window.addEventListener("pageshow", (event) => {
   resume();
 });
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") resume();
+  if (document.visibilityState === "visible") {
+    scheduleViewportUpdate();
+    resume();
+    checkForApplicationUpdate();
+  }
 });
 
 if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js"));
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (state.reloadingForUpdate) location.reload();
+  });
+  window.addEventListener("load", async () => {
+    try {
+      watchServiceWorkerRegistration(await navigator.serviceWorker.register("/sw.js"));
+    } catch {
+      // The live app remains usable when service-worker registration is unavailable.
+    }
+  });
 }
 
 start();

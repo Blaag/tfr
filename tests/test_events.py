@@ -16,6 +16,9 @@ from tfr.events import (
     Event,
     EventKind,
     Provenance,
+    SpoofAssessment,
+    SpoofReason,
+    SpoofStatus,
     outbound_audit_event,
     redact_command,
 )
@@ -142,6 +145,14 @@ def test_event_serializes_structured_provenance() -> None:
             adapter="tinymux",
             confidence=Confidence.HIGH,
         ),
+        spoof=SpoofAssessment(
+            status=SpoofStatus.SPOOFED,
+            speaker="Alice",
+            speaker_span=(0, 5),
+            reason=SpoofReason.MISSING_NOSPOOF_PREFIX,
+            suspected_sender="Black2",
+            attribution_confidence=Confidence.INFERRED,
+        ),
         parser_name="tinymux",
         parser_version="1",
         confidence=Confidence.HIGH,
@@ -161,6 +172,14 @@ def test_event_serializes_structured_provenance() -> None:
         "confidence": "high",
     }
     assert payload["parser"] == {"name": "tinymux", "version": "1", "confidence": "high"}
+    assert payload["spoof"] == {
+        "status": "spoofed",
+        "speaker": "Alice",
+        "speaker_span": [0, 5],
+        "reason": "missing_nospoof_prefix",
+        "suspected_sender": "Black2",
+        "attribution_confidence": "inferred",
+    }
 
 
 def test_event_metadata_is_immutable() -> None:

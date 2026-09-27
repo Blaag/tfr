@@ -57,7 +57,22 @@ def test_tinymux_saypose_does_not_claim_exact_type_without_evidence() -> None:
     parsed = TinyMuxAdapter().parse("[Alice(#12),saypose] localized speech text\r\n")
 
     assert parsed.kind is EventKind.SPEECH
+
+
+def test_saypose_pose_classification_requires_a_sender_boundary() -> None:
+    parsed = TinyMuxAdapter().parse("[Al(#12),saypose] Alice waves.\r\n")
+
+    assert parsed.kind is EventKind.SPEECH
     assert parsed.confidence is Confidence.HIGH
+
+
+def test_saypose_pose_classification_requires_a_complete_possessive() -> None:
+    for message in ("Al'ice waves.", "Al’ice waves."):
+        parsed = TinyMuxAdapter().parse(f"[Al(#12),saypose] {message}\r\n")
+        assert parsed.kind is EventKind.SPEECH
+
+    parsed = TinyMuxAdapter().parse("[Al(#12),saypose] Al's hat falls.\r\n")
+    assert parsed.kind is EventKind.POSE
 
 
 def test_tinymux_terse_prefix_has_provenance_only() -> None:

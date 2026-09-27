@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import stat
 from pathlib import Path
@@ -10,7 +11,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from tfr.core import EventBus
-from tfr.events import Actor, ActorType, Direction, Event, EventKind
+from tfr.events import Actor, ActorType, Direction, Event, EventKind, SpoofAssessment, SpoofStatus
 from tfr.gateway import EventHistory, GatewayRuntime, GatewayServer
 from tfr.gateway_protocol import MAX_MESSAGE_BYTES, encode_message, event_message, read_message
 from tfr.sessions import SessionState
@@ -88,6 +89,53 @@ async def test_history_snapshot_filters_worlds_and_bounds_before_delivery() -> N
         await bus.close()
 
 
+async def test_history_still_disconnects_an_undrained_slow_subscriber() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10}, subscriber_queue_size=2)
+    history.start()
+    try:
+        subscription = await history.subscribe(None)
+        for sequence in range(3):
+            await bus.publish(make_event("alpha", sequence))
+        await history.flush()
+
+        assert await subscription.queue.get() is None
+    finally:
+        await history.stop()
+        await bus.close()
+
+
+async def test_history_ingress_is_bounded_and_backpressures_publishers() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10}, ingress_queue_size=2)
+    history.start()
+    try:
+        assert history._queue is not None
+        history._pump.cancel()  # type: ignore[union-attr]
+        with contextlib.suppress(asyncio.CancelledError):
+            await history._pump
+
+        await bus.publish(make_event("alpha", 0))
+        await bus.publish(make_event("alpha", 1))
+        blocked = asyncio.create_task(bus.publish(make_event("alpha", 2)))
+        await asyncio.sleep(0)
+
+        assert history._queue.qsize() == 2
+        assert blocked.done() is False
+        history._queue.get_nowait()
+        history._queue.task_done()
+        await blocked
+    finally:
+        if history._queue is not None:
+            while not history._queue.empty():
+                history._queue.get_nowait()
+                history._queue.task_done()
+            bus.unsubscribe(history._queue)
+            history._queue = None
+        history._pump = None
+        await bus.close()
+
+
 def test_oversized_event_fallback_is_always_protocol_safe() -> None:
     event = make_event("alpha", 0)
     event = Event(
@@ -99,12 +147,18 @@ def test_oversized_event_fallback_is_always_protocol_safe() -> None:
         kind=event.kind,
         actor=Actor(ActorType.PLUGIN, "x" * MAX_MESSAGE_BYTES),
         canonical_text="x" * MAX_MESSAGE_BYTES,
+        spoof=SpoofAssessment(
+            status=SpoofStatus.SPOOFED,
+            speaker="Alice",
+            speaker_span=(0, 5),
+        ),
     )
 
     bounded = EventHistory._bounded_event(1, event)
 
     assert bounded.canonical_text == "[gateway omitted oversized event content]"
     assert bounded.actor is None
+    assert bounded.spoof is None
     encode_message(event_message(1, bounded))
 
 

@@ -50,6 +50,16 @@ class Confidence(StrEnum):
     UNKNOWN = "unknown"
 
 
+class SpoofStatus(StrEnum):
+    NOT_SPOOFED = "not_spoofed"
+    SPOOFED = "spoofed"
+
+
+class SpoofReason(StrEnum):
+    SPEAKER_MISMATCH = "speaker_mismatch"
+    MISSING_NOSPOOF_PREFIX = "missing_nospoof_prefix"
+
+
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
         return MappingProxyType({key: _freeze(item) for key, item in value.items()})
@@ -90,6 +100,23 @@ class Provenance:
 
 
 @dataclass(frozen=True, slots=True)
+class SpoofAssessment:
+    status: SpoofStatus
+    speaker: str
+    speaker_span: tuple[int, int]
+    reason: SpoofReason | None = None
+    suspected_sender: str | None = None
+    attribution_confidence: Confidence | None = None
+
+    def __post_init__(self) -> None:
+        start, end = self.speaker_span
+        if not self.speaker or start < 0 or end <= start:
+            raise ValueError("spoof assessment speaker span is invalid")
+        if (self.suspected_sender is None) != (self.attribution_confidence is None):
+            raise ValueError("spoof sender and attribution confidence must be provided together")
+
+
+@dataclass(frozen=True, slots=True)
 class Event:
     session_id: UUID
     world: str
@@ -104,6 +131,7 @@ class Event:
     plain_text: str | None = None
     display_text: str | None = None
     provenance: Provenance | None = None
+    spoof: SpoofAssessment | None = None
     parser_name: str | None = None
     parser_version: str | None = None
     confidence: Confidence = Confidence.UNKNOWN

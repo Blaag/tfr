@@ -83,7 +83,8 @@ reloads and WebKit context changes, so the pairing URL remains a bearer secret
 within that identity until expiry. The temporary plaintext recovery credential
 is released from application-held references at expiry or revocation and is
 never persisted. Redemption sets an opaque `Secure`, `HttpOnly`,
-`SameSite=Strict`, host-only cookie. Only token
+`SameSite=Strict`, host-only cookie whose persistent expiration does not exceed
+the device credential's remaining lifetime. Only token
 digests and non-secret device metadata are persisted, in an owner-only directory
 and regular file with atomic replacement. `tfr devices` lists paired devices and
 `tfr revoke-device` invalidates a credential and closes its active sockets.

@@ -86,8 +86,9 @@ class EventHistory:
         *,
         default_limit: int = 1_000,
         subscriber_queue_size: int = 1_000,
+        ingress_queue_size: int = 1_000,
     ) -> None:
-        if default_limit < 1 or subscriber_queue_size < 1:
+        if default_limit < 1 or subscriber_queue_size < 1 or ingress_queue_size < 1:
             raise ValueError("history and subscriber limits must be positive")
         if any(limit < 1 for limit in limits.values()):
             raise ValueError("world history limits must be positive")
@@ -95,6 +96,7 @@ class EventHistory:
         self.limits = dict(limits)
         self.default_limit = default_limit
         self.subscriber_queue_size = subscriber_queue_size
+        self.ingress_queue_size = ingress_queue_size
         self._history: dict[str, deque[SequencedEvent]] = {}
         self._subscribers: set[HistorySubscription] = set()
         self._queue: asyncio.Queue[Event] | None = None
@@ -106,7 +108,10 @@ class EventHistory:
     def start(self) -> None:
         if self._pump is not None and not self._pump.done():
             return
-        self._queue = self.event_bus.subscribe()
+        self._queue = self.event_bus.subscribe(
+            maxsize=self.ingress_queue_size,
+            backpressure=True,
+        )
         self._pump = asyncio.create_task(self._run(), name="tfr-gateway-history")
 
     async def stop(self) -> None:
@@ -230,6 +235,8 @@ class EventHistory:
                             subscription.queue.put_nowait(item)
             finally:
                 self._queue.task_done()
+            # Let active subscribers drain bursts before applying the slow-client bound.
+            await asyncio.sleep(0)
 
     @staticmethod
     def _close_subscription(subscription: HistorySubscription) -> None:
@@ -249,6 +256,7 @@ class EventHistory:
                 canonical_text=notice,
                 plain_text=notice,
                 display_text=notice,
+                spoof=None,
                 metadata={"gateway_omitted": "oversized_event"},
             )
             try:

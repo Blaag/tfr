@@ -81,6 +81,19 @@ def event_to_dict(event: Event) -> dict[str, Any]:
     if event.actor is not None:
         actor = {"type": event.actor.type, "id": event.actor.id}
 
+    spoof = None
+    if event.spoof is not None:
+        spoof = {
+            "status": event.spoof.status,
+            "speaker": event.spoof.speaker,
+            "speaker_span": event.spoof.speaker_span,
+        }
+        if event.spoof.reason is not None:
+            spoof["reason"] = event.spoof.reason
+        if event.spoof.suspected_sender is not None:
+            spoof["suspected_sender"] = event.spoof.suspected_sender
+            spoof["attribution_confidence"] = event.spoof.attribution_confidence
+
     return _json_value(
         {
             "event_id": event.event_id,
@@ -96,6 +109,7 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "plain_text": event.plain_text,
             "display_text": event.display_text,
             "provenance": provenance,
+            "spoof": spoof,
             "parser": {
                 "name": event.parser_name,
                 "version": event.parser_version,

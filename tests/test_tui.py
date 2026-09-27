@@ -33,7 +33,16 @@ from tfr.config import (
     WorldsConfig,
 )
 from tfr.core import CommandBus, EventBus
-from tfr.events import Actor, ActorType, Direction, Event, EventKind, Provenance
+from tfr.events import (
+    Actor,
+    ActorType,
+    Direction,
+    Event,
+    EventKind,
+    Provenance,
+    SpoofAssessment,
+    SpoofStatus,
+)
 from tfr.pager import PagerMode
 from tfr.plugin_api import BorderFragment, ScreenClearContext, TextDecoration, TextEffectKind
 from tfr.plugin_sources import PluginSourceNotice, PluginUpdateChecker, PluginUpdateResult
@@ -1594,6 +1603,36 @@ async def test_speaker_effects_keep_static_color_when_animations_are_off() -> No
 
     assert fragment_list_to_text(output).startswith("aLiCe")
     assert output[0][:2] == ("fg:#a9914a", "aLiCe")
+
+
+async def test_spoofed_speaker_is_permanently_reversed_with_speaker_effect() -> None:
+    tui = make_tui()
+    await add_speaker_effects(tui)
+    tui.active_view.display.resize(width=80, height=1)
+    event = Event(
+        session_id=tui.active_view.session.session_id,
+        world="alpha",
+        connection_generation=1,
+        sequence=0,
+        direction=Direction.INBOUND,
+        kind=EventKind.SAY,
+        canonical_text='Bob says, "I like grapes!"',
+        plain_text='Bob says, "I like grapes!"',
+        display_text='Bob says, "I like grapes!"',
+        spoof=SpoofAssessment(
+            status=SpoofStatus.SPOOFED,
+            speaker="Bob",
+            speaker_span=(0, 3),
+        ),
+        metadata={"message_text": 'Bob says, "I like grapes!"'},
+    )
+
+    tui.handle_event(event)
+    output = tui.active_view.output_text()
+    reversed_text = "".join(text for style, text in output if "reverse" in style)
+
+    assert reversed_text == "Bob"
+    assert fragment_list_to_text(output) == 'Bob says, "I like grapes!"'
 
 
 async def test_speaker_effect_cycles_are_anchored_to_event_arrival(
