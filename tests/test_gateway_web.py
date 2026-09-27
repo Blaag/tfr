@@ -51,6 +51,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
         "app.mjs",
         "command.mjs",
         "event-details.mjs",
+        "history-notice.mjs",
         "linkify.mjs",
         "pairing.mjs",
         "swipe.mjs",
@@ -133,17 +134,30 @@ def test_pointer_opened_event_details_do_not_retain_transcript_focus() -> None:
     assert "a:focus-visible,\n.event:focus-visible" not in styles
 
 
-def test_gateway_restart_notice_auto_dismisses() -> None:
+def test_history_notices_auto_dismiss() -> None:
     application = files("tfr").joinpath("web", "app.mjs").read_text(encoding="utf-8")
 
     assert (
-        'showHistoryNotice("The Gateway restarted. Showing a fresh retained history.", 6000)'
+        '"The Gateway restarted. Showing a fresh retained history.",\n        6000,'
         in application
     )
-    assert (
-        'showHistoryNotice("Older retained history was omitted from this mobile snapshot.")'
-        in application
-    )
+    assert "showHistoryNotice(decision.message, 10000)" in application
+    assert "if (state.ready) recordLiveHistoryEvent(world, event);" in application
+    assert "event.world === state.selectedWorld && !state.historyReset" in application
+    assert "if (evicted) updateHistoryNotice();" in application
+    assert 'available_count: "0"' in application
+
+
+def test_unpair_cleanup_clears_transcript_and_reconnect_state() -> None:
+    application = files("tfr").joinpath("web", "app.mjs").read_text(encoding="utf-8")
+    start = application.index("async function clearLocalData() {")
+    end = application.index("\nasync function unpairDevice", start)
+    cleanup = application[start:end]
+
+    assert "window.clearTimeout(state.reconnectTimer);" in cleanup
+    assert "state.reconnectTimer = null;" in cleanup
+    assert "resetGatewayState();" in cleanup
+    assert "state.worlds = [];" in cleanup
 
 
 def test_command_history_uses_a_touch_friendly_restore_sheet() -> None:
@@ -203,11 +217,12 @@ def make_event(
     text: str = "hello",
     world: str = "alpha",
     actor: Actor | None = None,
+    generation: int = 1,
 ) -> Event:
     return Event(
         session_id=UUID("63f755aa-e407-4f78-ae05-f9d62c23f765"),
         world=world,
-        connection_generation=1,
+        connection_generation=generation,
         sequence=1,
         direction=Direction.INBOUND,
         kind=kind,
@@ -224,6 +239,7 @@ class FakeRuntime:
         self.commands: list[tuple[str, str, str, UUID]] = []
         self.agent_worlds = {"agent-world"}
         self.command_error: Exception | None = None
+        self.connection_generation = 1
 
     def world_descriptors(self) -> list[dict[str, object]]:
         return [
@@ -231,11 +247,13 @@ class FakeRuntime:
                 "world": "alpha",
                 "state": "connected",
                 "aliases": ["a"],
+                "connection_generation": self.connection_generation,
             },
             {
                 "world": "agent-world",
                 "state": "connected",
                 "aliases": [],
+                "connection_generation": 1,
             },
         ]
 
@@ -331,6 +349,34 @@ def test_browser_projection_bounds_and_sanitizes_provenance() -> None:
     sender = projected["event"]["provenance"]["sender_name"]
     assert "\x1b" not in sender
     assert len(sender.encode("utf-8")) < 264
+
+
+def test_browser_source_accounting_uses_the_projected_message_text() -> None:
+    original = make_event(text="short")
+    event = Event(
+        session_id=original.session_id,
+        world=original.world,
+        connection_generation=original.connection_generation,
+        sequence=original.sequence,
+        direction=original.direction,
+        kind=original.kind,
+        canonical_text=original.canonical_text,
+        provenance=Provenance(sender_name="sender"),
+        spoof=SpoofAssessment(
+            status=SpoofStatus.SPOOFED,
+            speaker="Sender",
+            speaker_span=(0, 6),
+            suspected_sender="x" * 300,
+            attribution_confidence=Confidence.HIGH,
+        ),
+        metadata={"message_text": "m" * 500},
+    )
+
+    projected = browser_event(1, event)
+
+    assert projected is not None
+    assert projected["event"]["text"] == "m" * 500
+    assert gateway_web._browser_source_bytes(event) == 806
 
 
 def test_browser_projection_reports_verified_nospoof_source() -> None:
@@ -441,6 +487,8 @@ def test_browser_projection_does_not_infer_spoof_status_without_source() -> None
 async def paired_client(
     tmp_path: Path,
     runtime: FakeRuntime,
+    *,
+    snapshot_events: int = 20,
 ) -> tuple[WebGatewayServer, TestClient, str]:
     gateway = WebGatewayServer(
         runtime,  # type: ignore[arg-type]
@@ -448,7 +496,7 @@ async def paired_client(
         host="127.0.0.1",
         port=7348,
         state_directory=tmp_path / "web",
-        snapshot_events=20,
+        snapshot_events=snapshot_events,
     )
     client = TestClient(TestServer(gateway.application()))
     await client.start_server()
@@ -816,9 +864,21 @@ async def test_websocket_snapshot_commands_and_idempotency(tmp_path: Path) -> No
             "protocol": 2,
         }
         assert hello["worlds"] == [
-            {"world": "alpha", "state": "connected", "aliases": ["a"]}
+            {
+                "world": "alpha",
+                "state": "connected",
+                "aliases": ["a"],
+                "connection_generation": "1",
+                "history": {
+                    "connection_generation": "1",
+                    "available_count": "1",
+                    "snapshot_count": 1,
+                    "snapshot_gap": False,
+                },
+            }
         ]
         assert snapshot["event"]["text"] == "retained message"
+        assert snapshot["event"]["connection_generation"] == "1"
         assert ready["type"] == "ready"
 
         request_id = str(uuid4())
@@ -938,11 +998,148 @@ async def test_websocket_large_history_returns_newest_ordered_snapshot(tmp_path:
         hello = await socket.receive_json()
         assert hello["history_truncated"] is True
         assert hello["snapshot_count"] == 500
+        assert hello["worlds"][0]["history"] == {
+            "connection_generation": "1",
+            "available_count": "2000",
+            "snapshot_count": 500,
+            "snapshot_gap": False,
+        }
         received = [await socket.receive_json() for _ in range(500)]
         assert [message["event"]["text"] for message in received] == [
             f"history {sequence:04d}" for sequence in range(1_500, 2_000)
         ]
         assert (await socket.receive_json())["type"] == "ready"
+        await socket.close()
+    finally:
+        await client.close()
+        await history.stop()
+        await bus.close()
+
+
+async def test_websocket_snapshot_filters_before_limit_and_scopes_counts_to_generation(
+    tmp_path: Path,
+) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 20})
+    history.start()
+    await bus.publish(make_event(text="old generation", generation=0))
+    await bus.publish(make_event(kind=EventKind.AGENT_REQUEST, text="hidden one"))
+    await bus.publish(make_event(kind=EventKind.AGENT_RESPONSE, text="hidden two"))
+    for sequence in range(3):
+        await bus.publish(make_event(text=f"visible {sequence}"))
+    await history.flush()
+    runtime = FakeRuntime(history)
+    _gateway, client, token = await paired_client(
+        tmp_path,
+        runtime,
+        snapshot_events=2,
+    )
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        socket = await client.ws_connect("/ws", headers=headers)
+        hello = await socket.receive_json()
+        events = [await socket.receive_json(), await socket.receive_json()]
+
+        assert [message["event"]["text"] for message in events] == ["visible 1", "visible 2"]
+        assert hello["worlds"][0]["history"] == {
+            "connection_generation": "1",
+            "available_count": "3",
+            "snapshot_count": 2,
+            "snapshot_gap": False,
+        }
+        assert (await socket.receive_json())["type"] == "ready"
+        await socket.close()
+    finally:
+        await client.close()
+        await history.stop()
+        await bus.close()
+
+
+async def test_websocket_reports_omitted_current_generation_retention(tmp_path: Path) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 2})
+    history.start()
+    for sequence in range(5):
+        await bus.publish(make_event(text=f"retained {sequence}"))
+    await history.flush()
+    runtime = FakeRuntime(history)
+    _gateway, client, token = await paired_client(tmp_path, runtime)
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        socket = await client.ws_connect("/ws", headers=headers)
+        hello = await socket.receive_json()
+
+        assert hello["worlds"][0]["history"] == {
+            "connection_generation": "1",
+            "available_count": "5",
+            "snapshot_count": 2,
+            "snapshot_gap": False,
+        }
+        assert [
+            (await socket.receive_json())["event"]["text"] for _ in range(2)
+        ] == ["retained 3", "retained 4"]
+        assert (await socket.receive_json())["type"] == "ready"
+        await socket.close()
+    finally:
+        await client.close()
+        await history.stop()
+        await bus.close()
+
+
+async def test_websocket_resume_reports_total_generation_and_backfill_counts(
+    tmp_path: Path,
+) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    for sequence in range(5):
+        await bus.publish(make_event(text=f"message {sequence}"))
+    await history.flush()
+    runtime = FakeRuntime(history)
+    _gateway, client, token = await paired_client(tmp_path, runtime)
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        socket = await client.ws_connect(
+            f"/ws?gateway_id={runtime.gateway_id}&after_cursor=3",
+            headers=headers,
+        )
+        hello = await socket.receive_json()
+
+        assert hello["worlds"][0]["history"] == {
+            "connection_generation": "1",
+            "available_count": "5",
+            "snapshot_count": 2,
+            "snapshot_gap": False,
+        }
+        assert [
+            (await socket.receive_json())["event"]["text"] for _ in range(2)
+        ] == ["message 3", "message 4"]
+        assert (await socket.receive_json())["type"] == "ready"
+        await socket.close()
+    finally:
+        await client.close()
+        await history.stop()
+        await bus.close()
+
+
+async def test_websocket_resume_marks_a_retention_gap(tmp_path: Path) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 2})
+    history.start()
+    for sequence in range(5):
+        await bus.publish(make_event(text=f"message {sequence}"))
+    await history.flush()
+    runtime = FakeRuntime(history)
+    _gateway, client, token = await paired_client(tmp_path, runtime)
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        socket = await client.ws_connect(
+            f"/ws?gateway_id={runtime.gateway_id}&after_cursor=1",
+            headers=headers,
+        )
+        hello = await socket.receive_json()
+
+        assert hello["worlds"][0]["history"]["snapshot_gap"] is True
         await socket.close()
     finally:
         await client.close()
@@ -1031,6 +1228,12 @@ async def test_websocket_bounds_aggregate_snapshot_bytes(
         hello = await socket.receive_json()
         assert hello["history_truncated"] is True
         assert 0 < hello["snapshot_count"] < 4
+        assert hello["worlds"][0]["history"] == {
+            "connection_generation": "1",
+            "available_count": "4",
+            "snapshot_count": hello["snapshot_count"],
+            "snapshot_gap": False,
+        }
         for _ in range(hello["snapshot_count"]):
             assert (await socket.receive_json())["type"] == "event"
         assert (await socket.receive_json())["type"] == "ready"
@@ -1060,6 +1263,12 @@ async def test_websocket_bounds_snapshot_source_processing(
         hello = await socket.receive_json()
         assert hello["history_truncated"] is True
         assert hello["snapshot_count"] == 1
+        assert hello["worlds"][0]["history"] == {
+            "connection_generation": "1",
+            "available_count": "2",
+            "snapshot_count": 1,
+            "snapshot_gap": False,
+        }
         assert (await socket.receive_json())["type"] == "event"
         assert (await socket.receive_json())["type"] == "ready"
         await socket.close()

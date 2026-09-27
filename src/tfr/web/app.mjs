@@ -1,6 +1,12 @@
 import { createPairingSubmission, pairingCodeFromLink, submitPairing } from "./pairing.mjs";
 import { normalizeWorldCommand } from "./command.mjs";
 import { eventDetailRows } from "./event-details.mjs";
+import {
+  generationIsNewer,
+  historyNoticeDecision,
+  historySnapshotHasGap,
+  recordLiveHistoryEvent,
+} from "./history-notice.mjs";
 import { linkParts } from "./linkify.mjs";
 import { swipeDirection } from "./swipe.mjs";
 
@@ -62,6 +68,7 @@ const state = {
   reconnectAttempt: 0,
   intentionalClose: false,
   ready: false,
+  historyReset: false,
   gatewayId: readStorage("tfr.gatewayId"),
   cursor: null,
   worlds: [],
@@ -80,6 +87,7 @@ const state = {
   heartbeatRequestId: null,
   serviceWorkerRegistration: null,
   reloadingForUpdate: false,
+  shownHistoryNotices: new Map(),
 };
 const pairingSubmission = createPairingSubmission(
   (code) => submitPairing(document, code),
@@ -88,6 +96,7 @@ const pairingSubmission = createPairingSubmission(
 let pairingRecoveryTimer = null;
 let viewportTimer = null;
 let historyNoticeTimer = null;
+let historyNoticeKey = null;
 let transcriptTouch = null;
 let suppressTranscriptClickUntil = 0;
 let transcriptPointerTarget = null;
@@ -114,7 +123,7 @@ function setInputModality(modality) {
   document.documentElement.dataset.inputModality = modality;
 }
 
-function showHistoryNotice(message, duration = 0) {
+function showHistoryNotice(message, duration = 0, afterHide = null) {
   window.clearTimeout(historyNoticeTimer);
   historyNoticeTimer = null;
   elements.historyNotice.textContent = message;
@@ -124,7 +133,28 @@ function showHistoryNotice(message, duration = 0) {
       elements.historyNotice.hidden = true;
       elements.historyNotice.textContent = "";
       historyNoticeTimer = null;
+      historyNoticeKey = null;
+      afterHide?.();
     }, duration);
+  }
+}
+
+function updateHistoryNotice() {
+  if (state.historyReset) return;
+  const world = currentWorld();
+  const decision = historyNoticeDecision(
+    world,
+    state.events.get(state.selectedWorld) || [],
+    state.shownHistoryNotices.get(world?.world),
+    historyNoticeKey,
+  );
+  if (decision.action === "keep") return;
+  historyNoticeKey = decision.key;
+  if (decision.action === "hide") {
+    showHistoryNotice("");
+  } else {
+    state.shownHistoryNotices.set(world.world, decision.generation);
+    showHistoryNotice(decision.message, 10000);
   }
 }
 
@@ -378,6 +408,7 @@ function selectWorld(worldName, { focusInput = true } = {}) {
   updateWorldHeader();
   renderWorlds();
   renderTranscript({ restorePosition: true });
+  updateHistoryNotice();
   if (elements.settingsDialog.open) elements.settingsDialog.close();
   if (focusInput) elements.commandInput.focus({ preventScroll: true });
 }
@@ -562,15 +593,29 @@ function addEvent(message) {
   }
   const eventIds = state.eventIds.get(event.world);
   if (eventIds.has(event.id)) return;
+  const world = state.worlds.find((item) => item.world === event.world);
+  if (world && generationIsNewer(event.connection_generation, world.connection_generation)) {
+    world.connection_generation = event.connection_generation;
+    world.history = {
+      connection_generation: event.connection_generation,
+      available_count: "0",
+      snapshot_count: 0,
+      snapshot_gap: false,
+    };
+    state.shownHistoryNotices.delete(event.world);
+    if (event.world === state.selectedWorld && !state.historyReset) showHistoryNotice("");
+  }
+  if (state.ready) recordLiveHistoryEvent(world, event);
   events.push(event);
   eventIds.add(event.id);
+  let evicted = false;
   if (events.length > MAX_EVENTS_PER_WORLD) {
     for (const removed of events.splice(0, events.length - MAX_EVENTS_PER_WORLD)) {
       eventIds.delete(removed.id);
+      evicted = true;
     }
   }
   if (event.connection_state) {
-    const world = state.worlds.find((item) => item.world === event.world);
     if (world) world.state = event.connection_state;
   }
 
@@ -586,6 +631,7 @@ function addEvent(message) {
     renderWorlds();
     return;
   }
+  if (evicted) updateHistoryNotice();
   if (state.ready && !reading.atLive) {
     reading.unseenLive += 1;
     updateReturnLive();
@@ -602,14 +648,26 @@ function resetGatewayState() {
   state.eventIds.clear();
   state.unread.clear();
   state.reading.clear();
+  state.shownHistoryNotices.clear();
   state.cursor = null;
   safeRemove("tfr.cursor");
+}
+
+function discardEventsBeforeSnapshotGap(world) {
+  const events = state.events.get(world.world) || [];
+  if (!historySnapshotHasGap(world, events)) return;
+  const retained = events.filter(
+    (event) => event.connection_generation !== world.connection_generation,
+  );
+  state.events.set(world.world, retained);
+  state.eventIds.set(world.world, new Set(retained.map((event) => event.id)));
 }
 
 function handleMessage(message) {
   if (!message || message.protocol !== 1 || typeof message.type !== "string") return;
   if (message.type === "hello") {
     state.ready = false;
+    state.historyReset = message.history_reset === true;
     if (message.history_reset || (state.gatewayId && state.gatewayId !== message.gateway_id)) {
       resetGatewayState();
     }
@@ -622,6 +680,7 @@ function handleMessage(message) {
         ? `${buildVersion}${typeof buildCommit === "string" ? ` (${buildCommit.slice(0, 8)})` : ""}`
         : "Unknown";
     state.worlds = Array.isArray(message.worlds) ? message.worlds : [];
+    for (const world of state.worlds) discardEventsBeforeSnapshotGap(world);
     if (!state.worlds.some((world) => world.world === state.selectedWorld)) {
       state.selectedWorld = state.worlds[0]?.world || null;
     }
@@ -629,13 +688,7 @@ function handleMessage(message) {
       safeStore("tfr.selectedWorld", state.selectedWorld);
       elements.commandInput.value = state.drafts[state.selectedWorld] || "";
     }
-    if (message.history_reset) {
-      showHistoryNotice("The Gateway restarted. Showing a fresh retained history.", 6000);
-    } else if (message.history_truncated) {
-      showHistoryNotice("Older retained history was omitted from this mobile snapshot.");
-    } else {
-      showHistoryNotice("");
-    }
+    showHistoryNotice("");
     renderWorlds();
     updateWorldHeader();
     return;
@@ -657,6 +710,18 @@ function handleMessage(message) {
     setConnection("Live", "online");
     updateWorldHeader();
     renderTranscript({ restorePosition: true });
+    if (state.historyReset) {
+      showHistoryNotice(
+        "The Gateway restarted. Showing a fresh retained history.",
+        6000,
+        () => {
+          state.historyReset = false;
+          updateHistoryNotice();
+        },
+      );
+    } else {
+      updateHistoryNotice();
+    }
     startHeartbeat();
     return;
   }
@@ -862,9 +927,12 @@ async function sessionState() {
 
 async function clearLocalData() {
   stopHeartbeat();
+  window.clearTimeout(state.reconnectTimer);
+  state.reconnectTimer = null;
   state.socket?.close();
+  resetGatewayState();
+  state.worlds = [];
   state.gatewayId = null;
-  state.cursor = null;
   state.selectedWorld = null;
   state.drafts = {};
   state.commandHistory = {};

@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import os
 import stat
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -18,15 +19,23 @@ from tfr.sessions import SessionState
 from tfr.updates import current_build
 
 
-def make_event(world: str, sequence: int) -> Event:
+def make_event(
+    world: str,
+    sequence: int,
+    *,
+    generation: int = 1,
+    kind: EventKind = EventKind.RAW_OUTPUT,
+    actor: Actor | None = None,
+) -> Event:
     return Event(
         session_id=UUID("63f755aa-e407-4f78-ae05-f9d62c23f765"),
         world=world,
-        connection_generation=1,
+        connection_generation=generation,
         sequence=sequence,
         direction=Direction.INBOUND,
-        kind=EventKind.RAW_OUTPUT,
+        kind=kind,
         canonical_text=f"{world} {sequence}",
+        actor=actor,
     )
 
 
@@ -84,6 +93,100 @@ async def test_history_snapshot_filters_worlds_and_bounds_before_delivery() -> N
         assert live is not None
         assert live.event.world == "alpha"
         assert subscription.queue.empty()
+    finally:
+        await history.stop()
+        await bus.close()
+
+
+async def test_history_snapshot_filters_before_per_world_limit_and_counts_generations() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10, "beta": 10})
+    history.start()
+    try:
+        await bus.publish(make_event("alpha", 0, generation=1))
+        await bus.publish(make_event("alpha", 1, generation=1, kind=EventKind.PLUGIN))
+        await bus.publish(make_event("alpha", 2, generation=2))
+        await bus.publish(make_event("alpha", 3, generation=2))
+        await bus.publish(make_event("beta", 0, generation=4))
+        await bus.publish(make_event("beta", 1, generation=4))
+        await history.flush()
+
+        subscription = await history.subscribe(
+            None,
+            maximum_events_per_world=2,
+            event_filter=lambda event: event.kind is not EventKind.PLUGIN,
+            event_class_filter=lambda kind, _actor_type: kind is not EventKind.PLUGIN,
+        )
+
+        assert [item.cursor for item in subscription.snapshot.events] == [3, 4, 5, 6]
+        assert subscription.snapshot.available_counts == {
+            ("alpha", 2): 2,
+            ("beta", 4): 2,
+        }
+        assert subscription.snapshot.truncated is True
+    finally:
+        await history.stop()
+        await bus.close()
+
+
+async def test_history_combines_per_world_and_aggregate_snapshot_limits() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10, "beta": 10})
+    history.start()
+    try:
+        for sequence in range(4):
+            await bus.publish(make_event("alpha", sequence))
+            await bus.publish(make_event("beta", sequence))
+        await history.flush()
+
+        subscription = await history.subscribe(
+            None,
+            maximum_events=3,
+            maximum_events_per_world=2,
+        )
+
+        assert len(subscription.snapshot.events) == 3
+        assert Counter(item.event.world for item in subscription.snapshot.events) == {
+            "alpha": 1,
+            "beta": 2,
+        }
+        assert subscription.snapshot.truncated is True
+    finally:
+        await history.stop()
+        await bus.close()
+
+
+async def test_history_generation_counts_survive_content_retention() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 2})
+    history.start()
+    try:
+        for sequence in range(5):
+            await bus.publish(make_event("alpha", sequence))
+        await history.flush()
+
+        subscription = await history.subscribe(None)
+
+        assert [item.event.sequence for item in subscription.snapshot.events] == [3, 4]
+        assert subscription.snapshot.available_counts == {("alpha", 1): 5}
+    finally:
+        await history.stop()
+        await bus.close()
+
+
+async def test_history_marks_resume_gap_after_retained_events_are_evicted() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 2})
+    history.start()
+    try:
+        for sequence in range(5):
+            await bus.publish(make_event("alpha", sequence))
+        await history.flush()
+
+        subscription = await history.subscribe(1)
+
+        assert [item.event.sequence for item in subscription.snapshot.events] == [3, 4]
+        assert subscription.snapshot.after_cursor_gaps == frozenset({("alpha", 1)})
     finally:
         await history.stop()
         await bus.close()

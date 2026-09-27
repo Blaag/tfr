@@ -10,11 +10,12 @@ import socket
 import ssl
 import stat
 import sys
-from collections import deque
-from collections.abc import Awaitable, Callable, Mapping
+from collections import Counter, deque
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
@@ -22,7 +23,7 @@ from tfr.agents import AgentRuntime
 from tfr.config import ConfigurationBundle
 from tfr.core import CommandBus, EventBus, UnknownSessionError
 from tfr.eventlog import EventSink, JsonlEventSink
-from tfr.events import Actor, ActorType, CommandRequest, Event
+from tfr.events import Actor, ActorType, CommandRequest, Event, EventKind
 from tfr.gateway_protocol import (
     MAX_MESSAGE_BYTES,
     MAX_SNAPSHOT_EVENTS,
@@ -69,6 +70,9 @@ class HistorySnapshot:
     cursor: int
     oldest_cursor: int
     truncated: bool
+    available_counts: Mapping[tuple[str, int], int]
+    after_cursor_gaps: frozenset[tuple[str, int]]
+    resumed: bool
 
 
 @dataclass(eq=False, slots=True)
@@ -98,6 +102,12 @@ class EventHistory:
         self.subscriber_queue_size = subscriber_queue_size
         self.ingress_queue_size = ingress_queue_size
         self._history: dict[str, deque[SequencedEvent]] = {}
+        self._generation_counts: dict[
+            str, tuple[int, Counter[tuple[EventKind, ActorType | None]]]
+        ] = {}
+        self._generation_dropped_through: dict[
+            str, tuple[int, dict[tuple[EventKind, ActorType | None], int]]
+        ] = {}
         self._subscribers: set[HistorySubscription] = set()
         self._queue: asyncio.Queue[Event] | None = None
         self._pump: asyncio.Task[None] | None = None
@@ -140,37 +150,101 @@ class EventHistory:
         include_history: bool = True,
         worlds: frozenset[str] | None = None,
         maximum_events: int | None = None,
+        maximum_events_per_world: int | None = None,
+        event_filter: Callable[[Event], bool] | None = None,
+        event_class_filter: Callable[[EventKind, ActorType | None], bool] | None = None,
+        maximum_source_bytes: int | None = None,
+        event_source_bytes: Callable[[Event], int] | None = None,
     ) -> HistorySubscription:
         if maximum_events is not None and maximum_events < 1:
             raise ValueError("history snapshot limit must be positive")
+        if maximum_events_per_world is not None and maximum_events_per_world < 1:
+            raise ValueError("per-world history snapshot limit must be positive")
+        if maximum_source_bytes is not None and maximum_source_bytes < 1:
+            raise ValueError("history snapshot byte limit must be positive")
+        if (maximum_source_bytes is None) != (event_source_bytes is None):
+            raise ValueError("history snapshot byte limit and estimator must be used together")
         async with self._lock:
             if after_cursor is not None and (after_cursor < 0 or after_cursor > self._cursor):
                 raise ValueError("history cursor is outside the available range")
+            candidate_count = 0
+            candidate_counts: Counter[tuple[str, int]] = Counter()
+            for world, history in self._history.items():
+                if worlds is not None and world not in worlds:
+                    continue
+                for item in history:
+                    if event_filter is not None and not event_filter(item.event):
+                        continue
+                    if after_cursor is None or item.cursor > after_cursor:
+                        candidate_count += 1
+                        candidate_counts[(world, item.event.connection_generation)] += 1
+            available_counts = {
+                (world, generation): sum(
+                    count
+                    for (kind, actor_type), count in counts.items()
+                    if event_class_filter is None or event_class_filter(kind, actor_type)
+                )
+                for world, (generation, counts) in self._generation_counts.items()
+                if worlds is None or world in worlds
+            }
             candidates = (
                 item
                 for world, history in self._history.items()
                 if worlds is None or world in worlds
                 for item in history
-                if after_cursor is None or item.cursor > after_cursor
+                if (event_filter is None or event_filter(item.event))
+                and (after_cursor is None or item.cursor > after_cursor)
             )
             if not include_history:
                 retained: list[SequencedEvent] = []
                 available_count = 0
+            elif maximum_events_per_world is not None:
+                iterators: dict[str, Iterator[SequencedEvent]] = {}
+                newest: list[tuple[int, str, SequencedEvent]] = []
+                for world, history in self._history.items():
+                    if worlds is not None and world not in worlds:
+                        continue
+                    iterator = (
+                        item
+                        for item in reversed(history)
+                        if (event_filter is None or event_filter(item.event))
+                        and (after_cursor is None or item.cursor > after_cursor)
+                    )
+                    first = next(iterator, None)
+                    if first is not None:
+                        iterators[world] = iterator
+                        heapq.heappush(newest, (-first.cursor, world, first))
+                retained = []
+                retained_by_world: Counter[str] = Counter()
+                retained_source_bytes = 0
+                while newest:
+                    if maximum_events is not None and len(retained) >= maximum_events:
+                        break
+                    _cursor, world, item = heapq.heappop(newest)
+                    source_bytes = event_source_bytes(item.event) if event_source_bytes else 0
+                    if (
+                        maximum_source_bytes is not None
+                        and retained_source_bytes + source_bytes > maximum_source_bytes
+                    ):
+                        break
+                    retained.append(item)
+                    retained_source_bytes += source_bytes
+                    retained_by_world[world] += 1
+                    if retained_by_world[world] < maximum_events_per_world:
+                        following = next(iterators[world], None)
+                        if following is not None:
+                            heapq.heappush(newest, (-following.cursor, world, following))
+                retained.reverse()
+                available_count = candidate_count
             elif maximum_events is None:
                 retained = sorted(candidates, key=lambda item: item.cursor)
-                available_count = len(retained)
+                available_count = candidate_count
             else:
                 retained = sorted(
                     heapq.nlargest(maximum_events, candidates, key=lambda item: item.cursor),
                     key=lambda item: item.cursor,
                 )
-                available_count = sum(
-                    1
-                    for world, history in self._history.items()
-                    if worlds is None or world in worlds
-                    for item in history
-                    if after_cursor is None or item.cursor > after_cursor
-                )
+                available_count = candidate_count
             oldest = min(
                 (
                     item.cursor
@@ -180,6 +254,27 @@ class EventHistory:
                 ),
                 default=self._cursor + 1,
             )
+            retained_counts = Counter(
+                (item.event.world, item.event.connection_generation) for item in retained
+            )
+            after_cursor_gaps = {
+                key for key, count in candidate_counts.items() if count > retained_counts[key]
+            }
+            if after_cursor is not None:
+                for world, (generation, dropped) in self._generation_dropped_through.items():
+                    if worlds is not None and world not in worlds:
+                        continue
+                    if any(
+                        cursor > after_cursor
+                        and (
+                            event_class_filter is None
+                            or event_class_filter(kind, actor_type)
+                        )
+                        for (kind, actor_type), cursor in dropped.items()
+                    ):
+                        after_cursor_gaps.add((world, generation))
+            else:
+                after_cursor_gaps.clear()
             snapshot = HistorySnapshot(
                 events=tuple(retained),
                 cursor=self._cursor,
@@ -194,6 +289,9 @@ class EventHistory:
                         )
                     )
                 ),
+                available_counts=MappingProxyType(available_counts),
+                after_cursor_gaps=frozenset(after_cursor_gaps),
+                resumed=after_cursor is not None,
             )
             subscription = HistorySubscription(
                 snapshot=snapshot,
@@ -215,12 +313,43 @@ class EventHistory:
                 async with self._lock:
                     self._cursor += 1
                     item = SequencedEvent(self._cursor, self._bounded_event(self._cursor, event))
+                    bounded_event = item.event
+                    generation_counts = self._generation_counts.get(bounded_event.world)
+                    if (
+                        generation_counts is None
+                        or bounded_event.connection_generation > generation_counts[0]
+                    ):
+                        generation_counts = (bounded_event.connection_generation, Counter())
+                        self._generation_counts[bounded_event.world] = generation_counts
+                    if bounded_event.connection_generation == generation_counts[0]:
+                        actor_type = (
+                            bounded_event.actor.type
+                            if bounded_event.actor is not None
+                            else None
+                        )
+                        generation_counts[1][
+                            (bounded_event.kind, actor_type)
+                        ] += 1
                     history = self._history.get(event.world)
                     if history is None:
                         history = deque(maxlen=self.limits.get(event.world, self.default_limit))
                         self._history[event.world] = history
                     if len(history) == history.maxlen:
+                        dropped_item = history[0]
                         self._dropped_through = max(self._dropped_through, history[0].cursor)
+                        dropped_event = dropped_item.event
+                        dropped = self._generation_dropped_through.get(dropped_event.world)
+                        if dropped is None or dropped_event.connection_generation > dropped[0]:
+                            dropped = (dropped_event.connection_generation, {})
+                            self._generation_dropped_through[dropped_event.world] = dropped
+                        if dropped_event.connection_generation == dropped[0]:
+                            dropped_actor_type = (
+                                dropped_event.actor.type
+                                if dropped_event.actor is not None
+                                else None
+                            )
+                            event_class = (dropped_event.kind, dropped_actor_type)
+                            dropped[1][event_class] = dropped_item.cursor
                     history.append(item)
                     for subscription in tuple(self._subscribers):
                         if (

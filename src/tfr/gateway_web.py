@@ -5,7 +5,7 @@ import contextlib
 import hashlib
 import json
 import time
-from collections import OrderedDict, defaultdict, deque
+from collections import Counter, OrderedDict, defaultdict, deque
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from email.utils import format_datetime
@@ -61,6 +61,7 @@ _ASSETS = {
     "/app.mjs": ("app.mjs", "text/javascript; charset=utf-8"),
     "/command.mjs": ("command.mjs", "text/javascript; charset=utf-8"),
     "/event-details.mjs": ("event-details.mjs", "text/javascript; charset=utf-8"),
+    "/history-notice.mjs": ("history-notice.mjs", "text/javascript; charset=utf-8"),
     "/linkify.mjs": ("linkify.mjs", "text/javascript; charset=utf-8"),
     "/pairing.mjs": ("pairing.mjs", "text/javascript; charset=utf-8"),
     "/swipe.mjs": ("swipe.mjs", "text/javascript; charset=utf-8"),
@@ -76,12 +77,7 @@ _ASSETS = {
 def browser_event(cursor: int, event: Event) -> dict[str, Any] | None:
     if not _browser_event_allowed(event):
         return None
-    message_text = event.metadata.get("message_text")
-    raw_text = (
-        message_text
-        if event.provenance is not None and isinstance(message_text, str)
-        else event.display_text or event.plain_text or event.canonical_text or ""
-    )
+    raw_text = _browser_event_source_text(event)
     source_text, source_truncated = _bounded_utf8(raw_text, MAX_WEB_EVENT_SOURCE_BYTES)
     text = terminal_plain_text(source_text)
     encoded_text = text.encode("utf-8")
@@ -96,6 +92,7 @@ def browser_event(cursor: int, event: Event) -> dict[str, Any] | None:
             "id": str(event.event_id),
             "timestamp": event.timestamp.isoformat().replace("+00:00", "Z"),
             "world": event.world,
+            "connection_generation": str(event.connection_generation),
             "direction": event.direction.value,
             "kind": event.kind.value,
             "text": text,
@@ -167,7 +164,7 @@ def _truncate_with_ellipsis(encoded: bytes, maximum_bytes: int) -> str:
 
 
 def _browser_source_bytes(event: Event) -> int:
-    raw_text = event.display_text or event.plain_text or event.canonical_text or ""
+    raw_text = _browser_event_source_text(event)
     bounded_text, _truncated = _bounded_utf8(raw_text, MAX_WEB_EVENT_SOURCE_BYTES)
     total = len(bounded_text.encode("utf-8"))
     if event.provenance is not None:
@@ -180,13 +177,32 @@ def _browser_source_bytes(event: Event) -> int:
             )
             if value is not None
         )
+    if event.spoof is not None and event.spoof.suspected_sender is not None:
+        total += len(
+            _bounded_utf8(event.spoof.suspected_sender, MAX_WEB_PROVENANCE_SOURCE_BYTES)[0].encode(
+                "utf-8"
+            )
+        )
     return total
 
 
+def _browser_event_source_text(event: Event) -> str:
+    message_text = event.metadata.get("message_text")
+    if event.provenance is not None and isinstance(message_text, str):
+        return message_text
+    return event.display_text or event.plain_text or event.canonical_text or ""
+
+
 def _browser_event_allowed(event: Event) -> bool:
-    return event.kind in _VISIBLE_EVENT_KINDS and not (
-        event.kind is EventKind.COMMAND
-        and (event.actor is None or event.actor.type is not ActorType.HUMAN)
+    return _browser_event_class_allowed(
+        event.kind,
+        event.actor.type if event.actor is not None else None,
+    )
+
+
+def _browser_event_class_allowed(kind: EventKind, actor_type: ActorType | None) -> bool:
+    return kind in _VISIBLE_EVENT_KINDS and not (
+        kind is EventKind.COMMAND and actor_type is not ActorType.HUMAN
     )
 
 
@@ -291,9 +307,9 @@ class WebGatewayServer:
                 web.post("/api/logout", self._logout),
                 web.get("/ws", self._websocket),
                 web.get(
-                    "/{asset:index.html|app.mjs|command.mjs|event-details.mjs|linkify.mjs|"
-                    "pairing.mjs|swipe.mjs|styles.css|manifest.webmanifest|sw.js|icon.svg|icon-512.png|"
-                    "apple-touch-icon.png}",
+                    "/{asset:index.html|app.mjs|command.mjs|event-details.mjs|history-notice.mjs|"
+                    "linkify.mjs|pairing.mjs|swipe.mjs|styles.css|manifest.webmanifest|sw.js|"
+                    "icon.svg|icon-512.png|apple-touch-icon.png}",
                     self._asset,
                 ),
                 web.get("/", self._asset),
@@ -575,6 +591,11 @@ class WebGatewayServer:
                 None if history_reset else after_cursor,
                 worlds=self._authorized_worlds(device),
                 maximum_events=self.snapshot_events,
+                maximum_events_per_world=self.snapshot_events,
+                event_filter=_browser_event_allowed,
+                event_class_filter=_browser_event_class_allowed,
+                maximum_source_bytes=MAX_WEB_SNAPSHOT_SOURCE_BYTES,
+                event_source_bytes=_browser_source_bytes,
             )
         except ValueError as exc:
             async with self._session_lock:
@@ -718,6 +739,11 @@ class WebGatewayServer:
         history_reset: bool,
     ) -> None:
         visible: list[tuple[str, dict[str, Any]]] = []
+        visible_counts: dict[tuple[str, int], int] = defaultdict(int)
+        selected_counts: Counter[tuple[str, int]] = Counter(
+            (item.event.world, item.event.connection_generation)
+            for item in subscription.snapshot.events
+        )
         snapshot_bytes = 0
         snapshot_source_bytes = 0
         snapshot_truncated = subscription.snapshot.truncated
@@ -740,6 +766,7 @@ class WebGatewayServer:
                 snapshot_truncated = True
                 break
             visible.append((item.event.world, projected))
+            visible_counts[(item.event.world, item.event.connection_generation)] += 1
             snapshot_bytes += projected_bytes
             snapshot_source_bytes += source_bytes
         visible.reverse()
@@ -756,11 +783,12 @@ class WebGatewayServer:
                 "history_truncated": snapshot_truncated,
                 "history_reset": history_reset,
                 "worlds": [
-                    {
-                        "world": descriptor["world"],
-                        "state": descriptor["state"],
-                        "aliases": descriptor["aliases"],
-                    }
+                    self._browser_world_descriptor(
+                        descriptor,
+                        subscription,
+                        visible_counts,
+                        selected_counts,
+                    )
                     for descriptor in self.runtime.world_descriptors()
                     if descriptor["world"] in self._authorized_worlds(device)
                 ],
@@ -787,6 +815,33 @@ class WebGatewayServer:
                 "cursor": str(subscription.snapshot.cursor),
             },
         )
+
+    @staticmethod
+    def _browser_world_descriptor(
+        descriptor: Mapping[str, Any],
+        subscription: HistorySubscription,
+        visible_counts: Mapping[tuple[str, int], int],
+        selected_counts: Mapping[tuple[str, int], int],
+    ) -> dict[str, Any]:
+        world = str(descriptor["world"])
+        generation = int(descriptor.get("connection_generation", 0))
+        key = (world, generation)
+        return {
+            "world": world,
+            "state": descriptor["state"],
+            "aliases": descriptor["aliases"],
+            "connection_generation": str(generation),
+            "history": {
+                "connection_generation": str(generation),
+                "available_count": str(subscription.snapshot.available_counts.get(key, 0)),
+                "snapshot_count": visible_counts.get(key, 0),
+                "snapshot_gap": key in subscription.snapshot.after_cursor_gaps
+                or (
+                    subscription.snapshot.resumed
+                    and selected_counts.get(key, 0) > visible_counts.get(key, 0)
+                ),
+            },
+        }
 
     async def _send_events(
         self,
