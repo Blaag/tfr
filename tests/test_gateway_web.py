@@ -187,6 +187,8 @@ def test_unpair_cleanup_clears_transcript_and_reconnect_state() -> None:
     assert "connection.stop()?.close();" in cleanup
     assert "resetGatewayState();" in cleanup
     assert "state.worlds = [];" in cleanup
+    assert "state.drafts = new Map();" in cleanup
+    assert "state.commandHistory = new Map();" in cleanup
 
 
 def test_pwa_bounds_gateway_connection_attempts() -> None:
