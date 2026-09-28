@@ -959,6 +959,8 @@ with server attribution. Spoofed speaker names use a persistent inverse marker
 in both the terminal UI and PWA, independent of normal text effects.
 
 See [PRESENTATION.md](PRESENTATION.md) for the portable presentation direction,
-[SECURITY.md](SECURITY.md) for credential, TLS, logging, plugin, and agent
-security boundaries, and [LICENSES.md](LICENSES.md) for the reviewed runtime
-dependency licenses. TFR is distributed under the [MIT License](LICENSE).
+[PWA-TESTING.md](PWA-TESTING.md) for the reproducible development Gateway,
+mock-world, Playwright, and physical-device test workflow, [SECURITY.md](SECURITY.md)
+for credential, TLS, logging, plugin, and agent security boundaries, and
+[LICENSES.md](LICENSES.md) for the reviewed runtime dependency licenses. TFR is
+distributed under the [MIT License](LICENSE).

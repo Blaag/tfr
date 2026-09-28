@@ -44,6 +44,14 @@ reviewed on 2026-09-17:
 | --- | ---: | --- |
 | uv-build | 0.12.15 | MIT OR Apache-2.0 |
 
+The PWA browser test harness additionally pins these development-only
+dependencies, reviewed on 2026-09-28:
+
+| Package | Locked version | License |
+| --- | ---: | --- |
+| playwright | 1.63.0 | Apache-2.0 |
+| playwright-core | 1.63.0 | Apache-2.0 |
+
 TinyFugue is GPLv2 software. TFR uses behavioral inspiration only and contains
 no copied TinyFugue implementation code. TinyMUX source was consulted to verify
 the NOSPOOF wire grammar; no TinyMUX source code is included.

@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+
+
+async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    writer.write(
+        b"Development fixture world ready. Commands: pulse, stress, long, links, unicode, ansi.\r\n"
+    )
+    await writer.drain()
+    try:
+        while line := await reader.readline():
+            command = line.decode("utf-8", errors="replace").strip().casefold()
+            if command == "pulse":
+                writer.write(b'[Alice(#123),saypose] Alice says, "portable pulse"\r\n')
+            elif command == "stress" or command.startswith("stress "):
+                parts = command.split()
+                count = 500
+                if len(parts) == 2 and parts[1].isdigit():
+                    count = min(int(parts[1]), 5_000)
+                for index in range(1, count + 1):
+                    writer.write(
+                        f"stress {index:04d}: deterministic scroll output\r\n".encode()
+                    )
+            elif command == "long":
+                writer.write(("long: " + "0123456789" * 100 + "\r\n").encode())
+            elif command == "links":
+                writer.write(
+                    b"links: https://example.com/path?q=1 and http://example.org/end.\r\n"
+                )
+            elif command == "unicode":
+                writer.write("unicode: café 雪 ☃ 👩🏽‍💻 é\r\n".encode())
+            elif command == "ansi":
+                writer.write(
+                    b"ansi: \x1b[31mred\x1b[0m \x1b[1;3;4;38;2;1;200;120mstyled\x1b[0m "
+                    b"\x1b]8;;https://evil.example\x07safe-link-text\x1b]8;;\x07 "
+                    b"\x1b[2J<script>text only</script>\r\n"
+                )
+            else:
+                writer.write(b"echo: " + line)
+            await writer.drain()
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+async def run(host: str, port: int) -> None:
+    server = await asyncio.start_server(handle, host, port)
+    print(f"Fixture world listening on {host}:{port}", flush=True)
+    async with server:
+        await server.serve_forever()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the deterministic TFR development world")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=7421)
+    args = parser.parse_args()
+    asyncio.run(run(args.host, args.port))
+
+
+if __name__ == "__main__":
+    main()
