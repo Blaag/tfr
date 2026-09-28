@@ -581,7 +581,7 @@ def test_portable_character_sweep_renders_per_grapheme_in_terminal() -> None:
         )
     )
     display = DisplayBuffer(max_rows=20, width=30, height=5, pager_enabled=False)
-    display.append("alice says hello", presentations=(presentation,))
+    display.append("Alice says hello", presentations=(presentation,))
 
     start = display.visible_rows(elapsed_seconds=0, animations_enabled=True)[0]
     far = display.visible_rows(elapsed_seconds=1, animations_enabled=True)[0]
@@ -590,7 +590,7 @@ def test_portable_character_sweep_renders_per_grapheme_in_terminal() -> None:
     assert start[0] == ("fg:#ff0000", "A")
     assert start[1][0].startswith("fg:#")
     assert far[-2:] == (("fg:#ff0000", "E"), ("", " says hello"))
-    assert reduced[0] == ("fg:#ff0000 bold", "alice")
+    assert reduced[0] == ("fg:#ff0000 bold", "Alice")
 
 
 def test_portable_presentation_survives_reflow_and_clips_partial_recall() -> None:

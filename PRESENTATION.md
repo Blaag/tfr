@@ -132,7 +132,8 @@ The implemented version 1 effect program contains:
 - A two- or three-keyframe foreground timeline with bounded duration, repeat
   interval, repeat count, and sampling rate.
 - A two- or three-position per-grapheme sweep with bounded target length and
-  trail width, optional uppercase head emphasis, and Oklab color interpolation.
+  trail width, optional uppercase-head/lowercase-rest emphasis, and Oklab color
+  interpolation.
 - An explicit reduced-motion presentation.
 - A final static or no-op fallback.
 

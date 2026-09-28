@@ -549,13 +549,7 @@ function appendEventText(container, event, { animate = true } = {}) {
     applyTextStyle(styled, run.style);
     if (run.presentation?.characterSweep && run.presentation.characterIndex !== null) {
       styled.classList.add("presentation-character");
-      styled.dataset.original = run.text;
-      const uppercase = run.text.toLocaleUpperCase();
-      styled.dataset.uppercase =
-        [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(uppercase)]
-          .length === 1
-          ? uppercase
-          : run.text;
+      styled.dataset.caseable = /^[A-Za-z]$/.test(run.text) ? "true" : "false";
     }
     if (
       run.presentation?.style.foreground &&

@@ -205,8 +205,8 @@ test("runs one bounded animation clock for a character sweep and cleans up", () 
       listeners[name] = callback;
     },
   };
-  const characters = [..."alice"].map((text) => ({
-    dataset: { original: text, uppercase: text.toUpperCase() },
+  const characters = [..."Alice"].map((text) => ({
+    dataset: { caseable: "true" },
     style: {},
     textContent: text,
   }));
@@ -247,13 +247,15 @@ test("runs one bounded animation clock for a character sweep and cleans up", () 
       animation,
     );
     scheduled();
-    assert.equal(characters[2].textContent, "I");
+    assert.equal(characters[2].style.textTransform, "uppercase");
+    assert.equal(characters[0].style.textTransform, "lowercase");
     assert.equal(characters[2].style.color, "#ff0000");
     assert.notEqual(characters[1].style.color, "#180000");
     listeners.cancel();
     assert.equal(cancelled, 17);
-    assert.deepEqual(characters.map((character) => character.textContent), [..."alice"]);
+    assert.deepEqual(characters.map((character) => character.textContent), [..."Alice"]);
     assert.ok(characters.every((character) => character.style.color === "#180000"));
+    assert.ok(characters.every((character) => character.style.textTransform === "none"));
   } finally {
     globalThis.requestAnimationFrame = originalRequestAnimationFrame;
     globalThis.cancelAnimationFrame = originalCancelAnimationFrame;

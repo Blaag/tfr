@@ -490,10 +490,12 @@ export function animatePresentationElement(element, presentation, eventTimestamp
           sweep.head_color,
           intensity,
         );
-        character.textContent =
-          active && sweep.uppercase_head && index === head
-            ? character.dataset.uppercase
-            : character.dataset.original;
+        character.style.textTransform =
+          active && sweep.uppercase_head && character.dataset.caseable === "true"
+            ? index === head
+              ? "uppercase"
+              : "lowercase"
+            : "none";
       }
       frame = requestAnimationFrame(render);
     };
@@ -502,7 +504,7 @@ export function animatePresentationElement(element, presentation, eventTimestamp
       frame = null;
       for (const character of element.querySelectorAll(".presentation-character")) {
         character.style.color = sweep.base_color;
-        character.textContent = character.dataset.original;
+        character.style.textTransform = "none";
       }
     };
     animation.addEventListener("finish", stop);

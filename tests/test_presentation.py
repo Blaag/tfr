@@ -175,6 +175,17 @@ def test_character_sweep_has_bounded_target_and_static_reduced_motion() -> None:
     assert style == PresentationStyle(foreground="#ff0000", bold=True)
     assert text == "e\N{COMBINING ACUTE ACCENT}"
 
+    _style, sharp_s = presentation_grapheme_at(
+        program,
+        "ß",
+        0,
+        1,
+        0,
+        animations_enabled=True,
+        capabilities=frozenset(PresentationCapability),
+    )
+    assert sharp_s == "ß"
+
     too_long = character_sweep(0, 65, base_color="#180000", head_color="#ff0000")
     with pytest.raises(ValueError, match="sweep target is too large"):
         validate_effect_programs("a" * 65, (too_long,))

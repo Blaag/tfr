@@ -433,10 +433,9 @@ def presentation_grapheme_at(
     intensity = max(0.0, 1.0 - distance / sweep.trail_width)
     intensity = intensity * intensity * (3 - 2 * intensity)
     rendered = grapheme
-    if sweep.uppercase_head and index == head:
-        candidate = grapheme.upper()
-        if len(tuple(regex.finditer(r"\X", candidate))) == 1:
-            rendered = candidate
+    if sweep.uppercase_head and grapheme.isascii() and grapheme.isalpha():
+        candidate = grapheme.upper() if index == head else grapheme.lower()
+        rendered = candidate
     return PresentationStyle(
         foreground=interpolate_color(sweep.base_color, sweep.head_color, intensity)
     ), rendered
