@@ -977,6 +977,7 @@ async def run_gateway_ui(
         pager_enabled=configuration.main.ui.pager.enabled,
         pager_overlap=configuration.main.ui.pager.overlap_lines,
         recent_input_lines=configuration.main.ui.recent_input_lines,
+        mouse_mode=configuration.main.ui.mouse_mode,
         animations_enabled=configuration.main.ui.animations_enabled,
         low_bandwidth=configuration.main.ui.low_bandwidth,
         output_color=configuration.main.ui.output_color,

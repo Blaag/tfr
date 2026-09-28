@@ -19,6 +19,38 @@ function spoofStatus(event) {
   return "Undetermined; no reliable attribution";
 }
 
+function transitionTime(value) {
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.valueOf())) return "local unknown; UTC unknown";
+  const local = timestamp.toLocaleString([], {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZoneName: "short",
+  });
+  const utc = timestamp.toISOString().slice(0, 19).replace("T", " ");
+  return `local ${local}; UTC ${utc} UTC`;
+}
+
+export function connectionNotice(event) {
+  const timestamp = transitionTime(event.timestamp);
+  if (event.connection_state === "connected") return `Connected [${timestamp}]`;
+  if (event.connection_state === "disconnected") {
+    const reason = event.connection_error ? `: ${event.connection_error}` : "";
+    return `Disconnected${reason} [${timestamp}]`;
+  }
+  if (event.connection_state === "reconnect_wait") {
+    const delay = Number.isFinite(event.reconnect_delay_seconds)
+      ? ` in ${event.reconnect_delay_seconds}s`
+      : "";
+    return `Reconnecting${delay} [${timestamp}]`;
+  }
+  return event.text || "";
+}
+
 export function eventDetailRows(event) {
   const provenance = event.provenance || {};
   const rows = [

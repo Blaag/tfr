@@ -641,11 +641,15 @@ otherwise approximate the RGB colors at the terminal's available color depth.
 - Drag across world output to highlight it and copy the plain text to the clipboard.
 - Click an underlined `http://` or `https://` link in world output to open it in
   your default browser.
+- `ui.mouse_mode` controls mouse ownership. `auto` (the default) detects a
+  `mosh-server` ancestor and lets the local terminal own links, selection, and
+  clipboard copying; otherwise TFR handles clicks and selection. Use
+  `/mouse auto|terminal|tfr|status` to inspect or change the mode at runtime.
 
 Input beginning with `/` is a client command. Available commands are `/world
 ALIAS`, `/next` (`/n`), `/previous` (`/p`), `/connect`, `/disconnect`, `/reconnect`,
 `/end`, `/nospoof show|hide|status`, `/animations on|off|status`,
-`/lowbw on|off|status`, `/clear`, `/boss`, `/image`, `/sh`, `/reload`, `/restart`,
+`/lowbw on|off|status`, `/mouse auto|terminal|tfr|status`, `/clear`, `/boss`, `/image`, `/sh`, `/reload`, `/restart`,
 `/gateway reconnect`, `/help`, and `/quit`, plus commands registered by enabled
 plugins and configured world-switch aliases such as `/g`. Begin input with `//`
 to send a literal leading slash. `/help` displays commands, aliases and any
@@ -959,6 +963,8 @@ with server attribution. Spoofed speaker names use a persistent inverse marker
 in both the terminal UI and PWA, independent of normal text effects.
 
 See [PRESENTATION.md](PRESENTATION.md) for the portable presentation direction,
-[SECURITY.md](SECURITY.md) for credential, TLS, logging, plugin, and agent
-security boundaries, and [LICENSES.md](LICENSES.md) for the reviewed runtime
-dependency licenses. TFR is distributed under the [MIT License](LICENSE).
+[PWA-TESTING.md](PWA-TESTING.md) for the reproducible development Gateway,
+mock-world, Playwright, and physical-device test workflow, [SECURITY.md](SECURITY.md)
+for credential, TLS, logging, plugin, and agent security boundaries, and
+[LICENSES.md](LICENSES.md) for the reviewed runtime dependency licenses. TFR is
+distributed under the [MIT License](LICENSE).

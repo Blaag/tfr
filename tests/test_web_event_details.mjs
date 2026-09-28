@@ -1,7 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { eventDetailRows } from "../src/tfr/web/event-details.mjs";
+import { connectionNotice, eventDetailRows } from "../src/tfr/web/event-details.mjs";
+
+test("formats world connection transitions with local and UTC times", () => {
+  const timestamp = "2026-09-28T18:34:56Z";
+  const connected = connectionNotice({ timestamp, connection_state: "connected" });
+  const disconnected = connectionNotice({
+    timestamp,
+    connection_state: "disconnected",
+    connection_error: "remote closed",
+  });
+  const reconnecting = connectionNotice({
+    timestamp,
+    connection_state: "reconnect_wait",
+    reconnect_delay_seconds: 5,
+  });
+
+  for (const notice of [connected, disconnected, reconnecting]) {
+    assert.match(notice, /local .+; UTC 2026-09-28 18:34:56 UTC/);
+  }
+  assert.match(disconnected, /^Disconnected: remote closed/);
+  assert.match(reconnecting, /^Reconnecting in 5s/);
+});
 
 test("shows a server-derived NOSPOOF verdict", () => {
   assert.deepEqual(

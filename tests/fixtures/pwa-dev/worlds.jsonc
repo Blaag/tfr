@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "defaults": {
+    "encoding": "utf-8",
+    "reconnect": false,
+    "scrollback_lines": 500
+  },
+  "worlds": {
+    "dev-local": {
+      "aliases": ["dev"],
+      "host": "127.0.0.1",
+      "port": 7421,
+      "server": "tinymux",
+      "autoconnect": true,
+      "reconnect": false,
+      "provenance": {
+        "nospoof": false,
+        "show_prefix": false
+      }
+    }
+  }
+}

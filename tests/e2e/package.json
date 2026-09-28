@@ -1,0 +1,12 @@
+{
+  "name": "tfr-pwa-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node pwa-ui.mjs && node pwa-expiration.mjs",
+    "test:live": "node pwa-live.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}

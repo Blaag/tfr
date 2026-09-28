@@ -156,6 +156,14 @@ def browser_event(
         state = event.metadata.get("state")
         if isinstance(state, str):
             value["event"]["connection_state"] = state
+        error = event.metadata.get("error")
+        if isinstance(error, str):
+            value["event"]["connection_error"] = _bounded_visible_text(
+                error, MAX_WEB_PROVENANCE_BYTES
+            )
+        delay = event.metadata.get("delay_seconds")
+        if isinstance(delay, (int, float)) and not isinstance(delay, bool):
+            value["event"]["reconnect_delay_seconds"] = delay
     for optional_field in ("presentation", "text_runs", "provenance"):
         if len(json.dumps(value, ensure_ascii=True).encode("utf-8")) <= MAX_WEB_MESSAGE_BYTES:
             break

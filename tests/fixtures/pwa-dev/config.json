@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "worlds_file": "worlds.jsonc",
+  "agents_file": "agents.jsonc",
+  "logging": {
+    "enabled": false,
+    "directory": "state/logs"
+  },
+  "updates": {
+    "enabled": false,
+    "state_directory": "state/updates"
+  },
+  "plugins": {
+    "enabled": ["speaker_effects"],
+    "sources": [
+      {
+        "repo": "Blaag/tfr-plugins-public",
+        "policy": "stable-auto",
+        "manifest_url": "https://github.com/Blaag/tfr-plugins-public/releases/latest/download/plugin-manifest.json"
+      }
+    ],
+    "config": {
+      "speaker_effects": {
+        "rules": [
+          {
+            "speaker": "Alice",
+            "effect": "cylon",
+            "duration_seconds": 2,
+            "repeat_seconds": 2,
+            "trail_width": 2,
+            "frames_per_second": 20,
+            "kinds": ["say"]
+          }
+        ]
+      }
+    },
+    "state_directory": "state/plugins"
+  },
+  "web_gateway": {
+    "enabled": true,
+    "origin": "https://gateway.example.ts.net",
+    "listen_host": "127.0.0.1",
+    "listen_port": 7438,
+    "state_directory": "state/web",
+    "snapshot_events": 200
+  }
+}

@@ -878,6 +878,15 @@ Acceptance criteria:
   implementation, structured ANSI-derived text runs, and initial iPhone
   validation are complete; deeper accessibility testing and the longer platform
   pilot remain follow-up work.
+- [ ] Add a Gateway/PWA administration helper that discovers the running
+  Gateway's Unix socket, validates or configures Tailscale Serve, reports
+  actionable service-status failures, and wraps device pairing, listing, and
+  revocation without requiring users to coordinate runtime paths manually.
+- [ ] Generate smart, guided installation scripts for both Gateway and UI
+  hosts. Detect the host environment, install and configure the appropriate
+  service, paths, permissions, and update mechanism, and optionally prompt for
+  initial world definitions and credentials without exposing secrets in shell
+  history or generated logs.
 - [x] Add the first bounded portable presentation slice documented in
   `PRESENTATION.md`. Keep Python plugins as the policy layer; let them emit typed,
   composable effect programs interpreted by the TUI and PWA. Select variants by

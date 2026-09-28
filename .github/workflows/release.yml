@@ -25,6 +25,9 @@ jobs:
       - run: uv run ruff check .
       - run: node --check src/tfr/web/app.mjs
       - run: node --test tests/test_web_*.mjs
+      - run: npm --prefix tests/e2e ci
+      - run: npm --prefix tests/e2e exec -- playwright install --with-deps webkit
+      - run: npm --prefix tests/e2e test
       - run: >-
           uv run pytest -q
           -k 'not test_two_worlds_exchange_traffic_without_leakage'

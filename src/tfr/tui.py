@@ -8,12 +8,14 @@ import os
 import secrets
 import shlex
 import signal
+import subprocess
 import sys
 import time
 import webbrowser
 from collections import deque
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -22,6 +24,7 @@ from prompt_toolkit import Application
 from prompt_toolkit.application import get_app
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.data_structures import Point
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input import Input
@@ -91,6 +94,7 @@ _CORE_CLIENT_COMMANDS = frozenset(
         "help",
         "image",
         "lowbw",
+        "mouse",
         "n",
         "next",
         "nospoof",
@@ -140,6 +144,51 @@ def _row_text(row: FormattedRow) -> str:
 def _osc52_sequence(text: str) -> str:
     payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
     return f"\x1b]52;c;{payload}\x07"
+
+
+def _process_parent(pid: int) -> tuple[int, str] | None:
+    proc = Path("/proc") / str(pid)
+    try:
+        name = (proc / "comm").read_text(encoding="utf-8").strip()
+        status = (proc / "status").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        try:
+            result = subprocess.run(
+                ("ps", "-o", "ppid=", "-o", "comm=", "-p", str(pid)),
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
+            parent, name = result.stdout.strip().split(maxsplit=1)
+            return int(parent), Path(name).name
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+    parent_line = next((line for line in status.splitlines() if line.startswith("PPid:")), None)
+    if parent_line is None:
+        return None
+    try:
+        return int(parent_line.split()[1]), name
+    except (IndexError, ValueError):
+        return None
+
+
+def _running_under_mosh(pid: int | None = None) -> bool:
+    current = pid or os.getpid()
+    seen: set[int] = set()
+    while current > 1 and current not in seen and len(seen) < 64:
+        seen.add(current)
+        process = _process_parent(current)
+        if process is None:
+            return False
+        parent, name = process
+        if name == "mosh-server":
+            return True
+        current = parent
+    return False
+
+
+_MOSH_DETECTED_AT_IMPORT = _running_under_mosh()
 
 
 def _emit_commands(
@@ -199,6 +248,16 @@ def _format_elapsed(seconds: float) -> str:
         return f"{hours}h"
     days = hours // 24
     return f"{days}d"
+
+
+def _format_transition_timestamp(timestamp: datetime) -> str:
+    local = timestamp.astimezone()
+    local_zone = local.tzname() or "local"
+    utc = timestamp.astimezone(UTC)
+    return (
+        f"local {local:%Y-%m-%d %H:%M:%S} {local_zone}; "
+        f"UTC {utc:%Y-%m-%d %H:%M:%S} UTC"
+    )
 
 
 def _selected_row(row: FormattedRow, start: int, end: int) -> FormattedRow:
@@ -474,6 +533,7 @@ class TfrTui:
         pager_enabled: bool,
         pager_overlap: int,
         recent_input_lines: int = 3,
+        mouse_mode: str = "auto",
         plugins: PluginManager | None = None,
         agents: AgentRuntime | None = None,
         service_runtime: ServiceRuntime | None = None,
@@ -506,6 +566,8 @@ class TfrTui:
             raise ValueError("boss-screen mode must be cycle, random, or locked")
         if boss_screen_mode == "locked" and boss_screen is None:
             raise ValueError("locked boss-screen mode requires a screen")
+        if mouse_mode not in {"auto", "terminal", "tfr"}:
+            raise ValueError("mouse mode must be auto, terminal, or tfr")
         self.manager = manager
         self.event_bus = event_bus
         self.command_bus = command_bus
@@ -561,6 +623,8 @@ class TfrTui:
         self._startup_notices: list[tuple[str, str]] = []
         self.replay_mode = replay_mode
         self.recent_input_lines = recent_input_lines
+        self.mouse_mode = mouse_mode
+        self._mosh_detected = _MOSH_DETECTED_AT_IMPORT
         self.aliases = [session.world for session in sessions]
         self.world_switch_aliases: dict[str, str] = {}
         for session in sessions:
@@ -589,6 +653,9 @@ class TfrTui:
                 text = buffer.text
                 if text:
                     self._spawn(self.submit_text(world, text))
+                else:
+                    self.views[world].recent_commands.append("")
+                    self.application.invalidate()
                 return False
 
             self.views[alias] = WorldView(
@@ -701,7 +768,7 @@ class TfrTui:
             layout=Layout(root, focused_element=self.active_view.input_buffer),
             key_bindings=bindings,
             full_screen=True,
-            mouse_support=True,
+            mouse_support=Condition(lambda: self.effective_mouse_mode == "tfr"),
             style=Style.from_dict(dict(self.theme.styles)),
             before_render=self._before_render,
             input=input,
@@ -730,6 +797,12 @@ class TfrTui:
     @property
     def boss_mode(self) -> bool:
         return self.plugins.boss_active
+
+    @property
+    def effective_mouse_mode(self) -> str:
+        if self.mouse_mode == "auto":
+            return "terminal" if self._mosh_detected else "tfr"
+        return self.mouse_mode
 
     def _create_bindings(self) -> KeyBindings:
         bindings = KeyBindings()
@@ -819,6 +892,7 @@ class TfrTui:
         @bindings.add("c-l")
         def clear_screen(_event: Any) -> None:
             self.inspector_agent = None
+            self.active_view.input_buffer.reset()
             self.start_screen_clear(self.active_alias)
 
         @bindings.add("f8")
@@ -1458,6 +1532,23 @@ class TfrTui:
                 if event_text == event.display_text
                 else replace(event, display_text=event_text)
             )
+            spoof_span: tuple[int, int] | None = None
+            if (
+                event_text is not None
+                and event.spoof is not None
+                and event.spoof.status is SpoofStatus.SPOOFED
+            ):
+                plain_event_text = terminal_plain_text(event_text)
+                message_text = event.metadata.get("message_text")
+                plain_message = (
+                    terminal_plain_text(message_text) if isinstance(message_text, str) else None
+                )
+                message_start = (
+                    plain_event_text.find(plain_message) if plain_message is not None else -1
+                )
+                if message_start >= 0:
+                    start, end = event.spoof.speaker_span
+                    spoof_span = message_start + start, message_start + end
             display_text = (
                 self.plugins.transform_display(display_event)
                 if self.plugins is not None
@@ -1500,21 +1591,14 @@ class TfrTui:
                 )
                 view.clear_selection()
                 style_spans: tuple[StaticStyleSpan, ...] = ()
-                if event.spoof is not None and event.spoof.status is SpoofStatus.SPOOFED:
+                if spoof_span is not None and event.spoof is not None:
                     plain_display = terminal_plain_text(display_text)
-                    message_text = event.metadata.get("message_text")
-                    plain_message = (
-                        terminal_plain_text(message_text) if isinstance(message_text, str) else None
-                    )
-                    message_start = (
-                        plain_display.find(plain_message) if plain_message is not None else -1
-                    )
-                    if message_start >= 0:
-                        start, end = event.spoof.speaker_span
+                    start, end = spoof_span
+                    if plain_display[start:end].casefold() == event.spoof.speaker.casefold():
                         style_spans = (
                             StaticStyleSpan(
-                                start=message_start + start,
-                                end=message_start + end,
+                                start=start,
+                                end=end,
                                 style="reverse",
                             ),
                         )
@@ -1539,16 +1623,31 @@ class TfrTui:
             should_count = True
         elif event.kind is EventKind.CONNECTION:
             state = event.metadata.get("state")
+            timestamp = _format_transition_timestamp(event.timestamp)
             if state == SessionState.CONNECTED.value:
                 view.clear_selection()
-                view.display.append(self.theme.ansi_text("success", "-- Connected --"))
+                view.display.append(
+                    self.theme.ansi_text("success", f"-- Connected [{timestamp}] --")
+                )
                 should_count = True
             elif state == SessionState.DISCONNECTED.value:
                 view.clear_selection()
                 reason = event.metadata.get("error")
                 suffix = f": {reason}" if reason else ""
                 view.display.append(
-                    self.theme.ansi_text("error", f"-- Disconnected{suffix} --")
+                    self.theme.ansi_text(
+                        "error", f"-- Disconnected{suffix} [{timestamp}] --"
+                    )
+                )
+                should_count = True
+            elif state == SessionState.RECONNECT_WAIT.value:
+                view.clear_selection()
+                delay = event.metadata.get("delay_seconds")
+                suffix = f" in {delay:g}s" if isinstance(delay, (int, float)) else ""
+                view.display.append(
+                    self.theme.ansi_text(
+                        "warning", f"-- Reconnecting{suffix} [{timestamp}] --"
+                    )
                 )
                 should_count = True
         if should_count and event.world != self.active_alias:
@@ -1990,6 +2089,8 @@ class TfrTui:
             self._handle_nospoof_command(alias, parameters)
         elif command == "lowbw":
             self._handle_low_bandwidth_command(alias, parameters)
+        elif command == "mouse":
+            self._handle_mouse_command(alias, parameters)
         elif command == "animations":
             self._handle_animations_command(alias, parameters)
         elif self.plugins is not None and await self.plugins.execute_command(
@@ -2027,6 +2128,7 @@ class TfrTui:
             "  /end - return to live output",
             "  /nospoof show|hide|status - control NOSPOOF prefix visibility",
             "  /lowbw [on|off|status] - suppress continuous UI animation",
+            "  /mouse auto|terminal|tfr|status - choose who handles mouse input",
             "  /animations [on|off|status] - enable continuous UI effects",
             "  /update status|check - inspect stable TFR and plugin releases",
             "  /plugins - show configured, loaded, and failed plugins",
@@ -2249,6 +2351,26 @@ class TfrTui:
         self._sync_animation_task(restart=True)
         state = "on" if self.low_bandwidth else "off"
         self.add_notice(alias, f"Low-bandwidth mode is {state}")
+
+    def _handle_mouse_command(self, alias: str, parameters: list[str]) -> None:
+        operation = parameters[0].casefold() if len(parameters) == 1 else ""
+        if operation in {"auto", "terminal", "tfr"}:
+            self.mouse_mode = operation
+            if operation == "auto":
+                self._mosh_detected = _running_under_mosh()
+            self.application.invalidate()
+        elif operation not in {"", "status"} or len(parameters) > 1:
+            self.add_notice(alias, "Usage: /mouse auto|terminal|tfr|status")
+            return
+        reason = (
+            "; mosh-server detected"
+            if self.mouse_mode == "auto" and self._mosh_detected
+            else ""
+        )
+        self.add_notice(
+            alias,
+            f"Mouse mode: {self.mouse_mode} ({self.effective_mouse_mode}{reason})",
+        )
 
     def _set_low_bandwidth(self, enabled: bool) -> None:
         if enabled == self.low_bandwidth:
@@ -2522,6 +2644,7 @@ async def run_client(bundle: ConfigurationBundle) -> int:
             pager_enabled=bundle.main.ui.pager.enabled,
             pager_overlap=bundle.main.ui.pager.overlap_lines,
             recent_input_lines=bundle.main.ui.recent_input_lines,
+            mouse_mode=bundle.main.ui.mouse_mode,
             animations_enabled=bundle.main.ui.animations_enabled,
             low_bandwidth=bundle.main.ui.low_bandwidth,
             output_color=bundle.main.ui.output_color,

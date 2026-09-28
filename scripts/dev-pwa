@@ -1,0 +1,241 @@
+#!/bin/sh
+
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+FIXTURES="$ROOT/tests/fixtures/pwa-dev"
+E2E_ROOT="$ROOT/tests/e2e"
+DEV_ROOT=${TFR_DEV_ROOT:-"$ROOT/.tfr/pwa-dev-harness"}
+CONFIG="$DEV_ROOT/config.jsonc"
+SOCKET="$DEV_ROOT/state/run/gateway.sock"
+PID_FILE="$DEV_ROOT/state/dev-pwa.pid"
+FIXTURE_PORT=7421
+WEB_PORT=7438
+ORIGIN=${TFR_DEV_ORIGIN:-https://gateway.example.ts.net}
+
+usage() {
+    cat <<EOF
+Usage: $0 check|local|start|stop|pair|devices|revoke DEVICE_ID|playwright
+
+  check             Render and validate the isolated branch configuration
+  local             Run the mock world and Gateway without Tailscale Serve
+  start             Run the mock world, Gateway, and foreground Tailscale Serve
+  stop              Stop a development stack recorded by this harness
+  pair              Create a one-time pairing URL
+  devices           List devices paired to this isolated Gateway
+  revoke DEVICE_ID  Revoke one isolated development device
+  playwright        Pair and run the live Playwright WebKit smoke test
+
+Set TFR_DEV_ORIGIN to this machine's private Tailscale HTTPS origin before
+using start, pair, or playwright. Set TFR_DEV_PLUGIN_REF to test an exact
+40-character tfr-plugins-public commit instead of the stable channel.
+EOF
+}
+
+run_tfr() {
+    (cd "$ROOT" && uv run --frozen --no-sync tfr "$@")
+}
+
+prepare_runtime() {
+    mkdir -p "$DEV_ROOT/state/run"
+    chmod 700 "$DEV_ROOT" "$DEV_ROOT/state" "$DEV_ROOT/state/run"
+    cp "$FIXTURES/agents.jsonc" "$DEV_ROOT/agents.jsonc"
+    cp "$FIXTURES/worlds.jsonc" "$DEV_ROOT/worlds.jsonc"
+    TFR_DEV_CONFIG_TEMPLATE="$FIXTURES/config.json" \
+    TFR_DEV_CONFIG_OUTPUT="$CONFIG" \
+    TFR_DEV_ORIGIN="$ORIGIN" \
+    TFR_DEV_PLUGIN_REF=${TFR_DEV_PLUGIN_REF:-} \
+        uv run --directory "$ROOT" --frozen --no-sync python - <<'PY'
+import json
+import os
+from pathlib import Path
+from urllib.parse import urlsplit
+
+origin = os.environ["TFR_DEV_ORIGIN"].rstrip("/")
+parsed = urlsplit(origin)
+if (
+    parsed.scheme != "https"
+    or not parsed.hostname
+    or parsed.username is not None
+    or parsed.password is not None
+    or parsed.path
+    or parsed.query
+    or parsed.fragment
+):
+    raise SystemExit("TFR_DEV_ORIGIN must be an HTTPS origin without credentials or a suffix")
+
+config = json.loads(Path(os.environ["TFR_DEV_CONFIG_TEMPLATE"]).read_text())
+config["web_gateway"]["origin"] = origin
+plugin_ref = os.environ.get("TFR_DEV_PLUGIN_REF")
+if plugin_ref:
+    if len(plugin_ref) != 40 or any(character not in "0123456789abcdef" for character in plugin_ref):
+        raise SystemExit("TFR_DEV_PLUGIN_REF must be a lowercase 40-character commit")
+    config["plugins"]["sources"] = [
+        {
+            "repo": "Blaag/tfr-plugins-public",
+            "policy": "pinned",
+            "ref": plugin_ref,
+        }
+    ]
+Path(os.environ["TFR_DEV_CONFIG_OUTPUT"]).write_text(
+    json.dumps(config, indent=2) + "\n", encoding="utf-8"
+)
+PY
+}
+
+check_checkout() {
+    imported=$(cd "$ROOT" && uv run --frozen --no-sync python -c \
+        'from pathlib import Path; import tfr; print(Path(tfr.__file__).resolve())')
+    case "$imported" in
+        "$ROOT"/src/tfr/*) ;;
+        *)
+            printf '%s\n' "Refusing to run: tfr imports from $imported, not this checkout." >&2
+            exit 1
+            ;;
+    esac
+}
+
+port_is_free() {
+    uv run --directory "$ROOT" --frozen --no-sync python - "$1" <<'PY'
+import socket
+import sys
+
+with socket.socket() as sock:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("127.0.0.1", int(sys.argv[1])))
+    except OSError:
+        raise SystemExit(1)
+PY
+}
+
+preflight() {
+    prepare_runtime
+    check_checkout
+    run_tfr --check-config --config "$CONFIG"
+    for port in "$FIXTURE_PORT" "$WEB_PORT"; do
+        if ! port_is_free "$port"; then
+            printf '%s\n' "Refusing to run: 127.0.0.1:$port is already in use." >&2
+            exit 1
+        fi
+    done
+    if [ -e "$SOCKET" ]; then
+        printf '%s\n' "Refusing to run: stale or active socket exists at $SOCKET." >&2
+        exit 1
+    fi
+}
+
+terminate_tree() {
+    pid=$1
+    [ -n "$pid" ] || return
+    for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+        terminate_tree "$child"
+    done
+    kill -TERM "$pid" 2>/dev/null || true
+}
+
+stop_children() {
+    trap - INT TERM EXIT
+    terminate_tree "${SERVE_PID:-}"
+    terminate_tree "${GATEWAY_PID:-}"
+    terminate_tree "${FIXTURE_PID:-}"
+    wait 2>/dev/null || true
+    rm -f "$PID_FILE" "$SOCKET"
+}
+
+run_stack() {
+    with_serve=$1
+    preflight
+    trap stop_children INT TERM EXIT
+    printf '%s\n' "$$" >"$PID_FILE"
+    chmod 600 "$PID_FILE"
+
+    uv run --directory "$ROOT" --frozen --no-sync python "$ROOT/scripts/mock-world" \
+        --port "$FIXTURE_PORT" &
+    FIXTURE_PID=$!
+    run_tfr gateway --config "$CONFIG" --socket "$SOCKET" &
+    GATEWAY_PID=$!
+
+    if [ "$with_serve" = true ]; then
+        if [ "$ORIGIN" = "https://gateway.example.ts.net" ]; then
+            printf '%s\n' "Set TFR_DEV_ORIGIN to this machine's private Tailscale HTTPS origin." >&2
+            exit 1
+        fi
+        tailscale status >/dev/null 2>&1 || {
+            printf '%s\n' "Tailscale is not running." >&2
+            exit 1
+        }
+        serve_status=$(tailscale serve status --json)
+        if [ "$serve_status" != "{}" ]; then
+            printf '%s\n' "Refusing to replace an existing Tailscale Serve configuration." >&2
+            exit 1
+        fi
+        tailscale serve "http://127.0.0.1:$WEB_PORT" &
+        SERVE_PID=$!
+        printf '%s\n' "Development PWA: $ORIGIN"
+    else
+        printf '%s\n' "Local stack started without Tailscale Serve."
+    fi
+    printf '%s\n' "Pair in another terminal with: $0 pair"
+    wait "$GATEWAY_PID"
+}
+
+stop_stack() {
+    if [ ! -f "$PID_FILE" ]; then
+        printf '%s\n' "No development stack PID is recorded."
+        return
+    fi
+    IFS= read -r pid <"$PID_FILE"
+    case "$pid" in
+        ''|*[!0-9]*)
+            printf '%s\n' "Refusing invalid development stack PID: $pid" >&2
+            exit 1
+            ;;
+    esac
+    if ! kill -TERM "$pid" 2>/dev/null; then
+        rm -f "$PID_FILE"
+        printf '%s\n' "Development stack is not running; removed stale PID file."
+    fi
+}
+
+admin() {
+    prepare_runtime
+    run_tfr "$@" --socket "$SOCKET"
+}
+
+command=${1:-}
+case "$command" in
+    check)
+        prepare_runtime
+        check_checkout
+        run_tfr --check-config --config "$CONFIG"
+        ;;
+    local)
+        run_stack false
+        ;;
+    start)
+        run_stack true
+        ;;
+    stop)
+        stop_stack
+        ;;
+    pair)
+        admin pair --device-name "Development device"
+        ;;
+    devices)
+        admin devices
+        ;;
+    revoke)
+        [ "$#" -eq 2 ] || { usage >&2; exit 2; }
+        admin revoke-device --device-id "$2"
+        ;;
+    playwright)
+        pairing_url=$(admin pair --device-name "Playwright WebKit")
+        TFR_PWA_ORIGIN="$ORIGIN" TFR_PAIRING_URL="$pairing_url" \
+            npm --prefix "$E2E_ROOT" run test:live
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac
