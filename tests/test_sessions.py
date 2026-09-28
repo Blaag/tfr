@@ -399,6 +399,53 @@ async def test_session_detects_newline_injected_say_without_second_nospoof_prefi
     assert inbound[1].spoof.speaker_span == (0, 3)
 
 
+async def test_session_detects_newline_injected_say_after_unprefixed_local_echo() -> None:
+    sink = MemorySink()
+    session = make_session(
+        world="global",
+        host="127.0.0.1",
+        port=1,
+        sink=sink,
+        event_bus=EventBus([sink]),
+        command_bus=CommandBus(),
+        server="tinymush",
+        login=LoginConfig(character="Black", password="secret"),
+        provenance=ProvenanceConfig(nospoof=True),
+    )
+
+    await session._publish_inbound('You say, "It was awesome."\r\n')
+    await session._publish_inbound('Jarin says, "thanks"\r\n')
+
+    inbound = [event for event in sink.events if event.direction is Direction.INBOUND]
+    assert inbound[0].spoof is None
+    assert inbound[1].provenance is None
+    assert inbound[1].spoof is not None
+    assert inbound[1].spoof.status is SpoofStatus.SPOOFED
+    assert inbound[1].spoof.reason is SpoofReason.MISSING_NOSPOOF_PREFIX
+    assert inbound[1].spoof.speaker == "Jarin"
+    assert inbound[1].spoof.speaker_span == (0, 5)
+
+
+async def test_unprefixed_local_echo_requires_configured_nospoof() -> None:
+    sink = MemorySink()
+    session = make_session(
+        world="global",
+        host="127.0.0.1",
+        port=1,
+        sink=sink,
+        event_bus=EventBus([sink]),
+        command_bus=CommandBus(),
+        server="tinymush",
+        provenance=ProvenanceConfig(nospoof=False),
+    )
+
+    await session._publish_inbound('You say, "Hello"\r\n')
+    await session._publish_inbound('Jarin says, "Hello"\r\n')
+
+    inbound = [event for event in sink.events if event.direction is Direction.INBOUND]
+    assert all(event.spoof is None for event in inbound)
+
+
 async def test_session_does_not_flag_standalone_unprefixed_speech() -> None:
     sink = MemorySink()
     event_bus = EventBus([sink])

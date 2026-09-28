@@ -571,6 +571,26 @@ def test_browser_projection_uses_full_ascii_source_budget_before_sanitizing() ->
     assert projected["event"]["text_truncated"] is False
 
 
+def test_browser_projection_includes_world_transition_details() -> None:
+    original = make_event(kind=EventKind.CONNECTION, text="")
+    event = replace(
+        original,
+        direction=Direction.INTERNAL,
+        metadata={
+            "state": "reconnect_wait",
+            "error": "remote closed",
+            "delay_seconds": 5,
+        },
+    )
+
+    projected = browser_event(1, event)
+
+    assert projected is not None
+    assert projected["event"]["connection_state"] == "reconnect_wait"
+    assert projected["event"]["connection_error"] == "remote closed"
+    assert projected["event"]["reconnect_delay_seconds"] == 5
+
+
 def test_browser_projection_bounds_and_sanitizes_provenance() -> None:
     event = make_event()
     event = Event(

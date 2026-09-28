@@ -432,6 +432,15 @@ class WorldSession:
             self._expect_nospoof_continuation = True
             if parsed.provenance.sender_name:
                 self._remember_nospoof_sender(parsed.provenance.sender_name)
+        elif (
+            self.config.provenance.nospoof
+            and self.config.server in {"rhost", "tinymush", "tinymux"}
+            and parsed.kind is EventKind.SAY
+            and parsed.message_text.casefold().startswith("you say,")
+        ):
+            # MUSH servers omit NOSPOOF prefixes from the local say echo. A second
+            # apparent speaker can only be trusted if it has its own prefix.
+            self._expect_nospoof_continuation = True
         spoof = assess_spoofing(
             parsed.message_text,
             kind=parsed.kind,

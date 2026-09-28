@@ -59,6 +59,7 @@ from tfr.tui import (
     _format_elapsed,
     _multiline_paste_commands,
     _osc52_sequence,
+    _running_under_mosh,
     run_client,
 )
 from tfr.updates import BuildIdentity, UpdateChecker
@@ -76,6 +77,7 @@ def make_tui(
     server: str = "generic",
     unicode: bool = False,
     world_aliases: Mapping[str, tuple[str, ...]] | None = None,
+    mouse_mode: str = "auto",
 ) -> TfrTui:
     event_bus = EventBus()
     command_bus = CommandBus()
@@ -111,6 +113,7 @@ def make_tui(
         gateway_build=gateway_build,
         theme=theme,
         output_color=output_color,
+        mouse_mode=mouse_mode,
         input=input or DummyInput(),
         output=DummyOutput(),
     )
@@ -538,6 +541,51 @@ def test_osc52_clipboard_sequence_contains_utf8_selection() -> None:
     assert sequence.endswith("\x07")
     payload = sequence.removeprefix("\x1b]52;c;").removesuffix("\x07")
     assert base64.b64decode(payload).decode("utf-8") == "hello π"
+
+
+def test_mosh_detection_walks_process_ancestry(monkeypatch: pytest.MonkeyPatch) -> None:
+    processes = {
+        30: (20, "python"),
+        20: (10, "zsh"),
+        10: (1, "mosh-server"),
+    }
+    monkeypatch.setattr("tfr.tui._process_parent", processes.get)
+
+    assert _running_under_mosh(30) is True
+    assert _running_under_mosh(20) is True
+    assert _running_under_mosh(10) is True
+    assert _running_under_mosh(999) is False
+
+
+async def test_mouse_auto_uses_terminal_under_mosh_and_can_be_overridden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("tfr.tui._MOSH_DETECTED_AT_IMPORT", True)
+    tui = make_tui(mouse_mode="auto")
+
+    assert tui.effective_mouse_mode == "terminal"
+    assert tui.application.mouse_support() is False
+
+    await tui._handle_client_command("alpha", "/mouse tfr")
+    assert tui.effective_mouse_mode == "tfr"
+    assert tui.application.mouse_support() is True
+
+    await tui._handle_client_command("alpha", "/mouse terminal")
+    assert tui.effective_mouse_mode == "terminal"
+    assert tui.application.mouse_support() is False
+
+
+async def test_mouse_auto_status_reports_mosh_detection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("tfr.tui._MOSH_DETECTED_AT_IMPORT", True)
+    monkeypatch.setattr("tfr.tui._running_under_mosh", lambda: True)
+    tui = make_tui(mouse_mode="tfr")
+
+    await tui._handle_client_command("alpha", "/mouse auto")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Mouse mode: auto (terminal; mosh-server detected)" in text
 
 
 async def test_help_lists_commands_keybindings_markers_and_loaded_plugins() -> None:
@@ -1237,6 +1285,35 @@ async def test_page_up_ends_an_active_screen_clear_before_scrolling() -> None:
     assert view.display.screen_is_cleared is False
 
 
+def test_ctrl_l_clears_active_input_and_output() -> None:
+    tui = make_tui()
+    view = tui.active_view
+    view.input_buffer.text = "unfinished command"
+    view.display.append("old output")
+    clear = next(
+        binding
+        for binding in tui.application.key_bindings.bindings
+        if Keys.ControlL in binding.keys
+    )
+
+    clear.handler(SimpleNamespace(app=tui.application))
+
+    assert view.input_buffer.text == ""
+    assert view.display.screen_is_cleared is True
+
+
+def test_blank_enter_pushes_blank_rows_through_recent_input() -> None:
+    tui = make_tui()
+    view = tui.active_view
+    view.recent_commands.extend(("look", "say hello", "inventory"))
+
+    for _ in range(view.recent_input_lines):
+        view.input_buffer.validate_and_handle()
+
+    assert tuple(view.recent_commands) == ("", "", "")
+    assert fragment_list_to_text(view.recent_input_text()) == "\n\n"
+
+
 async def test_page_down_ends_an_active_screen_clear() -> None:
     tui = make_tui()
     await add_screen_clear_effects(tui)
@@ -1487,6 +1564,7 @@ async def test_standalone_client_loads_all_plugin_capabilities(
     ui = SimpleNamespace(
         pager=SimpleNamespace(enabled=True, overlap_lines=1),
         recent_input_lines=3,
+        mouse_mode="auto",
         animations_enabled=True,
         low_bandwidth=False,
         output_color="#d7d7d7",
@@ -1688,6 +1766,83 @@ async def test_spoofed_speaker_is_permanently_reversed_with_speaker_effect() -> 
 
     assert reversed_text == "Bob"
     assert fragment_list_to_text(output) == 'Bob says, "I like grapes!"'
+
+
+async def test_spoofed_speaker_remains_reversed_after_body_display_transform() -> None:
+    class BodyTransform:
+        api_version = 1
+
+        def register(self, registrar: Any, _config: object) -> None:
+            registrar.register_display_transform(
+                "body-transform",
+                lambda _event, text: text.replace("thanks", "th4nks"),
+            )
+
+    manager = await PluginManager.load(
+        enabled=("body-transform",),
+        config={},
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        discovered=(entry_point("body-transform", BodyTransform()),),
+        scope="ui",
+    )
+    tui = make_tui(plugins=manager)
+    tui.active_view.display.resize(width=80, height=1)
+    tui.handle_event(
+        Event(
+            session_id=tui.active_view.session.session_id,
+            world="alpha",
+            connection_generation=1,
+            sequence=0,
+            direction=Direction.INBOUND,
+            kind=EventKind.SAY,
+            canonical_text='Jarin says, "thanks"',
+            plain_text='Jarin says, "thanks"',
+            display_text='Jarin says, "thanks"',
+            spoof=SpoofAssessment(
+                status=SpoofStatus.SPOOFED,
+                speaker="Jarin",
+                speaker_span=(0, 5),
+            ),
+            metadata={"message_text": 'Jarin says, "thanks"'},
+        )
+    )
+    output = tui.active_view.output_text()
+
+    assert "".join(text for style, text in output if "reverse" in style) == "Jarin"
+    assert fragment_list_to_text(output) == 'Jarin says, "th4nks"'
+
+
+def test_world_transition_notices_include_local_and_utc_timestamps() -> None:
+    tui = make_tui()
+    tui.active_view.display.resize(width=200, height=20)
+    timestamp = datetime(2026, 9, 28, 18, 34, 56, tzinfo=UTC)
+    for sequence, (state, metadata) in enumerate(
+        (
+            (SessionState.CONNECTED, {}),
+            (SessionState.DISCONNECTED, {"error": "remote closed"}),
+            (SessionState.RECONNECT_WAIT, {"delay_seconds": 5}),
+        )
+    ):
+        tui.handle_event(
+            Event(
+                session_id=tui.active_view.session.session_id,
+                world="alpha",
+                connection_generation=1,
+                sequence=sequence,
+                timestamp=timestamp,
+                direction=Direction.INTERNAL,
+                kind=EventKind.CONNECTION,
+                metadata={"state": state.value, **metadata},
+            )
+        )
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Connected [local " in text
+    assert "Disconnected: remote closed [local " in text
+    assert "Reconnecting in 5s [local " in text
+    assert text.count("UTC 2026-09-28 18:34:56 UTC") == 3
 
 
 async def test_speaker_effect_cycles_are_anchored_to_event_arrival(

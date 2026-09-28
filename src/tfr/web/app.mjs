@@ -1,7 +1,7 @@
 import { createPairingSubmission, pairingCodeFromLink, submitPairing } from "./pairing.mjs";
 import { isMultilineWorldCommand, normalizeWorldCommand } from "./command.mjs";
 import { createConnectionLifecycle } from "./connection-lifecycle.mjs";
-import { eventDetailRows } from "./event-details.mjs";
+import { connectionNotice, eventDetailRows } from "./event-details.mjs";
 import {
   generationIsNewer,
   historyNoticeDecision,
@@ -582,7 +582,10 @@ function eventNode(event, { animate = true } = {}) {
   body.className = "event-body";
   const text = document.createElement("p");
   text.className = "event-text";
-  appendEventText(text, event, { animate });
+  const displayedEvent = event.connection_state
+    ? { ...event, text: connectionNotice(event), text_runs: undefined, presentation: undefined }
+    : event;
+  appendEventText(text, displayedEvent, { animate });
   body.append(text);
 
   item.append(body);
