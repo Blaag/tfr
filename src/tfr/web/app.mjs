@@ -553,6 +553,7 @@ function appendEventText(container, event, { animate = true } = {}) {
     }
     if (
       run.presentation?.style.foreground &&
+      !run.presentation.characterSweep &&
       !(run.role === "speaker" && event.spoof_status === "spoofed")
     ) {
       styled.classList.add("presentation-content");
