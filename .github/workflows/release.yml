@@ -38,11 +38,15 @@ jobs:
           assets="$(unzip -Z1 "${wheels[0]}")"
           grep -Fxq 'tfr/web/app.mjs' <<<"$assets"
           grep -Fxq 'tfr/web/command.mjs' <<<"$assets"
+          grep -Fxq 'tfr/web/connection-lifecycle.mjs' <<<"$assets"
           grep -Fxq 'tfr/web/event-details.mjs' <<<"$assets"
           grep -Fxq 'tfr/web/history-notice.mjs' <<<"$assets"
           grep -Fxq 'tfr/web/linkify.mjs' <<<"$assets"
+          grep -Fxq 'tfr/web/motion.mjs' <<<"$assets"
           grep -Fxq 'tfr/web/pairing.mjs' <<<"$assets"
+          grep -Fxq 'tfr/web/presentation.mjs' <<<"$assets"
           grep -Fxq 'tfr/web/swipe.mjs' <<<"$assets"
+          grep -Fxq 'tfr/web/text-runs.mjs' <<<"$assets"
       - name: Build update manifest
         run: |
           wheels=(dist/*.whl)

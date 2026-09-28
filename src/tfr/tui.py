@@ -35,7 +35,7 @@ from prompt_toolkit.output import Output
 from prompt_toolkit.styles import Style
 
 from tfr.agents import AgentRuntime
-from tfr.ansi import safe_ansi_formatted_text, terminal_plain_text
+from tfr.ansi import ansi_visible_text, safe_ansi_formatted_text, terminal_plain_text
 from tfr.borders import BorderEdge, border_cell
 from tfr.clear_effects import ScreenClearContext
 from tfr.config import ConfigurationBundle, ThemeConfig
@@ -63,6 +63,7 @@ from tfr.plugin_sources import (
     format_plugin_update_status,
 )
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
+from tfr.presentation import ActiveEffectProgram
 from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.themes import ResolvedTheme, resolve_theme
 from tfr.updates import (
@@ -1442,7 +1443,16 @@ class TfrTui:
                 else:
                     message_text = event.metadata.get("message_text")
                     if isinstance(message_text, str):
-                        event_text = message_text
+                        event_text = next(
+                            (
+                                projected
+                                for source in (event.display_text, event.canonical_text)
+                                if source is not None
+                                and (projected := ansi_visible_text(source, message_text))
+                                is not None
+                            ),
+                            message_text,
+                        )
             display_event = (
                 event
                 if event_text == event.display_text
@@ -1459,6 +1469,14 @@ class TfrTui:
                     if self.plugins is not None
                     else ()
                 )
+                presentations = (
+                    self.plugins.presentation_programs(
+                        display_event,
+                        terminal_plain_text(display_text),
+                    )
+                    if self.plugins is not None
+                    else ()
+                )
                 elapsed_seconds = self._animation_elapsed_seconds()
                 event_age_seconds = max(0.0, time.time() - event.timestamp.timestamp())
                 decorations = tuple(
@@ -1472,6 +1490,13 @@ class TfrTui:
                         - elapsed_seconds,
                     )
                     for decoration in decorations
+                )
+                presentations = tuple(
+                    ActiveEffectProgram(
+                        program,
+                        phase_offset_seconds=event_age_seconds - elapsed_seconds,
+                    )
+                    for program in presentations
                 )
                 view.clear_selection()
                 style_spans: tuple[StaticStyleSpan, ...] = ()
@@ -1496,6 +1521,7 @@ class TfrTui:
                 view.display.append(
                     display_text,
                     decorations=decorations,
+                    presentations=presentations,
                     style_spans=style_spans,
                 )
                 should_count = True
@@ -2193,7 +2219,7 @@ class TfrTui:
             self.theme.ansi_text("warning", f"-- Recall {count}"), recallable=False
         )
         elapsed_seconds = self._animation_elapsed_seconds()
-        for text, decorations, style_spans in recalled:
+        for text, decorations, presentations, style_spans in recalled:
             replayed = tuple(
                 replace(decoration, phase_offset_seconds=-elapsed_seconds)
                 for decoration in decorations
@@ -2201,6 +2227,7 @@ class TfrTui:
             view.display.append(
                 text,
                 decorations=replayed,
+                presentations=presentations,
                 style_spans=style_spans,
                 recallable=False,
             )

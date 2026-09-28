@@ -1,5 +1,6 @@
 import { createPairingSubmission, pairingCodeFromLink, submitPairing } from "./pairing.mjs";
-import { normalizeWorldCommand } from "./command.mjs";
+import { isMultilineWorldCommand, normalizeWorldCommand } from "./command.mjs";
+import { createConnectionLifecycle } from "./connection-lifecycle.mjs";
 import { eventDetailRows } from "./event-details.mjs";
 import {
   generationIsNewer,
@@ -8,16 +9,24 @@ import {
   recordLiveHistoryEvent,
 } from "./history-notice.mjs";
 import { linkParts } from "./linkify.mjs";
+import { motionAllowsAnimation } from "./motion.mjs";
+import {
+  animatePresentationElement,
+  splitPresentationRuns,
+} from "./presentation.mjs";
 import { swipeDirection } from "./swipe.mjs";
+import { installTextRunColors, textRunClassNames, validatedTextRuns } from "./text-runs.mjs";
 
 const MAX_EVENTS_PER_WORLD = 2500;
 const MAX_RENDERED_EVENTS = 500;
+const MAX_ANIMATED_PRESENTATIONS = 64;
 const MAX_COMMAND_HISTORY = 50;
 const MAX_STORED_COMMAND_CHARACTERS = 4096;
 const MAX_PAIRING_ATTEMPTS = 3;
 const RECONNECT_DELAYS = [500, 1000, 2000, 4000, 8000, 15000];
 const HEARTBEAT_INTERVAL_MS = 20000;
 const HEARTBEAT_TIMEOUT_MS = 8000;
+const CONNECTION_TIMEOUT_MS = 8000;
 const MIN_TEXT_SIZE = -2;
 const MAX_TEXT_SIZE = 4;
 
@@ -63,11 +72,6 @@ const elements = {
 };
 
 const state = {
-  socket: null,
-  reconnectTimer: null,
-  reconnectAttempt: 0,
-  intentionalClose: false,
-  ready: false,
   historyReset: false,
   gatewayId: readStorage("tfr.gatewayId"),
   cursor: null,
@@ -102,14 +106,50 @@ let suppressTranscriptClickUntil = 0;
 let transcriptPointerTarget = null;
 let pendingLiveEvents = [];
 let liveRenderFrame = null;
+let preserveLiveDuringViewportChange = false;
+const installedTextRunColors = new Set();
+const activePresentationAnimations = new Set();
+
+function cancelPresentationAnimations() {
+  for (const animation of activePresentationAnimations) animation.cancel();
+  activePresentationAnimations.clear();
+}
+
+const connection = createConnectionLifecycle({
+  connectionTimeout: CONNECTION_TIMEOUT_MS,
+  reconnectDelays: RECONNECT_DELAYS,
+  setTimer: (callback, delay) => window.setTimeout(callback, delay),
+  clearTimer: (timer) => window.clearTimeout(timer),
+  onConnectionTimeout: (socket) => {
+    setConnection(navigator.onLine ? "Gateway unavailable" : "Offline", "error");
+    updateWorldHeader();
+    try {
+      socket.close();
+    } catch {
+      socket.addEventListener("open", () => socket.close(), { once: true });
+    }
+  },
+  onReconnect: () => connect(),
+});
 
 function updateViewportHeight() {
   const viewport = window.visualViewport;
   const height = viewport?.height || window.innerHeight;
   const inputFocused = document.activeElement === elements.commandInput;
   const offsetTop = inputFocused ? viewport?.offsetTop || 0 : 0;
+  document.documentElement.toggleAttribute("data-input-focused", inputFocused);
   document.documentElement.style.setProperty("--viewport-height", `${height}px`);
   document.documentElement.style.setProperty("--viewport-offset-top", `${offsetTop}px`);
+  if (inputFocused && preserveLiveDuringViewportChange) {
+    window.requestAnimationFrame(() => {
+      const reading = readingState();
+      elements.transcript.scrollTop = elements.transcript.scrollHeight;
+      reading.atLive = true;
+      reading.scrollTop = elements.transcript.scrollTop;
+      reading.unseenLive = 0;
+      updateReturnLive();
+    });
+  }
 }
 
 function scheduleViewportUpdate() {
@@ -324,8 +364,8 @@ function updateWorldHeader() {
   const world = currentWorld();
   elements.worldName.textContent = world?.world || "Select world";
   elements.worldSignal.className = `world-signal ${world?.state || ""}`.trim();
-  elements.commandInput.disabled = !world || !state.ready;
-  elements.sendButton.disabled = !world || !state.ready;
+  elements.commandInput.disabled = !world || !connection.ready;
+  elements.sendButton.disabled = !world || !connection.ready;
   elements.historyButton.disabled = !world;
 }
 
@@ -438,34 +478,76 @@ function appendTextWithLinks(container, text) {
   }
 }
 
-function appendEventText(container, event) {
-  const runs = event.text_runs;
-  if (
-    !Array.isArray(runs) ||
-    !runs.every(
-      (run) =>
-        run &&
-        typeof run.text === "string" &&
-        (run.role === undefined || run.role === "speaker"),
-    ) ||
-    runs.map((run) => run.text).join("") !== (event.text || "")
-  ) {
-    appendTextWithLinks(container, event.text || "");
-    return;
-  }
-  for (const run of runs) {
-    if (run.role === "speaker") {
-      const speaker = document.createElement("span");
-      if (event.spoof_status === "spoofed") speaker.className = "spoofed-speaker";
-      appendTextWithLinks(speaker, run.text);
-      container.append(speaker);
-    } else {
-      appendTextWithLinks(container, run.text);
+function applyTextStyle(element, style) {
+  const sheet = [...document.styleSheets].find((candidate) => candidate.href?.endsWith("/styles.css"));
+  if (sheet) {
+    try {
+      installTextRunColors(style, sheet, installedTextRunColors);
+    } catch {
+      // Safe text and static emphasis remain available if CSSOM mutation is unavailable.
     }
+  }
+  element.classList.add(...textRunClassNames(style));
+}
+
+function appendEventText(container, event, { animate = true } = {}) {
+  const runs = validatedTextRuns(event);
+  const animationsEnabled = motionAllowsAnimation(
+    elements.motionPreference.value,
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
+  let presentationWrapper = null;
+  let activeProgram = null;
+  for (const run of splitPresentationRuns(event, runs, animationsEnabled)) {
+    let parent = container;
+    if (run.presentation) {
+      if (activeProgram !== run.presentation.program) {
+        presentationWrapper = document.createElement("span");
+        presentationWrapper.className = "presentation-target";
+        applyTextStyle(presentationWrapper, run.presentation.style);
+        container.append(presentationWrapper);
+        if (animate) {
+          const animation = animatePresentationElement(
+            presentationWrapper,
+            run.presentation,
+            event.timestamp,
+          );
+          if (animation) {
+            presentationWrapper.classList.add("presentation-animated");
+            const animatedWrapper = presentationWrapper;
+            activePresentationAnimations.add(animation);
+            const release = () => {
+              animatedWrapper.classList.remove("presentation-animated");
+              activePresentationAnimations.delete(animation);
+            };
+            animation.addEventListener("finish", release);
+            animation.addEventListener("cancel", release);
+          }
+        }
+        activeProgram = run.presentation.program;
+      }
+      parent = presentationWrapper;
+    } else {
+      presentationWrapper = null;
+      activeProgram = null;
+    }
+    const styled = document.createElement("span");
+    applyTextStyle(styled, run.style);
+    if (
+      run.presentation?.style.foreground &&
+      !(run.role === "speaker" && event.spoof_status === "spoofed")
+    ) {
+      styled.classList.add("presentation-content");
+    }
+    if (run.role === "speaker" && event.spoof_status === "spoofed") {
+      styled.classList.add("spoofed-speaker");
+    }
+    appendTextWithLinks(styled, run.text);
+    parent.append(styled);
   }
 }
 
-function eventNode(event) {
+function eventNode(event, { animate = true } = {}) {
   const item = document.createElement("li");
   item.className = `event ${event.direction}`;
   item.dataset.eventId = event.id;
@@ -481,7 +563,7 @@ function eventNode(event) {
   body.className = "event-body";
   const text = document.createElement("p");
   text.className = "event-text";
-  appendEventText(text, event);
+  appendEventText(text, event, { animate });
   body.append(text);
 
   item.append(body);
@@ -525,18 +607,34 @@ function openEventDetails(item, { pointerActivated = false } = {}) {
   scheduleViewportUpdate();
 }
 
-function renderTranscript({ scrollToLive = false, restorePosition = false } = {}) {
+function renderTranscript({ scrollToLive = false, smoothScroll = false, restorePosition = false } = {}) {
+  cancelPresentationAnimations();
   if (liveRenderFrame !== null) window.cancelAnimationFrame(liveRenderFrame);
   liveRenderFrame = null;
   pendingLiveEvents = [];
   const events = state.events.get(state.selectedWorld) || [];
   const visible = events.slice(-MAX_RENDERED_EVENTS);
   const reading = readingState();
-  elements.eventList.replaceChildren(...visible.map(eventNode));
+  elements.eventList.replaceChildren(
+    ...visible.map((event, index) =>
+      eventNode(event, { animate: index >= visible.length - MAX_ANIMATED_PRESENTATIONS }),
+    ),
+  );
   elements.emptyState.hidden = visible.length > 0;
   if (scrollToLive || reading.atLive) {
     requestAnimationFrame(() => {
-      elements.transcript.scrollTop = elements.transcript.scrollHeight;
+      elements.transcript.scrollTo({
+        top: elements.transcript.scrollHeight,
+        behavior:
+          scrollToLive &&
+          smoothScroll &&
+          motionAllowsAnimation(
+            elements.motionPreference.value,
+            window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+          )
+            ? "smooth"
+            : "auto",
+      });
       reading.atLive = true;
       reading.unseenLive = 0;
       reading.scrollTop = elements.transcript.scrollTop;
@@ -558,14 +656,30 @@ function flushLiveEvents() {
   const visible = events.filter((event) => event.world === state.selectedWorld);
   if (!visible.length) return;
   if (visible.length >= MAX_RENDERED_EVENTS) {
-    elements.eventList.replaceChildren(...visible.slice(-MAX_RENDERED_EVENTS).map(eventNode));
+    cancelPresentationAnimations();
+    const retained = visible.slice(-MAX_RENDERED_EVENTS);
+    elements.eventList.replaceChildren(
+      ...retained.map((event, index) =>
+        eventNode(event, { animate: index >= retained.length - MAX_ANIMATED_PRESENTATIONS }),
+      ),
+    );
   } else {
     const fragment = document.createDocumentFragment();
-    for (const event of visible) fragment.append(eventNode(event));
+    let animatedCount = elements.eventList.querySelectorAll(".presentation-animated").length;
+    for (const event of visible) {
+      const animate = animatedCount < MAX_ANIMATED_PRESENTATIONS;
+      const node = eventNode(event, { animate });
+      fragment.append(node);
+      if (node.querySelector(".presentation-animated")) animatedCount += 1;
+    }
     elements.eventList.append(fragment);
   }
   while (elements.eventList.children.length > MAX_RENDERED_EVENTS) {
-    elements.eventList.firstElementChild?.remove();
+    const removed = elements.eventList.firstElementChild;
+    for (const target of removed?.querySelectorAll(".presentation-animated") || []) {
+      for (const animation of target.getAnimations()) animation.cancel();
+    }
+    removed?.remove();
   }
   elements.emptyState.hidden = true;
   if (reading.atLive) elements.transcript.scrollTop = elements.transcript.scrollHeight;
@@ -605,7 +719,7 @@ function addEvent(message) {
     state.shownHistoryNotices.delete(event.world);
     if (event.world === state.selectedWorld && !state.historyReset) showHistoryNotice("");
   }
-  if (state.ready) recordLiveHistoryEvent(world, event);
+  if (connection.ready) recordLiveHistoryEvent(world, event);
   events.push(event);
   eventIds.add(event.id);
   let evicted = false;
@@ -619,7 +733,7 @@ function addEvent(message) {
     if (world) world.state = event.connection_state;
   }
 
-  if (state.ready) {
+  if (connection.ready) {
     state.cursor = message.cursor;
   } else {
     return;
@@ -632,7 +746,7 @@ function addEvent(message) {
     return;
   }
   if (evicted) updateHistoryNotice();
-  if (state.ready && !reading.atLive) {
+  if (connection.ready && !reading.atLive) {
     reading.unseenLive += 1;
     updateReturnLive();
   }
@@ -666,7 +780,7 @@ function discardEventsBeforeSnapshotGap(world) {
 function handleMessage(message) {
   if (!message || message.protocol !== 1 || typeof message.type !== "string") return;
   if (message.type === "hello") {
-    state.ready = false;
+    connection.ready = false;
     state.historyReset = message.history_reset === true;
     if (message.history_reset || (state.gatewayId && state.gatewayId !== message.gateway_id)) {
       resetGatewayState();
@@ -702,9 +816,8 @@ function handleMessage(message) {
     return;
   }
   if (message.type === "ready") {
-    state.ready = true;
+    connection.markReady(connection.socket);
     state.cursor = message.cursor;
-    state.reconnectAttempt = 0;
     elements.pairing.hidden = true;
     elements.console.hidden = false;
     setConnection("Live", "online");
@@ -779,8 +892,8 @@ function sendHeartbeat() {
     scheduleHeartbeat();
     return;
   }
-  const socket = state.socket;
-  if (!state.ready || !socket || socket.readyState !== WebSocket.OPEN) return;
+  const socket = connection.socket;
+  if (!connection.ready || !socket || socket.readyState !== WebSocket.OPEN) return;
   clearHeartbeatTimeout();
   const requestId = crypto.randomUUID();
   state.heartbeatRequestId = requestId;
@@ -791,7 +904,7 @@ function sendHeartbeat() {
     return;
   }
   state.heartbeatTimeout = window.setTimeout(() => {
-    if (state.socket === socket && state.heartbeatRequestId === requestId) {
+    if (connection.isCurrent(socket) && state.heartbeatRequestId === requestId) {
       setConnection("Reconnecting", "error");
       socket.close();
     }
@@ -804,16 +917,20 @@ function startHeartbeat() {
 }
 
 function connect() {
-  if (state.socket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(state.socket.readyState)) return;
-  window.clearTimeout(state.reconnectTimer);
-  state.intentionalClose = false;
-  state.ready = false;
+  connection.cancelReconnect();
+  if (
+    connection.socket &&
+    [WebSocket.OPEN, WebSocket.CONNECTING].includes(connection.socket.readyState)
+  ) {
+    return;
+  }
   setConnection("Connecting");
   updateWorldHeader();
   const socket = new WebSocket(socketUrl());
-  state.socket = socket;
+  connection.begin(socket);
 
   socket.addEventListener("message", (event) => {
+    if (!connection.isCurrent(socket)) return;
     try {
       handleMessage(JSON.parse(event.data));
     } catch {
@@ -821,10 +938,9 @@ function connect() {
     }
   });
   socket.addEventListener("close", async (event) => {
-    if (state.socket !== socket) return;
+    const closeToken = connection.close(socket);
+    if (closeToken === null) return;
     stopHeartbeat();
-    state.socket = null;
-    state.ready = false;
     updateWorldHeader();
     if (state.pending.size > 0) {
       for (const pending of state.pending.values()) {
@@ -835,8 +951,10 @@ function connect() {
       showToast("Command status unknown. Check the transcript before resending.", 6000);
     }
     const session =
-      event.code === 1008 || state.reconnectAttempt >= 2 ? await sessionState() : "paired";
-    if (state.socket && state.socket !== socket) return;
+      event.code === 1008 || connection.reconnectAttempt >= 2
+        ? await sessionState()
+        : "paired";
+    if (!connection.closeIsCurrent(closeToken)) return;
     if (session === "unpaired") {
       await clearLocalData();
       elements.console.hidden = true;
@@ -845,28 +963,37 @@ function connect() {
         "This device session expired or was revoked. Create a new link and paste it below.";
       return;
     }
-    setConnection(navigator.onLine ? "Reconnecting" : "Offline", "error");
-    if (!state.intentionalClose) scheduleReconnect();
+    setConnection(
+      navigator.onLine
+        ? session === "unreachable"
+          ? "Gateway unavailable"
+          : "Reconnecting"
+        : "Offline",
+      "error",
+    );
+    connection.scheduleReconnect();
   });
   socket.addEventListener("error", () => socket.close());
 }
 
 function scheduleReconnect() {
-  window.clearTimeout(state.reconnectTimer);
-  const delay = RECONNECT_DELAYS[Math.min(state.reconnectAttempt, RECONNECT_DELAYS.length - 1)];
-  state.reconnectAttempt += 1;
-  state.reconnectTimer = window.setTimeout(connect, delay);
+  connection.scheduleReconnect();
 }
 
 function sendCommand(event) {
   event.preventDefault();
   const world = currentWorld();
   const text = normalizeWorldCommand(elements.commandInput.value);
-  if (!world || !state.ready || !state.socket || state.socket.readyState !== WebSocket.OPEN) {
+  if (
+    !world ||
+    !connection.ready ||
+    !connection.socket ||
+    connection.socket.readyState !== WebSocket.OPEN
+  ) {
     showToast("Gateway is not ready");
     return;
   }
-  if (!text || /[\r\n\0]/.test(text)) {
+  if (!text || isMultilineWorldCommand(text) || text.includes("\0")) {
     showToast("Commands must be a single non-empty line");
     return;
   }
@@ -877,7 +1004,7 @@ function sendCommand(event) {
   const requestId = crypto.randomUUID();
   state.pending.set(requestId, { world: world.world, text });
   try {
-    state.socket.send(
+    connection.socket.send(
       JSON.stringify({ type: "command", request_id: requestId, world: world.world, text }),
     );
   } catch {
@@ -916,20 +1043,26 @@ function moveHistory(direction) {
 }
 
 async function sessionState() {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), CONNECTION_TIMEOUT_MS);
   try {
-    const response = await fetch("/api/session", { cache: "no-store", credentials: "same-origin" });
+    const response = await fetch("/api/session", {
+      cache: "no-store",
+      credentials: "same-origin",
+      signal: controller.signal,
+    });
     if (!response.ok) return "unreachable";
     return (await response.json()).paired === true ? "paired" : "unpaired";
   } catch {
     return "unreachable";
+  } finally {
+    window.clearTimeout(timeout);
   }
 }
 
 async function clearLocalData() {
   stopHeartbeat();
-  window.clearTimeout(state.reconnectTimer);
-  state.reconnectTimer = null;
-  state.socket?.close();
+  connection.stop()?.close();
   resetGatewayState();
   state.worlds = [];
   state.gatewayId = null;
@@ -954,7 +1087,7 @@ async function clearLocalData() {
 
 async function unpairDevice() {
   if (!window.confirm("Unpair this phone and clear its local TFR data?")) return;
-  state.intentionalClose = true;
+  connection.intentionalClose = true;
   try {
     const response = await fetch("/api/logout", {
       method: "POST",
@@ -964,7 +1097,7 @@ async function unpairDevice() {
     await clearLocalData();
     location.reload();
   } catch {
-    state.intentionalClose = false;
+    connection.intentionalClose = false;
     showToast("Could not revoke this device. Reconnect or revoke it from the Gateway.", 6000);
   }
 }
@@ -1011,7 +1144,7 @@ async function start() {
   if (session === "unreachable") {
     elements.pairing.hidden = true;
     elements.console.hidden = false;
-    setConnection("Offline", "error");
+    setConnection(navigator.onLine ? "Gateway unavailable" : "Offline", "error");
     scheduleReconnect();
     return;
   }
@@ -1027,8 +1160,23 @@ async function start() {
 }
 
 async function resume() {
+  if (connection.socket?.readyState === WebSocket.OPEN && connection.ready) {
+    sendHeartbeat();
+    return;
+  }
+  const probeGeneration = connection.beginProbe();
   const session = await sessionState();
-  if (session === "unreachable") return;
+  if (!connection.probeIsCurrent(probeGeneration)) return;
+  if (session === "unreachable") {
+    setConnection(navigator.onLine ? "Gateway unavailable" : "Offline", "error");
+    if (
+      !connection.hasReconnectScheduled() &&
+      connection.socket?.readyState !== WebSocket.CONNECTING
+    ) {
+      scheduleReconnect();
+    }
+    return;
+  }
   const pairingCode = readSessionStorage("tfr.pairingCode");
   if (session === "paired") clearPairingState();
   if (session === "unpaired" && pairingCode) {
@@ -1043,11 +1191,7 @@ async function resume() {
       "This device is not paired. Create a new pairing link on the Gateway.";
     return;
   }
-  if (state.socket?.readyState === WebSocket.OPEN && state.ready) {
-    sendHeartbeat();
-  } else {
-    connect();
-  }
+  connect();
 }
 
 function showWaitingServiceWorker(worker) {
@@ -1104,6 +1248,14 @@ elements.pairingForm.addEventListener("submit", (event) => {
 });
 elements.unpairDevice.addEventListener("click", unpairDevice);
 elements.composer.addEventListener("submit", sendCommand);
+elements.sendButton.addEventListener(
+  "touchstart",
+  (event) => {
+    event.preventDefault();
+    elements.composer.requestSubmit(elements.sendButton);
+  },
+  { passive: false },
+);
 elements.commandInput.addEventListener("input", () => {
   if (!state.selectedWorld) return;
   state.drafts[state.selectedWorld] = elements.commandInput.value.slice(
@@ -1127,8 +1279,20 @@ elements.commandInput.addEventListener("keydown", (event) => {
     moveHistory(1);
   }
 });
-elements.commandInput.addEventListener("focus", scheduleViewportUpdate);
-elements.commandInput.addEventListener("blur", scheduleViewportUpdate);
+elements.commandInput.addEventListener("paste", (event) => {
+  const text = event.clipboardData?.getData("text/plain") || "";
+  if (!isMultilineWorldCommand(text)) return;
+  event.preventDefault();
+  showToast("Multiline paste blocked. Paste one command at a time.");
+});
+elements.commandInput.addEventListener("focus", () => {
+  preserveLiveDuringViewportChange = readingState().atLive;
+  scheduleViewportUpdate();
+});
+elements.commandInput.addEventListener("blur", () => {
+  preserveLiveDuringViewportChange = false;
+  scheduleViewportUpdate();
+});
 elements.historyButton.addEventListener("click", openHistoryDialog);
 elements.historyDialog.addEventListener("close", () => elements.historyList.replaceChildren());
 elements.textSmaller.addEventListener("click", () => applyTextSize(textSizePreference() - 1));
@@ -1136,6 +1300,7 @@ elements.textReset.addEventListener("click", () => applyTextSize(0));
 elements.textLarger.addEventListener("click", () => applyTextSize(textSizePreference() + 1));
 elements.motionPreference.addEventListener("change", () => {
   applyMotionPreference(elements.motionPreference.value);
+  renderTranscript({ restorePosition: true });
 });
 elements.lineWrap.addEventListener("change", () => {
   applyLineWrap(elements.lineWrap.checked);
@@ -1147,7 +1312,10 @@ elements.applyUpdate.addEventListener("click", () => {
   elements.applyUpdate.disabled = true;
   worker.postMessage({ type: "SKIP_WAITING" });
 });
-elements.returnLive.addEventListener("click", () => renderTranscript({ scrollToLive: true }));
+elements.returnLive.addEventListener("click", () => {
+  preserveLiveDuringViewportChange = document.activeElement === elements.commandInput;
+  renderTranscript({ scrollToLive: true, smoothScroll: true });
+});
 elements.eventList.addEventListener("pointerdown", (event) => {
   setInputModality("pointer");
   transcriptPointerTarget = event.target.closest("a") ? null : event.target.closest(".event");
@@ -1180,6 +1348,7 @@ elements.transcript.addEventListener(
   "touchstart",
   (event) => {
     setInputModality("pointer");
+    preserveLiveDuringViewportChange = false;
     if (document.activeElement?.classList?.contains("event")) document.activeElement.blur();
     if (event.touches.length !== 1 || event.target.closest?.("a")) {
       transcriptTouch = null;

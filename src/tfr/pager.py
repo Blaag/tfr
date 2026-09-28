@@ -7,6 +7,7 @@ from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.utils import get_cwidth
 
 from tfr.ansi import project_ansi, safe_ansi_formatted_text, terminal_plain_text
+from tfr.presentation import ActiveEffectProgram
 from tfr.text_effects import TextDecoration, TextEffectKind
 from tfr.urls import find_urls
 
@@ -186,6 +187,7 @@ def wrap_ansi_text(
     *,
     default_style: str = "",
     decorations: tuple[TextDecoration, ...] = (),
+    presentations: tuple[ActiveEffectProgram, ...] = (),
     elapsed_seconds: float = 0.0,
     animations_enabled: bool = False,
     url_spans: tuple[tuple[int, int], ...] = (),
@@ -233,6 +235,15 @@ def wrap_ansi_text(
                         animations_enabled,
                         rendered_style,
                     )
+                    if effect_style:
+                        rendered_style = f"{rendered_style} {effect_style}".strip()
+            for presentation in presentations:
+                program = presentation.program
+                if program.start <= visible_offset < program.end:
+                    effect_style = presentation.style_at(
+                        elapsed_seconds,
+                        animations_enabled,
+                    ).as_style()
                     if effect_style:
                         rendered_style = f"{rendered_style} {effect_style}".strip()
             if any(start <= visible_offset < end for start, end in url_spans):
@@ -305,6 +316,7 @@ class DisplayBuffer:
         self._entry_rows: list[list[FormattedRow]] = []
         self._entry_row_offsets: list[int] = []
         self._entry_decorations: list[tuple[TextDecoration, ...]] = []
+        self._entry_presentations: list[tuple[ActiveEffectProgram, ...]] = []
         self._entry_recallable: list[bool] = []
         self._entry_urls: list[tuple[tuple[int, int, str], ...]] = []
         self._entry_style_spans: list[tuple[StaticStyleSpan, ...]] = []
@@ -322,6 +334,7 @@ class DisplayBuffer:
         text: str,
         *,
         decorations: tuple[TextDecoration, ...] = (),
+        presentations: tuple[ActiveEffectProgram, ...] = (),
         style_spans: tuple[StaticStyleSpan, ...] = (),
         recallable: bool = True,
     ) -> None:
@@ -333,6 +346,7 @@ class DisplayBuffer:
                 self.width,
                 default_style=self.default_style,
                 decorations=decorations,
+                presentations=presentations,
                 url_spans=tuple((start, end) for start, end, _url in urls),
                 style_spans=style_spans,
                 row_offsets=row_starts,
@@ -342,6 +356,7 @@ class DisplayBuffer:
         self._entry_rows.append(new_rows)
         self._entry_row_offsets.append(0)
         self._entry_decorations.append(decorations)
+        self._entry_presentations.append(presentations)
         self._entry_recallable.append(recallable)
         self._entry_urls.append(urls)
         self._entry_style_spans.append(style_spans)
@@ -359,6 +374,7 @@ class DisplayBuffer:
             self.entries.pop(0)
             self._entry_row_offsets.pop(0)
             self._entry_decorations.pop(0)
+            self._entry_presentations.pop(0)
             self._entry_recallable.pop(0)
             self._entry_urls.pop(0)
             self._entry_style_spans.pop(0)
@@ -382,9 +398,10 @@ class DisplayBuffer:
             self.width = width
             row_starts_by_entry: list[list[int]] = []
             entry_rows = []
-            for entry, decorations, urls, style_spans in zip(
+            for entry, decorations, presentations, urls, style_spans in zip(
                 self.entries,
                 self._entry_decorations,
+                self._entry_presentations,
                 self._entry_urls,
                 self._entry_style_spans,
                 strict=True,
@@ -397,6 +414,7 @@ class DisplayBuffer:
                             width,
                             default_style=self.default_style,
                             decorations=decorations,
+                            presentations=presentations,
                             url_spans=tuple((start, end) for start, end, _url in urls),
                             style_spans=style_spans,
                             row_offsets=row_starts,
@@ -432,12 +450,25 @@ class DisplayBuffer:
     def recent_entries(
         self,
         count: int,
-    ) -> tuple[tuple[str, tuple[TextDecoration, ...], tuple[StaticStyleSpan, ...]], ...]:
-        """Return recent recallable rows with their source decorations."""
+    ) -> tuple[
+        tuple[
+            str,
+            tuple[TextDecoration, ...],
+            tuple[ActiveEffectProgram, ...],
+            tuple[StaticStyleSpan, ...],
+        ],
+        ...,
+    ]:
+        """Return recent recallable rows with their source presentation."""
         if count <= 0:
             raise ValueError("recall row count must be positive")
         selected: list[
-            tuple[str, tuple[TextDecoration, ...], tuple[StaticStyleSpan, ...]]
+            tuple[
+                str,
+                tuple[TextDecoration, ...],
+                tuple[ActiveEffectProgram, ...],
+                tuple[StaticStyleSpan, ...],
+            ]
         ] = []
         remaining = count
         for index in range(len(self._entry_rows) - 1, -1, -1):
@@ -450,6 +481,7 @@ class DisplayBuffer:
                 recalled = (
                     self.entries[index],
                     self._entry_decorations[index],
+                    self._entry_presentations[index],
                     self._entry_style_spans[index],
                 )
             else:
@@ -464,7 +496,12 @@ class DisplayBuffer:
         self,
         index: int,
         row_start: int,
-    ) -> tuple[str, tuple[TextDecoration, ...], tuple[StaticStyleSpan, ...]]:
+    ) -> tuple[
+        str,
+        tuple[TextDecoration, ...],
+        tuple[ActiveEffectProgram, ...],
+        tuple[StaticStyleSpan, ...],
+    ]:
         projection = project_ansi(self.entries[index])
         source_start = self._entry_row_starts[index][row_start]
         source_end = len(projection.plain)
@@ -478,6 +515,22 @@ class DisplayBuffer:
                         decoration,
                         start=overlap_start - source_start,
                         end=overlap_end - source_start,
+                    )
+                )
+        presentations: list[ActiveEffectProgram] = []
+        for presentation in self._entry_presentations[index]:
+            program = presentation.program
+            overlap_start = max(source_start, program.start)
+            overlap_end = min(source_end, program.end)
+            if overlap_start < overlap_end:
+                presentations.append(
+                    replace(
+                        presentation,
+                        program=replace(
+                            program,
+                            start=overlap_start - source_start,
+                            end=overlap_end - source_start,
+                        ),
                     )
                 )
         style_spans: list[StaticStyleSpan] = []
@@ -495,6 +548,7 @@ class DisplayBuffer:
         return (
             projection.remove_visible_prefix(source_start),
             tuple(decorations),
+            tuple(presentations),
             tuple(style_spans),
         )
 
@@ -546,7 +600,9 @@ class DisplayBuffer:
         animations_enabled: bool = False,
     ) -> tuple[FormattedRow, ...]:
         start, end = self._visible_bounds()
-        if elapsed_seconds is None or not any(self._entry_decorations):
+        if elapsed_seconds is None or not (
+            any(self._entry_decorations) or any(self._entry_presentations)
+        ):
             return tuple(self.rows[start:end])
         visible: list[FormattedRow] = []
         for index, row_start in self._visible_entries(start, end):
@@ -554,6 +610,7 @@ class DisplayBuffer:
             base_rows = self._entry_rows[index]
             offset = self._entry_row_offsets[index]
             decorations = self._entry_decorations[index]
+            presentations = self._entry_presentations[index]
             rows = (
                 list(
                     wrap_ansi_text(
@@ -561,6 +618,7 @@ class DisplayBuffer:
                         self.width,
                         default_style=self.default_style,
                         decorations=decorations,
+                        presentations=presentations,
                         elapsed_seconds=elapsed_seconds,
                         animations_enabled=animations_enabled,
                         url_spans=tuple(
@@ -570,7 +628,7 @@ class DisplayBuffer:
                         style_spans=self._entry_style_spans[index],
                     )
                 )[offset:]
-                if decorations
+                if decorations or presentations
                 else base_rows
             )
             visible.extend(rows[max(0, start - row_start) : end - row_start])
@@ -607,6 +665,11 @@ class DisplayBuffer:
                 delay
                 for decoration in self._entry_decorations[index]
                 if (delay := decoration.frame_delay(elapsed_seconds)) is not None
+            )
+            delays.extend(
+                delay
+                for presentation in self._entry_presentations[index]
+                if (delay := presentation.frame_delay(elapsed_seconds)) is not None
             )
         return min(delays, default=None)
 

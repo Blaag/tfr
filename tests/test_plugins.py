@@ -25,6 +25,7 @@ from tfr.plugins import (
     PluginRegistry,
     PluginWorldInfo,
 )
+from tfr.presentation import color_pulse
 from tfr.text_effects import TextDecoration, TextEffectKind
 
 
@@ -146,6 +147,17 @@ async def test_fixture_plugin_registers_every_extension_and_submits_through_bus(
                     ),
                 ),
             )
+            registrar.register_presentation_decorator(
+                "pulse",
+                lambda _event, _text: (
+                    color_pulse(
+                        0,
+                        5,
+                        base_color="#a9914a",
+                        accent_color="#fff08a",
+                    ),
+                ),
+            )
             registrar.register_status_segment("ready", lambda world: f"plugin:{world}")
             registrar.register_screen_clear_effect(
                 lambda context: (("reverse", context.lines[0]),),
@@ -182,6 +194,7 @@ async def test_fixture_plugin_registers_every_extension_and_submits_through_bus(
     assert enriched.metadata["fixture"] is True
     assert manager.transform_display(enriched) == "HELLO"
     assert manager.decorate_display(enriched, "HELLO")[0].end == 5
+    assert manager.presentation_programs(enriched, "HELLO")[0].end == 5
     assert manager.render_status("alpha") == ("plugin:alpha",)
     assert manager.render_screen_clear(
         "fixture",
@@ -214,6 +227,7 @@ async def test_plugin_scopes_partition_gateway_and_ui_capabilities() -> None:
             registrar.register_enricher("speech", lambda _event: None)
             registrar.register_display_transform("display", lambda _event, text: text)
             registrar.register_display_decorator("decoration", lambda _event, _text: ())
+            registrar.register_presentation_decorator("presentation", lambda _event, _text: ())
             registrar.register_status_segment("status", lambda _world: "ready")
             registrar.register_border_effect(
                 "border",
@@ -245,6 +259,7 @@ async def test_plugin_scopes_partition_gateway_and_ui_capabilities() -> None:
     assert set(values["ui"].registry.commands) == {"boss", "wave"}
     assert set(values["ui"].registry.display_transforms) == {"display"}
     assert set(values["ui"].registry.display_decorators) == {"decoration"}
+    assert set(values["ui"].registry.presentation_decorators) == {"presentation"}
     assert set(values["ui"].registry.status_segments) == {"status"}
     assert set(values["ui"].registry.border_effects) == {"border"}
     assert set(values["ui"].registry.screen_clear_effects) == {"fixture"}
@@ -254,6 +269,29 @@ async def test_plugin_scopes_partition_gateway_and_ui_capabilities() -> None:
     assert values["gateway"].registry.screen_clear_effects == {}
     assert values["gateway"].registry.boss_views == {}
     assert values["gateway"].registry.display_decorators == {}
+    assert set(values["gateway"].registry.presentation_decorators) == {"presentation"}
+
+
+def test_presentation_decision_is_cached_for_retained_reprojection() -> None:
+    manager = PluginManager(
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        scope="gateway",
+    )
+    calls = 0
+
+    def decorate(_event: Event, _text: str) -> tuple[Any, ...]:
+        nonlocal calls
+        calls += 1
+        return ()
+
+    manager._registrar("fixture").register_presentation_decorator("cached", decorate)
+    event = inbound_event(uuid4())
+
+    assert manager.presentation_programs(event, "hello") == ()
+    assert manager.presentation_programs(event, "hello") == ()
+    assert calls == 1
 
 
 async def test_boss_view_plugin_activates_renders_and_accepts_bounded_events() -> None:

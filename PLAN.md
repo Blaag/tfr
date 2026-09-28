@@ -875,9 +875,19 @@ Acceptance criteria:
   scrollback, explicit return-to-live behavior, and responsive layouts for
   narrow screens. Compare PWA background/reconnect and notification limits
   against a native Swift client before choosing the long-term platform. The PWA
-  implementation and initial iPhone validation are complete; structured ANSI
-  spans, accessibility testing, and the longer platform pilot remain follow-up
-  work.
+  implementation, structured ANSI-derived text runs, and initial iPhone
+  validation are complete; deeper accessibility testing and the longer platform
+  pilot remain follow-up work.
+- [x] Add the first bounded portable presentation slice documented in
+  `PRESENTATION.md`. Keep Python plugins as the policy layer; let them emit typed,
+  composable effect programs interpreted by the TUI and PWA. Select variants by
+  supported capabilities, require explicit reduced-motion and unsupported-client
+  fallbacks, and begin with a bounded foreground-color timeline plus static bold
+  and underline. Migrate existing named text effects incrementally rather than
+  replacing the plugin API in one release. Browser-only scale, rotation,
+  translation, opacity, and overlay primitives remain follow-up work and must not
+  constrain the PWA to terminal capabilities. Keep client commands and actions
+  outside the presentation language.
 - [x] Fix speaker effects not working on poses.
 
 ## Test Strategy

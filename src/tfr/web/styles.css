@@ -363,10 +363,16 @@ a:focus-visible {
 .spoofed-speaker {
   padding: 0.06em 0.18em;
   outline: 1px solid currentColor;
-  background: var(--text);
-  color: var(--ink);
-  font-weight: 800;
+  background: var(--text) !important;
+  color: var(--ink) !important;
+  font-weight: 800 !important;
 }
+
+.ansi-bold { font-weight: 700; }
+.ansi-italic { font-style: italic; }
+.ansi-underline { text-decoration: underline; }
+.presentation-content,
+.presentation-content a { color: inherit !important; }
 
 :root[data-text-size="-2"] { --transcript-font-size: 0.76rem; }
 :root[data-text-size="-1"] { --transcript-font-size: 0.84rem; }
@@ -427,6 +433,34 @@ a:focus-visible {
   padding: 0.62rem 0.68rem calc(0.62rem + var(--safe-bottom));
   border-top: 1px solid var(--line);
   background: rgba(8, 18, 17, 0.97);
+}
+
+:root[data-input-focused] .composer {
+  padding-bottom: 0.62rem;
+}
+
+@media (orientation: landscape), (max-height: 500px) {
+  :root[data-input-focused] .console {
+    grid-template-rows: 0 0 minmax(0, 1fr) auto;
+    padding-top: 0;
+  }
+
+  :root[data-input-focused] .topbar,
+  :root[data-input-focused] .history-notice,
+  :root[data-input-focused] .history-button {
+    display: none;
+  }
+
+  :root[data-input-focused] .composer {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.35rem;
+    padding: 0.3rem 0.5rem;
+  }
+
+  :root[data-input-focused] .command-field input,
+  :root[data-input-focused] .send-button {
+    height: 2.35rem;
+  }
 }
 
 .close-button {
