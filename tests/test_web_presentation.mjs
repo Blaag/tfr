@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  animatePresentationElement,
   interpolatePresentationColor,
   presentationAnimationFrames,
   selectPresentation,
@@ -121,4 +122,140 @@ test("invalid presentation falls back to unchanged readable text", () => {
   assert.deepEqual(splitPresentationRuns(event, null, true), [
     { text: event.text, style: {}, role: undefined, presentation: null },
   ]);
+});
+
+test("validates and splits a bounded Unicode character sweep", () => {
+  const event = eventWithPresentation({ text: "alice says hi" });
+  const variant = event.presentation.programs[0].variants[0];
+  variant.requires = ["character_foreground", "timeline", "character_case"];
+  variant.style = {};
+  variant.foreground_keyframes = [];
+  variant.character_sweep = {
+    positions: [
+      { at: 0, position: 0 },
+      { at: 0.5, position: 1 },
+      { at: 1, position: 0 },
+    ],
+    base_color: "#180000",
+    head_color: "#ff0000",
+    trail_width: 2,
+    uppercase_head: true,
+  };
+
+  const program = validatedPresentation(event)[0];
+  const selected = selectPresentation(program, true);
+  const runs = splitPresentationRuns(event, null, true);
+
+  assert.deepEqual(selected.style, { foreground: "#180000" });
+  assert.equal(selected.animation, null);
+  assert.equal(selected.characterSweep.head_color, "#ff0000");
+  assert.deepEqual(
+    runs.slice(0, 5).map((run) => [run.text, run.presentation.characterIndex]),
+    [
+      ["a", 0],
+      ["l", 1],
+      ["i", 2],
+      ["c", 3],
+      ["e", 4],
+    ],
+  );
+});
+
+test("rejects oversized or malformed character sweeps", () => {
+  const event = eventWithPresentation({ text: "a".repeat(65) });
+  event.presentation.programs[0].end = 65;
+  const variant = event.presentation.programs[0].variants[0];
+  variant.requires = ["character_foreground", "timeline", "character_case"];
+  variant.style = {};
+  variant.foreground_keyframes = [];
+  variant.character_sweep = {
+    positions: [
+      { at: 0, position: 0 },
+      { at: 1, position: 1 },
+    ],
+    base_color: "#180000",
+    head_color: "#ff0000",
+    trail_width: 2,
+    uppercase_head: true,
+  };
+  assert.equal(validatedPresentation(event), null);
+
+  event.text = "alice";
+  event.presentation.programs[0].end = 5;
+  variant.character_sweep.trail_width = 99;
+  assert.equal(validatedPresentation(event), null);
+});
+
+test("runs one bounded animation clock for a character sweep and cleans up", () => {
+  const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+  const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
+  let scheduled = null;
+  let cancelled = null;
+  globalThis.requestAnimationFrame = (callback) => {
+    scheduled = callback;
+    return 17;
+  };
+  globalThis.cancelAnimationFrame = (id) => {
+    cancelled = id;
+  };
+  const listeners = {};
+  const animation = {
+    currentTime: 500,
+    addEventListener(name, callback) {
+      listeners[name] = callback;
+    },
+  };
+  const characters = [..."alice"].map((text) => ({
+    dataset: { original: text, uppercase: text.toUpperCase() },
+    style: {},
+    textContent: text,
+  }));
+  const element = {
+    animate(frames, options) {
+      assert.deepEqual(frames, [{ opacity: 1 }, { opacity: 1 }]);
+      assert.equal(options.duration, 2000);
+      return animation;
+    },
+    querySelectorAll() {
+      return characters;
+    },
+  };
+  const presentation = {
+    program: {
+      duration_ms: 2000,
+      repeat_ms: 2000,
+      repeat_count: 2,
+      frames_per_second: 20,
+    },
+    keyframes: null,
+    characterSweep: {
+      positions: [
+        { at: 0, position: 0 },
+        { at: 0.5, position: 1 },
+        { at: 1, position: 0 },
+      ],
+      base_color: "#180000",
+      head_color: "#ff0000",
+      trail_width: 2,
+      uppercase_head: true,
+    },
+  };
+
+  try {
+    assert.equal(
+      animatePresentationElement(element, presentation, "2026-01-01T00:00:00Z", Date.parse("2026-01-01T00:00:00Z")),
+      animation,
+    );
+    scheduled();
+    assert.equal(characters[2].textContent, "I");
+    assert.equal(characters[2].style.color, "#ff0000");
+    assert.notEqual(characters[1].style.color, "#180000");
+    listeners.cancel();
+    assert.equal(cancelled, 17);
+    assert.deepEqual(characters.map((character) => character.textContent), [..."alice"]);
+    assert.ok(characters.every((character) => character.style.color === "#180000"));
+  } finally {
+    globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+    globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
+  }
 });

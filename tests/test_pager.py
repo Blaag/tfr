@@ -4,7 +4,7 @@ from prompt_toolkit.formatted_text import fragment_list_to_text
 
 from tfr.ansi import terminal_plain_text
 from tfr.pager import DisplayBuffer, PagerMode, PagerState, StaticStyleSpan, wrap_ansi_text
-from tfr.presentation import ActiveEffectProgram, PresentationStyle, color_pulse
+from tfr.presentation import ActiveEffectProgram, PresentationStyle, character_sweep, color_pulse
 from tfr.text_effects import TextDecoration, TextEffectKind, validate_decorations
 
 
@@ -566,6 +566,31 @@ def test_portable_presentation_interprets_timeline_and_reduced_motion() -> None:
     assert active[0][0] == ("fg:#ffffff", "Alice")
     assert reduced[0][0] == ("fg:#123456 bold", "Alice")
     assert display.animation_frame_delay(0) == 0.05
+
+
+def test_portable_character_sweep_renders_per_grapheme_in_terminal() -> None:
+    presentation = ActiveEffectProgram(
+        character_sweep(
+            0,
+            5,
+            base_color="#180000",
+            head_color="#ff0000",
+            uppercase_head=True,
+            duration_seconds=2,
+            repeat_seconds=2,
+        )
+    )
+    display = DisplayBuffer(max_rows=20, width=30, height=5, pager_enabled=False)
+    display.append("alice says hello", presentations=(presentation,))
+
+    start = display.visible_rows(elapsed_seconds=0, animations_enabled=True)[0]
+    far = display.visible_rows(elapsed_seconds=1, animations_enabled=True)[0]
+    reduced = display.visible_rows(elapsed_seconds=1, animations_enabled=False)[0]
+
+    assert start[0] == ("fg:#ff0000", "A")
+    assert start[1][0].startswith("fg:#")
+    assert far[-2:] == (("fg:#ff0000", "E"), ("", " says hello"))
+    assert reduced[0] == ("fg:#ff0000 bold", "alice")
 
 
 def test_portable_presentation_survives_reflow_and_clips_partial_recall() -> None:

@@ -23,11 +23,14 @@ from tfr.plugins import (
     PluginWorldInfo,
 )
 from tfr.presentation import (
+    CharacterSweepTrack,
     EffectProgram,
     ForegroundKeyframe,
+    PositionKeyframe,
     PresentationCapability,
     PresentationStyle,
     PresentationVariant,
+    character_sweep,
     color_pulse,
 )
 from tfr.text_effects import (
@@ -48,6 +51,7 @@ __all__ = (
     "BossViewEvent",
     "BossViewHandle",
     "BossWorldStatus",
+    "CharacterSweepTrack",
     "Direction",
     "DuplicatePluginRegistration",
     "EffectProgram",
@@ -60,6 +64,7 @@ __all__ = (
     "PluginRegistrar",
     "PluginRegistrationError",
     "PluginWorldInfo",
+    "PositionKeyframe",
     "PresentationCapability",
     "PresentationStyle",
     "PresentationVariant",
@@ -68,6 +73,7 @@ __all__ = (
     "TextDecoration",
     "TextEffectKind",
     "derive_bright_color",
+    "character_sweep",
     "color_pulse",
     "escape_world_text",
     "terminal_plain_text",

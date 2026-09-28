@@ -6,8 +6,8 @@ This document records the architecture and migration plan for plugin-driven
 presentation across TFR clients. The first portable vertical slice is
 implemented alongside the existing `TextDecoration` API. It provides typed
 effect programs, terminal and PWA interpreters, a bounded browser projection,
-explicit reduced-motion and unsupported-capability fallbacks, and a
-`color_pulse()` constructor.
+explicit reduced-motion and unsupported-capability fallbacks, a
+`color_pulse()` constructor, and a bounded `character_sweep()` primitive.
 
 The model is intentionally still version 1 and narrow. Additional primitives
 must preserve its validation, fallback, accessibility, and resource-boundary
@@ -131,6 +131,8 @@ The implemented version 1 effect program contains:
 - Static foreground, bold, and underline style operations.
 - A two- or three-keyframe foreground timeline with bounded duration, repeat
   interval, repeat count, and sampling rate.
+- A two- or three-position per-grapheme sweep with bounded target length and
+  trail width, optional uppercase head emphasis, and Oklab color interpolation.
 - An explicit reduced-motion presentation.
 - A final static or no-op fallback.
 
@@ -282,10 +284,12 @@ The implemented first vertical slice supports:
   retained and live events must agree.
 
 Version 1 accepts one grapheme-aligned target of at most 2,048 Unicode code
-points per event. It rejects overlapping or multiple programs. The PWA starts at
-most 64 presentation animations in a rendered transcript and falls back to the
-program's static style for older targets. Invalid or oversized presentation is
-omitted without dropping readable event text.
+points per event. Character sweeps target at most 64 graphemes and use a trail
+width of 1–8. It rejects overlapping or multiple programs. The PWA starts at
+most 64 presentation animation-budget units in a rendered transcript; character
+sweeps consume four units and simple timelines consume one. Older targets fall
+back to the program's static style. Invalid or oversized presentation is omitted
+without dropping readable event text.
 
 After this works in both clients, a graphical extension can add opacity, scale,
 rotation, and bounded translation. Those primitives are sufficient to compose
