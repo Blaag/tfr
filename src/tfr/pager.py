@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
+import regex
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.utils import get_cwidth
 
@@ -207,6 +208,17 @@ def wrap_ansi_text(
     if row_offsets is not None:
         row_offsets.append(0)
     fragments = safe_ansi_formatted_text(text)
+    presentation_graphemes: dict[int, tuple[dict[int, int], int]] = {}
+    plain = terminal_plain_text(text)
+    for presentation in presentations:
+        program = presentation.program
+        indexes: dict[int, int] = {}
+        grapheme_count = 0
+        for index, match in enumerate(regex.finditer(r"\X", plain[program.start : program.end])):
+            for grapheme_offset in range(match.start(), match.end()):
+                indexes[program.start + grapheme_offset] = index
+            grapheme_count = index + 1
+        presentation_graphemes[id(presentation)] = (indexes, grapheme_count)
     for fragment in fragments:
         style, fragment_text = fragment[:2]
         for character in fragment_text:
@@ -240,10 +252,22 @@ def wrap_ansi_text(
             for presentation in presentations:
                 program = presentation.program
                 if program.start <= visible_offset < program.end:
-                    effect_style = presentation.style_at(
-                        elapsed_seconds,
-                        animations_enabled,
-                    ).as_style()
+                    indexes, count = presentation_graphemes[id(presentation)]
+                    grapheme_index = indexes.get(visible_offset)
+                    if grapheme_index is None:
+                        effect_style = presentation.style_at(
+                            elapsed_seconds,
+                            animations_enabled,
+                        ).as_style()
+                    else:
+                        presentation_style, rendered_character = presentation.render_grapheme(
+                            rendered_character,
+                            grapheme_index,
+                            count,
+                            elapsed_seconds,
+                            animations_enabled,
+                        )
+                        effect_style = presentation_style.as_style()
                     if effect_style:
                         rendered_style = f"{rendered_style} {effect_style}".strip()
             if any(start <= visible_offset < end for start, end in url_spans):

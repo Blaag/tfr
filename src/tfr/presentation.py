@@ -18,6 +18,8 @@ MAX_PRESENTATION_DURATION_SECONDS = 3.0
 MAX_PRESENTATION_REPEAT_SECONDS = 60.0
 MAX_PRESENTATION_REPEAT_COUNT = 20
 MAX_PRESENTATION_TOTAL_SECONDS = 300.0
+MAX_PRESENTATION_SWEEP_GRAPHEMES = 64
+MAX_PRESENTATION_TRAIL_WIDTH = 8
 
 
 class PresentationCapability(StrEnum):
@@ -25,6 +27,8 @@ class PresentationCapability(StrEnum):
     BOLD = "bold"
     UNDERLINE = "underline"
     TIMELINE = "timeline"
+    CHARACTER_FOREGROUND = "character_foreground"
+    CHARACTER_CASE = "character_case"
 
 
 TUI_PRESENTATION_CAPABILITIES = frozenset(PresentationCapability)
@@ -81,10 +85,59 @@ class ForegroundKeyframe:
 
 
 @dataclass(frozen=True, slots=True)
+class PositionKeyframe:
+    at: float
+    position: float
+
+    def __post_init__(self) -> None:
+        for name, value in (("position", self.position), ("keyframe position", self.at)):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or not 0 <= value <= 1
+            ):
+                raise ValueError(f"presentation {name} must be between 0 and 1")
+        object.__setattr__(self, "at", float(self.at))
+        object.__setattr__(self, "position", float(self.position))
+
+
+@dataclass(frozen=True, slots=True)
+class CharacterSweepTrack:
+    positions: tuple[PositionKeyframe, ...]
+    base_color: str
+    head_color: str
+    trail_width: int = 2
+    uppercase_head: bool = False
+
+    def __post_init__(self) -> None:
+        if any(type(frame) is not PositionKeyframe for frame in self.positions):
+            raise ValueError("presentation character sweep positions are invalid")
+        if not 2 <= len(self.positions) <= MAX_PRESENTATION_KEYFRAMES:
+            raise ValueError("presentation character sweep must contain 2 or 3 positions")
+        times = tuple(frame.at for frame in self.positions)
+        if times[0] != 0 or times[-1] != 1:
+            raise ValueError("presentation character sweep must start at 0 and end at 1")
+        if any(current >= following for current, following in zip(times, times[1:], strict=False)):
+            raise ValueError("presentation character sweep positions must increase")
+        object.__setattr__(self, "base_color", validate_color(self.base_color))
+        object.__setattr__(self, "head_color", validate_color(self.head_color))
+        if (
+            isinstance(self.trail_width, bool)
+            or not isinstance(self.trail_width, int)
+            or not 1 <= self.trail_width <= MAX_PRESENTATION_TRAIL_WIDTH
+        ):
+            raise ValueError("presentation character sweep trail width must be between 1 and 8")
+        if not isinstance(self.uppercase_head, bool):
+            raise ValueError("presentation character sweep uppercase flag must be boolean")
+
+
+@dataclass(frozen=True, slots=True)
 class PresentationVariant:
     requires: tuple[PresentationCapability, ...]
     style: PresentationStyle = PresentationStyle()
     foreground_keyframes: tuple[ForegroundKeyframe, ...] = ()
+    character_sweep: CharacterSweepTrack | None = None
 
     def __post_init__(self) -> None:
         if not self.requires or len(self.requires) > len(PresentationCapability):
@@ -119,6 +172,17 @@ class PresentationVariant:
                 raise ValueError("presentation keyframe positions must increase")
             if self.style.foreground is None:
                 raise ValueError("presentation timeline requires a static foreground style")
+        if self.character_sweep is not None:
+            used.update(
+                {
+                    PresentationCapability.CHARACTER_FOREGROUND,
+                    PresentationCapability.TIMELINE,
+                }
+            )
+            if self.character_sweep.uppercase_head:
+                used.add(PresentationCapability.CHARACTER_CASE)
+        if self.foreground_keyframes and self.character_sweep is not None:
+            raise ValueError("presentation variant supports only one timeline track")
         if not used:
             raise ValueError("presentation variant must apply a style or timeline")
         if not used <= set(self.requires):
@@ -203,6 +267,24 @@ class ActiveEffectProgram:
     def frame_delay(self, elapsed_seconds: float) -> float | None:
         return presentation_frame_delay(self.program, elapsed_seconds + self.phase_offset_seconds)
 
+    def render_grapheme(
+        self,
+        grapheme: str,
+        index: int,
+        count: int,
+        elapsed_seconds: float,
+        animations_enabled: bool,
+    ) -> tuple[PresentationStyle, str]:
+        return presentation_grapheme_at(
+            self.program,
+            grapheme,
+            index,
+            count,
+            elapsed_seconds + self.phase_offset_seconds,
+            animations_enabled=animations_enabled,
+            capabilities=TUI_PRESENTATION_CAPABILITIES,
+        )
+
 
 def validate_effect_programs(text: str, programs: tuple[EffectProgram, ...]) -> None:
     if len(programs) > MAX_PRESENTATION_PROGRAMS:
@@ -224,6 +306,16 @@ def validate_effect_programs(text: str, programs: tuple[EffectProgram, ...]) -> 
                 type(frame) is not ForegroundKeyframe
                 for frame in variant.foreground_keyframes
             )
+            or (
+                variant.character_sweep is not None
+                and (
+                    type(variant.character_sweep) is not CharacterSweepTrack
+                    or any(
+                        type(frame) is not PositionKeyframe
+                        for frame in variant.character_sweep.positions
+                    )
+                )
+            )
             for variant in program.variants
         ) or type(program.reduced_motion) is not PresentationStyle or type(
             program.fallback
@@ -233,6 +325,10 @@ def validate_effect_programs(text: str, programs: tuple[EffectProgram, ...]) -> 
             raise ValueError("presentation target extends beyond visible text")
         if program.start not in boundaries or program.end not in boundaries:
             raise ValueError("presentation target must align with grapheme boundaries")
+        if any(variant.character_sweep is not None for variant in program.variants):
+            target = text[program.start : program.end]
+            if len(tuple(regex.finditer(r"\X", target))) > MAX_PRESENTATION_SWEEP_GRAPHEMES:
+                raise ValueError("presentation character sweep target is too large")
         if program.start < previous_end:
             raise ValueError("presentation targets cannot overlap")
         previous_end = program.end
@@ -288,9 +384,68 @@ def presentation_style_at(
     )
 
 
+def _timeline_value(keyframes: tuple[Any, ...], progress: float, attribute: str) -> float:
+    before = keyframes[0]
+    after = keyframes[-1]
+    for candidate in keyframes[1:]:
+        after = candidate
+        if progress <= candidate.at:
+            break
+        before = candidate
+    span = after.at - before.at
+    local = 1.0 if span == 0 else (progress - before.at) / span
+    start = getattr(before, attribute)
+    return start + (getattr(after, attribute) - start) * local
+
+
+def presentation_grapheme_at(
+    program: EffectProgram,
+    grapheme: str,
+    index: int,
+    count: int,
+    elapsed_seconds: float,
+    *,
+    animations_enabled: bool,
+    capabilities: frozenset[PresentationCapability],
+) -> tuple[PresentationStyle, str]:
+    if not animations_enabled:
+        return program.reduced_motion, grapheme
+    variant = select_presentation_variant(program, capabilities)
+    if variant is None:
+        return program.fallback, grapheme
+    sweep = variant.character_sweep
+    if sweep is None:
+        return presentation_style_at(
+            program,
+            elapsed_seconds,
+            animations_enabled=True,
+            capabilities=capabilities,
+        ), grapheme
+    elapsed = max(0.0, elapsed_seconds)
+    cycle = int(elapsed // program.repeat_seconds)
+    phase = elapsed % program.repeat_seconds
+    if cycle >= program.repeat_count or phase >= program.duration_seconds:
+        return PresentationStyle(foreground=sweep.base_color), grapheme
+    progress = phase / program.duration_seconds
+    position = _timeline_value(sweep.positions, progress, "position")
+    head = round(position * max(0, count - 1))
+    distance = abs(index - head)
+    intensity = max(0.0, 1.0 - distance / sweep.trail_width)
+    intensity = intensity * intensity * (3 - 2 * intensity)
+    rendered = grapheme
+    if sweep.uppercase_head and grapheme.isascii() and grapheme.isalpha():
+        candidate = grapheme.upper() if index == head else grapheme.lower()
+        rendered = candidate
+    return PresentationStyle(
+        foreground=interpolate_color(sweep.base_color, sweep.head_color, intensity)
+    ), rendered
+
+
 def presentation_frame_delay(program: EffectProgram, elapsed_seconds: float) -> float | None:
     variant = select_presentation_variant(program, TUI_PRESENTATION_CAPABILITIES)
-    if variant is None or not variant.foreground_keyframes:
+    if variant is None or (
+        not variant.foreground_keyframes and variant.character_sweep is None
+    ):
         return None
     elapsed = max(0.0, elapsed_seconds)
     cycle = int(elapsed // program.repeat_seconds)
@@ -323,6 +478,22 @@ def effect_programs_as_dict(programs: tuple[EffectProgram, ...]) -> dict[str, An
                             {"at": frame.at, "color": frame.color}
                             for frame in variant.foreground_keyframes
                         ],
+                        **(
+                            {
+                                "character_sweep": {
+                                    "positions": [
+                                        {"at": frame.at, "position": frame.position}
+                                        for frame in variant.character_sweep.positions
+                                    ],
+                                    "base_color": variant.character_sweep.base_color,
+                                    "head_color": variant.character_sweep.head_color,
+                                    "trail_width": variant.character_sweep.trail_width,
+                                    "uppercase_head": variant.character_sweep.uppercase_head,
+                                }
+                            }
+                            if variant.character_sweep is not None
+                            else {}
+                        ),
                     }
                     for variant in program.variants
                 ],
@@ -368,4 +539,53 @@ def color_pulse(
         duration_seconds=duration_seconds,
         repeat_seconds=repeat_seconds,
         repeat_count=repeat_count,
+    )
+
+
+def character_sweep(
+    start: int,
+    end: int,
+    *,
+    base_color: str,
+    head_color: str,
+    trail_width: int = 2,
+    uppercase_head: bool = False,
+    duration_seconds: float = 2.0,
+    repeat_seconds: float = 2.0,
+    repeat_count: int = MAX_PRESENTATION_REPEAT_COUNT,
+    frames_per_second: float = 20.0,
+    reduced_motion: PresentationStyle | None = None,
+) -> EffectProgram:
+    base = PresentationStyle(foreground=base_color)
+    requires = [
+        PresentationCapability.CHARACTER_FOREGROUND,
+        PresentationCapability.TIMELINE,
+    ]
+    if uppercase_head:
+        requires.append(PresentationCapability.CHARACTER_CASE)
+    return EffectProgram(
+        start=start,
+        end=end,
+        variants=(
+            PresentationVariant(
+                requires=tuple(requires),
+                character_sweep=CharacterSweepTrack(
+                    positions=(
+                        PositionKeyframe(0, 0),
+                        PositionKeyframe(0.5, 1),
+                        PositionKeyframe(1, 0),
+                    ),
+                    base_color=base_color,
+                    head_color=head_color,
+                    trail_width=trail_width,
+                    uppercase_head=uppercase_head,
+                ),
+            ),
+        ),
+        reduced_motion=reduced_motion or PresentationStyle(foreground=head_color, bold=True),
+        fallback=base,
+        duration_seconds=duration_seconds,
+        repeat_seconds=repeat_seconds,
+        repeat_count=repeat_count,
+        frames_per_second=frames_per_second,
     )

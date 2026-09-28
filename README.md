@@ -769,8 +769,9 @@ The display-decorator API remains terminal-local. The additive
 `register_presentation_decorator()` API keeps plugins as the policy layer while
 allowing them to emit bounded, declarative effect programs interpreted by both
 the terminal UI and PWA. Version 1 supports static foreground, bold, underline,
-and foreground-color timelines with explicit reduced-motion and unsupported-
-capability fallbacks. Browser-rich transform variants remain planned. The API,
+foreground-color timelines, and bounded per-grapheme color/case sweeps with
+explicit reduced-motion and unsupported-capability fallbacks. Browser-rich
+transform variants remain planned. The API,
 limits, pure-decorator requirement, and incremental migration from named
 `TextEffectKind` recipes are documented in [`PRESENTATION.md`](PRESENTATION.md).
 Commands can include help text for `/help`. Enrichers return

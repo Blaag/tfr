@@ -373,6 +373,7 @@ a:focus-visible {
 .ansi-underline { text-decoration: underline; }
 .presentation-content,
 .presentation-content a { color: inherit !important; }
+.presentation-character { color: inherit; }
 
 :root[data-text-size="-2"] { --transcript-font-size: 0.76rem; }
 :root[data-text-size="-1"] { --transcript-font-size: 0.84rem; }

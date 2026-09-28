@@ -20,6 +20,7 @@ import { installTextRunColors, textRunClassNames, validatedTextRuns } from "./te
 const MAX_EVENTS_PER_WORLD = 2500;
 const MAX_RENDERED_EVENTS = 500;
 const MAX_ANIMATED_PRESENTATIONS = 64;
+const CHARACTER_SWEEP_ANIMATION_COST = 4;
 const MAX_COMMAND_HISTORY = 50;
 const MAX_STORED_COMMAND_CHARACTERS = 4096;
 const MAX_PAIRING_ATTEMPTS = 3;
@@ -113,6 +114,19 @@ const activePresentationAnimations = new Set();
 function cancelPresentationAnimations() {
   for (const animation of activePresentationAnimations) animation.cancel();
   activePresentationAnimations.clear();
+}
+
+function presentationAnimationCost(node) {
+  if (!node.querySelector(".presentation-animated")) return 0;
+  return node.querySelector(".presentation-character") ? CHARACTER_SWEEP_ANIMATION_COST : 1;
+}
+
+function eventPresentationAnimationCost(event) {
+  return event?.presentation?.programs?.some((program) =>
+    program.variants?.some((variant) => variant.character_sweep),
+  )
+    ? CHARACTER_SWEEP_ANIMATION_COST
+    : 1;
 }
 
 const connection = createConnectionLifecycle({
@@ -533,8 +547,13 @@ function appendEventText(container, event, { animate = true } = {}) {
     }
     const styled = document.createElement("span");
     applyTextStyle(styled, run.style);
+    if (run.presentation?.characterSweep && run.presentation.characterIndex !== null) {
+      styled.classList.add("presentation-character");
+      styled.dataset.caseable = /^[A-Za-z]$/.test(run.text) ? "true" : "false";
+    }
     if (
       run.presentation?.style.foreground &&
+      !run.presentation.characterSweep &&
       !(run.role === "speaker" && event.spoof_status === "spoofed")
     ) {
       styled.classList.add("presentation-content");
@@ -615,11 +634,15 @@ function renderTranscript({ scrollToLive = false, smoothScroll = false, restoreP
   const events = state.events.get(state.selectedWorld) || [];
   const visible = events.slice(-MAX_RENDERED_EVENTS);
   const reading = readingState();
-  elements.eventList.replaceChildren(
-    ...visible.map((event, index) =>
-      eventNode(event, { animate: index >= visible.length - MAX_ANIMATED_PRESENTATIONS }),
-    ),
-  );
+  const nodes = [];
+  let animationBudget = MAX_ANIMATED_PRESENTATIONS;
+  for (const event of visible.toReversed()) {
+    const cost = eventPresentationAnimationCost(event);
+    const node = eventNode(event, { animate: animationBudget >= cost });
+    animationBudget -= presentationAnimationCost(node);
+    nodes.unshift(node);
+  }
+  elements.eventList.replaceChildren(...nodes);
   elements.emptyState.hidden = visible.length > 0;
   if (scrollToLive || reading.atLive) {
     requestAnimationFrame(() => {
@@ -658,19 +681,27 @@ function flushLiveEvents() {
   if (visible.length >= MAX_RENDERED_EVENTS) {
     cancelPresentationAnimations();
     const retained = visible.slice(-MAX_RENDERED_EVENTS);
-    elements.eventList.replaceChildren(
-      ...retained.map((event, index) =>
-        eventNode(event, { animate: index >= retained.length - MAX_ANIMATED_PRESENTATIONS }),
-      ),
-    );
+    const nodes = [];
+    let animationBudget = MAX_ANIMATED_PRESENTATIONS;
+    for (const event of retained.toReversed()) {
+      const cost = eventPresentationAnimationCost(event);
+      const node = eventNode(event, { animate: animationBudget >= cost });
+      animationBudget -= presentationAnimationCost(node);
+      nodes.unshift(node);
+    }
+    elements.eventList.replaceChildren(...nodes);
   } else {
     const fragment = document.createDocumentFragment();
-    let animatedCount = elements.eventList.querySelectorAll(".presentation-animated").length;
+    let animatedCount = [...elements.eventList.children].reduce(
+      (total, node) => total + presentationAnimationCost(node),
+      0,
+    );
     for (const event of visible) {
-      const animate = animatedCount < MAX_ANIMATED_PRESENTATIONS;
+      const animate =
+        animatedCount + eventPresentationAnimationCost(event) <= MAX_ANIMATED_PRESENTATIONS;
       const node = eventNode(event, { animate });
       fragment.append(node);
-      if (node.querySelector(".presentation-animated")) animatedCount += 1;
+      animatedCount += presentationAnimationCost(node);
     }
     elements.eventList.append(fragment);
   }
