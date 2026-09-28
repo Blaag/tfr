@@ -400,6 +400,9 @@ secret is in the URL fragment, removed from browser history before submission,
 and retained only in tab-scoped session storage for bounded recovery attempts.
 The URL should still be treated as a short-lived secret and kept out of shell
 transcripts and messages. In Safari, use Share > Add to Home Screen after pairing.
+If an already-installed Home Screen app later needs to be paired again, open the
+app and paste a new pairing link into its pairing screen. Safari and the installed
+app can use separate cookie storage, so this avoids removing and reinstalling it.
 
 List and revoke paired devices locally:
 
@@ -415,10 +418,13 @@ administration should use `revoke-device`. Device credentials expire after 180
 days and authorize only non-agent worlds that existed when the link was created.
 Pair again after adding a world that the phone should access.
 
-The PWA provides retained and live world output, world switching, unread counts,
-per-world drafts and bounded command history, command submission, safe links,
-and reconnect/backfill. It intentionally does not provide agent controls, world
-connection controls, local shell access, plugin UI, or offline command queues.
+The PWA provides retained and live world output, validated ANSI-derived colors
+and emphasis, world switching, unread counts, per-world drafts and bounded
+command history, command submission, safe links, and reconnect/backfill. It
+supports the first bounded portable plugin effects: foreground-color timelines
+with static and reduced-motion fallbacks. It intentionally does not yet provide
+agent controls, world connection controls, local shell access, transform-rich
+plugin effects, arbitrary plugin-provided browser UI, or offline command queues.
 iOS may suspend its WebSocket in the background; returning to the app reconnects
 from the last committed cursor. If retained history no longer covers the gap,
 the app reports that truncation instead of pretending the transcript is
@@ -758,6 +764,15 @@ The loaded object can implement `register(registrar, config)` and set
 enrichers, display transforms, structured display decorators, border effects,
 screen-clear effects, boss views, status segments, key bindings, and lifecycle
 handlers.
+
+The display-decorator API remains terminal-local. The additive
+`register_presentation_decorator()` API keeps plugins as the policy layer while
+allowing them to emit bounded, declarative effect programs interpreted by both
+the terminal UI and PWA. Version 1 supports static foreground, bold, underline,
+and foreground-color timelines with explicit reduced-motion and unsupported-
+capability fallbacks. Browser-rich transform variants remain planned. The API,
+limits, pure-decorator requirement, and incremental migration from named
+`TextEffectKind` recipes are documented in [`PRESENTATION.md`](PRESENTATION.md).
 Commands can include help text for `/help`. Enrichers return
 `tfr.plugin_api.EventPatch`; they cannot replace event
 identity or canonical text. Command and key handlers receive a
@@ -938,7 +953,11 @@ source tag. Prefixes are retained in canonical logs even when hidden from the
 display. Set the initial behavior with `provenance.show_prefix`, then use
 `/nospoof show`, `/nospoof hide`, or `/nospoof status` at runtime. This affects
 future display only and never removes provenance from canonical logs.
+When NOSPOOF is enabled, TFR also compares apparent say and known pose speakers
+with server attribution. Spoofed speaker names use a persistent inverse marker
+in both the terminal UI and PWA, independent of normal text effects.
 
-See [SECURITY.md](SECURITY.md) for credential, TLS, logging, plugin, and agent
-security boundaries. See [LICENSES.md](LICENSES.md) for the reviewed runtime
+See [PRESENTATION.md](PRESENTATION.md) for the portable presentation direction,
+[SECURITY.md](SECURITY.md) for credential, TLS, logging, plugin, and agent
+security boundaries, and [LICENSES.md](LICENSES.md) for the reviewed runtime
 dependency licenses. TFR is distributed under the [MIT License](LICENSE).

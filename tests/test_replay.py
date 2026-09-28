@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from tfr.eventlog import serialize_event
-from tfr.events import EventKind
+from tfr.events import Confidence, EventKind, SpoofReason, SpoofStatus
 from tfr.replay import ReplayError, event_from_dict, read_transcript
 
 FIXTURE = Path(__file__).parent / "fixtures" / "transcript.jsonl"
@@ -28,6 +28,29 @@ def test_serialized_event_round_trips_for_deterministic_replay() -> None:
     restored = event_from_dict(json.loads(serialize_event(original)))
 
     assert restored == original
+
+
+def test_replay_preserves_spoof_assessment(tmp_path: Path) -> None:
+    transcript = tmp_path / "spoof.jsonl"
+    payload = json.loads(FIXTURE.read_text().splitlines()[0])
+    payload["spoof"] = {
+        "status": "spoofed",
+        "speaker": "Alice",
+        "speaker_span": [0, 5],
+        "reason": "missing_nospoof_prefix",
+        "suspected_sender": "Black2",
+        "attribution_confidence": "inferred",
+    }
+    transcript.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    event = read_transcript(transcript)[0]
+
+    assert event.spoof is not None
+    assert event.spoof.status is SpoofStatus.SPOOFED
+    assert event.spoof.reason is SpoofReason.MISSING_NOSPOOF_PREFIX
+    assert event.spoof.suspected_sender == "Black2"
+    assert event.spoof.attribution_confidence is Confidence.INFERRED
+    assert event.spoof.speaker_span == (0, 5)
 
 
 def test_invalid_transcript_reports_file_and_line(tmp_path: Path) -> None:

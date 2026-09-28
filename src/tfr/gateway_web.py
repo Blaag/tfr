@@ -5,8 +5,11 @@ import contextlib
 import hashlib
 import json
 import time
-from collections import OrderedDict, defaultdict, deque
+from collections import Counter, OrderedDict, defaultdict, deque
 from collections.abc import Mapping
+from dataclasses import replace
+from datetime import UTC, datetime
+from email.utils import format_datetime
 from importlib.resources import files
 from typing import Any
 from urllib.parse import urlsplit
@@ -14,11 +17,13 @@ from uuid import UUID
 
 from aiohttp import WSMsgType, web
 
-from tfr.ansi import terminal_plain_text
+from tfr.ansi import BrowserTextSpan, ansi_visible_text, browser_text_spans, terminal_plain_text
 from tfr.core import UnknownSessionError
 from tfr.events import ActorType, Event, EventKind
 from tfr.gateway import GatewayRuntime, HistorySubscription, SequencedEvent
 from tfr.gateway_devices import DeviceRecord, DeviceStore
+from tfr.plugins import PluginManager
+from tfr.presentation import effect_programs_as_dict
 
 WEB_PROTOCOL_VERSION = 1
 SESSION_COOKIE = "__Host-tfr_session"
@@ -32,6 +37,7 @@ MAX_WEB_CLIENTS = 8
 MAX_WEB_CLIENTS_PER_DEVICE = 2
 MAX_WEB_EVENT_TEXT_BYTES = 8_192
 MAX_WEB_EVENT_SOURCE_BYTES = 32_768
+MAX_WEB_TEXT_RUNS = 64
 MAX_WEB_PROVENANCE_BYTES = 256
 MAX_WEB_PROVENANCE_SOURCE_BYTES = 4_096
 MAX_WEB_SNAPSHOT_BYTES = 2_097_152
@@ -57,7 +63,19 @@ _ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.mjs": ("app.mjs", "text/javascript; charset=utf-8"),
+    "/command.mjs": ("command.mjs", "text/javascript; charset=utf-8"),
+    "/connection-lifecycle.mjs": (
+        "connection-lifecycle.mjs",
+        "text/javascript; charset=utf-8",
+    ),
+    "/event-details.mjs": ("event-details.mjs", "text/javascript; charset=utf-8"),
+    "/history-notice.mjs": ("history-notice.mjs", "text/javascript; charset=utf-8"),
+    "/linkify.mjs": ("linkify.mjs", "text/javascript; charset=utf-8"),
+    "/motion.mjs": ("motion.mjs", "text/javascript; charset=utf-8"),
     "/pairing.mjs": ("pairing.mjs", "text/javascript; charset=utf-8"),
+    "/presentation.mjs": ("presentation.mjs", "text/javascript; charset=utf-8"),
+    "/swipe.mjs": ("swipe.mjs", "text/javascript; charset=utf-8"),
+    "/text-runs.mjs": ("text-runs.mjs", "text/javascript; charset=utf-8"),
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
     "/sw.js": ("sw.js", "text/javascript; charset=utf-8"),
@@ -67,16 +85,22 @@ _ASSETS = {
 }
 
 
-def browser_event(cursor: int, event: Event) -> dict[str, Any] | None:
+def browser_event(
+    cursor: int,
+    event: Event,
+    plugins: PluginManager | None = None,
+) -> dict[str, Any] | None:
     if not _browser_event_allowed(event):
         return None
-    raw_text = event.display_text or event.plain_text or event.canonical_text or ""
+    raw_text = _browser_event_source_text(event)
     source_text, source_truncated = _bounded_utf8(raw_text, MAX_WEB_EVENT_SOURCE_BYTES)
-    text = terminal_plain_text(source_text)
+    spans = browser_text_spans(source_text)
+    text = "".join(span.text for span in spans)
     encoded_text = text.encode("utf-8")
     text_truncated = source_truncated or len(encoded_text) > MAX_WEB_EVENT_TEXT_BYTES
     if text_truncated:
         text = _truncate_with_ellipsis(encoded_text, MAX_WEB_EVENT_TEXT_BYTES)
+        spans = _truncate_browser_spans(spans, text)
     value: dict[str, Any] = {
         "type": "event",
         "protocol": WEB_PROTOCOL_VERSION,
@@ -85,6 +109,7 @@ def browser_event(cursor: int, event: Event) -> dict[str, Any] | None:
             "id": str(event.event_id),
             "timestamp": event.timestamp.isoformat().replace("+00:00", "Z"),
             "world": event.world,
+            "connection_generation": str(event.connection_generation),
             "direction": event.direction.value,
             "kind": event.kind.value,
             "text": text,
@@ -105,11 +130,96 @@ def browser_event(cursor: int, event: Event) -> dict[str, Any] | None:
         }
         if provenance:
             value["event"]["provenance"] = provenance
+    if event.spoof is not None:
+        value["event"]["spoof_status"] = event.spoof.status.value
+        if event.spoof.reason is not None:
+            value["event"]["spoof_reason"] = event.spoof.reason.value
+        if event.spoof.suspected_sender is not None:
+            value["event"]["spoof_sender"] = _bounded_visible_text(
+                event.spoof.suspected_sender, MAX_WEB_PROVENANCE_BYTES
+            )
+            assert event.spoof.attribution_confidence is not None
+            value["event"]["spoof_sender_confidence"] = (
+                event.spoof.attribution_confidence.value
+            )
+    speaker_span = event.spoof.speaker_span if event.spoof is not None else None
+    if speaker_span is not None and not (0 <= speaker_span[0] < speaker_span[1] <= len(text)):
+        speaker_span = None
+    text_runs = _browser_text_runs(spans, speaker_span)
+    if text_runs is not None:
+        value["event"]["text_runs"] = text_runs
+    if plugins is not None:
+        programs = plugins.presentation_programs(event, text)
+        if programs:
+            value["event"]["presentation"] = effect_programs_as_dict(programs)
     if event.kind is EventKind.CONNECTION:
         state = event.metadata.get("state")
         if isinstance(state, str):
             value["event"]["connection_state"] = state
+    for optional_field in ("presentation", "text_runs", "provenance"):
+        if len(json.dumps(value, ensure_ascii=True).encode("utf-8")) <= MAX_WEB_MESSAGE_BYTES:
+            break
+        value["event"].pop(optional_field, None)
+    if len(json.dumps(value, ensure_ascii=True).encode("utf-8")) > MAX_WEB_MESSAGE_BYTES:
+        for optional_field in (
+            "spoof_sender",
+            "spoof_sender_confidence",
+            "spoof_reason",
+            "spoof_status",
+        ):
+            value["event"].pop(optional_field, None)
     return value
+
+
+def _truncate_browser_spans(
+    spans: tuple[BrowserTextSpan, ...],
+    truncated_text: str,
+) -> tuple[BrowserTextSpan, ...]:
+    remaining = len(truncated_text) - 1
+    output: list[BrowserTextSpan] = []
+    for span in spans:
+        if remaining <= 0:
+            break
+        fragment = span.text[:remaining]
+        if fragment:
+            output.append(replace(span, text=fragment))
+            remaining -= len(fragment)
+    output.append(BrowserTextSpan("…"))
+    return tuple(output)
+
+
+def _browser_text_runs(
+    spans: tuple[BrowserTextSpan, ...],
+    speaker_span: tuple[int, int] | None,
+) -> list[dict[str, Any]] | None:
+    if len(spans) > MAX_WEB_TEXT_RUNS:
+        spans = (BrowserTextSpan("".join(span.text for span in spans)),)
+    has_style = any(span.as_dict()["style"] for span in spans)
+    if not has_style and speaker_span is None:
+        return None
+    speaker_start, speaker_end = speaker_span or (-1, -1)
+    visible_offset = 0
+    runs: list[dict[str, Any]] = []
+    for span in spans:
+        span_start = visible_offset
+        span_end = span_start + len(span.text)
+        boundaries = [span_start]
+        boundaries.extend(
+            boundary
+            for boundary in (speaker_start, speaker_end)
+            if span_start < boundary < span_end
+        )
+        boundaries.append(span_end)
+        for start, end in zip(boundaries, boundaries[1:], strict=False):
+            if start == end:
+                continue
+            run = span.as_dict()
+            run["text"] = span.text[start - span_start : end - span_start]
+            if speaker_start <= start and end <= speaker_end:
+                run["role"] = "speaker"
+            runs.append(run)
+        visible_offset = span_end
+    return runs
 
 
 def _bounded_visible_text(value: str, maximum_bytes: int) -> str:
@@ -137,7 +247,7 @@ def _truncate_with_ellipsis(encoded: bytes, maximum_bytes: int) -> str:
 
 
 def _browser_source_bytes(event: Event) -> int:
-    raw_text = event.display_text or event.plain_text or event.canonical_text or ""
+    raw_text = _browser_event_source_text(event)
     bounded_text, _truncated = _bounded_utf8(raw_text, MAX_WEB_EVENT_SOURCE_BYTES)
     total = len(bounded_text.encode("utf-8"))
     if event.provenance is not None:
@@ -150,13 +260,38 @@ def _browser_source_bytes(event: Event) -> int:
             )
             if value is not None
         )
+    if event.spoof is not None and event.spoof.suspected_sender is not None:
+        total += len(
+            _bounded_utf8(event.spoof.suspected_sender, MAX_WEB_PROVENANCE_SOURCE_BYTES)[0].encode(
+                "utf-8"
+            )
+        )
     return total
 
 
+def _browser_event_source_text(event: Event) -> str:
+    message_text = event.metadata.get("message_text")
+    if event.provenance is not None and isinstance(message_text, str):
+        for source in (event.display_text, event.canonical_text):
+            if source is None:
+                continue
+            projected = ansi_visible_text(source, message_text)
+            if projected is not None:
+                return projected
+        return message_text
+    return event.display_text or event.plain_text or event.canonical_text or ""
+
+
 def _browser_event_allowed(event: Event) -> bool:
-    return event.kind in _VISIBLE_EVENT_KINDS and not (
-        event.kind is EventKind.COMMAND
-        and (event.actor is None or event.actor.type is not ActorType.HUMAN)
+    return _browser_event_class_allowed(
+        event.kind,
+        event.actor.type if event.actor is not None else None,
+    )
+
+
+def _browser_event_class_allowed(kind: EventKind, actor_type: ActorType | None) -> bool:
+    return kind in _VISIBLE_EVENT_KINDS and not (
+        kind is EventKind.COMMAND and actor_type is not ActorType.HUMAN
     )
 
 
@@ -256,12 +391,16 @@ class WebGatewayServer:
             [
                 web.get("/api/session", self._session),
                 web.post("/api/pair", self._pair),
+                web.get("/pair", self._pair_redirect),
                 web.post("/pair", self._pair_page),
                 web.post("/api/logout", self._logout),
                 web.get("/ws", self._websocket),
                 web.get(
-                    "/{asset:index.html|app.mjs|pairing.mjs|styles.css|manifest.webmanifest|sw.js|"
-                    "icon.svg|icon-512.png|apple-touch-icon.png}",
+                    "/{asset:index.html|app.mjs|command.mjs|connection-lifecycle.mjs|"
+                    "event-details.mjs|history-notice.mjs|linkify.mjs|motion.mjs|pairing.mjs|"
+                    "presentation.mjs|swipe.mjs|text-runs.mjs|styles.css|manifest.webmanifest|"
+                    "sw.js|icon.svg|icon-512.png|"
+                    "apple-touch-icon.png}",
                     self._asset,
                 ),
                 web.get("/", self._asset),
@@ -380,10 +519,17 @@ class WebGatewayServer:
         return True
 
     @staticmethod
-    def _set_session_cookie(response: web.StreamResponse, token: str) -> None:
+    def _set_session_cookie(
+        response: web.StreamResponse,
+        token: str,
+        device: DeviceRecord,
+    ) -> None:
+        remaining_seconds = max(0, int((device.expires_at - datetime.now(UTC)).total_seconds()))
         response.set_cookie(
             SESSION_COOKIE,
             token,
+            max_age=remaining_seconds,
+            expires=format_datetime(device.expires_at.astimezone(UTC), usegmt=True),
             secure=True,
             httponly=True,
             samesite="Strict",
@@ -416,8 +562,15 @@ class WebGatewayServer:
         response = self._json_response(
             {"paired": True, "device": {"id": str(device.device_id), "label": device.label}}
         )
-        self._set_session_cookie(response, token)
+        self._set_session_cookie(response, token, device)
         return response
+
+    async def _pair_redirect(self, request: web.Request) -> web.Response:
+        self._validate_public_request(request, require_origin=False)
+        return web.Response(
+            status=303,
+            headers={"Location": "/", "Cache-Control": "no-store"},
+        )
 
     async def _pair_page(self, request: web.Request) -> web.Response:
         self._validate_public_request(
@@ -445,7 +598,7 @@ class WebGatewayServer:
         if set(value) != {"code"} or len(codes) != 1 or not isinstance(codes[0], str):
             return web.Response(text="Invalid pairing request", status=400)
         try:
-            _device, token = await self.devices.redeem(codes[0], tailscale_login)
+            device, token = await self.devices.redeem(codes[0], tailscale_login)
         except ValueError:
             return web.Response(
                 status=303,
@@ -455,7 +608,7 @@ class WebGatewayServer:
             status=303,
             headers={"Location": "/?pairing=complete", "Cache-Control": "no-store"},
         )
-        self._set_session_cookie(response, token)
+        self._set_session_cookie(response, token, device)
         return response
 
     async def _logout(self, request: web.Request) -> web.Response:
@@ -529,6 +682,11 @@ class WebGatewayServer:
                 None if history_reset else after_cursor,
                 worlds=self._authorized_worlds(device),
                 maximum_events=self.snapshot_events,
+                maximum_events_per_world=self.snapshot_events,
+                event_filter=_browser_event_allowed,
+                event_class_filter=_browser_event_class_allowed,
+                maximum_source_bytes=MAX_WEB_SNAPSHOT_SOURCE_BYTES,
+                event_source_bytes=_browser_source_bytes,
             )
         except ValueError as exc:
             async with self._session_lock:
@@ -672,6 +830,11 @@ class WebGatewayServer:
         history_reset: bool,
     ) -> None:
         visible: list[tuple[str, dict[str, Any]]] = []
+        visible_counts: dict[tuple[str, int], int] = defaultdict(int)
+        selected_counts: Counter[tuple[str, int]] = Counter(
+            (item.event.world, item.event.connection_generation)
+            for item in subscription.snapshot.events
+        )
         snapshot_bytes = 0
         snapshot_source_bytes = 0
         snapshot_truncated = subscription.snapshot.truncated
@@ -684,7 +847,7 @@ class WebGatewayServer:
             if snapshot_source_bytes + source_bytes > MAX_WEB_SNAPSHOT_SOURCE_BYTES:
                 snapshot_truncated = True
                 break
-            projected = browser_event(item.cursor, item.event)
+            projected = browser_event(item.cursor, item.event, self.runtime.plugins)
             if projected is None:
                 continue
             projected_bytes = len(
@@ -694,6 +857,7 @@ class WebGatewayServer:
                 snapshot_truncated = True
                 break
             visible.append((item.event.world, projected))
+            visible_counts[(item.event.world, item.event.connection_generation)] += 1
             snapshot_bytes += projected_bytes
             snapshot_source_bytes += source_bytes
         visible.reverse()
@@ -705,15 +869,17 @@ class WebGatewayServer:
                 "type": "hello",
                 "protocol": WEB_PROTOCOL_VERSION,
                 "gateway_id": str(self.runtime.gateway_id),
+                "build": self.runtime.build.as_dict(),
                 "cursor": str(subscription.snapshot.cursor),
                 "history_truncated": snapshot_truncated,
                 "history_reset": history_reset,
                 "worlds": [
-                    {
-                        "world": descriptor["world"],
-                        "state": descriptor["state"],
-                        "aliases": descriptor["aliases"],
-                    }
+                    self._browser_world_descriptor(
+                        descriptor,
+                        subscription,
+                        visible_counts,
+                        selected_counts,
+                    )
                     for descriptor in self.runtime.world_descriptors()
                     if descriptor["world"] in self._authorized_worlds(device)
                 ],
@@ -741,6 +907,33 @@ class WebGatewayServer:
             },
         )
 
+    @staticmethod
+    def _browser_world_descriptor(
+        descriptor: Mapping[str, Any],
+        subscription: HistorySubscription,
+        visible_counts: Mapping[tuple[str, int], int],
+        selected_counts: Mapping[tuple[str, int], int],
+    ) -> dict[str, Any]:
+        world = str(descriptor["world"])
+        generation = int(descriptor.get("connection_generation", 0))
+        key = (world, generation)
+        return {
+            "world": world,
+            "state": descriptor["state"],
+            "aliases": descriptor["aliases"],
+            "connection_generation": str(generation),
+            "history": {
+                "connection_generation": str(generation),
+                "available_count": str(subscription.snapshot.available_counts.get(key, 0)),
+                "snapshot_count": visible_counts.get(key, 0),
+                "snapshot_gap": key in subscription.snapshot.after_cursor_gaps
+                or (
+                    subscription.snapshot.resumed
+                    and selected_counts.get(key, 0) > visible_counts.get(key, 0)
+                ),
+            },
+        }
+
     async def _send_events(
         self,
         socket: web.WebSocketResponse,
@@ -767,7 +960,7 @@ class WebGatewayServer:
                     socket, code=1008, message=b"World authorization changed"
                 )
                 return
-            message = browser_event(item.cursor, item.event)
+            message = browser_event(item.cursor, item.event, self.runtime.plugins)
             if message is not None:
                 if not await self._send_if_active(
                     socket,

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from http.cookies import SimpleCookie
 from importlib.resources import files
 from pathlib import Path
@@ -13,10 +18,25 @@ from aiohttp.client_exceptions import WSServerHandshakeError
 from aiohttp.test_utils import TestClient, TestServer
 
 import tfr.gateway_web as gateway_web
-from tfr.core import EventBus, UnknownSessionError
-from tfr.events import Actor, ActorType, Direction, Event, EventKind, Provenance
+from tfr.adapters import TinyMushAdapter
+from tfr.core import CommandBus, EventBus, UnknownSessionError
+from tfr.events import (
+    Actor,
+    ActorType,
+    Confidence,
+    Direction,
+    Event,
+    EventKind,
+    Provenance,
+    SpoofAssessment,
+    SpoofReason,
+    SpoofStatus,
+)
 from tfr.gateway import EventHistory
 from tfr.gateway_web import SESSION_COOKIE, WebGatewayServer, browser_event
+from tfr.plugins import PluginManager
+from tfr.presentation import color_pulse
+from tfr.updates import BuildIdentity
 
 ORIGIN = "https://gateway.example.ts.net"
 PUBLIC_HEADERS = {
@@ -35,7 +55,16 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
     assert {
         "index.html",
         "app.mjs",
+        "command.mjs",
+        "connection-lifecycle.mjs",
+        "event-details.mjs",
+        "history-notice.mjs",
+        "linkify.mjs",
+        "motion.mjs",
         "pairing.mjs",
+        "presentation.mjs",
+        "swipe.mjs",
+        "text-runs.mjs",
         "styles.css",
         "manifest.webmanifest",
         "sw.js",
@@ -45,10 +74,232 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
     } <= {asset.name for asset in asset_directory.iterdir()}
 
 
+async def test_all_declared_pwa_assets_are_routable(tmp_path: Path) -> None:
+    runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 20}))
+    gateway = WebGatewayServer(
+        runtime,  # type: ignore[arg-type]
+        origin=ORIGIN,
+        host="127.0.0.1",
+        port=7348,
+        state_directory=tmp_path / "web",
+        snapshot_events=20,
+    )
+    client = TestClient(TestServer(gateway.application()))
+    await client.start_server()
+    try:
+        for path in gateway_web._ASSETS:
+            response = await client.get(path, headers=NAVIGATION_HEADERS)
+            assert response.status == 200, path
+    finally:
+        await client.close()
+
+
 def test_pwa_hidden_state_overrides_layout_display() -> None:
     styles = files("tfr").joinpath("web", "styles.css").read_text(encoding="utf-8")
     assert "[hidden]" in styles
     assert "display: none !important" in styles
+
+
+def test_pwa_shell_uses_explicit_grid_rows() -> None:
+    styles = files("tfr").joinpath("web", "styles.css").read_text(encoding="utf-8")
+    for selector, row in (
+        (".topbar", 1),
+        (".history-notice", 2),
+        (".transcript", 3),
+        (".composer", 4),
+    ):
+        start = styles.index(f"{selector} {{")
+        end = styles.index("}", start)
+        assert f"grid-row: {row};" in styles[start:end]
+
+
+def test_pwa_header_uses_one_shared_font_size() -> None:
+    styles = files("tfr").joinpath("web", "styles.css").read_text(encoding="utf-8")
+
+    topbar_start = styles.index(".topbar {")
+    topbar_end = styles.index("}", topbar_start)
+    assert "font-size: 0.82rem;" in styles[topbar_start:topbar_end]
+    for selector in (".settings-button {", ".settings-glyph {", ".active-world strong {"):
+        start = styles.index(selector)
+        end = styles.index("}", start)
+        assert "font-size: inherit;" in styles[start:end]
+    connection_start = styles.index(".connection-state {")
+    connection_end = styles.index("}", connection_start)
+    assert "font-size: inherit;" in styles[connection_start:connection_end]
+
+
+def test_transcript_rows_use_compact_terminal_spacing() -> None:
+    styles = files("tfr").joinpath("web", "styles.css").read_text(encoding="utf-8")
+
+    event_start = styles.index(".event {")
+    event_end = styles.index("}", event_start)
+    text_start = styles.index(".event-text {")
+    text_end = styles.index("}", text_start)
+    assert "padding: 0.06rem 0.9rem 0.08rem 0.7rem;" in styles[event_start:event_end]
+    assert "line-height: 1.25;" in styles[text_start:text_end]
+
+
+def test_pwa_line_wrap_setting_allows_horizontal_transcript_panning() -> None:
+    asset_directory = files("tfr").joinpath("web")
+    page = asset_directory.joinpath("index.html").read_text(encoding="utf-8")
+    styles = asset_directory.joinpath("styles.css").read_text(encoding="utf-8")
+    application = asset_directory.joinpath("app.mjs").read_text(encoding="utf-8")
+
+    assert 'id="line-wrap" type="checkbox" role="switch" checked' in page
+    assert ':root[data-line-wrap="off"] .event-text' in styles
+    assert "overflow-wrap: normal;" in styles
+    assert "white-space: pre;" in styles
+    assert 'safeStore("tfr.lineWrap", "off")' in application
+    assert "direction && lineWrapPreference()" in application
+
+
+def test_pointer_opened_event_details_do_not_retain_transcript_focus() -> None:
+    asset_directory = files("tfr").joinpath("web")
+    application = asset_directory.joinpath("app.mjs").read_text(encoding="utf-8")
+    styles = asset_directory.joinpath("styles.css").read_text(encoding="utf-8")
+
+    assert "if (pointerActivated) item.blur();" in application
+    assert 'setInputModality("pointer")' in application
+    assert ':root[data-input-modality="keyboard"] .event:focus-visible' in styles
+    assert "a:focus-visible,\n.event:focus-visible" not in styles
+
+
+def test_history_notices_auto_dismiss() -> None:
+    application = files("tfr").joinpath("web", "app.mjs").read_text(encoding="utf-8")
+
+    assert (
+        '"The Gateway restarted. Showing a fresh retained history.",\n        6000,'
+        in application
+    )
+    assert "showHistoryNotice(decision.message, 10000)" in application
+    assert "if (connection.ready) recordLiveHistoryEvent(world, event);" in application
+    assert "event.world === state.selectedWorld && !state.historyReset" in application
+    assert "if (evicted) updateHistoryNotice();" in application
+    assert 'available_count: "0"' in application
+
+
+def test_unpair_cleanup_clears_transcript_and_reconnect_state() -> None:
+    application = files("tfr").joinpath("web", "app.mjs").read_text(encoding="utf-8")
+    start = application.index("async function clearLocalData() {")
+    end = application.index("\nasync function unpairDevice", start)
+    cleanup = application[start:end]
+
+    assert "connection.stop()?.close();" in cleanup
+    assert "resetGatewayState();" in cleanup
+    assert "state.worlds = [];" in cleanup
+
+
+def test_pwa_bounds_gateway_connection_attempts() -> None:
+    application = files("tfr").joinpath("web", "app.mjs").read_text(encoding="utf-8")
+
+    assert "const CONNECTION_TIMEOUT_MS = 8000;" in application
+    assert (
+        'setConnection(navigator.onLine ? "Gateway unavailable" : "Offline", "error")'
+        in application
+    )
+    assert "signal: controller.signal" in application
+    assert "const connection = createConnectionLifecycle" in application
+    assert "const probeGeneration = connection.beginProbe();" in application
+    assert "if (!connection.probeIsCurrent(probeGeneration)) return;" in application
+
+
+def test_command_history_uses_a_touch_friendly_restore_sheet() -> None:
+    asset_directory = files("tfr").joinpath("web")
+    page = asset_directory.joinpath("index.html").read_text(encoding="utf-8")
+    styles = asset_directory.joinpath("styles.css").read_text(encoding="utf-8")
+    application = asset_directory.joinpath("app.mjs").read_text(encoding="utf-8")
+
+    assert 'id="history-button" class="history-button"' in page
+    assert 'id="history-dialog" class="history-dialog"' in page
+    assert 'id="history-older"' not in page
+    assert 'id="history-newer"' not in page
+    assert "[...history].reverse().map" in application
+    assert "elements.commandInput.value = text;" in application
+    assert "elements.historyDialog.close();" in application
+    history_button_start = styles.index("\n.history-button {")
+    history_button_end = styles.index("}", history_button_start)
+    assert "min-width: 4.6rem;" in styles[history_button_start:history_button_end]
+    history_row_start = styles.index(".history-list button {")
+    history_row_end = styles.index("}", history_row_start)
+    assert "min-height: 3.25rem;" in styles[history_row_start:history_row_end]
+
+
+def test_mobile_composer_keeps_a_visible_send_button() -> None:
+    asset_directory = files("tfr").joinpath("web")
+    page = asset_directory.joinpath("index.html").read_text(encoding="utf-8")
+    styles = asset_directory.joinpath("styles.css").read_text(encoding="utf-8")
+
+    assert 'id="send-button" class="send-button"' in page
+    assert ".send-button {" in styles
+
+
+def test_mobile_send_submits_before_ios_keyboard_layout_shift() -> None:
+    application = files("tfr").joinpath("web", "app.mjs").read_text(encoding="utf-8")
+    start = application.index('elements.sendButton.addEventListener(\n  "touchstart"')
+    end = application.index("\nelements.commandInput.addEventListener", start)
+    touch_handler = application[start:end]
+
+    assert "event.preventDefault();" in touch_handler
+    assert "elements.composer.requestSubmit(elements.sendButton);" in touch_handler
+    assert "{ passive: false }" in touch_handler
+
+
+def test_mobile_keyboard_preserves_live_edge_and_compacts_landscape() -> None:
+    asset_directory = files("tfr").joinpath("web")
+    application = asset_directory.joinpath("app.mjs").read_text(encoding="utf-8")
+    styles = asset_directory.joinpath("styles.css").read_text(encoding="utf-8")
+
+    assert "preserveLiveDuringViewportChange = readingState().atLive;" in application
+    assert "elements.transcript.scrollTop = elements.transcript.scrollHeight;" in application
+    assert 'toggleAttribute("data-input-focused", inputFocused)' in application
+    assert ':root[data-input-focused] .composer' in styles
+    assert "@media (orientation: landscape), (max-height: 500px)" in styles
+    assert ":root[data-input-focused] .topbar" in styles
+    assert ":root[data-input-focused] .history-button" in styles
+
+
+def test_mobile_multiline_paste_is_blocked_before_command_submission() -> None:
+    application = files("tfr").joinpath("web", "app.mjs").read_text(encoding="utf-8")
+
+    start = application.index('elements.commandInput.addEventListener("paste"')
+    end = application.index('\nelements.commandInput.addEventListener("focus"', start)
+    paste_handler = application[start:end]
+    assert 'event.clipboardData?.getData("text/plain")' in paste_handler
+    assert "isMultilineWorldCommand(text)" in paste_handler
+    assert "event.preventDefault();" in paste_handler
+    assert "Multiline paste blocked" in paste_handler
+
+
+def test_live_transcript_rendering_is_batched_and_bounded() -> None:
+    application = files("tfr").joinpath("web", "app.mjs").read_text(encoding="utf-8")
+
+    assert "function flushLiveEvents()" in application
+    assert "document.createDocumentFragment()" in application
+    assert "MAX_ANIMATED_PRESENTATIONS" in application
+    assert "requestAnimationFrame(flushLiveEvents)" in application
+    assert "window.cancelAnimationFrame(liveRenderFrame)" in application
+    assert "if (reading.atLive) elements.transcript.scrollTop" in application
+    assert "cancelPresentationAnimations();" in application
+    assert "activePresentationAnimations" in application
+
+
+def test_command_submission_does_not_force_scrollback_to_live() -> None:
+    application = files("tfr").joinpath("web", "app.mjs").read_text(encoding="utf-8")
+    send_start = application.index("function sendCommand(event) {")
+    send_end = application.index("\nfunction moveHistory", send_start)
+    send_command = application[send_start:send_end]
+
+    assert "reading.atLive = true" not in send_command
+    assert "renderTranscript({ scrollToLive: true })" not in send_command
+
+
+def test_return_to_live_respects_the_resolved_motion_preference() -> None:
+    application = files("tfr").joinpath("web", "app.mjs").read_text(encoding="utf-8")
+
+    assert 'window.matchMedia("(prefers-reduced-motion: reduce)").matches' in application
+    assert "motionAllowsAnimation(" in application
+    assert '? "smooth"\n            : "auto"' in application
+    assert "renderTranscript({ scrollToLive: true, smoothScroll: true });" in application
 
 
 def make_event(
@@ -57,11 +308,12 @@ def make_event(
     text: str = "hello",
     world: str = "alpha",
     actor: Actor | None = None,
+    generation: int = 1,
 ) -> Event:
     return Event(
         session_id=UUID("63f755aa-e407-4f78-ae05-f9d62c23f765"),
         world=world,
-        connection_generation=1,
+        connection_generation=generation,
         sequence=1,
         direction=Direction.INBOUND,
         kind=kind,
@@ -73,10 +325,18 @@ def make_event(
 class FakeRuntime:
     def __init__(self, history: EventHistory) -> None:
         self.gateway_id = UUID("92716400-4bb9-43d2-845f-b8a0e51c9994")
+        self.build = BuildIdentity("1.2.3", "a" * 40)
         self.history = history
         self.commands: list[tuple[str, str, str, UUID]] = []
         self.agent_worlds = {"agent-world"}
         self.command_error: Exception | None = None
+        self.connection_generation = 1
+        self.plugins = PluginManager(
+            event_bus=EventBus(),
+            command_bus=CommandBus(),
+            targets={},
+            scope="gateway",
+        )
 
     def world_descriptors(self) -> list[dict[str, object]]:
         return [
@@ -84,11 +344,13 @@ class FakeRuntime:
                 "world": "alpha",
                 "state": "connected",
                 "aliases": ["a"],
+                "connection_generation": self.connection_generation,
             },
             {
                 "world": "agent-world",
                 "state": "connected",
                 "aliases": [],
+                "connection_generation": 1,
             },
         ]
 
@@ -157,6 +419,148 @@ def test_browser_projection_bounds_large_event_text() -> None:
     assert len(projected["event"]["text"].encode("utf-8")) < 8_200
 
 
+def test_browser_projection_always_fits_wire_limit_after_optional_fields() -> None:
+    text = "".join(f"\x1b[{31 + index % 2}m😀" for index in range(2_048))
+    original = make_event(text=text)
+    event = replace(
+        original,
+        provenance=Provenance(
+            sender_name="😀" * 64,
+            owner_name="😀" * 64,
+            server_source="😀" * 64,
+        ),
+    )
+
+    projected = browser_event(1, event)
+
+    assert projected is not None
+    assert len(json.dumps(projected, ensure_ascii=True).encode("utf-8")) <= (
+        gateway_web.MAX_WEB_MESSAGE_BYTES
+    )
+
+
+def test_browser_projection_emits_safe_exact_style_runs() -> None:
+    projected = browser_event(
+        1,
+        make_event(text="plain \x1b[1;4;31;44mstyled\x1b[0m <script>雪</script>"),
+    )
+
+    assert projected is not None
+    assert projected["event"]["text"] == "plain styled <script>雪</script>"
+    assert "".join(run["text"] for run in projected["event"]["text_runs"]) == projected[
+        "event"
+    ]["text"]
+    styled = next(run for run in projected["event"]["text_runs"] if run["text"] == "styled")
+    assert styled["style"] == {
+        "foreground": "#aa0000",
+        "background": "#0000aa",
+        "bold": True,
+        "underline": True,
+    }
+
+
+def test_browser_projection_emits_bounded_portable_presentation() -> None:
+    manager = PluginManager(
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        scope="gateway",
+    )
+    manager._registrar("fixture").register_presentation_decorator(
+        "pulse",
+        lambda _event, _text: (
+            color_pulse(
+                0,
+                5,
+                base_color="#a9914a",
+                accent_color="#fff08a",
+                repeat_count=2,
+            ),
+        ),
+    )
+
+    projected = browser_event(1, make_event(text="Alice says hello"), manager)
+
+    assert projected is not None
+    assert projected["event"]["presentation"] == {
+        "version": 1,
+        "programs": [
+            {
+                "start": 0,
+                "end": 5,
+                "duration_ms": 1200,
+                "repeat_ms": 6000,
+                "repeat_count": 2,
+                "frames_per_second": 20.0,
+                "variants": [
+                    {
+                        "requires": ["foreground_color", "timeline"],
+                        "style": {"foreground": "#a9914a"},
+                        "foreground_keyframes": [
+                            {"at": 0.0, "color": "#a9914a"},
+                            {"at": 0.5, "color": "#fff08a"},
+                            {"at": 1.0, "color": "#a9914a"},
+                        ],
+                    }
+                ],
+                "reduced_motion": {"foreground": "#fff08a", "bold": True},
+                "fallback": {"foreground": "#a9914a"},
+            }
+        ],
+    }
+
+
+def test_browser_projection_omits_invalid_presentation_without_dropping_text() -> None:
+    manager = PluginManager(
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        scope="gateway",
+    )
+    manager._registrar("fixture").register_presentation_decorator(
+        "outside",
+        lambda _event, _text: (
+            color_pulse(0, 99, base_color="#a9914a", accent_color="#fff08a"),
+        ),
+    )
+
+    projected = browser_event(1, make_event(text="short"), manager)
+
+    assert projected is not None
+    assert projected["event"]["text"] == "short"
+    assert "presentation" not in projected["event"]
+    assert manager.registry.presentation_decorators == {}
+
+
+def test_browser_projection_discards_osc_cursor_and_malformed_controls() -> None:
+    projected = browser_event(
+        1,
+        make_event(
+            text=(
+                "before"
+                "\x1b]8;;https://evil.example\x07link\x1b]8;;\x07"
+                "\x1b[2J"
+                "\x01\x02"
+                "after\x1b[31"
+            )
+        ),
+    )
+
+    assert projected is not None
+    assert projected["event"]["text"] == "beforelinkafter"
+    assert "text_runs" not in projected["event"]
+
+
+def test_browser_projection_bounds_adversarial_style_runs() -> None:
+    text = "".join(f"\x1b[{31 + index % 2}mX" for index in range(300))
+
+    projected = browser_event(1, make_event(text=text))
+
+    assert projected is not None
+    assert projected["event"]["text"] == "X" * 300
+    assert "text_runs" not in projected["event"]
+
+
 def test_browser_projection_uses_full_ascii_source_budget_before_sanitizing() -> None:
     projected = browser_event(1, make_event(text="\x1b[31m" * 3_000 + "hello"))
 
@@ -186,9 +590,257 @@ def test_browser_projection_bounds_and_sanitizes_provenance() -> None:
     assert len(sender.encode("utf-8")) < 264
 
 
+def test_browser_source_accounting_uses_the_projected_message_text() -> None:
+    original = make_event(text="short")
+    event = Event(
+        session_id=original.session_id,
+        world=original.world,
+        connection_generation=original.connection_generation,
+        sequence=original.sequence,
+        direction=original.direction,
+        kind=original.kind,
+        canonical_text=original.canonical_text,
+        provenance=Provenance(sender_name="sender"),
+        spoof=SpoofAssessment(
+            status=SpoofStatus.SPOOFED,
+            speaker="Sender",
+            speaker_span=(0, 6),
+            suspected_sender="x" * 300,
+            attribution_confidence=Confidence.HIGH,
+        ),
+        metadata={"message_text": "m" * 500},
+    )
+
+    projected = browser_event(1, event)
+
+    assert projected is not None
+    assert projected["event"]["text"] == "m" * 500
+    assert gateway_web._browser_source_bytes(event) == 806
+
+
+def test_browser_projection_preserves_message_ansi_while_hiding_nospoof_prefix() -> None:
+    original = make_event(kind=EventKind.SAY, text="unused")
+    event = Event(
+        session_id=original.session_id,
+        world=original.world,
+        connection_generation=original.connection_generation,
+        sequence=original.sequence,
+        direction=original.direction,
+        kind=original.kind,
+        canonical_text="\x1b[36m[Widget(#1),saypose]\x1b[0m \x1b[31mWidget says hi\x1b[0m",
+        plain_text="[Widget(#1),saypose] Widget says hi",
+        display_text="\x1b[31mWidget says hi\x1b[0m",
+        provenance=Provenance(sender_name="Widget", server_source="saypose"),
+        metadata={"message_text": "Widget says hi"},
+    )
+
+    projected = browser_event(1, event)
+
+    assert projected is not None
+    assert projected["event"]["text"] == "Widget says hi"
+    assert projected["event"]["text_runs"] == [
+        {"text": "Widget says hi", "style": {"foreground": "#aa0000"}}
+    ]
+
+
+def test_browser_projection_reconstructs_ansi_message_when_display_includes_prefix() -> None:
+    original = make_event(kind=EventKind.SAY, text="unused")
+    canonical = "\x1b[36m[Widget(#1),saypose]\x1b[0m \x1b[31mWidget says hi\x1b[0m"
+    event = Event(
+        session_id=original.session_id,
+        world=original.world,
+        connection_generation=original.connection_generation,
+        sequence=original.sequence,
+        direction=original.direction,
+        kind=original.kind,
+        canonical_text=canonical,
+        plain_text="[Widget(#1),saypose] Widget says hi",
+        display_text=canonical,
+        provenance=Provenance(sender_name="Widget", server_source="saypose"),
+        metadata={"message_text": "Widget says hi"},
+    )
+
+    projected = browser_event(1, event)
+
+    assert projected is not None
+    assert projected["event"]["text"] == "Widget says hi"
+    assert projected["event"]["text_runs"] == [
+        {"text": "Widget says hi", "style": {"foreground": "#aa0000"}}
+    ]
+
+
+def test_browser_projection_extracts_ansi_message_with_trailing_framing() -> None:
+    original = make_event(kind=EventKind.SAY, text="unused")
+    event = Event(
+        session_id=original.session_id,
+        world=original.world,
+        connection_generation=original.connection_generation,
+        sequence=original.sequence,
+        direction=original.direction,
+        kind=original.kind,
+        canonical_text="[Widget(#1),saypose] \x1b[31mWidget says hi\x1b[0m\r\n",
+        plain_text="[Widget(#1),saypose] Widget says hi\r\n",
+        display_text="\x1b[31mWidget says hi\x1b[0m\r\n",
+        provenance=Provenance(sender_name="Widget", server_source="saypose"),
+        metadata={"message_text": "Widget says hi"},
+    )
+
+    projected = browser_event(1, event)
+
+    assert projected is not None
+    assert projected["event"]["text"] == "Widget says hi"
+    assert projected["event"]["text_runs"] == [
+        {"text": "Widget says hi", "style": {"foreground": "#aa0000"}}
+    ]
+
+
+def test_tinymush_bold_red_output_reaches_browser_as_colored_text_run() -> None:
+    raw = "[Widget(#1)] \x1b[1;31mhi\x1b[0m\r\n"
+    parsed = TinyMushAdapter().parse(raw)
+    original = make_event(kind=parsed.kind, text=raw)
+    event = Event(
+        session_id=original.session_id,
+        world=original.world,
+        connection_generation=original.connection_generation,
+        sequence=original.sequence,
+        direction=original.direction,
+        kind=parsed.kind,
+        canonical_text=parsed.canonical_text,
+        plain_text=parsed.plain_text,
+        display_text=parsed.display_text,
+        provenance=parsed.provenance,
+        parser_name=parsed.parser_name,
+        parser_version=parsed.parser_version,
+        confidence=parsed.confidence,
+        metadata={"message_text": parsed.message_text},
+    )
+
+    projected = browser_event(1, event)
+
+    assert projected is not None
+    assert projected["event"]["text"] == "hi\r\n"
+    assert projected["event"]["text_runs"] == [
+        {
+            "text": "hi",
+            "style": {"foreground": "#aa0000", "bold": True},
+        },
+        {"text": "\r\n", "style": {}},
+    ]
+
+
+def test_browser_projection_reports_verified_nospoof_source() -> None:
+    original = make_event(kind=EventKind.SAY, text='You say, "Hello"')
+    event = Event(
+        session_id=original.session_id,
+        world=original.world,
+        connection_generation=original.connection_generation,
+        sequence=original.sequence,
+        direction=original.direction,
+        kind=original.kind,
+        canonical_text=original.canonical_text,
+        provenance=Provenance(
+            sender_name="Black2",
+            server_source="saypose",
+            confidence=Confidence.HIGH,
+        ),
+        spoof=SpoofAssessment(
+            status=SpoofStatus.NOT_SPOOFED,
+            speaker="You",
+            speaker_span=(0, 3),
+        ),
+    )
+
+    projected = browser_event(1, event)
+
+    assert projected is not None
+    assert projected["event"]["spoof_status"] == "not_spoofed"
+    assert projected["event"]["text_runs"] == [
+        {"text": "You", "style": {}, "role": "speaker"},
+        {"text": ' say, "Hello"', "style": {}},
+    ]
+
+
+def test_browser_projection_reports_mismatched_say_speaker_as_spoofed() -> None:
+    original = make_event(kind=EventKind.SAY, text='Alice says, "Hello"')
+    event = Event(
+        session_id=original.session_id,
+        world=original.world,
+        connection_generation=original.connection_generation,
+        sequence=original.sequence,
+        direction=original.direction,
+        kind=original.kind,
+        canonical_text=original.canonical_text,
+        provenance=Provenance(sender_name="Widget", confidence=Confidence.HIGH),
+        spoof=SpoofAssessment(
+            status=SpoofStatus.SPOOFED,
+            speaker="Alice",
+            speaker_span=(0, 5),
+        ),
+    )
+
+    projected = browser_event(1, event)
+
+    assert projected is not None
+    assert projected["event"]["spoof_status"] == "spoofed"
+    assert projected["event"]["text_runs"][0] == {
+        "text": "Alice",
+        "style": {},
+        "role": "speaker",
+    }
+
+
+def test_browser_projection_reports_inferred_multiline_spoof_sender() -> None:
+    original = make_event(kind=EventKind.SAY, text='Bob says, "Hello"')
+    event = Event(
+        session_id=original.session_id,
+        world=original.world,
+        connection_generation=original.connection_generation,
+        sequence=original.sequence,
+        direction=original.direction,
+        kind=original.kind,
+        canonical_text=original.canonical_text,
+        spoof=SpoofAssessment(
+            status=SpoofStatus.SPOOFED,
+            speaker="Bob",
+            speaker_span=(0, 3),
+            reason=SpoofReason.MISSING_NOSPOOF_PREFIX,
+            suspected_sender="Black2",
+            attribution_confidence=Confidence.INFERRED,
+        ),
+    )
+
+    projected = browser_event(1, event)
+
+    assert projected is not None
+    assert projected["event"]["spoof_reason"] == "missing_nospoof_prefix"
+    assert projected["event"]["spoof_sender"] == "Black2"
+    assert projected["event"]["spoof_sender_confidence"] == "inferred"
+
+
+def test_browser_projection_does_not_infer_spoof_status_without_source() -> None:
+    original = make_event()
+    event = Event(
+        session_id=original.session_id,
+        world=original.world,
+        connection_generation=original.connection_generation,
+        sequence=original.sequence,
+        direction=original.direction,
+        kind=original.kind,
+        canonical_text=original.canonical_text,
+        provenance=Provenance(sender_name="Widget", confidence=Confidence.HIGH),
+    )
+
+    projected = browser_event(1, event)
+
+    assert projected is not None
+    assert "spoof_status" not in projected["event"]
+
+
 async def paired_client(
     tmp_path: Path,
     runtime: FakeRuntime,
+    *,
+    snapshot_events: int = 20,
 ) -> tuple[WebGatewayServer, TestClient, str]:
     gateway = WebGatewayServer(
         runtime,  # type: ignore[arg-type]
@@ -196,7 +848,7 @@ async def paired_client(
         host="127.0.0.1",
         port=7348,
         state_directory=tmp_path / "web",
-        snapshot_events=20,
+        snapshot_events=snapshot_events,
     )
     client = TestClient(TestServer(gateway.application()))
     await client.start_server()
@@ -214,6 +866,8 @@ async def paired_client(
     assert morsel["secure"]
     assert morsel["httponly"]
     assert morsel["samesite"] == "Strict"
+    assert 0 < int(morsel["max-age"]) <= 180 * 24 * 60 * 60
+    assert parsedate_to_datetime(morsel["expires"]).timestamp() > time.time()
     return gateway, client, morsel.value
 
 
@@ -302,9 +956,17 @@ async def test_pairing_retry_returns_the_same_device_cookie(tmp_path: Path) -> N
         )
 
         assert first.status == retry.status == 200
-        assert first.headers["Set-Cookie"] == retry.headers["Set-Cookie"]
         assert other_browser.status == 200
-        assert first.headers["Set-Cookie"] == other_browser.headers["Set-Cookie"]
+        cookies = []
+        for response in (first, retry, other_browser):
+            cookie = SimpleCookie()
+            cookie.load(response.headers["Set-Cookie"])
+            cookies.append(cookie[SESSION_COOKIE])
+        assert {morsel.value for morsel in cookies} == {cookies[0].value}
+        assert {morsel["expires"] for morsel in cookies} == {cookies[0]["expires"]}
+        assert all(morsel["secure"] and morsel["httponly"] for morsel in cookies)
+        assert all(morsel["samesite"] == "Strict" for morsel in cookies)
+        assert all(int(morsel["max-age"]) <= int(cookies[0]["max-age"]) for morsel in cookies)
         assert wrong_identity.status == 401
         assert len(gateway.device_descriptors()) == 1
     finally:
@@ -339,12 +1001,58 @@ async def test_navigation_pairing_sets_cookie_and_redirects(tmp_path: Path) -> N
         assert response.headers["Location"] == "/?pairing=complete"
         cookie = SimpleCookie()
         cookie.load(response.headers["Set-Cookie"])
-        token = cookie[SESSION_COOKIE].value
+        morsel = cookie[SESSION_COOKIE]
+        token = morsel.value
+        assert 0 < int(morsel["max-age"]) <= 180 * 24 * 60 * 60
+        assert parsedate_to_datetime(morsel["expires"]).timestamp() > time.time()
         session = await client.get(
             "/api/session",
             headers={**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"},
         )
         assert (await session.json())["paired"] is True
+    finally:
+        await client.close()
+        await bus.close()
+
+
+async def test_get_pair_redirects_to_the_application_root(tmp_path: Path) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 5})
+    runtime = FakeRuntime(history)
+    gateway = WebGatewayServer(
+        runtime,  # type: ignore[arg-type]
+        origin=ORIGIN,
+        host="127.0.0.1",
+        port=7348,
+        state_directory=tmp_path / "web",
+        snapshot_events=5,
+    )
+    client = TestClient(TestServer(gateway.application()))
+    await client.start_server()
+    try:
+        response = await client.get(
+            "/pair",
+            headers=NAVIGATION_HEADERS,
+            allow_redirects=False,
+        )
+
+        assert response.status == 303
+        assert response.headers["Location"] == "/"
+        assert response.headers["Cache-Control"] == "no-store"
+
+        wrong_host = await client.get(
+            "/pair",
+            headers={**NAVIGATION_HEADERS, "Host": "gateway.example.ts.net.evil.test"},
+            allow_redirects=False,
+        )
+        missing_identity = await client.get(
+            "/pair",
+            headers={"Host": "gateway.example.ts.net"},
+            allow_redirects=False,
+        )
+
+        assert wrong_host.status == 403
+        assert missing_identity.status == 403
     finally:
         await client.close()
         await bus.close()
@@ -502,10 +1210,27 @@ async def test_websocket_snapshot_commands_and_idempotency(tmp_path: Path) -> No
         snapshot = await socket.receive_json()
         ready = await socket.receive_json()
         assert hello["type"] == "hello"
+        assert hello["build"] == {
+            "version": "1.2.3",
+            "commit": "a" * 40,
+            "protocol": 2,
+        }
         assert hello["worlds"] == [
-            {"world": "alpha", "state": "connected", "aliases": ["a"]}
+            {
+                "world": "alpha",
+                "state": "connected",
+                "aliases": ["a"],
+                "connection_generation": "1",
+                "history": {
+                    "connection_generation": "1",
+                    "available_count": "1",
+                    "snapshot_count": 1,
+                    "snapshot_gap": False,
+                },
+            }
         ]
         assert snapshot["event"]["text"] == "retained message"
+        assert snapshot["event"]["connection_generation"] == "1"
         assert ready["type"] == "ready"
 
         request_id = str(uuid4())
@@ -557,6 +1282,216 @@ async def test_websocket_snapshot_commands_and_idempotency(tmp_path: Path) -> No
         unauthorized = await socket.receive_json()
         assert unauthorized["ok"] is False
         assert "not authorized" in unauthorized["error"]
+        await socket.close()
+    finally:
+        await client.close()
+        await history.stop()
+        await bus.close()
+
+
+async def test_websocket_delivers_rapid_event_burst_in_order(tmp_path: Path) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 5_000})
+    history.start()
+    runtime = FakeRuntime(history)
+    _gateway, client, token = await paired_client(tmp_path, runtime)
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        socket = await client.ws_connect("/ws", headers=headers)
+        assert (await socket.receive_json())["type"] == "hello"
+        assert (await socket.receive_json())["type"] == "ready"
+
+        for sequence in range(5_000):
+            await bus.publish(make_event(text=f"stress {sequence:03d}"))
+        await history.flush()
+        received = [
+            await asyncio.wait_for(socket.receive_json(), timeout=5)
+            for _ in range(5_000)
+        ]
+
+        assert [message["event"]["text"] for message in received] == [
+            f"stress {sequence:03d}" for sequence in range(5_000)
+        ]
+        assert [int(message["cursor"]) for message in received] == list(range(1, 5_001))
+        await socket.close()
+    finally:
+        await client.close()
+        await history.stop()
+        await bus.close()
+
+
+async def test_websocket_large_history_returns_newest_ordered_snapshot(tmp_path: Path) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 2_000})
+    history.start()
+    for sequence in range(2_000):
+        await bus.publish(make_event(text=f"history {sequence:04d}"))
+    await history.flush()
+    runtime = FakeRuntime(history)
+    gateway = WebGatewayServer(
+        runtime,  # type: ignore[arg-type]
+        origin=ORIGIN,
+        host="127.0.0.1",
+        port=7348,
+        state_directory=tmp_path / "web",
+        snapshot_events=500,
+    )
+    client = TestClient(TestServer(gateway.application()))
+    await client.start_server()
+    url = gateway.create_pairing_url("History iPhone")
+    code = parse_qs(urlsplit(url).fragment)["pair"][0]
+    response = await client.post("/api/pair", json={"code": code}, headers=PUBLIC_HEADERS)
+    cookie = SimpleCookie()
+    cookie.load(response.headers["Set-Cookie"])
+    token = cookie[SESSION_COOKIE].value
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        socket = await client.ws_connect("/ws", headers=headers)
+        hello = await socket.receive_json()
+        assert hello["history_truncated"] is True
+        assert hello["snapshot_count"] == 500
+        assert hello["worlds"][0]["history"] == {
+            "connection_generation": "1",
+            "available_count": "2000",
+            "snapshot_count": 500,
+            "snapshot_gap": False,
+        }
+        received = [await socket.receive_json() for _ in range(500)]
+        assert [message["event"]["text"] for message in received] == [
+            f"history {sequence:04d}" for sequence in range(1_500, 2_000)
+        ]
+        assert (await socket.receive_json())["type"] == "ready"
+        await socket.close()
+    finally:
+        await client.close()
+        await history.stop()
+        await bus.close()
+
+
+async def test_websocket_snapshot_filters_before_limit_and_scopes_counts_to_generation(
+    tmp_path: Path,
+) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 20})
+    history.start()
+    await bus.publish(make_event(text="old generation", generation=0))
+    await bus.publish(make_event(kind=EventKind.AGENT_REQUEST, text="hidden one"))
+    await bus.publish(make_event(kind=EventKind.AGENT_RESPONSE, text="hidden two"))
+    for sequence in range(3):
+        await bus.publish(make_event(text=f"visible {sequence}"))
+    await history.flush()
+    runtime = FakeRuntime(history)
+    _gateway, client, token = await paired_client(
+        tmp_path,
+        runtime,
+        snapshot_events=2,
+    )
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        socket = await client.ws_connect("/ws", headers=headers)
+        hello = await socket.receive_json()
+        events = [await socket.receive_json(), await socket.receive_json()]
+
+        assert [message["event"]["text"] for message in events] == ["visible 1", "visible 2"]
+        assert hello["worlds"][0]["history"] == {
+            "connection_generation": "1",
+            "available_count": "3",
+            "snapshot_count": 2,
+            "snapshot_gap": False,
+        }
+        assert (await socket.receive_json())["type"] == "ready"
+        await socket.close()
+    finally:
+        await client.close()
+        await history.stop()
+        await bus.close()
+
+
+async def test_websocket_reports_omitted_current_generation_retention(tmp_path: Path) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 2})
+    history.start()
+    for sequence in range(5):
+        await bus.publish(make_event(text=f"retained {sequence}"))
+    await history.flush()
+    runtime = FakeRuntime(history)
+    _gateway, client, token = await paired_client(tmp_path, runtime)
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        socket = await client.ws_connect("/ws", headers=headers)
+        hello = await socket.receive_json()
+
+        assert hello["worlds"][0]["history"] == {
+            "connection_generation": "1",
+            "available_count": "5",
+            "snapshot_count": 2,
+            "snapshot_gap": False,
+        }
+        assert [
+            (await socket.receive_json())["event"]["text"] for _ in range(2)
+        ] == ["retained 3", "retained 4"]
+        assert (await socket.receive_json())["type"] == "ready"
+        await socket.close()
+    finally:
+        await client.close()
+        await history.stop()
+        await bus.close()
+
+
+async def test_websocket_resume_reports_total_generation_and_backfill_counts(
+    tmp_path: Path,
+) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    for sequence in range(5):
+        await bus.publish(make_event(text=f"message {sequence}"))
+    await history.flush()
+    runtime = FakeRuntime(history)
+    _gateway, client, token = await paired_client(tmp_path, runtime)
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        socket = await client.ws_connect(
+            f"/ws?gateway_id={runtime.gateway_id}&after_cursor=3",
+            headers=headers,
+        )
+        hello = await socket.receive_json()
+
+        assert hello["worlds"][0]["history"] == {
+            "connection_generation": "1",
+            "available_count": "5",
+            "snapshot_count": 2,
+            "snapshot_gap": False,
+        }
+        assert [
+            (await socket.receive_json())["event"]["text"] for _ in range(2)
+        ] == ["message 3", "message 4"]
+        assert (await socket.receive_json())["type"] == "ready"
+        await socket.close()
+    finally:
+        await client.close()
+        await history.stop()
+        await bus.close()
+
+
+async def test_websocket_resume_marks_a_retention_gap(tmp_path: Path) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 2})
+    history.start()
+    for sequence in range(5):
+        await bus.publish(make_event(text=f"message {sequence}"))
+    await history.flush()
+    runtime = FakeRuntime(history)
+    _gateway, client, token = await paired_client(tmp_path, runtime)
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        socket = await client.ws_connect(
+            f"/ws?gateway_id={runtime.gateway_id}&after_cursor=1",
+            headers=headers,
+        )
+        hello = await socket.receive_json()
+
+        assert hello["worlds"][0]["history"]["snapshot_gap"] is True
         await socket.close()
     finally:
         await client.close()
@@ -645,6 +1580,12 @@ async def test_websocket_bounds_aggregate_snapshot_bytes(
         hello = await socket.receive_json()
         assert hello["history_truncated"] is True
         assert 0 < hello["snapshot_count"] < 4
+        assert hello["worlds"][0]["history"] == {
+            "connection_generation": "1",
+            "available_count": "4",
+            "snapshot_count": hello["snapshot_count"],
+            "snapshot_gap": False,
+        }
         for _ in range(hello["snapshot_count"]):
             assert (await socket.receive_json())["type"] == "event"
         assert (await socket.receive_json())["type"] == "ready"
@@ -674,6 +1615,12 @@ async def test_websocket_bounds_snapshot_source_processing(
         hello = await socket.receive_json()
         assert hello["history_truncated"] is True
         assert hello["snapshot_count"] == 1
+        assert hello["worlds"][0]["history"] == {
+            "connection_generation": "1",
+            "available_count": "2",
+            "snapshot_count": 1,
+            "snapshot_gap": False,
+        }
         assert (await socket.receive_json())["type"] == "event"
         assert (await socket.receive_json())["type"] == "ready"
         await socket.close()
@@ -805,6 +1752,34 @@ async def test_revocation_closes_active_socket_and_invalidates_cookie(tmp_path: 
         assert frame.type in {WSMsgType.CLOSE, WSMsgType.CLOSED}
         response = await client.get("/api/session", headers=headers)
         assert (await response.json())["paired"] is False
+    finally:
+        await client.close()
+        await bus.close()
+
+
+async def test_expired_active_session_closes_on_next_request(tmp_path: Path) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 5})
+    runtime = FakeRuntime(history)
+    gateway, client, token = await paired_client(tmp_path, runtime)
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        socket = await client.ws_connect("/ws", headers=headers)
+        assert (await socket.receive_json())["type"] == "hello"
+        assert (await socket.receive_json())["type"] == "ready"
+        digest, device = next(iter(gateway.devices._devices.items()))
+        gateway.devices._devices[digest] = replace(
+            device,
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+
+        await socket.send_json({"type": "ping", "request_id": str(uuid4())})
+
+        frame = await socket.receive()
+        assert frame.type in {WSMsgType.CLOSE, WSMsgType.CLOSED}
+        assert socket.close_code == 1008
+        response = await client.get("/api/session", headers=headers)
+        assert (await response.json()) == {"paired": False, "device": None}
     finally:
         await client.close()
         await bus.close()

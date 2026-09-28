@@ -25,18 +25,29 @@ class EventBus:
         self._sinks = tuple(sinks)
         self._processors = list(processors)
         self._subscribers: set[asyncio.Queue[Event]] = set()
+        self._backpressure_subscribers: set[asyncio.Queue[Event]] = set()
         self._publish_lock = asyncio.Lock()
         self._closed = False
 
-    def subscribe(self, *, maxsize: int = 0) -> asyncio.Queue[Event]:
+    def subscribe(
+        self,
+        *,
+        maxsize: int = 0,
+        backpressure: bool = False,
+    ) -> asyncio.Queue[Event]:
         if self._closed:
             raise RuntimeError("event bus is closed")
+        if backpressure and maxsize < 1:
+            raise ValueError("backpressure subscribers require a bounded queue")
         queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=maxsize)
         self._subscribers.add(queue)
+        if backpressure:
+            self._backpressure_subscribers.add(queue)
         return queue
 
     def unsubscribe(self, queue: asyncio.Queue[Event]) -> None:
         self._subscribers.discard(queue)
+        self._backpressure_subscribers.discard(queue)
 
     def add_processor(self, processor: Callable[[Event], Awaitable[Event]]) -> None:
         if self._closed:
@@ -52,6 +63,9 @@ class EventBus:
             for sink in self._sinks:
                 await sink.write(event)
             for queue in tuple(self._subscribers):
+                if queue in self._backpressure_subscribers:
+                    await queue.put(event)
+                    continue
                 if queue.full():
                     queue.get_nowait()
                 queue.put_nowait(event)
@@ -64,6 +78,7 @@ class EventBus:
             for sink in self._sinks:
                 await sink.close()
             self._subscribers.clear()
+            self._backpressure_subscribers.clear()
 
 
 class CommandBus:

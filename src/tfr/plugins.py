@@ -46,6 +46,7 @@ from tfr.events import (
     EventKind,
     Provenance,
 )
+from tfr.presentation import EffectProgram, validate_effect_programs
 from tfr.text_effects import TextDecoration, validate_decorations
 
 PLUGIN_API_VERSION = 1
@@ -293,6 +294,10 @@ class DisplayDecorator(Protocol):
     def __call__(self, event: Event, text: str) -> Sequence[TextDecoration]: ...
 
 
+class PresentationDecorator(Protocol):
+    def __call__(self, event: Event, text: str) -> Sequence[EffectProgram]: ...
+
+
 class StatusSegment(Protocol):
     def __call__(self, world: str) -> str | None: ...
 
@@ -416,6 +421,7 @@ class PluginRegistry:
         self.enrichers: dict[str, tuple[str, EventEnricher]] = {}
         self.display_transforms: dict[str, tuple[str, DisplayTransform]] = {}
         self.display_decorators: dict[str, tuple[str, DisplayDecorator]] = {}
+        self.presentation_decorators: dict[str, tuple[str, PresentationDecorator]] = {}
         self.border_effects: dict[str, PluginBorderEffect] = {}
         self.screen_clear_effects: dict[str, PluginScreenClearEffect] = {}
         self.boss_views: dict[str, PluginBossView] = {}
@@ -489,6 +495,13 @@ class PluginRegistrar:
         if self.scope == "gateway":
             return
         PluginRegistry._add(self._registry.display_decorators, name, (self.plugin, handler))
+
+    def register_presentation_decorator(
+        self,
+        name: str,
+        handler: PresentationDecorator,
+    ) -> None:
+        PluginRegistry._add(self._registry.presentation_decorators, name, (self.plugin, handler))
 
     def register_border_effect(
         self,
@@ -681,6 +694,9 @@ class PluginManager:
         self._session_id = uuid4()
         self._sequence = 0
         self._failure_tasks: set[asyncio.Task[Any]] = set()
+        self._presentation_cache: dict[
+            tuple[UUID, str], tuple[EffectProgram, ...]
+        ] = {}
         self.requested_plugins: tuple[str, ...] = ()
         self._loaded_plugins: list[str] = []
         self.load_failures: dict[str, str] = {}
@@ -762,6 +778,7 @@ class PluginManager:
                 manager.registry.enrichers,
                 manager.registry.display_transforms,
                 manager.registry.display_decorators,
+                manager.registry.presentation_decorators,
                 manager.registry.border_effects,
                 manager.registry.screen_clear_effects,
                 manager.registry.boss_views,
@@ -1204,6 +1221,27 @@ class PluginManager:
                 self.registry.display_decorators.pop(name, None)
                 self._schedule_failure(plugin, f"display-decoration:{name}", exc, world=event.world)
         return tuple(decorations)
+
+    def presentation_programs(self, event: Event, text: str) -> tuple[EffectProgram, ...]:
+        cache_key = (event.event_id, text)
+        cached = self._presentation_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        programs: list[EffectProgram] = []
+        for name, (plugin, decorator) in tuple(self.registry.presentation_decorators.items()):
+            try:
+                additions = tuple(decorator(event, text))
+                combined = tuple((*programs, *additions))
+                validate_effect_programs(text, combined)
+                programs.extend(additions)
+            except Exception as exc:
+                self.registry.presentation_decorators.pop(name, None)
+                self._schedule_failure(plugin, f"presentation:{name}", exc, world=event.world)
+        result = tuple(programs)
+        self._presentation_cache[cache_key] = result
+        if len(self._presentation_cache) > 5_000:
+            self._presentation_cache.pop(next(iter(self._presentation_cache)))
+        return result
 
     @property
     def border_frames_per_second(self) -> float | None:

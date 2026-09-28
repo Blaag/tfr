@@ -14,6 +14,9 @@ from tfr.events import (
     Event,
     EventKind,
     Provenance,
+    SpoofAssessment,
+    SpoofReason,
+    SpoofStatus,
 )
 
 
@@ -47,6 +50,27 @@ def event_from_dict(value: dict[str, Any]) -> Event:
         else None
     )
     parser = value.get("parser") or {}
+    spoof_value = value.get("spoof")
+    spoof = (
+        SpoofAssessment(
+            status=SpoofStatus(spoof_value["status"]),
+            speaker=spoof_value["speaker"],
+            speaker_span=tuple(spoof_value["speaker_span"]),
+            reason=(
+                SpoofReason(spoof_value["reason"])
+                if spoof_value.get("reason") is not None
+                else None
+            ),
+            suspected_sender=spoof_value.get("suspected_sender"),
+            attribution_confidence=(
+                Confidence(spoof_value["attribution_confidence"])
+                if spoof_value.get("attribution_confidence") is not None
+                else None
+            ),
+        )
+        if spoof_value is not None
+        else None
+    )
     timestamp = str(value["timestamp"]).replace("Z", "+00:00")
     return Event(
         event_id=UUID(value["event_id"]),
@@ -62,6 +86,7 @@ def event_from_dict(value: dict[str, Any]) -> Event:
         plain_text=value.get("plain_text"),
         display_text=value.get("display_text"),
         provenance=provenance,
+        spoof=spoof,
         parser_name=parser.get("name"),
         parser_version=parser.get("version"),
         confidence=Confidence(parser.get("confidence", "unknown")),

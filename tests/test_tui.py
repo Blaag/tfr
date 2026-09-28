@@ -33,9 +33,24 @@ from tfr.config import (
     WorldsConfig,
 )
 from tfr.core import CommandBus, EventBus
-from tfr.events import Actor, ActorType, Direction, Event, EventKind, Provenance
+from tfr.events import (
+    Actor,
+    ActorType,
+    Direction,
+    Event,
+    EventKind,
+    Provenance,
+    SpoofAssessment,
+    SpoofStatus,
+)
 from tfr.pager import PagerMode
-from tfr.plugin_api import BorderFragment, ScreenClearContext, TextDecoration, TextEffectKind
+from tfr.plugin_api import (
+    BorderFragment,
+    ScreenClearContext,
+    TextDecoration,
+    TextEffectKind,
+    color_pulse,
+)
 from tfr.plugin_sources import PluginSourceNotice, PluginUpdateChecker, PluginUpdateResult
 from tfr.plugins import BossViewEvent, PluginManager
 from tfr.sessions import SessionManager, SessionState, WorldSession
@@ -1596,6 +1611,85 @@ async def test_speaker_effects_keep_static_color_when_animations_are_off() -> No
     assert output[0][:2] == ("fg:#a9914a", "aLiCe")
 
 
+async def test_portable_presentation_runs_in_tui_and_uses_event_time() -> None:
+    class PortablePlugin:
+        def register(self, registrar: Any, _config: Any) -> None:
+            registrar.register_presentation_decorator(
+                "speaker",
+                lambda _event, _text: (
+                    color_pulse(
+                        0,
+                        5,
+                        base_color="#000000",
+                        accent_color="#ffffff",
+                        duration_seconds=2,
+                        repeat_seconds=5,
+                        repeat_count=1,
+                    ),
+                ),
+            )
+
+    manager = await PluginManager.load(
+        enabled=("portable",),
+        config={},
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        discovered=(entry_point("portable", PortablePlugin()),),
+        scope="ui",
+    )
+    tui = make_tui(plugins=manager)
+    tui.active_view.display.resize(width=80, height=1)
+    tui.handle_event(
+        Event(
+            session_id=tui.active_view.session.session_id,
+            world="alpha",
+            connection_generation=1,
+            sequence=0,
+            direction=Direction.INBOUND,
+            kind=EventKind.SAY,
+            canonical_text="Alice says, hello",
+            plain_text="Alice says, hello",
+            display_text="Alice says, hello",
+        )
+    )
+    presentation = tui.active_view.display._entry_presentations[0][0]
+    tui._border_frame_elapsed = 1 - presentation.phase_offset_seconds
+
+    assert tui.active_view.output_text()[0][:2] == ("fg:#ffffff", "Alice")
+    assert fragment_list_to_text(tui.active_view.display.formatted_text()).startswith("Alice")
+
+
+async def test_spoofed_speaker_is_permanently_reversed_with_speaker_effect() -> None:
+    tui = make_tui()
+    await add_speaker_effects(tui)
+    tui.active_view.display.resize(width=80, height=1)
+    event = Event(
+        session_id=tui.active_view.session.session_id,
+        world="alpha",
+        connection_generation=1,
+        sequence=0,
+        direction=Direction.INBOUND,
+        kind=EventKind.SAY,
+        canonical_text='Bob says, "I like grapes!"',
+        plain_text='Bob says, "I like grapes!"',
+        display_text='Bob says, "I like grapes!"',
+        spoof=SpoofAssessment(
+            status=SpoofStatus.SPOOFED,
+            speaker="Bob",
+            speaker_span=(0, 3),
+        ),
+        metadata={"message_text": 'Bob says, "I like grapes!"'},
+    )
+
+    tui.handle_event(event)
+    output = tui.active_view.output_text()
+    reversed_text = "".join(text for style, text in output if "reverse" in style)
+
+    assert reversed_text == "Bob"
+    assert fragment_list_to_text(output) == 'Bob says, "I like grapes!"'
+
+
 async def test_speaker_effect_cycles_are_anchored_to_event_arrival(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1884,6 +1978,32 @@ def test_inactive_world_events_increment_unread_until_switch() -> None:
     assert fragment_list_to_text(beta.display.formatted_text()) == "Someone says hello"
     tui.switch_world("beta")
     assert beta.unread_events == 0
+
+
+def test_nospoof_message_preserves_ansi_color_in_tui_output() -> None:
+    tui = make_tui(server="tinymush")
+    session = tui.active_view.session
+    event = Event(
+        session_id=session.session_id,
+        world=session.world,
+        connection_generation=1,
+        sequence=0,
+        direction=Direction.INBOUND,
+        kind=EventKind.SAY,
+        canonical_text='[Sender(#1)] Sender says, "\x1b[1;31mhi\x1b[0m"\r\n',
+        plain_text='[Sender(#1)] Sender says, "hi"\r\n',
+        display_text='Sender says, "\x1b[1;31mhi\x1b[0m"\r\n',
+        provenance=Provenance(sender_name="Sender", sender_dbref=1, adapter="tinymush"),
+        metadata={"message_text": 'Sender says, "hi"\r\n'},
+    )
+
+    tui.handle_event(event)
+
+    fragments = tui.active_view.display.formatted_text()
+    assert fragment_list_to_text(fragments) == 'Sender says, "hi"'
+    hi_style = next(style for style, text in fragments if text == "hi")
+    assert "ansired" in hi_style
+    assert "bold" in hi_style
 
 
 def test_more_count_is_visible_in_status_bar() -> None:

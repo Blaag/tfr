@@ -83,7 +83,8 @@ reloads and WebKit context changes, so the pairing URL remains a bearer secret
 within that identity until expiry. The temporary plaintext recovery credential
 is released from application-held references at expiry or revocation and is
 never persisted. Redemption sets an opaque `Secure`, `HttpOnly`,
-`SameSite=Strict`, host-only cookie. Only token
+`SameSite=Strict`, host-only cookie whose persistent expiration does not exceed
+the device credential's remaining lifetime. Only token
 digests and non-secret device metadata are persisted, in an owner-only directory
 and regular file with atomic replacement. `tfr devices` lists paired devices and
 `tfr revoke-device` invalidates a credential and closes its active sockets.
@@ -108,10 +109,23 @@ that fixed allowlist.
 The browser receives an explicit projection rather than serialized internal
 events. Telnet, plugin-internal, and agent audit events are excluded; arbitrary
 metadata, model/provider details, session IDs, and canonical ANSI text are not
-sent. Visible text is reduced to safe plain text and the PWA constructs DOM text
-nodes rather than interpreting world output as HTML. Static responses use a
-restrictive Content Security Policy and authenticated responses are marked
-`no-store`. The service worker caches only the public application shell.
+sent. Visible text is projected into bounded runs containing text plus an
+allowlist of validated colors, emphasis flags, and semantic roles. The PWA
+constructs DOM text nodes and applies only TFR-owned classes and validated color
+properties rather than interpreting world output as HTML or CSS. Static
+responses use a restrictive Content Security Policy and authenticated responses
+are marked `no-store`. The service worker caches only the public application
+shell.
+
+Portable plugin presentation accepts only versioned, bounded primitives. The
+initial schema permits one grapheme-aligned text range, static foreground/bold/
+underline, and a bounded foreground-color timeline with finite repetition and
+explicit fallbacks. The Gateway never sends plugin Python, JavaScript, CSS,
+HTML, selectors, DOM commands, terminal controls, or arbitrary expressions.
+Invalid, unsupported, or oversized programs fail open to readable ordinary text.
+The PWA also caps concurrently started transcript animations. See
+[`PRESENTATION.md`](PRESENTATION.md) for the capability, fallback, accessibility,
+and resource-boundary design.
 
 The PWA stores only non-command interface state such as the selected world and
 Gateway identity in browser storage. Drafts, command history, transcript data,

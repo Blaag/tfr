@@ -1,7 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createPairingSubmission, submitPairing } from "../src/tfr/web/pairing.mjs";
+import {
+  createPairingSubmission,
+  pairingCodeFromLink,
+  submitPairing,
+} from "../src/tfr/web/pairing.mjs";
+
+test("extracts a pairing code only from a same-origin TFR link", () => {
+  const origin = "https://gateway.example.ts.net";
+  assert.equal(
+    pairingCodeFromLink(`${origin}/#pair=fragment-secret`, origin),
+    "fragment-secret",
+  );
+  assert.equal(pairingCodeFromLink("not a link", origin), null);
+  assert.equal(pairingCodeFromLink("https://evil.example/#pair=fragment-secret", origin), null);
+  assert.equal(pairingCodeFromLink(`${origin}/other#pair=fragment-secret`, origin), null);
+  assert.equal(pairingCodeFromLink(`${origin}/?leak=1#pair=fragment-secret`, origin), null);
+  assert.equal(pairingCodeFromLink(`${origin}/#pair=one&pair=two`, origin), null);
+  assert.equal(pairingCodeFromLink(`${origin}/#other=fragment-secret`, origin), null);
+});
 
 test("pairing uses a hidden top-level form post", () => {
   const created = [];

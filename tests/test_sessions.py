@@ -20,7 +20,16 @@ from tfr.config import (
     WorldDefaults,
 )
 from tfr.core import CommandBus, EventBus
-from tfr.events import Actor, ActorType, CommandRequest, Direction, Event, EventKind
+from tfr.events import (
+    Actor,
+    ActorType,
+    CommandRequest,
+    Direction,
+    Event,
+    EventKind,
+    SpoofReason,
+    SpoofStatus,
+)
 from tfr.sessions import SessionState, TextFramer, WorldSession
 from tfr.telnet import Command, Option
 
@@ -337,6 +346,189 @@ async def test_session_preserves_canonical_nospoof_and_projects_display() -> Non
     assert event.provenance is not None
     assert event.provenance.sender_dbref == 12
     assert event.metadata["message_text"] == 'Alice says, "Hi"\r\n'
+
+
+async def test_session_detects_newline_injected_say_without_second_nospoof_prefix() -> None:
+    sink = MemorySink()
+    event_bus = EventBus([sink])
+    command_bus = CommandBus()
+    message = (
+        '[Black2(#735)] Black2 says, "Hello"\r\n'
+        'Bob says, "I like grapes!"\r\n'
+    )
+
+    async def handle(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(message.encode())
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    host, port = server_address(server)
+    session = make_session(
+        world="global",
+        host=host,
+        port=port,
+        sink=sink,
+        event_bus=event_bus,
+        command_bus=command_bus,
+        server="tinymush",
+        login=LoginConfig(character="Black2", password="secret"),
+        provenance=ProvenanceConfig(nospoof=True),
+    )
+
+    try:
+        await session.start()
+        await session.wait_closed()
+    finally:
+        await session.stop()
+        server.close()
+        await server.wait_closed()
+
+    inbound = [event for event in sink.events if event.direction is Direction.INBOUND]
+    assert len(inbound) == 2
+    assert inbound[0].spoof is not None
+    assert inbound[0].spoof.status is SpoofStatus.NOT_SPOOFED
+    assert inbound[1].provenance is None
+    assert inbound[1].spoof is not None
+    assert inbound[1].spoof.status is SpoofStatus.SPOOFED
+    assert inbound[1].spoof.reason is SpoofReason.MISSING_NOSPOOF_PREFIX
+    assert inbound[1].spoof.suspected_sender is None
+    assert inbound[1].spoof.attribution_confidence is None
+    assert inbound[1].spoof.speaker == "Bob"
+    assert inbound[1].spoof.speaker_span == (0, 3)
+
+
+async def test_session_does_not_flag_standalone_unprefixed_speech() -> None:
+    sink = MemorySink()
+    event_bus = EventBus([sink])
+    command_bus = CommandBus()
+    message = 'Black2 says, "Hello"\r\nBob says, "I like grapes!"\r\n'
+
+    async def handle(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(message.encode())
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    host, port = server_address(server)
+    session = make_session(
+        world="global",
+        host=host,
+        port=port,
+        sink=sink,
+        event_bus=event_bus,
+        command_bus=command_bus,
+        server="tinymush",
+        login=LoginConfig(character="Black2", password="secret"),
+        provenance=ProvenanceConfig(nospoof=True),
+    )
+
+    try:
+        await session.start()
+        await session.wait_closed()
+    finally:
+        await session.stop()
+        server.close()
+        await server.wait_closed()
+
+    inbound = [event for event in sink.events if event.direction is Direction.INBOUND]
+    assert len(inbound) == 2
+    assert all(event.spoof is None for event in inbound)
+
+
+def test_session_bounds_remembered_nospoof_senders() -> None:
+    session = make_session(
+        world="global",
+        host="127.0.0.1",
+        port=1,
+        sink=MemorySink(),
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        server="tinymush",
+    )
+
+    for index in range(300):
+        session._remember_nospoof_sender(f"Sender {index}")
+
+    assert len(session._nospoof_senders) == 256
+    assert session._nospoof_senders[0] == "Sender 44"
+    assert session._nospoof_senders[-1] == "Sender 299"
+
+
+async def test_outbound_command_clears_pending_nospoof_continuation() -> None:
+    sink = MemorySink()
+    event_bus = EventBus([sink])
+    command_bus = CommandBus()
+    session = make_session(
+        world="global",
+        host="127.0.0.1",
+        port=1,
+        sink=sink,
+        event_bus=event_bus,
+        command_bus=command_bus,
+        server="tinymush",
+    )
+    writer = SimpleNamespace(write=lambda _data: None, drain=AsyncMock())
+
+    await session._publish_inbound('[Black2(#735)] Black2 says, "Hello"\r\n')
+    await session._send_command(  # type: ignore[arg-type]
+        writer,
+        CommandRequest(
+            session_id=session.session_id,
+            world=session.world,
+            actor=Actor(ActorType.HUMAN, "operator"),
+            text="!nospoof",
+        ),
+    )
+    await session._publish_inbound('Bob says, "Hello"\r\n')
+
+    inbound = [event for event in sink.events if event.direction is Direction.INBOUND]
+    assert inbound[-1].spoof is None
+
+
+async def test_unrelated_line_does_not_hide_missing_nospoof_prefix() -> None:
+    sink = MemorySink()
+    session = make_session(
+        world="global",
+        host="127.0.0.1",
+        port=1,
+        sink=sink,
+        event_bus=EventBus([sink]),
+        command_bus=CommandBus(),
+        server="tinymux",
+    )
+
+    await session._publish_inbound('[Black2(#735)] Black2 says, "Hello"\r\n')
+    await session._publish_inbound("An unrelated line.\r\n")
+    await session._publish_inbound('Bob says, "Hello"\r\n')
+
+    inbound = [event for event in sink.events if event.direction is Direction.INBOUND]
+    assert inbound[-1].spoof is not None
+    assert inbound[-1].spoof.status is SpoofStatus.SPOOFED
+    assert inbound[-1].spoof.reason is SpoofReason.MISSING_NOSPOOF_PREFIX
+    assert inbound[-1].spoof.suspected_sender is None
+
+
+async def test_terse_nospoof_prefix_arms_missing_prefix_detection() -> None:
+    sink = MemorySink()
+    session = make_session(
+        world="global",
+        host="127.0.0.1",
+        port=1,
+        sink=sink,
+        event_bus=EventBus([sink]),
+        command_bus=CommandBus(),
+        server="tinymux",
+    )
+
+    await session._publish_inbound('[#735] Black2 says, "Hello"\r\n')
+    await session._publish_inbound('Bob says, "Injected"\r\n')
+
+    inbound = [event for event in sink.events if event.direction is Direction.INBOUND]
+    assert inbound[-1].spoof is not None
+    assert inbound[-1].spoof.reason is SpoofReason.MISSING_NOSPOOF_PREFIX
 
 
 async def test_idle_command_resets_after_human_output() -> None:

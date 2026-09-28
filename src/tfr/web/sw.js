@@ -1,8 +1,17 @@
-const CACHE_NAME = "tfr-shell-web1-v8";
+const CACHE_NAME = "tfr-shell-web1-v42";
 const SHELL = [
   "/",
   "/app.mjs",
+  "/command.mjs",
+  "/connection-lifecycle.mjs",
+  "/event-details.mjs",
+  "/history-notice.mjs",
+  "/linkify.mjs",
+  "/motion.mjs",
   "/pairing.mjs",
+  "/presentation.mjs",
+  "/swipe.mjs",
+  "/text-runs.mjs",
   "/styles.css",
   "/manifest.webmanifest",
   "/icon.svg",
@@ -12,16 +21,22 @@ const SHELL = [
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL)));
-  self.skipWaiting();
+});
+
+self.addEventListener("message", (event) => {
+  if (event.origin !== self.location.origin) return;
+  if (event.data?.type === "SKIP_WAITING") self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))),
-    ),
+    caches
+      .keys()
+      .then((keys) =>
+        Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))),
+      )
+      .then(() => self.clients.claim()),
   );
-  self.clients.claim();
 });
 
 self.addEventListener("fetch", (event) => {
