@@ -1072,8 +1072,8 @@ async function clearLocalData() {
   state.worlds = [];
   state.gatewayId = null;
   state.selectedWorld = null;
-  state.drafts = {};
-  state.commandHistory = {};
+  state.drafts = new Map();
+  state.commandHistory = new Map();
   state.pending.clear();
   state.reading.clear();
   for (const key of [
