@@ -1,4 +1,4 @@
-const CACHE_NAME = "tfr-shell-web1-v41";
+const CACHE_NAME = "tfr-shell-web1-v42";
 const SHELL = [
   "/",
   "/app.mjs",
@@ -24,6 +24,7 @@ self.addEventListener("install", (event) => {
 });
 
 self.addEventListener("message", (event) => {
+  if (event.origin !== self.location.origin) return;
   if (event.data?.type === "SKIP_WAITING") self.skipWaiting();
 });
 

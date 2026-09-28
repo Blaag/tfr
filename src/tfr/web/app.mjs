@@ -81,8 +81,8 @@ const state = {
   unread: new Map(),
   reading: new Map(),
   selectedWorld: readStorage("tfr.selectedWorld"),
-  drafts: {},
-  commandHistory: {},
+  drafts: new Map(),
+  commandHistory: new Map(),
   historyIndex: null,
   pending: new Map(),
   toastTimer: null,
@@ -372,7 +372,7 @@ function updateWorldHeader() {
 function restoreHistoryCommand(text) {
   if (!state.selectedWorld) return;
   elements.commandInput.value = text;
-  state.drafts[state.selectedWorld] = text.slice(0, MAX_STORED_COMMAND_CHARACTERS);
+  state.drafts.set(state.selectedWorld, text.slice(0, MAX_STORED_COMMAND_CHARACTERS));
   state.historyIndex = null;
   elements.historyDialog.close();
   window.requestAnimationFrame(() => {
@@ -387,7 +387,7 @@ function openHistoryDialog() {
   if (!world || elements.historyDialog.open) return;
   elements.commandInput.blur();
   elements.historyDialogWorld.textContent = world.world;
-  const history = state.commandHistory[world.world] || [];
+  const history = state.commandHistory.get(world.world) || [];
   const buttons = [...history].reverse().map((text) => {
     const button = document.createElement("button");
     button.type = "button";
@@ -434,9 +434,9 @@ function renderWorlds() {
 
 function selectWorld(worldName, { focusInput = true } = {}) {
   if (state.selectedWorld) {
-    state.drafts[state.selectedWorld] = elements.commandInput.value.slice(
-      0,
-      MAX_STORED_COMMAND_CHARACTERS,
+    state.drafts.set(
+      state.selectedWorld,
+      elements.commandInput.value.slice(0, MAX_STORED_COMMAND_CHARACTERS),
     );
     readingState().scrollTop = elements.transcript.scrollTop;
   }
@@ -444,7 +444,7 @@ function selectWorld(worldName, { focusInput = true } = {}) {
   safeStore("tfr.selectedWorld", worldName);
   state.unread.set(worldName, 0);
   state.historyIndex = null;
-  elements.commandInput.value = state.drafts[worldName] || "";
+  elements.commandInput.value = state.drafts.get(worldName) || "";
   updateWorldHeader();
   renderWorlds();
   renderTranscript({ restorePosition: true });
@@ -800,7 +800,7 @@ function handleMessage(message) {
     }
     if (state.selectedWorld) {
       safeStore("tfr.selectedWorld", state.selectedWorld);
-      elements.commandInput.value = state.drafts[state.selectedWorld] || "";
+      elements.commandInput.value = state.drafts.get(state.selectedWorld) || "";
     }
     showHistoryNotice("");
     renderWorlds();
@@ -849,7 +849,10 @@ function handleMessage(message) {
     if (message.ok !== true) {
       showToast(message.error || "Command was rejected", 4200);
       if (pending) {
-        state.drafts[pending.world] = pending.text.slice(0, MAX_STORED_COMMAND_CHARACTERS);
+        state.drafts.set(
+          pending.world,
+          pending.text.slice(0, MAX_STORED_COMMAND_CHARACTERS),
+        );
         if (pending.world === state.selectedWorld) elements.commandInput.value = pending.text;
       }
     }
@@ -944,7 +947,10 @@ function connect() {
     updateWorldHeader();
     if (state.pending.size > 0) {
       for (const pending of state.pending.values()) {
-        state.drafts[pending.world] = pending.text.slice(0, MAX_STORED_COMMAND_CHARACTERS);
+        state.drafts.set(
+          pending.world,
+          pending.text.slice(0, MAX_STORED_COMMAND_CHARACTERS),
+        );
         if (pending.world === state.selectedWorld) elements.commandInput.value = pending.text;
       }
       state.pending.clear();
@@ -1013,13 +1019,12 @@ function sendCommand(event) {
     return;
   }
 
-  const history = Array.isArray(state.commandHistory[world.world])
-    ? state.commandHistory[world.world]
-    : [];
+  const storedHistory = state.commandHistory.get(world.world);
+  const history = Array.isArray(storedHistory) ? storedHistory : [];
   const storedText = text.slice(0, MAX_STORED_COMMAND_CHARACTERS);
   if (history.at(-1) !== storedText) history.push(storedText);
-  state.commandHistory[world.world] = history.slice(-MAX_COMMAND_HISTORY);
-  state.drafts[world.world] = "";
+  state.commandHistory.set(world.world, history.slice(-MAX_COMMAND_HISTORY));
+  state.drafts.set(world.world, "");
   state.historyIndex = null;
   elements.commandInput.value = "";
   window.requestAnimationFrame(() => {
@@ -1031,7 +1036,7 @@ function sendCommand(event) {
 function moveHistory(direction) {
   const world = currentWorld();
   if (!world) return;
-  const history = state.commandHistory[world.world] || [];
+  const history = state.commandHistory.get(world.world) || [];
   if (!history.length) return;
   if (state.historyIndex === null) {
     state.historyIndex = direction < 0 ? history.length - 1 : history.length;
@@ -1258,9 +1263,9 @@ elements.sendButton.addEventListener(
 );
 elements.commandInput.addEventListener("input", () => {
   if (!state.selectedWorld) return;
-  state.drafts[state.selectedWorld] = elements.commandInput.value.slice(
-    0,
-    MAX_STORED_COMMAND_CHARACTERS,
+  state.drafts.set(
+    state.selectedWorld,
+    elements.commandInput.value.slice(0, MAX_STORED_COMMAND_CHARACTERS),
   );
   state.historyIndex = null;
 });
