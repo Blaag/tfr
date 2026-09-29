@@ -226,3 +226,18 @@ def test_managed_restart_uses_current_release(
         "--socket",
         "/tmp/tfr.sock",
     ]
+
+
+def test_update_activation_does_not_rewrite_a_nonstandard_launcher(tmp_path: Path) -> None:
+    layout = InstallationLayout.defaults(root=tmp_path / "tfr", bin_directory=tmp_path / "bin")
+    first = f"1.2.3+git.{'a' * 40}"
+    second = f"1.2.3+git.{'b' * 40}"
+    stage_release(layout, first, "a" * 40)
+    stage_release(layout, second, "b" * 40)
+    layout.activate(first)
+    launcher = layout.launcher.read_text(encoding="utf-8")
+
+    activated = layout.activate(second, write_launcher=False)
+
+    assert activated.metadata.release_id == second
+    assert layout.launcher.read_text(encoding="utf-8") == launcher

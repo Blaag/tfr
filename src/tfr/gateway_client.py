@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import ssl
 import sys
@@ -14,6 +15,7 @@ from tfr.agents import AgentInspection
 from tfr.config import (
     GatewayReconnectConfig,
     UiConfiguration,
+    UpdateConfig,
     WorldCapabilitiesConfig,
     WorldConfig,
     WorldDefaults,
@@ -38,14 +40,26 @@ from tfr.gateway_transport import (
     validate_tcp_endpoint,
 )
 from tfr.installations import managed_restart_command
+from tfr.managed_updates import (
+    StagedManagedUpdate,
+    activate_managed_update,
+    stage_managed_update,
+)
 from tfr.plugin_sources import PluginUpdateChecker, load_plugin_sources
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.sessions import SessionManager, SessionState
-from tfr.updates import BuildIdentity, UpdateChecker, UpdateError
+from tfr.updates import (
+    BuildIdentity,
+    ReleaseManifest,
+    UpdateChecker,
+    UpdateError,
+    current_build,
+)
 
 _RESTART_GATEWAY_ID = "TFR_RESTART_GATEWAY_ID"
 _RESTART_CURSOR = "TFR_RESTART_CURSOR"
 _RESTART_WORLD = "TFR_RESTART_WORLD"
+_UPDATE_RESTART = "TFR_UPDATE_RESTART"
 
 
 class GatewayDisconnectedError(ConnectionError):
@@ -55,6 +69,8 @@ class GatewayDisconnectedError(ConnectionError):
 ReconnectFactory = Callable[[UUID, int], Awaitable["GatewayClient"]]
 ConnectHandler = Callable[[], Awaitable[None]]
 DisconnectHandler = Callable[[Exception], None]
+UpdatePrepareHandler = Callable[[Mapping[str, Any]], Awaitable[dict[str, Any]]]
+UpdateCommitHandler = Callable[[str], Awaitable[None]]
 
 
 class RemoteWorldSession:
@@ -231,12 +247,17 @@ class GatewayClient:
         self.command_bus = RemoteCommandBus(self)
         self.agents: RemoteAgentRuntime | None = None
         self._write_lock = asyncio.Lock()
-        self._pending: dict[UUID, asyncio.Future[None]] = {}
+        self._pending: dict[UUID, asyncio.Future[dict[str, Any] | None]] = {}
         self._pump: asyncio.Task[None] | None = None
         self._reconnect_factory: ReconnectFactory | None = None
         self.connect_handler: ConnectHandler | None = None
         self.disconnect_handler: DisconnectHandler | None = None
+        self.update_prepare_handler: UpdatePrepareHandler | None = None
+        self.update_commit_handler: UpdateCommitHandler | None = None
+        self.update_restart_handler: Callable[[], None] | None = None
+        self.update_abort_handler: Callable[[str], None] | None = None
         self._reconnect_lock = asyncio.Lock()
+        self._gateway_request_tasks: set[asyncio.Task[None]] = set()
 
     @classmethod
     async def connect(
@@ -358,6 +379,8 @@ class GatewayClient:
                 "client_id": str(client_id),
                 "gateway_id": str(gateway_id) if gateway_id is not None else None,
                 "after_cursor": after_cursor,
+                "build": current_build().as_dict(),
+                "managed_updates": managed_restart_command(()) is not None,
             }
             if auth_token is not None:
                 hello_request["auth_token"] = auth_token
@@ -459,6 +482,11 @@ class GatewayClient:
                 await self._pump
             self._pump = None
         self._fail_pending(GatewayDisconnectedError("gateway client stopped"))
+        for task in self._gateway_request_tasks:
+            task.cancel()
+        if self._gateway_request_tasks:
+            await asyncio.gather(*tuple(self._gateway_request_tasks), return_exceptions=True)
+        self._gateway_request_tasks.clear()
         self.writer.close()
         with contextlib.suppress(Exception):
             await self.writer.wait_closed()
@@ -593,6 +621,15 @@ class GatewayClient:
         request_id = uuid4()
         await self._request({"type": "ping", "request_id": str(request_id)}, request_id)
 
+    async def update(self) -> dict[str, Any]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "update", "request_id": str(request_id)}, request_id
+        )
+        if result is None:
+            raise GatewayProtocolError("Gateway returned no update result")
+        return result
+
     async def verify_connection(self, *, timeout: float) -> bool:
         """Actively confirm the connection is alive with a bounded ping round trip.
 
@@ -608,14 +645,18 @@ class GatewayClient:
             return False
         return True
 
-    async def _request(self, message: dict[str, Any], request_id: UUID) -> None:
+    async def _request(
+        self, message: dict[str, Any], request_id: UUID
+    ) -> dict[str, Any] | None:
         if self._pump is None or self._pump.done():
             raise GatewayDisconnectedError("gateway client is not running")
-        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        future: asyncio.Future[dict[str, Any] | None] = (
+            asyncio.get_running_loop().create_future()
+        )
         self._pending[request_id] = future
         try:
             await write_message(self.writer, message, lock=self._write_lock)
-            await future
+            return await future
         finally:
             self._pending.pop(request_id, None)
 
@@ -637,6 +678,16 @@ class GatewayClient:
                     await self.event_bus.publish(event)
                 elif message_type == "ack":
                     self._handle_ack(message)
+                elif message_type == "update_prepare":
+                    self._spawn_gateway_request(self._handle_update_prepare(message))
+                elif message_type == "update_commit":
+                    self._spawn_gateway_request(self._handle_update_commit(message))
+                elif message_type == "update_abort":
+                    error = message.get("error")
+                    if not isinstance(error, str):
+                        raise GatewayProtocolError("Gateway update abort message is invalid")
+                    if self.update_abort_handler is not None:
+                        self.update_abort_handler(error)
                 elif message_type == "error":
                     raise GatewayProtocolError(str(message.get("message", "gateway error")))
                 else:
@@ -659,9 +710,71 @@ class GatewayClient:
         if future is None or future.done():
             return
         if message.get("ok") is True:
-            future.set_result(None)
+            result = message.get("result")
+            if result is not None and not isinstance(result, dict):
+                raise GatewayProtocolError("gateway acknowledgement result must be an object")
+            future.set_result(result)
         else:
             future.set_exception(ValueError(str(message.get("error", "gateway request failed"))))
+
+    async def _handle_update_prepare(self, message: Mapping[str, Any]) -> None:
+        await self._handle_gateway_update_request(message, prepare=True)
+
+    async def _handle_update_commit(self, message: Mapping[str, Any]) -> None:
+        await self._handle_gateway_update_request(message, prepare=False)
+
+    def _spawn_gateway_request(self, coroutine: Awaitable[None]) -> None:
+        task = asyncio.create_task(coroutine, name="tfr-gateway-update-request")
+        self._gateway_request_tasks.add(task)
+        task.add_done_callback(self._gateway_request_done)
+
+    def _gateway_request_done(self, task: asyncio.Task[None]) -> None:
+        self._gateway_request_tasks.discard(task)
+        if not task.cancelled():
+            task.exception()
+
+    async def _handle_gateway_update_request(
+        self, message: Mapping[str, Any], *, prepare: bool
+    ) -> None:
+        try:
+            request_id = UUID(str(message["request_id"]))
+            if prepare:
+                if self.update_prepare_handler is None:
+                    raise ValueError("this UI cannot stage managed updates")
+                manifest = message.get("manifest")
+                if not isinstance(manifest, dict):
+                    raise ValueError("Gateway update manifest is invalid")
+                result = await self.update_prepare_handler(manifest)
+            else:
+                if self.update_commit_handler is None:
+                    raise ValueError("this UI cannot activate managed updates")
+                release_id = message.get("release_id")
+                if not isinstance(release_id, str) or not release_id:
+                    raise ValueError("Gateway update release ID is invalid")
+                await self.update_commit_handler(release_id)
+                result = None
+        except (KeyError, OSError, RuntimeError, ValueError) as exc:
+            await write_message(
+                self.writer,
+                {
+                    "type": "ack",
+                    "request_id": str(message.get("request_id", "")),
+                    "ok": False,
+                    "error": str(exc),
+                },
+                lock=self._write_lock,
+            )
+            return
+        acknowledgement: dict[str, Any] = {
+            "type": "ack",
+            "request_id": str(request_id),
+            "ok": True,
+        }
+        if result is not None:
+            acknowledgement["result"] = result
+        await write_message(self.writer, acknowledgement, lock=self._write_lock)
+        if not prepare and self.update_restart_handler is not None:
+            self.update_restart_handler()
 
     def _update_session(self, event: Event) -> None:
         if event.kind.value != "connection":
@@ -716,12 +829,17 @@ class GatewayUiRuntime:
         plugins: PluginManager,
         *,
         reconnect_config: GatewayReconnectConfig | None = None,
+        update_config: UpdateConfig | None = None,
         notify: Callable[[str], None] | None = None,
     ) -> None:
         self.client = client
         self.plugins = plugins
         self.reconnect_config = reconnect_config or GatewayReconnectConfig()
         self.notify = notify or (lambda _text: None)
+        self.update_config = update_config
+        self._staged_update: StagedManagedUpdate | None = None
+        self._update_transaction_active = False
+        self._update_restart_expected = False
         self._supervisor_task: asyncio.Task[None] | None = None
         self._stopping = False
         self._gateway_connected = False
@@ -730,6 +848,9 @@ class GatewayUiRuntime:
         self._connection_tasks: set[asyncio.Task[None]] = set()
         self.client.connect_handler = self._handle_connected
         self.client.disconnect_handler = self._handle_disconnect
+        self.client.update_prepare_handler = self._prepare_update
+        self.client.update_commit_handler = self._commit_update
+        self.client.update_abort_handler = self._abort_update
         self.client.event_bus.add_processor(self.plugins.process_event)
 
     async def start(self) -> None:
@@ -775,16 +896,94 @@ class GatewayUiRuntime:
             await self._reconcile_world_states()
             return self._format_reconnect_message(restored)
 
+    async def request_update(self) -> dict[str, Any]:
+        self._update_transaction_active = True
+        try:
+            return await self.client.update()
+        except BaseException:
+            self._update_transaction_active = False
+            raise
+
+    async def _prepare_update(self, manifest_value: Mapping[str, Any]) -> dict[str, Any]:
+        if self.update_config is None:
+            raise ValueError("stable updates are unavailable")
+        self._update_transaction_active = True
+        try:
+            manifest = ReleaseManifest.from_json(
+                json.dumps(dict(manifest_value), separators=(",", ":")).encode()
+            )
+        except (TypeError, ValueError, UpdateError) as exc:
+            raise ValueError(f"Gateway update manifest is invalid: {exc}") from exc
+        self.notify(
+            f"Preparing UI update {manifest.version}. {manifest.release_url}"
+        )
+        self._staged_update = await stage_managed_update(
+            self.update_config, expected_manifest=manifest
+        )
+        return {
+            "version": self._staged_update.version,
+            "commit": self._staged_update.commit,
+            "release_url": self._staged_update.release_url,
+        }
+
+    async def _commit_update(self, release_id: str) -> None:
+        if self._staged_update is None or self._staged_update.release_id != release_id:
+            raise ValueError("UI has not staged the requested release")
+        await asyncio.to_thread(activate_managed_update, release_id)
+        self._update_restart_expected = True
+        self.notify(
+            f"Activated UI {self._staged_update.version}. "
+            f"{self._staged_update.release_url}"
+        )
+
+    def _abort_update(self, error: str) -> None:
+        self._update_transaction_active = False
+        self._staged_update = None
+        self.notify(error)
+
     async def _handle_connected(self) -> None:
         await self._set_gateway_connected(True)
 
     def _handle_disconnect(self, _error: Exception) -> None:
+        if self._update_restart_expected and not self._stopping:
+            task = asyncio.create_task(
+                self._recover_after_update(), name="tfr-gateway-update-reconnect"
+            )
+            self._connection_tasks.add(task)
+            task.add_done_callback(self._connection_task_done)
+            return
+        self._update_transaction_active = False
         task = asyncio.create_task(
             self._set_gateway_connected(False, intentional=self._stopping),
             name="tfr-gateway-disconnected-event",
         )
         self._connection_tasks.add(task)
         task.add_done_callback(self._connection_task_done)
+
+    async def _recover_after_update(self) -> None:
+        await self._set_gateway_connected(False)
+        last_error: Exception | None = None
+        for _attempt in range(120):
+            if self._stopping:
+                return
+            try:
+                restored = await self.client.reconnect()
+            except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+                last_error = exc
+                await asyncio.sleep(1)
+                continue
+            self._update_restart_expected = False
+            self._update_transaction_active = False
+            await self._set_gateway_connected(True)
+            await self._reconcile_world_states()
+            self.notify(self._format_reconnect_message(restored))
+            return
+        self._update_restart_expected = False
+        self._update_transaction_active = False
+        self.notify(
+            "Gateway did not return after the update"
+            + (f": {last_error}" if last_error is not None else "")
+        )
 
     def _connection_task_done(self, task: asyncio.Task[None]) -> None:
         self._connection_tasks.discard(task)
@@ -835,6 +1034,8 @@ class GatewayUiRuntime:
                 await asyncio.sleep(config.heartbeat_seconds)
                 if self._stopping:
                     return
+                if self._update_transaction_active:
+                    continue
                 alive = await self.client.verify_connection(timeout=config.ping_timeout_seconds)
                 if alive or self._stopping:
                     continue
@@ -887,23 +1088,23 @@ async def run_gateway_ui(
 ) -> int:
     from tfr.tui import TfrTui
 
-    resume_gateway_id, resume_world = _restart_state_from_environment()
+    resume_gateway_id, resume_world, update_restart = _restart_state_from_environment()
     connection_options = {
         "show_nospoof_prefix": configuration.main.ui.show_nospoof_prefix,
         "gateway_id": resume_gateway_id,
         # A replacement UI needs retained history to rebuild its in-memory display.
         "after_cursor": None,
     }
-    if gateway_host is None:
-        client = await GatewayClient.connect(
-            path or default_gateway_socket(),
-            **connection_options,
-        )
-    else:
+    async def connect() -> GatewayClient:
+        if gateway_host is None:
+            return await GatewayClient.connect(
+                path or default_gateway_socket(),
+                **connection_options,
+            )
         validate_tcp_endpoint(gateway_host, gateway_port)
         if token_file is None:
             raise ValueError("network gateway connection requires --token-file")
-        client = await GatewayClient.connect_tcp(
+        return await GatewayClient.connect_tcp(
             gateway_host,
             gateway_port,
             auth_token=load_gateway_token(token_file),
@@ -911,6 +1112,22 @@ async def run_gateway_ui(
             server_hostname=tls_server_name,
             **connection_options,
         )
+
+    maximum_attempts = 120 if update_restart else 30 if resume_gateway_id is not None else 120
+    for attempt in range(maximum_attempts):
+        try:
+            client = await connect()
+            break
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            update_in_progress = "Gateway update in progress" in str(exc)
+            if (
+                not update_restart
+                and resume_gateway_id is None
+                and not update_in_progress
+                or attempt + 1 == maximum_attempts
+            ):
+                raise
+            await asyncio.sleep(1)
     manager = SessionManager(client.sessions)  # type: ignore[arg-type]
     try:
         extra_plugins, plugin_source_failures, plugin_source_notices = await load_plugin_sources(
@@ -955,6 +1172,7 @@ async def run_gateway_ui(
         client,
         plugins,
         reconnect_config=configuration.main.ui.gateway_reconnect,
+        update_config=configuration.main.updates,
     )
     update_checker = UpdateChecker(configuration.main.updates)
     plugin_update_checker = PluginUpdateChecker(
@@ -977,7 +1195,6 @@ async def run_gateway_ui(
         pager_enabled=configuration.main.ui.pager.enabled,
         pager_overlap=configuration.main.ui.pager.overlap_lines,
         recent_input_lines=configuration.main.ui.recent_input_lines,
-        mouse_mode=configuration.main.ui.mouse_mode,
         animations_enabled=configuration.main.ui.animations_enabled,
         low_bandwidth=configuration.main.ui.low_bandwidth,
         output_color=configuration.main.ui.output_color,
@@ -998,6 +1215,12 @@ async def run_gateway_ui(
         initial_scroll_to_end=True,
     )
     runtime.notify = lambda text: tui.add_notice(tui.active_alias, text)
+    def restart_after_update() -> None:
+        tui.update_restart_requested = True
+        if tui.application.is_running:
+            tui.application.exit(result=0)
+
+    client.update_restart_handler = restart_after_update
     if resume_world in tui.views:
         tui.switch_world(resume_world)
     for message in plugin_source_messages:
@@ -1013,9 +1236,11 @@ async def run_gateway_ui(
             "Earlier gateway history is no longer retained",
         )
     result = await tui.run()
-    if tui.restart_requested:
+    if tui.restart_requested or getattr(tui, "update_restart_requested", False):
         os.environ[_RESTART_GATEWAY_ID] = str(client.gateway_id)
         os.environ[_RESTART_WORLD] = tui.active_alias
+        if getattr(tui, "update_restart_requested", False):
+            os.environ[_UPDATE_RESTART] = "1"
         restart = managed_restart_command(sys.argv[1:])
         if restart is None:
             restart = [sys.executable, "-I", "-m", "tfr", *sys.argv[1:]]
@@ -1023,14 +1248,15 @@ async def run_gateway_ui(
     return result
 
 
-def _restart_state_from_environment() -> tuple[UUID | None, str | None]:
+def _restart_state_from_environment() -> tuple[UUID | None, str | None, bool]:
     gateway_value = os.environ.pop(_RESTART_GATEWAY_ID, None)
     os.environ.pop(_RESTART_CURSOR, None)
     world = os.environ.pop(_RESTART_WORLD, None)
+    update_restart = os.environ.pop(_UPDATE_RESTART, None) == "1"
     if gateway_value is None:
-        return None, None
+        return None, None, update_restart
     try:
         gateway_id = UUID(gateway_value)
     except ValueError:
-        return None, None
-    return gateway_id, world
+        return None, None, update_restart
+    return gateway_id, world, update_restart

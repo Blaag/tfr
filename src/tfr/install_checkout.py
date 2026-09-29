@@ -426,6 +426,25 @@ def install_latest_stable(
         )
 
 
+def install_stable_manifest(
+    layout: InstallationLayout,
+    manifest: ReleaseManifest,
+    *,
+    python: str,
+    activate: bool = False,
+    source_url: str = _OFFICIAL_REPOSITORY_URL,
+) -> ReleaseMetadata:
+    """Install one already-validated stable manifest without fetching another."""
+    with stable_release_checkout(manifest, source_url=source_url) as identity:
+        return install_checkout(
+            identity.root,
+            layout,
+            python=python,
+            activate=activate,
+            provenance="stable-release",
+        )
+
+
 def _parse_tag_object(content: str) -> dict[str, str]:
     headers: dict[str, str] = {}
     for line in content.splitlines():

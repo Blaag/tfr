@@ -8,7 +8,6 @@ import os
 import secrets
 import shlex
 import signal
-import subprocess
 import sys
 import time
 import webbrowser
@@ -24,7 +23,7 @@ from prompt_toolkit import Application
 from prompt_toolkit.application import get_app
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.data_structures import Point
-from prompt_toolkit.filters import Condition
+from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input import Input
@@ -53,6 +52,7 @@ from tfr.image_art import (
     load_image_file,
     render_image,
 )
+from tfr.managed_updates import activate_managed_update, stage_managed_update
 from tfr.pager import (
     DisplayBuffer,
     FormattedRow,
@@ -94,7 +94,6 @@ _CORE_CLIENT_COMMANDS = frozenset(
         "help",
         "image",
         "lowbw",
-        "mouse",
         "n",
         "next",
         "nospoof",
@@ -118,6 +117,8 @@ class ServiceRuntime(Protocol):
     async def start(self) -> None: ...
 
     async def stop(self) -> None: ...
+
+    async def request_update(self) -> dict[str, Any]: ...
 
 
 @dataclass(slots=True)
@@ -144,51 +145,6 @@ def _row_text(row: FormattedRow) -> str:
 def _osc52_sequence(text: str) -> str:
     payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
     return f"\x1b]52;c;{payload}\x07"
-
-
-def _process_parent(pid: int) -> tuple[int, str] | None:
-    proc = Path("/proc") / str(pid)
-    try:
-        name = (proc / "comm").read_text(encoding="utf-8").strip()
-        status = (proc / "status").read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        try:
-            result = subprocess.run(
-                ("ps", "-o", "ppid=", "-o", "comm=", "-p", str(pid)),
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=1,
-            )
-            parent, name = result.stdout.strip().split(maxsplit=1)
-            return int(parent), Path(name).name
-        except (OSError, subprocess.SubprocessError, ValueError):
-            return None
-    parent_line = next((line for line in status.splitlines() if line.startswith("PPid:")), None)
-    if parent_line is None:
-        return None
-    try:
-        return int(parent_line.split()[1]), name
-    except (IndexError, ValueError):
-        return None
-
-
-def _running_under_mosh(pid: int | None = None) -> bool:
-    current = pid or os.getpid()
-    seen: set[int] = set()
-    while current > 1 and current not in seen and len(seen) < 64:
-        seen.add(current)
-        process = _process_parent(current)
-        if process is None:
-            return False
-        parent, name = process
-        if name == "mosh-server":
-            return True
-        current = parent
-    return False
-
-
-_MOSH_DETECTED_AT_IMPORT = _running_under_mosh()
 
 
 def _emit_commands(
@@ -533,7 +489,6 @@ class TfrTui:
         pager_enabled: bool,
         pager_overlap: int,
         recent_input_lines: int = 3,
-        mouse_mode: str = "auto",
         plugins: PluginManager | None = None,
         agents: AgentRuntime | None = None,
         service_runtime: ServiceRuntime | None = None,
@@ -566,8 +521,6 @@ class TfrTui:
             raise ValueError("boss-screen mode must be cycle, random, or locked")
         if boss_screen_mode == "locked" and boss_screen is None:
             raise ValueError("locked boss-screen mode requires a screen")
-        if mouse_mode not in {"auto", "terminal", "tfr"}:
-            raise ValueError("mouse mode must be auto, terminal, or tfr")
         self.manager = manager
         self.event_bus = event_bus
         self.command_bus = command_bus
@@ -592,6 +545,7 @@ class TfrTui:
         self.plugin_update_checker = plugin_update_checker
         self.gateway_build = gateway_build
         self.restart_requested = False
+        self.update_restart_requested = False
         self.animations_enabled = animations_enabled
         self.low_bandwidth = low_bandwidth
         self.theme: ResolvedTheme = resolve_theme(theme, output_color=output_color)
@@ -623,8 +577,6 @@ class TfrTui:
         self._startup_notices: list[tuple[str, str]] = []
         self.replay_mode = replay_mode
         self.recent_input_lines = recent_input_lines
-        self.mouse_mode = mouse_mode
-        self._mosh_detected = _MOSH_DETECTED_AT_IMPORT
         self.aliases = [session.world for session in sessions]
         self.world_switch_aliases: dict[str, str] = {}
         for session in sessions:
@@ -654,8 +606,12 @@ class TfrTui:
                 if text:
                     self._spawn(self.submit_text(world, text))
                 else:
-                    self.views[world].recent_commands.append("")
+                    view = self.views[world]
+                    view.recent_commands.append("")
+                    buffer.history_forward(count=1_000_000)
+                    buffer.document = Document()
                     self.application.invalidate()
+                    return True
                 return False
 
             self.views[alias] = WorldView(
@@ -768,7 +724,7 @@ class TfrTui:
             layout=Layout(root, focused_element=self.active_view.input_buffer),
             key_bindings=bindings,
             full_screen=True,
-            mouse_support=Condition(lambda: self.effective_mouse_mode == "tfr"),
+            mouse_support=True,
             style=Style.from_dict(dict(self.theme.styles)),
             before_render=self._before_render,
             input=input,
@@ -797,12 +753,6 @@ class TfrTui:
     @property
     def boss_mode(self) -> bool:
         return self.plugins.boss_active
-
-    @property
-    def effective_mouse_mode(self) -> str:
-        if self.mouse_mode == "auto":
-            return "terminal" if self._mosh_detected else "tfr"
-        return self.mouse_mode
 
     def _create_bindings(self) -> KeyBindings:
         bindings = KeyBindings()
@@ -891,9 +841,7 @@ class TfrTui:
 
         @bindings.add("c-l")
         def clear_screen(_event: Any) -> None:
-            self.inspector_agent = None
-            self.active_view.input_buffer.reset()
-            self.start_screen_clear(self.active_alias)
+            self.clear_screen(self.active_alias)
 
         @bindings.add("f8")
         def toggle_agent_inspector(_event: Any) -> None:
@@ -1159,6 +1107,14 @@ class TfrTui:
         self._sync_animation_task(restart=True)
         self.application.invalidate()
 
+    def clear_screen(self, alias: str) -> None:
+        view = self.views[alias]
+        self.inspector_agent = None
+        view.recent_commands.clear()
+        view.input_buffer.history_forward(count=1_000_000)
+        view.input_buffer.document = Document()
+        self.start_screen_clear(alias)
+
     def start_screen_clear(self, alias: str) -> None:
         view = self.views[alias]
         view.clear_selection()
@@ -1396,8 +1352,11 @@ class TfrTui:
         self._background_tasks.discard(task)
         if task.cancelled():
             return
-        if task.exception() is not None:
-            self.add_notice(self.active_alias, "Client operation failed")
+        if exception := task.exception():
+            self.add_notice(
+                self.active_alias,
+                f"Client operation failed: {type(exception).__name__}: {exception}",
+            )
 
     def switch_relative(self, amount: int) -> None:
         self.switch_world(self.aliases[(self.active_index + amount) % len(self.aliases)])
@@ -2089,8 +2048,6 @@ class TfrTui:
             self._handle_nospoof_command(alias, parameters)
         elif command == "lowbw":
             self._handle_low_bandwidth_command(alias, parameters)
-        elif command == "mouse":
-            self._handle_mouse_command(alias, parameters)
         elif command == "animations":
             self._handle_animations_command(alias, parameters)
         elif self.plugins is not None and await self.plugins.execute_command(
@@ -2123,13 +2080,13 @@ class TfrTui:
             "  /world ALIAS - switch worlds; /next (/n) and /previous (/p) also switch",
             "  /connect, /disconnect, /reconnect - manage the active connection",
             "  /image [--width N] [--ascii|--unicode] [--withcolor] [path] - send an image",
-            "  /clear [status|cycle|random|lock EFFECT] - clear output or select its effect",
+            "  /clear [status|cycle|random|lock EFFECT] - clear input/output or select effect",
             "  /recall X - show the last X retained lines for the active world",
             "  /end - return to live output",
             "  /nospoof show|hide|status - control NOSPOOF prefix visibility",
             "  /lowbw [on|off|status] - suppress continuous UI animation",
-            "  /mouse auto|terminal|tfr|status - choose who handles mouse input",
             "  /animations [on|off|status] - enable continuous UI effects",
+            "  /update - update TFR and stable-auto plugins on the Gateway and all connected UIs",
             "  /update status|check - inspect stable TFR and plugin releases",
             "  /plugins - show configured, loaded, and failed plugins",
             "  /agent status|inspect|pause|resume|trigger|close - manage agents",
@@ -2144,7 +2101,7 @@ class TfrTui:
             "  F6/Ctrl-Right next; left-click selects a world; drag copies output",
             "  Click an underlined http(s) link to open it in your browser",
             "  PageUp/PageDown scroll or page; End returns to live output",
-            "  Ctrl-L clear screen; Ctrl-R reconnect; F8 agent inspector",
+            "  Ctrl-L clear visible input/output; Ctrl-R reconnect; F8 agent inspector",
             "  Ctrl-Q quit; Ctrl-C interrupt",
             "",
             "World-switch aliases",
@@ -2187,8 +2144,8 @@ class TfrTui:
         return "\n".join(lines)
 
     async def _handle_update_command(self, alias: str, parameters: list[str]) -> None:
-        if parameters not in (["status"], ["check"]):
-            self.add_notice(alias, "Usage: /update status|check")
+        if parameters not in ([], ["status"], ["check"]):
+            self.add_notice(alias, "Usage: /update [status|check]")
             return
         core_enabled = self.update_checker is not None and self.update_checker.config.enabled
         plugins_enabled = (
@@ -2196,6 +2153,38 @@ class TfrTui:
         )
         if not core_enabled and not plugins_enabled:
             self.add_notice(alias, "Stable update checks are disabled")
+            return
+        if not parameters:
+            if not core_enabled:
+                self.add_notice(alias, "Stable TFR updates are disabled")
+                return
+            self.add_notice(
+                alias,
+                "Preparing the stable TFR update for the Gateway and all connected UIs...",
+            )
+            try:
+                if self.service_runtime is not None and hasattr(
+                    self.service_runtime, "request_update"
+                ):
+                    result = await self.service_runtime.request_update()
+                else:
+                    staged = await stage_managed_update(self.update_checker.config)
+                    activate_managed_update(staged.release_id)
+                    result = {
+                        "version": staged.version,
+                        "release_url": staged.release_url,
+                    }
+                    self.update_restart_requested = True
+                    get_app().exit(result=0)
+            except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+                self.add_notice(alias, f"Update failed: {exc}")
+                return
+            self.add_notice(
+                alias,
+                f"Update {result.get('version', 'release')} transaction started; "
+                f"connected UIs and the Gateway are preparing. "
+                f"{result.get('release_url', '')}".rstrip(),
+            )
             return
         if parameters == ["check"]:
             scope = (
@@ -2272,7 +2261,7 @@ class TfrTui:
         available = self._screen_clear_plugins()
         operation = parameters[0].casefold() if parameters else ""
         if not parameters:
-            self.start_screen_clear(alias)
+            self.clear_screen(alias)
             return
         if operation == "status" and len(parameters) == 1:
             selected = (
@@ -2351,26 +2340,6 @@ class TfrTui:
         self._sync_animation_task(restart=True)
         state = "on" if self.low_bandwidth else "off"
         self.add_notice(alias, f"Low-bandwidth mode is {state}")
-
-    def _handle_mouse_command(self, alias: str, parameters: list[str]) -> None:
-        operation = parameters[0].casefold() if len(parameters) == 1 else ""
-        if operation in {"auto", "terminal", "tfr"}:
-            self.mouse_mode = operation
-            if operation == "auto":
-                self._mosh_detected = _running_under_mosh()
-            self.application.invalidate()
-        elif operation not in {"", "status"} or len(parameters) > 1:
-            self.add_notice(alias, "Usage: /mouse auto|terminal|tfr|status")
-            return
-        reason = (
-            "; mosh-server detected"
-            if self.mouse_mode == "auto" and self._mosh_detected
-            else ""
-        )
-        self.add_notice(
-            alias,
-            f"Mouse mode: {self.mouse_mode} ({self.effective_mouse_mode}{reason})",
-        )
 
     def _set_low_bandwidth(self, enabled: bool) -> None:
         if enabled == self.low_bandwidth:
@@ -2644,7 +2613,6 @@ async def run_client(bundle: ConfigurationBundle) -> int:
             pager_enabled=bundle.main.ui.pager.enabled,
             pager_overlap=bundle.main.ui.pager.overlap_lines,
             recent_input_lines=bundle.main.ui.recent_input_lines,
-            mouse_mode=bundle.main.ui.mouse_mode,
             animations_enabled=bundle.main.ui.animations_enabled,
             low_bandwidth=bundle.main.ui.low_bandwidth,
             output_color=bundle.main.ui.output_color,
@@ -2673,4 +2641,12 @@ async def run_client(bundle: ConfigurationBundle) -> int:
     except BaseException:
         await runtime.stop()
         raise
-    return await tui.run()
+    result = await tui.run()
+    if getattr(tui, "update_restart_requested", False):
+        from tfr.installations import managed_restart_command
+
+        restart = managed_restart_command(sys.argv[1:])
+        if restart is None:
+            raise RuntimeError("activated TFR release cannot be restarted")
+        os.execv(restart[0], restart)
+    return result

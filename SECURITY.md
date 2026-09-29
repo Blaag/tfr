@@ -211,19 +211,22 @@ notification-only: TFR does not download or execute the advertised artifact.
 Malformed, oversized, non-HTTPS, prerelease, or unexpected manifests are
 rejected without interrupting startup or sessions.
 
-The Gateway handshake shares only its TFR version, exact release commit when
-available, and protocol version. The shared Gateway token grants no update,
-package-management, filesystem, or restart operation. Gateway upgrades remain
-explicit administrator actions followed by
-a service restart. Treat a custom `updates.manifest_url` as a software supply
-chain trust decision. The explicit source-based stable installer does not use
-that configurable URL or the notification cache: it fetches the official live
-manifest and only the manifest's fully qualified tag from the fixed official
-repository. It requires an annotated tag that directly targets the declared
-commit and verifies the tagged project version before executing candidate build
-code. It never fetches or installs `main`, rejects normal stable downgrades and
-same-version commit changes, and leaves direct verification and installation of
-the manifest's wheel artifact as future work.
+The Gateway handshake shares each native client's TFR version, exact release
+commit when available, protocol version, and managed-update capability. A native
+UI authenticated to the Gateway may initiate bare `/update`, which causes the
+Gateway and every connected managed native UI to fetch, build, activate, and
+restart. Treat local socket access and the shared Gateway TLS token as update
+authority, not only command authority. Browser device credentials cannot invoke
+this operation.
+
+Treat a custom `updates.manifest_url` as a software supply-chain trust decision.
+Coordinated updates require every host's configured manifest to match. The
+source-based stable installer fetches only the manifest's fully qualified tag,
+requires an annotated tag that directly targets the declared commit, verifies
+the tagged project version before executing candidate build code, and uses the
+tagged lock file. It never fetches or installs `main`, rejects normal stable
+downgrades and same-version commit changes, and leaves direct verification and
+installation of the manifest's wheel artifact as future work.
 The release workflow builds without write credentials and transfers its outputs
 to a separate write-capable job gated by the protected `release` environment.
 Repository administrators must also enable immutable releases and protect stable

@@ -59,7 +59,6 @@ from tfr.tui import (
     _format_elapsed,
     _multiline_paste_commands,
     _osc52_sequence,
-    _running_under_mosh,
     run_client,
 )
 from tfr.updates import BuildIdentity, UpdateChecker
@@ -77,7 +76,6 @@ def make_tui(
     server: str = "generic",
     unicode: bool = False,
     world_aliases: Mapping[str, tuple[str, ...]] | None = None,
-    mouse_mode: str = "auto",
 ) -> TfrTui:
     event_bus = EventBus()
     command_bus = CommandBus()
@@ -113,7 +111,6 @@ def make_tui(
         gateway_build=gateway_build,
         theme=theme,
         output_color=output_color,
-        mouse_mode=mouse_mode,
         input=input or DummyInput(),
         output=DummyOutput(),
     )
@@ -543,51 +540,6 @@ def test_osc52_clipboard_sequence_contains_utf8_selection() -> None:
     assert base64.b64decode(payload).decode("utf-8") == "hello π"
 
 
-def test_mosh_detection_walks_process_ancestry(monkeypatch: pytest.MonkeyPatch) -> None:
-    processes = {
-        30: (20, "python"),
-        20: (10, "zsh"),
-        10: (1, "mosh-server"),
-    }
-    monkeypatch.setattr("tfr.tui._process_parent", processes.get)
-
-    assert _running_under_mosh(30) is True
-    assert _running_under_mosh(20) is True
-    assert _running_under_mosh(10) is True
-    assert _running_under_mosh(999) is False
-
-
-async def test_mouse_auto_uses_terminal_under_mosh_and_can_be_overridden(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("tfr.tui._MOSH_DETECTED_AT_IMPORT", True)
-    tui = make_tui(mouse_mode="auto")
-
-    assert tui.effective_mouse_mode == "terminal"
-    assert tui.application.mouse_support() is False
-
-    await tui._handle_client_command("alpha", "/mouse tfr")
-    assert tui.effective_mouse_mode == "tfr"
-    assert tui.application.mouse_support() is True
-
-    await tui._handle_client_command("alpha", "/mouse terminal")
-    assert tui.effective_mouse_mode == "terminal"
-    assert tui.application.mouse_support() is False
-
-
-async def test_mouse_auto_status_reports_mosh_detection(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("tfr.tui._MOSH_DETECTED_AT_IMPORT", True)
-    monkeypatch.setattr("tfr.tui._running_under_mosh", lambda: True)
-    tui = make_tui(mouse_mode="tfr")
-
-    await tui._handle_client_command("alpha", "/mouse auto")
-
-    text = fragment_list_to_text(tui.active_view.display.formatted_text())
-    assert "Mouse mode: auto (terminal; mosh-server detected)" in text
-
-
 async def test_help_lists_commands_keybindings_markers_and_loaded_plugins() -> None:
     tui = make_tui()
     tui.active_view.display.resize(width=80, height=100)
@@ -732,6 +684,29 @@ async def test_update_check_reports_ui_and_gateway_versions(tmp_path: Path) -> N
     assert "UI update available: 1.2.3 (running 1.0.0" in text
     assert "Gateway update available: 1.2.3 (running 1.1.0" in text
     assert "Plugin update available: owner/plugins 0.5.0 (current 0.4.0)" in text
+
+
+async def test_bare_update_reports_the_coordinated_release_link(tmp_path: Path) -> None:
+    checker = UpdateChecker(UpdateConfig(state_directory=tmp_path))
+
+    class UpdateRuntime:
+        async def request_update(self) -> dict[str, str]:
+            return {
+                "version": "1.2.3",
+                "release_url": "https://example.invalid/tfr/v1.2.3",
+            }
+
+    tui = make_tui(update_checker=checker)
+    tui.service_runtime = UpdateRuntime()  # type: ignore[assignment]
+    tui.active_view.display.resize(width=100, height=20)
+
+    await tui._handle_client_command("alpha", "/update")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Preparing the stable TFR update for the Gateway and all connected UIs" in text
+    assert "Update 1.2.3 transaction started" in text
+    assert "connected UIs and the Gateway are preparing" in text
+    assert "https://example.invalid/tfr/v1.2.3" in text.replace("\n", "")
 
 
 async def test_restart_is_available_only_for_gateway_attached_ui() -> None:
@@ -1098,6 +1073,9 @@ async def test_screen_clear_plugin_overlays_snapshot_then_reveals_new_output() -
     view.display.resize(width=20, height=4)
     view.display.append("old text")
 
+    view.input_buffer.text = "unfinished draft"
+    view.recent_commands.append("look")
+
     tui.start_screen_clear("alpha")
 
     task = tui._screen_clear_task
@@ -1105,6 +1083,8 @@ async def test_screen_clear_plugin_overlays_snapshot_then_reveals_new_output() -
     assert tui._screen_clear_world == "alpha"
     assert "old text" in fragment_list_to_text(tui.screen_clear_text())
     assert view.display.screen_is_cleared is True
+    assert view.input_buffer.text == "unfinished draft"
+    assert tuple(view.recent_commands) == ("look",)
 
     view.display.append("new text")
     task.cancel()
@@ -1285,23 +1265,6 @@ async def test_page_up_ends_an_active_screen_clear_before_scrolling() -> None:
     assert view.display.screen_is_cleared is False
 
 
-def test_ctrl_l_clears_active_input_and_output() -> None:
-    tui = make_tui()
-    view = tui.active_view
-    view.input_buffer.text = "unfinished command"
-    view.display.append("old output")
-    clear = next(
-        binding
-        for binding in tui.application.key_bindings.bindings
-        if Keys.ControlL in binding.keys
-    )
-
-    clear.handler(SimpleNamespace(app=tui.application))
-
-    assert view.input_buffer.text == ""
-    assert view.display.screen_is_cleared is True
-
-
 def test_blank_enter_pushes_blank_rows_through_recent_input() -> None:
     tui = make_tui()
     view = tui.active_view
@@ -1312,6 +1275,93 @@ def test_blank_enter_pushes_blank_rows_through_recent_input() -> None:
 
     assert tuple(view.recent_commands) == ("", "", "")
     assert fragment_list_to_text(view.recent_input_text()) == "\n\n"
+
+
+async def test_blank_enter_preserves_immediate_up_arrow_history() -> None:
+    with create_pipe_input() as input:
+        tui = make_tui(input=input)
+        view = tui.active_view
+        view.input_buffer.history.append_string("look")
+        running = asyncio.create_task(tui.run())
+
+        async def history_loaded() -> None:
+            while view.input_buffer.working_index == 0:
+                await asyncio.sleep(0.005)
+
+        try:
+            await asyncio.wait_for(history_loaded(), timeout=1)
+            input.send_text("\r")
+            input.send_bytes(b"\x1b[A")
+
+            async def history_recalled() -> None:
+                while view.input_buffer.text != "look":
+                    await asyncio.sleep(0.005)
+
+            await asyncio.wait_for(history_recalled(), timeout=1)
+            assert tuple(view.recent_commands) == ("",)
+        finally:
+            input.send_bytes(b"\x11")
+            await asyncio.wait_for(running, timeout=1)
+
+
+async def test_ctrl_l_clears_visible_input_and_output_but_preserves_history() -> None:
+    with create_pipe_input() as input:
+        tui = make_tui(input=input)
+        view = tui.active_view
+        view.input_buffer.history.append_string("look")
+        view.recent_commands.extend(("look", "say hello"))
+        view.display.append("old output")
+        running = asyncio.create_task(tui.run())
+
+        async def history_loaded() -> None:
+            while view.input_buffer.working_index == 0:
+                await asyncio.sleep(0.005)
+
+        try:
+            await asyncio.wait_for(history_loaded(), timeout=1)
+            input.send_text("unfinished command")
+
+            async def draft_entered() -> None:
+                while view.input_buffer.text != "unfinished command":
+                    await asyncio.sleep(0.005)
+
+            await asyncio.wait_for(draft_entered(), timeout=1)
+            input.send_bytes(b"\x0c")
+
+            async def screen_cleared() -> None:
+                while not view.display.screen_is_cleared:
+                    await asyncio.sleep(0.005)
+
+            await asyncio.wait_for(screen_cleared(), timeout=1)
+            assert view.input_buffer.text == ""
+            assert tuple(view.recent_commands) == ()
+            assert fragment_list_to_text(view.recent_input_text()) == "\n\n"
+
+            input.send_bytes(b"\x1b[A")
+
+            async def history_recalled() -> None:
+                while view.input_buffer.text != "look":
+                    await asyncio.sleep(0.005)
+
+            await asyncio.wait_for(history_recalled(), timeout=1)
+        finally:
+            input.send_bytes(b"\x11")
+            await asyncio.wait_for(running, timeout=1)
+
+
+async def test_clear_command_clears_visible_input_and_output() -> None:
+    tui = make_tui()
+    view = tui.active_view
+    view.input_buffer.text = "unfinished command"
+    view.recent_commands.extend(("look", "say hello"))
+    view.display.append("old output")
+
+    await tui._handle_client_command("alpha", "/clear")
+
+    assert view.input_buffer.text == ""
+    assert tuple(view.recent_commands) == ()
+    assert fragment_list_to_text(view.recent_input_text()) == "\n\n"
+    assert view.display.screen_is_cleared is True
 
 
 async def test_page_down_ends_an_active_screen_clear() -> None:
@@ -1564,7 +1614,6 @@ async def test_standalone_client_loads_all_plugin_capabilities(
     ui = SimpleNamespace(
         pager=SimpleNamespace(enabled=True, overlap_lines=1),
         recent_input_lines=3,
-        mouse_mode="auto",
         animations_enabled=True,
         low_bandwidth=False,
         output_color="#d7d7d7",

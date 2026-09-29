@@ -89,8 +89,10 @@ than HTTP 404:
 https://github.com/Blaag/tfr/releases/latest/download/update-manifest.json
 ```
 
-Running `/update check` in TFR then checks that manifest. Update checks are
-notification-only and do not install the advertised artifact.
+Running `/update check` in TFR checks that manifest without installing it. Bare
+`/update` explicitly stages the verified tagged source on the Gateway and all
+connected managed native UIs, then activates and restarts them after all are
+ready. Protocol-changing releases still require manual coordinated deployment.
 
 To install the published source release explicitly, run:
 

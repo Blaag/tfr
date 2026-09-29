@@ -304,6 +304,7 @@ async def test_stable_auto_and_notify_use_only_verified_releases(
     assert failures == ()
     assert len(notices) == 1
     assert "0.1.1 is available" in notices[0].message
+    assert "https://example.invalid/releases/v0.1.1" in notices[0].message
     assert notices[0].available_version == "0.1.1"
 
     _discovered, failures, notices = await load_plugin_sources(
@@ -311,7 +312,10 @@ async def test_stable_auto_and_notify_use_only_verified_releases(
     )
     assert failures == ()
     assert len(notices) == 1
-    assert notices[0].message == "updated stable plugin release to 0.1.1 (was 0.1.0)"
+    assert notices[0].message == (
+        "updated stable plugin release to 0.1.1 (was 0.1.0). "
+        "https://example.invalid/releases/v0.1.1"
+    )
     assert notices[0].available_version is None
 
     third_commit = release_commit(repository, "0.1.2", marker="three")
@@ -389,7 +393,10 @@ async def test_stable_auto_recovers_from_an_incompatible_installed_release(
 
     assert [entry.name for entry in discovered] == ["fixture"]
     assert failures == ()
-    assert notices[0].message == "updated stable plugin release to 0.1.1 (was 0.1.0)"
+    assert notices[0].message == (
+        "updated stable plugin release to 0.1.1 (was 0.1.0). "
+        "https://example.invalid/releases/v0.1.1"
+    )
 
 
 async def test_stable_notify_reports_a_compatible_replacement_for_incompatible_current(

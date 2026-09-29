@@ -95,7 +95,6 @@ def test_loads_jsonc_and_resolves_references(tmp_path: Path) -> None:
 
     assert bundle.main.ui.scrollback_lines == 500
     assert bundle.main.ui.recent_input_lines == 3
-    assert bundle.main.ui.mouse_mode == "auto"
     assert bundle.main.ui.output_color is None
     assert bundle.main.ui.theme.preset == "default"
     assert bundle.main.ui.theme.colors.text is None

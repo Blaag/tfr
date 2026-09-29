@@ -41,12 +41,19 @@ from tfr.gateway_transport import (
     validate_gateway_token,
     validate_tcp_endpoint,
 )
+from tfr.installations import InstallationError, managed_restart_command
+from tfr.managed_updates import (
+    StagedManagedUpdate,
+    activate_managed_update,
+    stage_managed_update,
+)
 from tfr.plugin_sources import PluginSourceNotice, load_plugin_sources
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.updates import (
     BuildIdentity,
     UpdateChecker,
+    UpdateError,
     UpdateResult,
     current_build,
     format_update_status,
@@ -56,12 +63,24 @@ MAX_COMMAND_CHARACTERS = 65_536
 MAX_ACTOR_ID_CHARACTERS = 256
 MAX_HELLO_BYTES = 16_384
 HELLO_TIMEOUT_SECONDS = 5
+UPDATE_PREPARE_TIMEOUT_SECONDS = 900
+UPDATE_COMMIT_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True, slots=True)
 class SequencedEvent:
     cursor: int
     event: Event
+
+
+@dataclass(slots=True)
+class _GatewayUpdateParticipant:
+    connection_id: str
+    writer: asyncio.StreamWriter
+    write_lock: asyncio.Lock
+    build: BuildIdentity | None
+    managed_updates: bool
+    pending: dict[UUID, asyncio.Future[dict[str, Any] | None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -761,6 +780,7 @@ class GatewayServer:
         pairing_url_factory: Callable[[str], str] | None = None,
         device_list_factory: Callable[[], list[dict[str, Any]]] | None = None,
         device_revoke_factory: Callable[[UUID], Awaitable[bool]] | None = None,
+        update_notice: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         if (
             maximum_clients < 1
@@ -796,12 +816,21 @@ class GatewayServer:
         self.pairing_url_factory = pairing_url_factory
         self.device_list_factory = device_list_factory
         self.device_revoke_factory = device_revoke_factory
+        self.update_notice = update_notice
         self._server: asyncio.Server | None = None
         self._tcp_server: asyncio.Server | None = None
         self._socket_identity: tuple[int, int] | None = None
         self._clients: set[asyncio.Task[Any]] = set()
         self._tcp_clients: set[asyncio.Task[Any]] = set()
         self._pending_tcp_clients: dict[asyncio.Task[Any], str] = {}
+        self._update_participants: dict[str, _GatewayUpdateParticipant] = {}
+        self._update_participants_lock = asyncio.Lock()
+        self._update_lock = asyncio.Lock()
+        self._accepting_update_participants = True
+        self._staged_update: StagedManagedUpdate | None = None
+        self._update_transaction_participants: tuple[_GatewayUpdateParticipant, ...] = ()
+        self._update_task: asyncio.Task[None] | None = None
+        self._update_restart = asyncio.Event()
 
     async def start(self, *, start_serving: bool = True) -> None:
         if self._server is not None:
@@ -847,6 +876,14 @@ class GatewayServer:
             await self._tcp_server.start_serving()
 
     async def stop(self) -> None:
+        if (
+            self._update_task is not None
+            and self._update_task is not asyncio.current_task()
+            and not self._update_task.done()
+        ):
+            self._update_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._update_task
         if self._tcp_server is not None:
             self._tcp_server.close()
             await self._tcp_server.wait_closed()
@@ -863,6 +900,9 @@ class GatewayServer:
         self._tcp_clients.clear()
         self._pending_tcp_clients.clear()
         self._remove_owned_socket()
+
+    async def wait_update_restart(self) -> None:
+        await self._update_restart.wait()
 
     def _validate_socket_parent(self) -> None:
         if os.name != "posix":
@@ -956,6 +996,7 @@ class GatewayServer:
         write_lock = asyncio.Lock()
         sender: asyncio.Task[None] | None = None
         receiver: asyncio.Task[None] | None = None
+        participant: _GatewayUpdateParticipant | None = None
         try:
             hello = await asyncio.wait_for(
                 read_message(reader, maximum_bytes=MAX_HELLO_BYTES),
@@ -984,6 +1025,15 @@ class GatewayServer:
             if admin and auth_token is not None:
                 raise GatewayProtocolError("gateway administration requires the local socket")
             connection_id = str(uuid4())
+            client_build: BuildIdentity | None = None
+            if "build" in hello:
+                try:
+                    client_build = BuildIdentity.from_mapping(hello["build"])
+                except UpdateError as exc:
+                    raise GatewayProtocolError(f"invalid client build identity: {exc}") from exc
+            managed_updates = hello.get("managed_updates", False)
+            if not isinstance(managed_updates, bool):
+                raise GatewayProtocolError("managed_updates must be a boolean")
             requested_gateway = hello.get("gateway_id")
             if requested_gateway is not None and not isinstance(requested_gateway, str):
                 raise GatewayProtocolError("gateway_id must be a string or null")
@@ -1026,6 +1076,19 @@ class GatewayServer:
             )
             for item in snapshot.events:
                 await write_message(writer, event_message(item.cursor, item.event), lock=write_lock)
+            if not admin:
+                participant = _GatewayUpdateParticipant(
+                    connection_id=connection_id,
+                    writer=writer,
+                    write_lock=write_lock,
+                    build=client_build,
+                    managed_updates=managed_updates,
+                    pending={},
+                )
+                async with self._update_participants_lock:
+                    if not self._accepting_update_participants:
+                        raise GatewayProtocolError("Gateway update in progress; retry shortly")
+                    self._update_participants[connection_id] = participant
             sender = asyncio.create_task(
                 self._send_events(subscription, writer, write_lock),
                 name=f"tfr-gateway-events-{client_id}",
@@ -1057,6 +1120,12 @@ class GatewayServer:
                     lock=write_lock,
                 )
         finally:
+            if participant is not None:
+                async with self._update_participants_lock:
+                    self._update_participants.pop(participant.connection_id, None)
+                for future in participant.pending.values():
+                    if not future.done():
+                        future.set_exception(ConnectionError("UI disconnected during update"))
             for task in (sender, receiver):
                 if task is not None:
                     task.cancel()
@@ -1111,12 +1180,16 @@ class GatewayServer:
     ) -> None:
         request_id_value = message.get("request_id")
         result: dict[str, Any] | None = None
+        start_update = False
         try:
             request_id = UUID(str(request_id_value))
         except (TypeError, ValueError, AttributeError):
             raise GatewayProtocolError("request_id must be a UUID") from None
         try:
             message_type = message["type"]
+            if message_type == "ack":
+                self._handle_update_ack(client_id, request_id, message)
+                return
             if message_type == "command":
                 world = self._world(message)
                 text = message.get("text")
@@ -1178,6 +1251,16 @@ class GatewayServer:
                 await self.runtime.agent_control(name=name, action=action)
             elif message_type == "ping":
                 pass
+            elif message_type == "update":
+                if set(message) != {"type", "protocol", "request_id"}:
+                    raise ValueError("update has invalid fields")
+                staged = await self._stage_gateway_update()
+                result = {
+                    "version": staged.version,
+                    "commit": staged.commit,
+                    "release_url": staged.release_url,
+                }
+                start_update = True
             elif message_type == "pair_device":
                 if not allow_admin or self.pairing_url_factory is None:
                     raise ValueError("web device pairing is unavailable")
@@ -1227,6 +1310,187 @@ class GatewayServer:
         if result is not None:
             acknowledgement["result"] = result
         await write_message(writer, acknowledgement, lock=write_lock)
+        if start_update:
+            self._update_task = asyncio.create_task(
+                self._coordinate_update(), name="tfr-gateway-coordinated-update"
+            )
+
+    async def _stage_gateway_update(self) -> StagedManagedUpdate:
+        async with self._update_lock:
+            if self._staged_update is not None or (
+                self._update_task is not None and not self._update_task.done()
+            ):
+                raise ValueError("a coordinated update is already in progress")
+            if self.runtime.update_checker is None:
+                raise ValueError("stable updates are unavailable")
+            async with self._update_participants_lock:
+                self._accepting_update_participants = False
+                participants = tuple(self._update_participants.values())
+                self._update_transaction_participants = participants
+            incompatible = [
+                participant
+                for participant in participants
+                if not participant.managed_updates
+                or participant.build is None
+            ]
+            if incompatible:
+                async with self._update_participants_lock:
+                    self._accepting_update_participants = True
+                    self._update_transaction_participants = ()
+                raise ValueError(
+                    "all connected native UIs must support managed updates; "
+                    f"{len(incompatible)} UI(s) cannot participate"
+                )
+            try:
+                staged = await stage_managed_update(self.runtime.update_checker.config)
+            except BaseException:
+                async with self._update_participants_lock:
+                    self._accepting_update_participants = True
+                    self._update_transaction_participants = ()
+                raise
+            incompatible = [
+                participant
+                for participant in participants
+                if participant.build is None
+                or not staged.manifest.supports(participant.build)
+            ]
+            if incompatible:
+                async with self._update_participants_lock:
+                    self._accepting_update_participants = True
+                    self._update_transaction_participants = ()
+                raise ValueError(
+                    "all connected native UIs must be protocol-compatible; "
+                    f"{len(incompatible)} UI(s) cannot participate"
+                )
+            self._staged_update = staged
+            return staged
+
+    async def _coordinate_update(self) -> None:
+        staged = self._staged_update
+        if staged is None:
+            return
+        participants = self._update_transaction_participants
+        if self.update_notice is not None:
+            await self.update_notice(
+                f"Gateway update {staged.version} is being prepared. {staged.release_url}"
+            )
+        try:
+            await asyncio.gather(
+                *(
+                    self._request_update_participant(
+                        participant,
+                        "update_prepare",
+                        timeout=UPDATE_PREPARE_TIMEOUT_SECONDS,
+                        manifest=staged.manifest.as_dict(),
+                    )
+                    for participant in participants
+                )
+            )
+        except (ConnectionError, OSError, RuntimeError, TimeoutError, ValueError) as exc:
+            await self._broadcast_update_message(
+                participants, "update_abort", error=f"Update aborted: {exc}"
+            )
+            if self.update_notice is not None:
+                await self.update_notice(f"Gateway update aborted: {exc}")
+            print(f"tfr: coordinated update aborted: {exc}", file=sys.stderr, flush=True)
+            self._staged_update = None
+            async with self._update_participants_lock:
+                self._accepting_update_participants = True
+                self._update_transaction_participants = ()
+            return
+
+        commit_results = await asyncio.gather(
+            *(
+                self._request_update_participant(
+                    participant,
+                    "update_commit",
+                    timeout=UPDATE_COMMIT_TIMEOUT_SECONDS,
+                    release_id=staged.release_id,
+                )
+                for participant in participants
+            ),
+            return_exceptions=True,
+        )
+        for result in commit_results:
+            if isinstance(result, BaseException):
+                print(
+                    f"tfr: UI update commit acknowledgement failed: {result}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        try:
+            await asyncio.to_thread(activate_managed_update, staged.release_id)
+        except (InstallationError, OSError) as exc:
+            print(f"tfr: Gateway update activation failed: {exc}", file=sys.stderr, flush=True)
+            if self.update_notice is not None:
+                await self.update_notice(f"Gateway update activation failed: {exc}")
+            async with self._update_participants_lock:
+                self._accepting_update_participants = True
+                self._update_transaction_participants = ()
+            return
+        print(
+            f"tfr: activated Gateway {staged.version}. {staged.release_url}",
+            file=sys.stderr,
+            flush=True,
+        )
+        self._update_restart.set()
+
+    async def _request_update_participant(
+        self,
+        participant: _GatewayUpdateParticipant,
+        message_type: str,
+        *,
+        timeout: float,
+        **values: Any,
+    ) -> dict[str, Any] | None:
+        request_id = uuid4()
+        future: asyncio.Future[dict[str, Any] | None] = (
+            asyncio.get_running_loop().create_future()
+        )
+        participant.pending[request_id] = future
+        try:
+            await write_message(
+                participant.writer,
+                {"type": message_type, "request_id": str(request_id), **values},
+                lock=participant.write_lock,
+            )
+            return await asyncio.wait_for(future, timeout=timeout)
+        finally:
+            participant.pending.pop(request_id, None)
+
+    def _handle_update_ack(
+        self, connection_id: str, request_id: UUID, message: Mapping[str, Any]
+    ) -> None:
+        participant = self._update_participants.get(connection_id)
+        future = participant.pending.get(request_id) if participant is not None else None
+        if future is None or future.done():
+            return
+        if message.get("ok") is not True:
+            future.set_exception(ValueError(str(message.get("error", "UI update failed"))))
+            return
+        result = message.get("result")
+        if result is not None and not isinstance(result, dict):
+            future.set_exception(ValueError("UI update result must be an object"))
+            return
+        future.set_result(result)
+
+    async def _broadcast_update_message(
+        self,
+        participants: tuple[_GatewayUpdateParticipant, ...],
+        message_type: str,
+        **values: Any,
+    ) -> None:
+        await asyncio.gather(
+            *(
+                write_message(
+                    participant.writer,
+                    {"type": message_type, **values},
+                    lock=participant.write_lock,
+                )
+                for participant in participants
+            ),
+            return_exceptions=True,
+        )
 
     @staticmethod
     def _client_id(value: Any) -> str:
@@ -1294,10 +1558,12 @@ async def run_gateway(
         pairing_url_factory=(web_server.create_pairing_url if web_server is not None else None),
         device_list_factory=(web_server.device_descriptors if web_server is not None else None),
         device_revoke_factory=(web_server.revoke_device if web_server is not None else None),
+        update_notice=(web_server.notify_update if web_server is not None else None),
     )
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     installed_signals: list[signal.Signals] = []
+    restart_requested = False
     try:
         await server.start(start_serving=False)
         await runtime.start()
@@ -1320,8 +1586,19 @@ async def run_gateway(
                 installed_signals.append(handled_signal)
             except (NotImplementedError, RuntimeError, ValueError):
                 pass
-        await stop.wait()
-        return 0
+        signal_stop = asyncio.create_task(stop.wait(), name="tfr-gateway-signal-stop")
+        update_stop = asyncio.create_task(
+            server.wait_update_restart(), name="tfr-gateway-update-stop"
+        )
+        done, pending = await asyncio.wait(
+            {signal_stop, update_stop}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            task.result()
+        restart_requested = update_stop in done
     finally:
         for handled_signal in installed_signals:
             loop.remove_signal_handler(handled_signal)
@@ -1329,3 +1606,9 @@ async def run_gateway(
             await web_server.stop()
         await server.stop()
         await runtime.stop()
+    if restart_requested:
+        restart = managed_restart_command(sys.argv[1:])
+        if restart is None:
+            raise RuntimeError("activated Gateway release cannot be restarted")
+        os.execv(restart[0], restart)
+    return 0
