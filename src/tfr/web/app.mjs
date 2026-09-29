@@ -872,6 +872,15 @@ function handleMessage(message) {
     startHeartbeat();
     return;
   }
+  if (message.type === "maintenance") {
+    const text =
+      typeof message.message === "string"
+        ? message.message
+        : "Gateway maintenance is starting";
+    setConnection("Updating", "connecting");
+    showToast(text, 8000);
+    return;
+  }
   if (message.type === "ack") {
     if (message.request_id === state.heartbeatRequestId) {
       clearHeartbeatTimeout();

@@ -5,13 +5,19 @@ import ssl
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from uuid import UUID, uuid4
 
 import pytest
 import trustme
 
-from tfr.config import GatewayReconnectConfig, MainConfig, PluginsConfig, UiConfiguration
+from tfr.config import (
+    GatewayReconnectConfig,
+    MainConfig,
+    PluginsConfig,
+    UiConfiguration,
+    UpdateConfig,
+)
 from tfr.core import EventBus
 from tfr.events import Actor, ActorType, CommandRequest, Direction, Event, EventKind
 from tfr.gateway import EventHistory, GatewayServer
@@ -29,9 +35,10 @@ from tfr.gateway_transport import (
     create_gateway_client_tls_context,
     create_gateway_server_tls_context,
 )
+from tfr.managed_updates import StagedManagedUpdate
 from tfr.plugin_sources import PluginSourceFailure, PluginSourceNotice
 from tfr.plugins import PluginLifecycleEvent, PluginManager
-from tfr.updates import current_build
+from tfr.updates import ReleaseArtifact, ReleaseManifest, current_build
 
 
 def make_event(sequence: int) -> Event:
@@ -124,6 +131,117 @@ class FakeRuntime:
 
     async def agent_control(self, *, name: str, action: str) -> None:
         self.agent_controls.append((name, action))
+
+
+def update_manifest() -> ReleaseManifest:
+    build = current_build()
+    return ReleaseManifest(
+        version="1.2.3",
+        tag="v1.2.3",
+        commit="a" * 40,
+        protocol_minimum=build.protocol,
+        protocol_maximum=build.protocol,
+        release_url="https://example.invalid/tfr/v1.2.3",
+        artifact=ReleaseArtifact(
+            url="https://example.invalid/tfr/v1.2.3/tfr.whl",
+            size=1,
+            sha256="b" * 64,
+        ),
+    )
+
+
+async def test_coordinated_update_prepares_and_commits_every_connected_ui(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    runtime.update_checker = SimpleNamespace(config=UpdateConfig())
+    manifest = update_manifest()
+    staged = StagedManagedUpdate(
+        release_id=f"1.2.3+stable.{'a' * 40}",
+        version=manifest.version,
+        commit=manifest.commit,
+        release_url=manifest.release_url,
+        manifest=manifest,
+    )
+    monkeypatch.setattr("tfr.gateway_client.managed_restart_command", lambda _args: ["tfr"])
+    stage = AsyncMock(return_value=staged)
+    activate = Mock()
+    monkeypatch.setattr("tfr.gateway.stage_managed_update", stage)
+    monkeypatch.setattr("tfr.gateway.activate_managed_update", activate)
+    socket_path = Path("/tmp") / f"tfr-update-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    clients = [
+        await GatewayClient.connect(socket_path),
+        await GatewayClient.connect(socket_path),
+    ]
+    events: list[tuple[int, str]] = []
+    for index, client in enumerate(clients):
+        async def prepare(_manifest: object, client_index: int = index) -> dict[str, object]:
+            events.append((client_index, "prepare"))
+            return {"version": manifest.version}
+
+        async def commit(_release_id: str, client_index: int = index) -> None:
+            events.append((client_index, "commit"))
+
+        client.update_prepare_handler = prepare
+        client.update_commit_handler = commit
+        client.start()
+    try:
+        result = await clients[0].update()
+        await asyncio.wait_for(server.wait_update_restart(), timeout=1)
+        assert result == {
+            "version": manifest.version,
+            "commit": manifest.commit,
+            "release_url": manifest.release_url,
+        }
+        assert events.count((0, "prepare")) == 1
+        assert events.count((1, "prepare")) == 1
+        assert events.count((0, "commit")) == 1
+        assert events.count((1, "commit")) == 1
+        assert max(events.index((0, "prepare")), events.index((1, "prepare"))) < min(
+            events.index((0, "commit")), events.index((1, "commit"))
+        )
+        stage.assert_awaited_once()
+        activate.assert_called_once_with(staged.release_id)
+    finally:
+        await asyncio.gather(*(client.stop() for client in clients))
+        await server.stop()
+        await history.stop()
+        await bus.close()
+
+
+async def test_coordinated_update_rejects_an_unmanaged_connected_ui(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    runtime.update_checker = SimpleNamespace(config=UpdateConfig())
+    socket_path = Path("/tmp") / f"tfr-update-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    unmanaged = await GatewayClient.connect(socket_path)
+    monkeypatch.setattr("tfr.gateway_client.managed_restart_command", lambda _args: ["tfr"])
+    managed = await GatewayClient.connect(socket_path)
+    stage = AsyncMock()
+    monkeypatch.setattr("tfr.gateway.stage_managed_update", stage)
+    unmanaged.start()
+    managed.start()
+    try:
+        with pytest.raises(ValueError, match="all connected native UIs must support"):
+            await managed.update()
+        stage.assert_not_awaited()
+    finally:
+        await managed.stop()
+        await unmanaged.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
 
 
 async def test_client_receives_snapshot_live_events_and_command_acks() -> None:

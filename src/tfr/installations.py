@@ -302,9 +302,9 @@ class InstallationLayout:
             )
         return tuple(releases)
 
-    def activate(self, release_id: str) -> InstalledRelease:
+    def activate(self, release_id: str, *, write_launcher: bool = True) -> InstalledRelease:
         with self.lock():
-            return self._activate_locked(release_id)
+            return self._activate_locked(release_id, write_launcher=write_launcher)
 
     def rollback(self) -> InstalledRelease:
         with self.lock():
@@ -313,10 +313,13 @@ class InstallationLayout:
                 raise InstallationError("no previous TFR release is available")
             return self._activate_locked(previous)
 
-    def _activate_locked(self, release_id: str) -> InstalledRelease:
+    def _activate_locked(
+        self, release_id: str, *, write_launcher: bool = True
+    ) -> InstalledRelease:
         self.validate_release(release_id)
-        # Create or validate the stable entry point before changing the active release.
-        self.write_launcher()
+        if write_launcher:
+            # Create or validate the stable entry point before changing the active release.
+            self.write_launcher()
         current = self._pointer_release_id(self.current)
         if current != release_id:
             previous = self._pointer_release_id(self.previous)
@@ -407,6 +410,15 @@ def release_python(release_path: Path) -> Path:
 
 
 def managed_restart_command(arguments: Sequence[str]) -> list[str] | None:
+    managed = managed_installation()
+    if managed is None:
+        return None
+    _layout, installed = managed
+    python = release_python(installed.path)
+    return [str(python), "-I", "-m", "tfr", *arguments]
+
+
+def managed_installation() -> tuple[InstallationLayout, InstalledRelease] | None:
     root = os.environ.get(_MANAGED_ROOT_ENV)
     if root is None:
         return None
@@ -417,11 +429,9 @@ def managed_restart_command(arguments: Sequence[str]) -> list[str] | None:
         release_id = layout._pointer_release_id(layout.current)
         if release_id is None:
             return None
-        installed = layout.validate_release(release_id)
+        return layout, layout.validate_release(release_id)
     except (InstallationError, OSError):
         return None
-    python = release_python(installed.path)
-    return [str(python), "-I", "-m", "tfr", *arguments]
 
 
 def _validate_directory(path: Path, *, private: bool) -> None:

@@ -520,16 +520,6 @@
           "title": "Low Bandwidth",
           "type": "boolean"
         },
-        "mouse_mode": {
-          "default": "auto",
-          "enum": [
-            "auto",
-            "terminal",
-            "tfr"
-          ],
-          "title": "Mouse Mode",
-          "type": "string"
-        },
         "output_color": {
           "anyOf": [
             {

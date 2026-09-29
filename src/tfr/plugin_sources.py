@@ -310,7 +310,7 @@ async def _resolve_stable_source(
                 return (
                     current[0],
                     f"stable plugin release {manifest.version} is available "
-                    f"(current {installed.version})",
+                    f"(current {installed.version}). {manifest.release_url}",
                     manifest.version,
                 )
         try:
@@ -332,7 +332,7 @@ async def _resolve_stable_source(
             )
         notice = (
             f"updated stable plugin release to {manifest.version} "
-            f"(was {current[1].version})"
+            f"(was {current[1].version}). {manifest.release_url}"
             if current is not None
             else None
         )
@@ -423,7 +423,8 @@ def format_plugin_update_status(result: PluginUpdateResult) -> str:
     if result.checked_at is None or result.latest_version is None:
         return f"{label}: not checked yet"
     if result.current_version is None:
-        return f"{label}: no verified stable release is installed"
+        suffix = f". {result.release_url}" if result.release_url is not None else ""
+        return f"{label}: no verified stable release is installed{suffix}"
     if result.available:
         return (
             f"Plugin update available: {source} {result.latest_version} "

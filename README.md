@@ -198,10 +198,9 @@ Managed files use this layout:
 ```
 
 `~/.local/bin/tfr` is a stable launcher that executes the environment selected
-by `current`. Activation changes new invocations only; existing UI and Gateway
-processes continue running their original code. A managed attached UI's
-`/reload` re-enters through `current`. Restart a managed Gateway through its
-normal systemd, launchd, or other administrator-controlled service operation.
+by `current`. Activation changes new invocations only. A managed attached UI's
+`/reload` re-enters through `current`, while bare `/update` coordinates verified
+activation and process replacement for the Gateway and all connected native UIs.
 
 The checkout script also manages installed releases:
 
@@ -252,12 +251,26 @@ way, `/reload` follows the managed `current` release.
 
 TFR checks the latest stable GitHub Release in the background after startup and
 then approximately every six hours. The same schedule checks stable plugin
-sources configured on the UI host. These periodic checks are notification-only:
-they never download, install, or execute an artifact. Use `/update status` to
-inspect TFR and plugin results or `/update check` to refresh them immediately.
-An attached UI reports its own build and the remote Gateway build separately;
-update the Gateway through its administrator-controlled deployment and restart
-process.
+sources configured on the UI host. Periodic checks, `/update status`, and
+`/update check` are notification-only. Bare `/update` is the explicit install
+operation: it verifies and stages the configured stable release on the Gateway
+and every native UI connected when the transaction begins, then activates and
+restarts them only after every participant reports ready. Exact release links
+are included in availability, preparation, and activation notices.
+
+Automatic updates require every participating process to use a valid managed
+installation and the same stable manifest. An unmanaged, incompatible, failed,
+or disconnected native UI aborts preparation before activation. New native
+connections retry while an update is in progress. A UI that was offline when
+the transaction began must update after reconnecting. Protocol-changing releases
+remain manual coordinated deployments because the running protocol requires an
+exact version match.
+
+Browser clients do not install native code and do not participate in the
+all-ready barrier. They receive a maintenance notice, reconnect after the
+Gateway restarts, and use the existing service-worker update prompt for changed
+PWA assets. Independently installed UI hosts that were not connected must run
+`/update` themselves.
 
 The TFR release manifest is cached with its HTTP `ETag` under
 `~/.local/state/tfr/updates` by default. Plugin results are held in memory and
@@ -268,12 +281,10 @@ manifest URL, and state directory under the top-level `updates` object. Only
 stable `vMAJOR.MINOR.PATCH` releases participate; prereleases and moving Git tags
 are not used.
 
-Release notifications do not download or install the advertised artifact.
-Operators may explicitly run `./scripts/install-from-checkout --latest-stable`
-to rebuild and activate the exact tagged source release. This command validates
-the manifest-to-tag trust chain independently and is never started by the
-background checker. Direct verified installation of the advertised wheel
-remains future work.
+Bare `/update` and `./scripts/install-from-checkout --latest-stable` rebuild and
+activate the exact tagged source release. Both validate the manifest-to-tag
+trust chain; background checks never start installation. Direct verified
+installation of the advertised wheel remains future work.
 
 From the bootstrap checkout, a normal update is:
 
@@ -282,11 +293,10 @@ From the bootstrap checkout, a normal update is:
 ~/.local/bin/tfr --version
 ```
 
-Activation affects new processes only. Restart a managed Gateway through its
-service manager and use `/reload` or restart each managed UI. If the new release
-must be reverted, use `./scripts/install-from-checkout --rollback`, then restart
-the affected process again. `--list` shows the exact release IDs selected by the
-`current` and `previous` pointers.
+If a new release must be reverted, use
+`./scripts/install-from-checkout --rollback`, then restart the affected process.
+`--list` shows the exact release IDs selected by the `current` and `previous`
+pointers.
 
 Maintainers publish a release by updating `project.version` in `pyproject.toml`,
 committing and pushing that change, previewing `./scripts/publish-release`, then
@@ -634,22 +644,19 @@ otherwise approximate the RGB colors at the terminal's available color depth.
 - `F5`, `Ctrl+Left`, or `Option+Left`: switch to the previous world.
 - `PageUp` and `PageDown`: navigate scrollback or advance `More` output.
 - `End`: return to live output.
-- `Ctrl+L`: burn away the active screen without deleting retained scrollback.
+- `Ctrl+L`: clear visible input and output without deleting command history or
+  retained scrollback.
 - `Ctrl+R`: reconnect the active world.
 - `Ctrl+Q`: quit cleanly.
 - Left-click a world in the top bar to switch to it.
 - Drag across world output to highlight it and copy the plain text to the clipboard.
 - Click an underlined `http://` or `https://` link in world output to open it in
   your default browser.
-- `ui.mouse_mode` controls mouse ownership. `auto` (the default) detects a
-  `mosh-server` ancestor and lets the local terminal own links, selection, and
-  clipboard copying; otherwise TFR handles clicks and selection. Use
-  `/mouse auto|terminal|tfr|status` to inspect or change the mode at runtime.
 
 Input beginning with `/` is a client command. Available commands are `/world
 ALIAS`, `/next` (`/n`), `/previous` (`/p`), `/connect`, `/disconnect`, `/reconnect`,
 `/end`, `/nospoof show|hide|status`, `/animations on|off|status`,
-`/lowbw on|off|status`, `/mouse auto|terminal|tfr|status`, `/clear`, `/boss`, `/image`, `/sh`, `/reload`, `/restart`,
+`/lowbw on|off|status`, `/clear`, `/boss`, `/image`, `/sh`, `/reload`, `/restart`,
 `/gateway reconnect`, `/help`, and `/quit`, plus commands registered by enabled
 plugins and configured world-switch aliases such as `/g`. Begin input with `//`
 to send a literal leading slash. `/help` displays commands, aliases and any
@@ -714,9 +721,11 @@ them. Use `/lowbw on` to retain static styling but stop scheduled redraws. World
 traffic and keyboard input still redraw normally. `ui.animations_enabled` and
 `ui.low_bandwidth` select the initial state for each attached UI.
 
-Ctrl-L snapshots and clears the visible output. UI plugins can register finite
-screen-clear transitions; `ui.screen_clear.mode` chooses `cycle`, `random`, or
-`locked`, and locked mode requires an `effect` matching an enabled plugin name.
+Ctrl-L clears the active draft and visible recent-input rows, then snapshots and
+clears the visible output. Input history remains available with Up. UI plugins
+can register finite output-only screen-clear transitions;
+`ui.screen_clear.mode` chooses `cycle`, `random`, or `locked`, and locked mode
+requires an `effect` matching an enabled plugin name.
 Effect contexts include both plain snapshot lines and the corresponding styled
 fragments so transitions can preserve the visible text colors.
 Screen-clear effects may run for up to 60 seconds at no more than 30 frames per
@@ -724,7 +733,7 @@ second. Stateful effects can provide a completion check to keep the transition
 visible past that nominal duration until their simulation finishes.
 Use `/clear status`, `/clear cycle`, `/clear random`, or `/clear lock EFFECT` to
 change selection for the running UI. `/clear` without arguments behaves like
-Ctrl-L. With no available effect plugin, clearing is immediate. The underlying
+Ctrl-L. With no available effect plugin, output clearing is immediate. The underlying
 scrollback is retained, and output arriving during a transition appears when it
 completes.
 
@@ -746,7 +755,9 @@ pager state, and unread count while inactive.
 The active world's recently sent commands remain directly above the editor.
 These lines are separate from server output, so server speech echoes are not
 duplicated. Configure their number with `ui.recent_input_lines` (default `3`, or
-`0` to hide the pane). `PageUp` after `Ctrl+L` reveals retained pre-clear output;
+`0` to hide the pane). Blank Enter advances these visible rows without adding an
+empty command to input history, so Up still recalls the last command. `PageUp`
+after `Ctrl+L` reveals retained pre-clear output;
 pressing `PageUp`, `PageDown`, `End`, or `/end` while a screen-clear
 animation is still running ends that animation immediately so the requested
 scrolling is visible right away, instead of silently changing scroll position
@@ -840,10 +851,10 @@ may continue with the current release only after revalidating its metadata,
 origin, tag, commit, project metadata, and clean checkout.
 
 When `stable-auto` installs a newer release during startup, TFR reports the old
-and new versions. Later releases discovered while the UI is running appear in
-the periodic update notice and `/update status|check`; they are activated only
-on a later startup or reload, before plugin import. `stable-notify` uses the same
-status integration but never activates a newer release automatically.
+and new versions with the exact release link. Bare `/update` also activates
+compatible `stable-auto` releases when each process restarts and imports its
+plugins. `stable-notify` uses the same status integration but never activates a
+newer release automatically.
 
 Use `"policy": "stable-notify"` to bootstrap the current stable release but only
 report later compatible releases. To roll back, first change `stable-auto` to

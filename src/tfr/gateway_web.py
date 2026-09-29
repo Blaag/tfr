@@ -430,6 +430,23 @@ class WebGatewayServer:
         self._site = None
         self._runner = None
 
+    async def notify_update(self, message: str) -> None:
+        await asyncio.gather(
+            *(
+                self._send_bounded(
+                    socket,
+                    {
+                        "type": "maintenance",
+                        "protocol": WEB_PROTOCOL_VERSION,
+                        "message": message,
+                    },
+                )
+                for sockets in tuple(self._active_sockets.values())
+                for socket in tuple(sockets)
+            ),
+            return_exceptions=True,
+        )
+
     @web.middleware
     async def _security_headers(
         self,

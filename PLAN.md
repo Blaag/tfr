@@ -810,9 +810,13 @@ Acceptance criteria:
   environments, exact checkout build identity, atomic activation, a stable
   launcher, retained previous release, and rollback, plus a script that builds
   and installs the current clean Git `HEAD` using `uv.lock`.
-- [ ] Add opt-in stable-release download and staging that verifies the manifest
-  source, artifact size, and SHA-256 digest before activating the managed UI
-  installation; keep Gateway activation and restart administrator-controlled.
+- [x] Add a bare `/update` that stages the exact verified stable source release,
+  requires every connected managed native UI to prepare successfully, atomically
+  activates each UI and the Gateway, and re-execs every participating process.
+  Preserve browser service-worker updates and require manual deployment for
+  protocol-changing releases.
+- [ ] Add direct stable-release artifact installation that verifies artifact
+  size and SHA-256 before activating, without rebuilding the verified tag.
 - [x] Include stable Git-sourced plugin releases in `/update status|check` and
   the UI's periodic update schedule without applying code while the UI is
   running. Report successful `stable-auto` startup upgrades, preserve
