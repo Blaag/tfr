@@ -38,7 +38,7 @@ from tfr.gateway_transport import (
 from tfr.managed_updates import StagedManagedUpdate
 from tfr.plugin_sources import PluginSourceFailure, PluginSourceNotice
 from tfr.plugins import PluginLifecycleEvent, PluginManager
-from tfr.updates import ReleaseArtifact, ReleaseManifest, current_build
+from tfr.updates import ReleaseArtifact, ReleaseManifest, UpdateResult, current_build
 
 
 def make_event(sequence: int) -> Event:
@@ -157,8 +157,11 @@ async def test_coordinated_update_prepares_and_commits_every_connected_ui(
     history = EventHistory(bus, {"alpha": 10})
     history.start()
     runtime = FakeRuntime(history)
-    runtime.update_checker = SimpleNamespace(config=UpdateConfig())
     manifest = update_manifest()
+    runtime.update_checker = SimpleNamespace(
+        config=UpdateConfig(),
+        check=AsyncMock(return_value=UpdateResult(checked_at=None, manifest=manifest)),
+    )
     staged = StagedManagedUpdate(
         release_id=f"1.2.3+stable.{'a' * 40}",
         version=manifest.version,
@@ -194,6 +197,7 @@ async def test_coordinated_update_prepares_and_commits_every_connected_ui(
         result = await clients[0].update()
         await asyncio.wait_for(server.wait_update_restart(), timeout=1)
         assert result == {
+            "updated": True,
             "version": manifest.version,
             "commit": manifest.commit,
             "release_url": manifest.release_url,
@@ -330,6 +334,126 @@ async def test_new_ui_can_rebuild_display_from_retained_gateway_history() -> Non
         await history.stop()
         await bus.close()
     socket_path.parent.rmdir()
+
+
+async def test_coordinated_update_does_nothing_when_everything_is_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    build = current_build()
+    manifest = ReleaseManifest(
+        version=build.version,
+        tag=f"v{build.version}",
+        commit=build.commit or "a" * 40,
+        protocol_minimum=build.protocol,
+        protocol_maximum=build.protocol,
+        release_url=f"https://example.invalid/tfr/v{build.version}",
+        artifact=ReleaseArtifact(
+            url=f"https://example.invalid/tfr/v{build.version}/tfr.whl",
+            size=1,
+            sha256="b" * 64,
+        ),
+    )
+    runtime.build = build
+    runtime.update_checker = SimpleNamespace(
+        config=UpdateConfig(),
+        check=AsyncMock(return_value=UpdateResult(checked_at=None, manifest=manifest)),
+    )
+    runtime.plugin_update_checker = SimpleNamespace(
+        stable_auto_update_available=AsyncMock(return_value=False)
+    )
+    stage = AsyncMock()
+    activate = Mock()
+    monkeypatch.setattr("tfr.gateway.stage_managed_update", stage)
+    monkeypatch.setattr("tfr.gateway.activate_managed_update", activate)
+    monkeypatch.setattr("tfr.gateway_client.managed_restart_command", lambda _args: ["tfr"])
+    socket_path = Path("/tmp") / f"tfr-update-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    check = AsyncMock(return_value={"available": False})
+    client.update_check_handler = check
+    client.start()
+    try:
+        assert await client.update() == {"updated": False}
+        check.assert_awaited_once_with()
+        stage.assert_not_awaited()
+        activate.assert_not_called()
+        assert not server._update_restart.is_set()
+        assert server._accepting_update_participants is True
+    finally:
+        await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+
+
+async def test_coordinated_update_runs_for_a_stable_auto_plugin_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    build = current_build()
+    manifest = ReleaseManifest(
+        version=build.version,
+        tag=f"v{build.version}",
+        commit=build.commit or "a" * 40,
+        protocol_minimum=build.protocol,
+        protocol_maximum=build.protocol,
+        release_url=f"https://example.invalid/tfr/v{build.version}",
+        artifact=ReleaseArtifact(
+            url=f"https://example.invalid/tfr/v{build.version}/tfr.whl",
+            size=1,
+            sha256="b" * 64,
+        ),
+    )
+    runtime.build = build
+    runtime.update_checker = SimpleNamespace(
+        config=UpdateConfig(),
+        check=AsyncMock(return_value=UpdateResult(checked_at=None, manifest=manifest)),
+    )
+    runtime.plugin_update_checker = SimpleNamespace(
+        stable_auto_update_available=AsyncMock(return_value=False)
+    )
+    staged = StagedManagedUpdate(
+        release_id=f"{build.version}+stable.{manifest.commit}",
+        version=manifest.version,
+        commit=manifest.commit,
+        release_url=manifest.release_url,
+        manifest=manifest,
+    )
+    stage = AsyncMock(return_value=staged)
+    activate = Mock()
+    monkeypatch.setattr("tfr.gateway.stage_managed_update", stage)
+    monkeypatch.setattr("tfr.gateway.activate_managed_update", activate)
+    monkeypatch.setattr("tfr.gateway_client.managed_restart_command", lambda _args: ["tfr"])
+    socket_path = Path("/tmp") / f"tfr-update-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    client.update_check_handler = AsyncMock(return_value={"available": True})
+    client.update_prepare_handler = AsyncMock(return_value={"version": manifest.version})
+    client.update_commit_handler = AsyncMock()
+    client.start()
+    try:
+        result = await client.update()
+        await asyncio.wait_for(server.wait_update_restart(), timeout=1)
+        assert result["updated"] is True
+        stage.assert_awaited_once_with(
+            runtime.update_checker.config,
+            expected_manifest=manifest,
+        )
+        activate.assert_called_once_with(staged.release_id)
+    finally:
+        await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
 
 
 def test_remote_world_session_defaults_new_fields_for_older_gateways() -> None:

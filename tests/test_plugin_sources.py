@@ -283,6 +283,67 @@ async def test_plugin_update_checker_reports_stable_sources(tmp_path: Path) -> N
     )
 
 
+async def test_plugin_update_checker_limits_restart_checks_to_stable_auto(
+    tmp_path: Path,
+) -> None:
+    automatic = PluginSource(
+        repo="owner/automatic",
+        policy="stable-auto",
+        manifest_url="https://example.invalid/automatic.json",
+    )
+    notification = PluginSource(
+        repo="owner/notification",
+        policy="stable-notify",
+        manifest_url="https://example.invalid/notification.json",
+    )
+
+    def check(
+        source: PluginSource,
+        _plugins_directory: Path,
+        _timeout_seconds: float,
+    ) -> PluginUpdateResult:
+        return PluginUpdateResult(
+            repo=source.repo,
+            policy=source.policy,
+            checked_at=datetime.now(UTC),
+            current_version="0.1.0",
+            latest_version="0.2.0" if source == notification else "0.1.0",
+        )
+
+    checker = PluginUpdateChecker(
+        (automatic, notification),
+        plugins_directory=tmp_path,
+        config=UpdateConfig(),
+        check_source=check,
+    )
+
+    assert await checker.stable_auto_update_available() is False
+
+
+async def test_plugin_update_checker_fails_closed_for_stable_auto_errors(
+    tmp_path: Path,
+) -> None:
+    source = PluginSource(
+        repo="owner/automatic",
+        policy="stable-auto",
+        manifest_url="https://example.invalid/automatic.json",
+    )
+    checker = PluginUpdateChecker(
+        (source,),
+        plugins_directory=tmp_path,
+        config=UpdateConfig(),
+        check_source=lambda *_args: PluginUpdateResult(
+            repo=source.repo,
+            policy=source.policy,
+            checked_at=datetime.now(UTC),
+            error="manifest unavailable",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="owner/automatic.*manifest unavailable"):
+        await checker.stable_auto_update_available()
+
+
 async def test_periodic_plugin_updates_suppress_an_already_reported_release(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
