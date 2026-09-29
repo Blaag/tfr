@@ -498,6 +498,21 @@ class PluginUpdateChecker:
             )
             return self._results
 
+    async def stable_auto_update_available(self) -> bool:
+        results = await self.check()
+        failures = [
+            result
+            for result in results
+            if result.policy == "stable-auto" and result.error is not None
+        ]
+        if failures:
+            failure = failures[0]
+            source_id = plugin_source_id(failure.repo, failure.source_path)
+            raise ValueError(
+                f"cannot check stable-auto plugin {source_id}: {failure.error}"
+            )
+        return any(result.policy == "stable-auto" and result.available for result in results)
+
     async def run_periodically(self, notify: Callable[[PluginUpdateResult], None]) -> None:
         await asyncio.sleep(self.config.initial_delay_seconds)
         while True:

@@ -71,6 +71,7 @@ ConnectHandler = Callable[[], Awaitable[None]]
 DisconnectHandler = Callable[[Exception], None]
 UpdatePrepareHandler = Callable[[Mapping[str, Any]], Awaitable[dict[str, Any]]]
 UpdateCommitHandler = Callable[[str], Awaitable[None]]
+UpdateCheckHandler = Callable[[], Awaitable[dict[str, Any]]]
 
 
 class RemoteWorldSession:
@@ -254,6 +255,7 @@ class GatewayClient:
         self.disconnect_handler: DisconnectHandler | None = None
         self.update_prepare_handler: UpdatePrepareHandler | None = None
         self.update_commit_handler: UpdateCommitHandler | None = None
+        self.update_check_handler: UpdateCheckHandler | None = None
         self.update_restart_handler: Callable[[], None] | None = None
         self.update_abort_handler: Callable[[str], None] | None = None
         self._reconnect_lock = asyncio.Lock()
@@ -381,6 +383,7 @@ class GatewayClient:
                 "after_cursor": after_cursor,
                 "build": current_build().as_dict(),
                 "managed_updates": managed_restart_command(()) is not None,
+                "update_checks": True,
             }
             if auth_token is not None:
                 hello_request["auth_token"] = auth_token
@@ -680,6 +683,8 @@ class GatewayClient:
                     self._handle_ack(message)
                 elif message_type == "update_prepare":
                     self._spawn_gateway_request(self._handle_update_prepare(message))
+                elif message_type == "update_check":
+                    self._spawn_gateway_request(self._handle_update_check(message))
                 elif message_type == "update_commit":
                     self._spawn_gateway_request(self._handle_update_commit(message))
                 elif message_type == "update_abort":
@@ -719,6 +724,30 @@ class GatewayClient:
 
     async def _handle_update_prepare(self, message: Mapping[str, Any]) -> None:
         await self._handle_gateway_update_request(message, prepare=True)
+
+    async def _handle_update_check(self, message: Mapping[str, Any]) -> None:
+        try:
+            request_id = UUID(str(message["request_id"]))
+            if self.update_check_handler is None:
+                raise ValueError("this UI cannot check managed update availability")
+            result = await self.update_check_handler()
+        except (KeyError, OSError, RuntimeError, ValueError) as exc:
+            await write_message(
+                self.writer,
+                {
+                    "type": "ack",
+                    "request_id": str(message.get("request_id", "")),
+                    "ok": False,
+                    "error": str(exc),
+                },
+                lock=self._write_lock,
+            )
+            return
+        await write_message(
+            self.writer,
+            {"type": "ack", "request_id": str(request_id), "ok": True, "result": result},
+            lock=self._write_lock,
+        )
 
     async def _handle_update_commit(self, message: Mapping[str, Any]) -> None:
         await self._handle_gateway_update_request(message, prepare=False)
@@ -830,6 +859,7 @@ class GatewayUiRuntime:
         *,
         reconnect_config: GatewayReconnectConfig | None = None,
         update_config: UpdateConfig | None = None,
+        plugin_update_checker: PluginUpdateChecker | None = None,
         notify: Callable[[str], None] | None = None,
     ) -> None:
         self.client = client
@@ -837,6 +867,7 @@ class GatewayUiRuntime:
         self.reconnect_config = reconnect_config or GatewayReconnectConfig()
         self.notify = notify or (lambda _text: None)
         self.update_config = update_config
+        self.plugin_update_checker = plugin_update_checker
         self._staged_update: StagedManagedUpdate | None = None
         self._update_transaction_active = False
         self._update_restart_expected = False
@@ -849,6 +880,7 @@ class GatewayUiRuntime:
         self.client.connect_handler = self._handle_connected
         self.client.disconnect_handler = self._handle_disconnect
         self.client.update_prepare_handler = self._prepare_update
+        self.client.update_check_handler = self._check_update
         self.client.update_commit_handler = self._commit_update
         self.client.update_abort_handler = self._abort_update
         self.client.event_bus.add_processor(self.plugins.process_event)
@@ -899,10 +931,21 @@ class GatewayUiRuntime:
     async def request_update(self) -> dict[str, Any]:
         self._update_transaction_active = True
         try:
-            return await self.client.update()
+            result = await self.client.update()
+            if result.get("updated") is False:
+                self._update_transaction_active = False
+            return result
         except BaseException:
             self._update_transaction_active = False
             raise
+
+    async def _check_update(self) -> dict[str, Any]:
+        available = (
+            await self.plugin_update_checker.stable_auto_update_available()
+            if self.plugin_update_checker is not None
+            else False
+        )
+        return {"available": available}
 
     async def _prepare_update(self, manifest_value: Mapping[str, Any]) -> dict[str, Any]:
         if self.update_config is None:
@@ -1168,12 +1211,6 @@ async def run_gateway_ui(
         finally:
             await client.event_bus.close()
         raise
-    runtime = GatewayUiRuntime(
-        client,
-        plugins,
-        reconnect_config=configuration.main.ui.gateway_reconnect,
-        update_config=configuration.main.updates,
-    )
     update_checker = UpdateChecker(configuration.main.updates)
     plugin_update_checker = PluginUpdateChecker(
         configuration.main.plugins.sources,
@@ -1184,6 +1221,13 @@ async def run_gateway_ui(
             for notice in plugin_source_notices
             if notice.available_version is not None
         },
+    )
+    runtime = GatewayUiRuntime(
+        client,
+        plugins,
+        reconnect_config=configuration.main.ui.gateway_reconnect,
+        update_config=configuration.main.updates,
+        plugin_update_checker=plugin_update_checker,
     )
     tui = TfrTui(
         sessions=client.sessions,  # type: ignore[arg-type]

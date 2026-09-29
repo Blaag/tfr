@@ -2160,7 +2160,7 @@ class TfrTui:
                 return
             self.add_notice(
                 alias,
-                "Preparing the stable TFR update for the Gateway and all connected UIs...",
+                "Checking for stable updates on the Gateway and all connected UIs...",
             )
             try:
                 if self.service_runtime is not None and hasattr(
@@ -2168,23 +2168,41 @@ class TfrTui:
                 ):
                     result = await self.service_runtime.request_update()
                 else:
-                    staged = await stage_managed_update(self.update_checker.config)
-                    activate_managed_update(staged.release_id)
-                    result = {
-                        "version": staged.version,
-                        "release_url": staged.release_url,
-                    }
-                    self.update_restart_requested = True
-                    get_app().exit(result=0)
+                    core_result = await self.update_checker.check()
+                    if core_result.error is not None:
+                        raise ValueError(
+                            f"cannot check stable TFR updates: {core_result.error}"
+                        )
+                    core_available = core_result.available_for(self.update_checker.build)
+                    plugin_available = (
+                        await self.plugin_update_checker.stable_auto_update_available()
+                        if self.plugin_update_checker is not None
+                        else False
+                    )
+                    if not core_available and not plugin_available:
+                        result = {"updated": False}
+                    else:
+                        staged = await stage_managed_update(self.update_checker.config)
+                        activate_managed_update(staged.release_id)
+                        result = {
+                            "updated": True,
+                            "version": staged.version,
+                            "release_url": staged.release_url,
+                        }
+                        self.update_restart_requested = True
+                        get_app().exit(result=0)
             except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
                 self.add_notice(alias, f"Update failed: {exc}")
                 return
-            self.add_notice(
-                alias,
-                f"Update {result.get('version', 'release')} transaction started; "
-                f"connected UIs and the Gateway are preparing. "
-                f"{result.get('release_url', '')}".rstrip(),
-            )
+            if result.get("updated") is False:
+                self.add_notice(alias, "TFR and stable-auto plugins are up to date")
+            else:
+                self.add_notice(
+                    alias,
+                    f"Update {result.get('version', 'release')} transaction started; "
+                    f"connected UIs and the Gateway are preparing. "
+                    f"{result.get('release_url', '')}".rstrip(),
+                )
             return
         if parameters == ["check"]:
             scope = (

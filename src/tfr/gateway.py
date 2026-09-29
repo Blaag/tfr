@@ -47,7 +47,7 @@ from tfr.managed_updates import (
     activate_managed_update,
     stage_managed_update,
 )
-from tfr.plugin_sources import PluginSourceNotice, load_plugin_sources
+from tfr.plugin_sources import PluginSourceNotice, PluginUpdateChecker, load_plugin_sources
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.updates import (
@@ -80,6 +80,7 @@ class _GatewayUpdateParticipant:
     write_lock: asyncio.Lock
     build: BuildIdentity | None
     managed_updates: bool
+    update_checks: bool
     pending: dict[UUID, asyncio.Future[dict[str, Any] | None]]
 
 
@@ -463,6 +464,7 @@ class GatewayRuntime:
         history: EventHistory,
         build: BuildIdentity | None = None,
         update_checker: UpdateChecker | None = None,
+        plugin_update_checker: PluginUpdateChecker | None = None,
         plugin_source_messages: tuple[str, ...] = (),
         plugin_source_notices: tuple[PluginSourceNotice, ...] = (),
     ) -> None:
@@ -475,6 +477,7 @@ class GatewayRuntime:
         self.history = history
         self.build = build or current_build()
         self.update_checker = update_checker
+        self.plugin_update_checker = plugin_update_checker
         self.plugin_source_messages = plugin_source_messages
         self.plugin_source_notices = plugin_source_notices
         self.gateway_id = uuid4()
@@ -557,6 +560,20 @@ class GatewayRuntime:
             history=history,
             update_checker=(
                 UpdateChecker(bundle.main.updates) if plugin_scope == "gateway" else None
+            ),
+            plugin_update_checker=(
+                PluginUpdateChecker(
+                    bundle.main.plugins.sources,
+                    plugins_directory=bundle.main.plugins.state_directory,
+                    config=bundle.main.updates,
+                    notified_versions={
+                        notice.source_id: notice.available_version
+                        for notice in plugin_source_notices
+                        if notice.available_version is not None
+                    },
+                )
+                if plugin_scope == "gateway"
+                else None
             ),
             plugin_source_messages=plugin_source_messages,
             plugin_source_notices=plugin_source_notices,
@@ -1034,6 +1051,9 @@ class GatewayServer:
             managed_updates = hello.get("managed_updates", False)
             if not isinstance(managed_updates, bool):
                 raise GatewayProtocolError("managed_updates must be a boolean")
+            update_checks = hello.get("update_checks", False)
+            if not isinstance(update_checks, bool):
+                raise GatewayProtocolError("update_checks must be a boolean")
             requested_gateway = hello.get("gateway_id")
             if requested_gateway is not None and not isinstance(requested_gateway, str):
                 raise GatewayProtocolError("gateway_id must be a string or null")
@@ -1083,6 +1103,7 @@ class GatewayServer:
                     write_lock=write_lock,
                     build=client_build,
                     managed_updates=managed_updates,
+                    update_checks=update_checks,
                     pending={},
                 )
                 async with self._update_participants_lock:
@@ -1160,14 +1181,32 @@ class GatewayServer:
         *,
         allow_admin: bool,
     ) -> None:
-        while message := await read_message(reader):
-            await self._handle_request(
-                message,
-                client_id,
-                writer,
-                write_lock,
-                allow_admin=allow_admin,
-            )
+        update_requests: set[asyncio.Task[None]] = set()
+        try:
+            while message := await read_message(reader):
+                request = self._handle_request(
+                    message,
+                    client_id,
+                    writer,
+                    write_lock,
+                    allow_admin=allow_admin,
+                )
+                if message.get("type") != "update":
+                    await request
+                    continue
+                task = asyncio.create_task(request, name="tfr-gateway-update-request")
+                update_requests.add(task)
+                task.add_done_callback(self._update_request_done)
+                task.add_done_callback(update_requests.discard)
+        finally:
+            for task in update_requests:
+                task.cancel()
+            await asyncio.gather(*update_requests, return_exceptions=True)
+
+    @staticmethod
+    def _update_request_done(task: asyncio.Task[None]) -> None:
+        if not task.cancelled():
+            task.exception()
 
     async def _handle_request(
         self,
@@ -1255,12 +1294,16 @@ class GatewayServer:
                 if set(message) != {"type", "protocol", "request_id"}:
                     raise ValueError("update has invalid fields")
                 staged = await self._stage_gateway_update()
-                result = {
-                    "version": staged.version,
-                    "commit": staged.commit,
-                    "release_url": staged.release_url,
-                }
-                start_update = True
+                if staged is None:
+                    result = {"updated": False}
+                else:
+                    result = {
+                        "updated": True,
+                        "version": staged.version,
+                        "commit": staged.commit,
+                        "release_url": staged.release_url,
+                    }
+                    start_update = True
             elif message_type == "pair_device":
                 if not allow_admin or self.pairing_url_factory is None:
                     raise ValueError("web device pairing is unavailable")
@@ -1315,7 +1358,7 @@ class GatewayServer:
                 self._coordinate_update(), name="tfr-gateway-coordinated-update"
             )
 
-    async def _stage_gateway_update(self) -> StagedManagedUpdate:
+    async def _stage_gateway_update(self) -> StagedManagedUpdate | None:
         async with self._update_lock:
             if self._staged_update is not None or (
                 self._update_task is not None and not self._update_task.done()
@@ -1342,7 +1385,58 @@ class GatewayServer:
                     f"{len(incompatible)} UI(s) cannot participate"
                 )
             try:
-                staged = await stage_managed_update(self.runtime.update_checker.config)
+                update_result = await self.runtime.update_checker.check()
+                if update_result.error is not None:
+                    raise ValueError(f"cannot check stable TFR updates: {update_result.error}")
+                manifest = update_result.manifest
+                if manifest is None:
+                    raise ValueError("stable TFR update check returned no release manifest")
+                builds = [getattr(self.runtime, "build", current_build())]
+                builds.extend(
+                    participant.build
+                    for participant in participants
+                    if participant.build is not None
+                )
+                update_available = any(
+                    update_result.available_for(build) for build in builds
+                )
+                if not update_available:
+                    unsupported = [
+                        participant for participant in participants if not participant.update_checks
+                    ]
+                    if unsupported:
+                        raise ValueError(
+                            "all connected native UIs must support update availability checks; "
+                            f"{len(unsupported)} UI(s) cannot participate"
+                        )
+                    plugin_checks: list[Awaitable[bool | dict[str, Any] | None]] = []
+                    plugin_checker = getattr(self.runtime, "plugin_update_checker", None)
+                    if plugin_checker is not None:
+                        plugin_checks.append(plugin_checker.stable_auto_update_available())
+                    plugin_checks.extend(
+                        self._request_update_participant(
+                            participant,
+                            "update_check",
+                            timeout=UPDATE_PREPARE_TIMEOUT_SECONDS,
+                        )
+                        for participant in participants
+                    )
+                    plugin_results = await asyncio.gather(*plugin_checks)
+                    update_available = any(
+                        result is True
+                        or isinstance(result, dict)
+                        and result.get("available") is True
+                        for result in plugin_results
+                    )
+                if not update_available:
+                    async with self._update_participants_lock:
+                        self._accepting_update_participants = True
+                        self._update_transaction_participants = ()
+                    return None
+                staged = await stage_managed_update(
+                    self.runtime.update_checker.config,
+                    expected_manifest=manifest,
+                )
             except BaseException:
                 async with self._update_participants_lock:
                     self._accepting_update_participants = True

@@ -286,6 +286,11 @@ activate the exact tagged source release. Both validate the manifest-to-tag
 trust chain; background checks never start installation. Direct verified
 installation of the advertised wheel remains future work.
 
+Before staging, bare `/update` checks the Gateway and every connected native UI.
+If their TFR builds and configured `stable-auto` plugins are current, it reports
+that no update is available and leaves every process and world connection
+running.
+
 From the bootstrap checkout, a normal update is:
 
 ```console

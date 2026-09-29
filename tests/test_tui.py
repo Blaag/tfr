@@ -703,10 +703,29 @@ async def test_bare_update_reports_the_coordinated_release_link(tmp_path: Path) 
     await tui._handle_client_command("alpha", "/update")
 
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
-    assert "Preparing the stable TFR update for the Gateway and all connected UIs" in text
+    assert "Checking for stable updates on the Gateway and all connected UIs" in text
     assert "Update 1.2.3 transaction started" in text
     assert "connected UIs and the Gateway are preparing" in text
     assert "https://example.invalid/tfr/v1.2.3" in text.replace("\n", "")
+
+
+async def test_bare_update_reports_when_everything_is_current(tmp_path: Path) -> None:
+    checker = UpdateChecker(UpdateConfig(state_directory=tmp_path))
+
+    class UpdateRuntime:
+        async def request_update(self) -> dict[str, object]:
+            return {"updated": False}
+
+    tui = make_tui(update_checker=checker)
+    tui.service_runtime = UpdateRuntime()  # type: ignore[assignment]
+    tui.active_view.display.resize(width=100, height=20)
+
+    await tui._handle_client_command("alpha", "/update")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Checking for stable updates on the Gateway and all connected UIs" in text
+    assert "TFR and stable-auto plugins are up to date" in text
+    assert "transaction started" not in text
 
 
 async def test_restart_is_available_only_for_gateway_attached_ui() -> None:
