@@ -7,6 +7,8 @@
   "ui": {
     "scrollback_lines": 20000,
     "recent_input_lines": 3,
+    // Use "terminal" to leave selection and links to the terminal emulator.
+    "mouse_mode": "tfr",
     // See the README Themes section for all available presets.
     "theme": {
       "preset": "catppuccin-mocha",

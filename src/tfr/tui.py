@@ -8,6 +8,7 @@ import os
 import secrets
 import shlex
 import signal
+import subprocess
 import sys
 import time
 import webbrowser
@@ -24,6 +25,7 @@ from prompt_toolkit.application import get_app
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.document import Document
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input import Input
@@ -94,6 +96,7 @@ _CORE_CLIENT_COMMANDS = frozenset(
         "help",
         "image",
         "lowbw",
+        "mouse",
         "n",
         "next",
         "nospoof",
@@ -145,6 +148,48 @@ def _row_text(row: FormattedRow) -> str:
 def _osc52_sequence(text: str) -> str:
     payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
     return f"\x1b]52;c;{payload}\x07"
+
+
+def _process_parent(pid: int) -> tuple[int, str] | None:
+    proc = Path("/proc") / str(pid)
+    try:
+        name = (proc / "comm").read_text(encoding="utf-8").strip()
+        status = (proc / "status").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        try:
+            result = subprocess.run(
+                ("ps", "-o", "ppid=", "-o", "comm=", "-p", str(pid)),
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
+            parent, name = result.stdout.strip().split(maxsplit=1)
+            return int(parent), Path(name).name
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+    parent_line = next((line for line in status.splitlines() if line.startswith("PPid:")), None)
+    if parent_line is None:
+        return None
+    try:
+        return int(parent_line.split()[1]), name
+    except (IndexError, ValueError):
+        return None
+
+
+def _running_under_mosh(pid: int | None = None) -> bool:
+    current = pid or os.getpid()
+    seen: set[int] = set()
+    while current > 1 and current not in seen and len(seen) < 64:
+        seen.add(current)
+        process = _process_parent(current)
+        if process is None:
+            return False
+        parent, name = process
+        if name == "mosh-server":
+            return True
+        current = parent
+    return False
 
 
 def _emit_commands(
@@ -489,6 +534,7 @@ class TfrTui:
         pager_enabled: bool,
         pager_overlap: int,
         recent_input_lines: int = 3,
+        mouse_mode: str = "tfr",
         plugins: PluginManager | None = None,
         agents: AgentRuntime | None = None,
         service_runtime: ServiceRuntime | None = None,
@@ -521,6 +567,8 @@ class TfrTui:
             raise ValueError("boss-screen mode must be cycle, random, or locked")
         if boss_screen_mode == "locked" and boss_screen is None:
             raise ValueError("locked boss-screen mode requires a screen")
+        if mouse_mode not in {"auto", "terminal", "tfr"}:
+            raise ValueError("mouse mode must be auto, terminal, or tfr")
         self.manager = manager
         self.event_bus = event_bus
         self.command_bus = command_bus
@@ -577,6 +625,8 @@ class TfrTui:
         self._startup_notices: list[tuple[str, str]] = []
         self.replay_mode = replay_mode
         self.recent_input_lines = recent_input_lines
+        self.mouse_mode = mouse_mode
+        self._mosh_detected = _running_under_mosh() if mouse_mode == "auto" else False
         self.aliases = [session.world for session in sessions]
         self.world_switch_aliases: dict[str, str] = {}
         for session in sessions:
@@ -724,7 +774,7 @@ class TfrTui:
             layout=Layout(root, focused_element=self.active_view.input_buffer),
             key_bindings=bindings,
             full_screen=True,
-            mouse_support=True,
+            mouse_support=Condition(lambda: self.effective_mouse_mode == "tfr"),
             style=Style.from_dict(dict(self.theme.styles)),
             before_render=self._before_render,
             input=input,
@@ -753,6 +803,12 @@ class TfrTui:
     @property
     def boss_mode(self) -> bool:
         return self.plugins.boss_active
+
+    @property
+    def effective_mouse_mode(self) -> str:
+        if self.mouse_mode == "auto":
+            return "terminal" if self._mosh_detected else "tfr"
+        return self.mouse_mode
 
     def _create_bindings(self) -> KeyBindings:
         bindings = KeyBindings()
@@ -809,6 +865,19 @@ class TfrTui:
                 display.pager.scroll_rows(display.pager.page_size)
             self._sync_animation_task(restart=True)
             event.app.invalidate()
+
+        tab_pages_output = Condition(
+            lambda: (
+                self.inspector_agent is None
+                and self.image_preview is None
+                and not self.active_view.input_buffer.text
+                and self.active_view.display.pager.more_rows > 0
+            )
+        )
+
+        @bindings.add("tab", filter=tab_pages_output)
+        def tab_page_down(event: Any) -> None:
+            page_down(event)
 
         @bindings.add("end")
         def jump_to_end(event: Any) -> None:
@@ -2048,6 +2117,8 @@ class TfrTui:
             self._handle_nospoof_command(alias, parameters)
         elif command == "lowbw":
             self._handle_low_bandwidth_command(alias, parameters)
+        elif command == "mouse":
+            self._handle_mouse_command(alias, parameters)
         elif command == "animations":
             self._handle_animations_command(alias, parameters)
         elif self.plugins is not None and await self.plugins.execute_command(
@@ -2085,6 +2156,7 @@ class TfrTui:
             "  /end - return to live output",
             "  /nospoof show|hide|status - control NOSPOOF prefix visibility",
             "  /lowbw [on|off|status] - suppress continuous UI animation",
+            "  /mouse auto|terminal|tfr|status - choose who handles mouse input",
             "  /animations [on|off|status] - enable continuous UI effects",
             "  /update - update TFR and stable-auto plugins on the Gateway and all connected UIs",
             "  /update status|check - inspect stable TFR and plugin releases",
@@ -2100,7 +2172,7 @@ class TfrTui:
             "  Enter send; F5/Ctrl-Left/Option-Left previous world",
             "  F6/Ctrl-Right next; left-click selects a world; drag copies output",
             "  Click an underlined http(s) link to open it in your browser",
-            "  PageUp/PageDown scroll or page; End returns to live output",
+            "  PageUp/PageDown scroll or page; empty-input Tab also pages when more output exists",
             "  Ctrl-L clear visible input/output; Ctrl-R reconnect; F8 agent inspector",
             "  Ctrl-Q quit; Ctrl-C interrupt",
             "",
@@ -2358,6 +2430,26 @@ class TfrTui:
         self._sync_animation_task(restart=True)
         state = "on" if self.low_bandwidth else "off"
         self.add_notice(alias, f"Low-bandwidth mode is {state}")
+
+    def _handle_mouse_command(self, alias: str, parameters: list[str]) -> None:
+        operation = parameters[0].casefold() if len(parameters) == 1 else ""
+        if operation in {"auto", "terminal", "tfr"}:
+            self.mouse_mode = operation
+            if operation == "auto":
+                self._mosh_detected = _running_under_mosh()
+            self.application.invalidate()
+        elif operation not in {"", "status"} or len(parameters) > 1:
+            self.add_notice(alias, "Usage: /mouse auto|terminal|tfr|status")
+            return
+        reason = (
+            "; mosh-server detected"
+            if self.mouse_mode == "auto" and self._mosh_detected
+            else ""
+        )
+        self.add_notice(
+            alias,
+            f"Mouse mode: {self.mouse_mode} ({self.effective_mouse_mode}{reason})",
+        )
 
     def _set_low_bandwidth(self, enabled: bool) -> None:
         if enabled == self.low_bandwidth:
@@ -2631,6 +2723,7 @@ async def run_client(bundle: ConfigurationBundle) -> int:
             pager_enabled=bundle.main.ui.pager.enabled,
             pager_overlap=bundle.main.ui.pager.overlap_lines,
             recent_input_lines=bundle.main.ui.recent_input_lines,
+            mouse_mode=bundle.main.ui.mouse_mode,
             animations_enabled=bundle.main.ui.animations_enabled,
             low_bandwidth=bundle.main.ui.low_bandwidth,
             output_color=bundle.main.ui.output_color,
