@@ -153,6 +153,7 @@ class ThemeConfig(StrictModel):
 class UiConfig(StrictModel):
     scrollback_lines: PositiveInt = 20_000
     recent_input_lines: int = Field(default=3, ge=0, le=20)
+    mouse_mode: Literal["auto", "terminal", "tfr"] = "tfr"
     output_color: HexColor | None = None
     theme: ThemeConfig = Field(default_factory=ThemeConfig)
     show_nospoof_prefix: bool = False

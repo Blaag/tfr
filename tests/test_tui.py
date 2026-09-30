@@ -59,6 +59,7 @@ from tfr.tui import (
     _format_elapsed,
     _multiline_paste_commands,
     _osc52_sequence,
+    _running_under_mosh,
     run_client,
 )
 from tfr.updates import BuildIdentity, UpdateChecker
@@ -76,6 +77,7 @@ def make_tui(
     server: str = "generic",
     unicode: bool = False,
     world_aliases: Mapping[str, tuple[str, ...]] | None = None,
+    mouse_mode: str = "tfr",
 ) -> TfrTui:
     event_bus = EventBus()
     command_bus = CommandBus()
@@ -111,6 +113,7 @@ def make_tui(
         gateway_build=gateway_build,
         theme=theme,
         output_color=output_color,
+        mouse_mode=mouse_mode,
         input=input or DummyInput(),
         output=DummyOutput(),
     )
@@ -139,6 +142,50 @@ def test_output_color_overrides_theme_plain_text_color() -> None:
     )
 
     assert tui.active_view.display.default_style == "fg:#010203"
+
+
+def test_mosh_detection_walks_process_ancestry(monkeypatch: pytest.MonkeyPatch) -> None:
+    processes = {
+        30: (20, "python"),
+        20: (10, "zsh"),
+        10: (1, "mosh-server"),
+    }
+    monkeypatch.setattr("tfr.tui._process_parent", processes.get)
+
+    assert _running_under_mosh(30) is True
+    assert _running_under_mosh(20) is True
+    assert _running_under_mosh(10) is True
+    assert _running_under_mosh(999) is False
+
+
+async def test_mouse_mode_defaults_to_tfr_and_can_be_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tui = make_tui()
+
+    assert tui.effective_mouse_mode == "tfr"
+    assert tui.application.mouse_support() is True
+
+    await tui._handle_client_command("alpha", "/mouse terminal")
+    assert tui.effective_mouse_mode == "terminal"
+    assert tui.application.mouse_support() is False
+
+    monkeypatch.setattr("tfr.tui._running_under_mosh", lambda: True)
+    await tui._handle_client_command("alpha", "/mouse auto")
+    assert tui.effective_mouse_mode == "terminal"
+    assert tui.application.mouse_support() is False
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Mouse mode: auto (terminal; mosh-server detected)" in text
+
+
+async def test_mouse_command_rejects_invalid_mode() -> None:
+    tui = make_tui()
+
+    await tui._handle_client_command("alpha", "/mouse invalid")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Usage: /mouse auto|terminal|tfr|status" in text
 
 
 async def add_speaker_effects(
@@ -1402,6 +1449,84 @@ async def test_page_down_ends_an_active_screen_clear() -> None:
     assert tui._screen_clear_world is None
 
 
+def test_tab_pages_paused_output_when_input_is_empty() -> None:
+    tui = make_tui()
+    view = tui.active_view
+    view.display.resize(width=40, height=3)
+    for index in range(6):
+        view.display.append(f"line {index}")
+    assert view.display.pager.mode is PagerMode.PAUSED
+    assert view.display.pager.more_rows == 3
+    binding = next(
+        binding
+        for binding in tui.application.key_bindings.bindings
+        if Keys.ControlI in binding.keys
+    )
+
+    assert binding.filter() is True
+    binding.handler(SimpleNamespace(app=tui.application))
+
+    assert view.display.pager.mode is PagerMode.PAUSED
+    assert view.display.pager.more_rows == 1
+
+    assert binding.filter() is True
+    binding.handler(SimpleNamespace(app=tui.application))
+
+    assert view.display.pager.mode is PagerMode.FOLLOW
+    assert view.display.pager.more_rows == 0
+
+
+def test_tab_pages_manually_scrolled_output_when_input_is_empty() -> None:
+    tui = make_tui()
+    view = tui.active_view
+    view.display.resize(width=40, height=3)
+    for index in range(8):
+        view.display.append(f"line {index}")
+    view.display.pager.jump_to_end()
+    view.display.pager.scroll_rows(-2)
+    assert view.display.pager.mode is PagerMode.SCROLLED
+    assert view.display.pager.more_rows == 2
+    binding = next(
+        binding
+        for binding in tui.application.key_bindings.bindings
+        if Keys.ControlI in binding.keys
+    )
+
+    assert binding.filter() is True
+    binding.handler(SimpleNamespace(app=tui.application))
+
+    assert view.display.pager.mode is PagerMode.FOLLOW
+    assert view.display.pager.more_rows == 0
+
+
+def test_tab_paging_filter_preserves_normal_tab_when_paging_is_unavailable() -> None:
+    tui = make_tui()
+    view = tui.active_view
+    view.display.resize(width=40, height=3)
+    for index in range(6):
+        view.display.append(f"line {index}")
+    binding = next(
+        binding
+        for binding in tui.application.key_bindings.bindings
+        if Keys.ControlI in binding.keys
+    )
+
+    view.input_buffer.text = "draft"
+    assert binding.filter() is False
+
+    view.input_buffer.reset()
+    tui.inspector_agent = "agent"
+    assert binding.filter() is False
+
+    tui.inspector_agent = None
+    tui.image_preview = SimpleNamespace()
+    assert binding.filter() is False
+
+    tui.image_preview = None
+    view.display.pager.jump_to_end()
+    assert binding.filter() is False
+
+
 async def test_jump_to_end_key_ends_an_active_screen_clear() -> None:
     tui = make_tui()
     await add_screen_clear_effects(tui)
@@ -1633,6 +1758,7 @@ async def test_standalone_client_loads_all_plugin_capabilities(
     ui = SimpleNamespace(
         pager=SimpleNamespace(enabled=True, overlap_lines=1),
         recent_input_lines=3,
+        mouse_mode="tfr",
         animations_enabled=True,
         low_bandwidth=False,
         output_color="#d7d7d7",

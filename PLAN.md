@@ -778,6 +778,13 @@ Acceptance criteria:
   and an explicit option to emit selected statistics to the world.
 - [x] Make display-affecting keys such as Page Up and Page Down immediately end
   an active screen-clear animation before performing the requested action.
+- [x] Make Tab act as a second Page Down only when the active world's input
+  buffer is empty, normal world output is active rather than another panel such
+  as the agent inspector, and the output pager has rows below the current view
+  (`pager.more_rows > 0`). Reuse the existing Page Down behavior for both paused
+  and manually scrolled output, including ending an active screen-clear effect;
+  otherwise preserve normal Tab input behavior. Test paused output, manually
+  scrolled output, bottom-of-output, nonempty input, and alternate-panel cases.
 - [x] Make low-bandwidth mode disable every animation, including screen-clear
   plugin animations. Clearing the screen while `lowbw` is enabled must complete
   immediately without rendering or scheduling animated effect frames.
@@ -864,6 +871,19 @@ Acceptance criteria:
   conversion work, and emitted line length; provide an adjustable preview and
   explicit confirmation before sending paced, server-aware `@emit` lines, and
   never upload the source image to an external service.
+- [ ] Add optional authenticated file sharing backed by a private S3 bucket,
+  with inline previews for supported image formats.
+  Users sign in through an Amazon Cognito user pool and present the resulting
+  JWT to an API Gateway endpoint. After authorizing the user and requested
+  operation, the API returns narrowly scoped, short-lived URLs: an S3 presigned
+  PUT for uploading a bounded file and a CloudFront signed URL for viewing or
+  downloading it through a private distribution (or an S3 presigned GET when
+  intentionally bypassing CloudFront). Keep the bucket non-public, use
+  CloudFront origin access control, generate unguessable object keys, validate
+  ownership and sharing policy server-side, constrain allowed file types and
+  size, force safe download handling for non-previewable content, expire URLs
+  promptly, and define malware scanning, deletion, retention, abuse-reporting,
+  and orphan-cleanup behavior.
 - [x] Build a mobile gateway client, evaluating a PWA before a native iOS app
   to avoid App Store fees and approval overhead while retaining an installable
   home-screen experience. The gateway already exchanges newline-delimited JSON
