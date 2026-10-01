@@ -7,6 +7,7 @@ import pytest
 
 from tfr.config import WorldsConfig
 from tfr.setup_install import (
+    SCHEMA_ROOT,
     _configure_worlds,
     _world_entry,
     generate_worlds_config,
@@ -80,7 +81,8 @@ def test_rebuilding_worlds_confirms_each_replacement_once(
     assert len(prompts) == 2
     assert prompts[0].startswith("Replace or rebuild existing worlds file")
     assert prompts[1] == "Configure one or more worlds interactively now?"
-    assert "raw.githubusercontent.com" in worlds.read_text(encoding="utf-8")
+    document = json.loads(worlds.read_text(encoding="utf-8"))
+    assert document["$schema"] == f"{SCHEMA_ROOT}/worlds.schema.json"
     assert list(config_directory.glob("worlds.jsonc.backup-*"))
 
 
