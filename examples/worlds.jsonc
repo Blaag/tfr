@@ -13,7 +13,12 @@
       "aliases": ["me"],
       "host": "mux.example.org",
       "port": 4201,
+      // Supported adapters: bare, generic, rhost, tinymush, and tinymux.
       "server": "tinymux",
+      // These optional per-world values override the defaults above.
+      // "encoding": "utf-8",
+      // "reconnect": true,
+      // "scrollback_lines": 20000,
       // Enables Braille image glyphs for worlds known to preserve Unicode.
       "capabilities": {
         "unicode": true,
@@ -21,6 +26,10 @@
       "tls": {
         "enabled": true,
         "verify": true,
+        // Use a private CA or override the TLS hostname when required. Relative
+        // CA paths resolve from this worlds.jsonc file.
+        // "ca_file": "certs/world-ca.pem",
+        // "server_hostname": "mux.example.org",
       },
       "login": {
         "character": "Alice",
@@ -28,7 +37,10 @@
       },
       "autoconnect": true,
       "provenance": {
+        // TFR enables and parses NOSPOOF after login on supported servers.
         "nospoof": true,
+        // Overrides ui.show_nospoof_prefix for this world. Detection and spoof
+        // warnings still work when the wire prefix is hidden.
         "show_prefix": false,
       },
       "idle": {

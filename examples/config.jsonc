@@ -7,21 +7,48 @@
   "ui": {
     "scrollback_lines": 20000,
     "recent_input_lines": 3,
-    // Use "terminal" to leave selection and links to the terminal emulator.
+    // "tfr" enables clicks and wheel scrolling. "terminal" leaves selection
+    // and links to the terminal emulator. "auto" chooses terminal under mosh.
     "mouse_mode": "tfr",
-    // See the README Themes section for all available presets.
+    // Optional fallback for output without an ANSI foreground color. When
+    // omitted, the active theme's text color is used.
+    // "output_color": "#d7d7d7",
+    // Presets: default, catppuccin-latte, catppuccin-frappe,
+    // catppuccin-macchiato, catppuccin-mocha, gruvbox, tokyo-night,
+    // dracula, nord, solarized-dark, nightfly, kanagawa, and 1976.
     "theme": {
       "preset": "catppuccin-mocha",
-      "colors": {},
+      // Override any semantic color while retaining the rest of the preset.
+      "colors": {
+        // "background": "#1e1e2e",
+        // "surface": "#313244",
+        // "overlay": "#45475a",
+        // "text": "#cdd6f4",
+        // "muted": "#6c7086",
+        // "accent": "#89b4fa",
+        // "secondary": "#cba6f7",
+        // "info": "#89dceb",
+        // "success": "#a6e3a1",
+        // "warning": "#f9e2af",
+        // "error": "#f38ba8",
+        // "selection": "#585b70",
+        // "selected_text": "#cdd6f4",
+      },
     },
+    // Global default for displaying a parsed NOSPOOF wire prefix. A world's
+    // provenance.show_prefix can override it; /nospoof changes it at runtime.
     "show_nospoof_prefix": false,
     "animations_enabled": true,
     "low_bandwidth": false,
     "screen_clear": {
+      // "cycle", "random", or "locked". Locked mode also requires effect.
       "mode": "cycle",
+      // "effect": "flame",
     },
     "boss": {
+      // "cycle", "random", or "locked". Locked mode also requires screen.
       "mode": "cycle",
+      // "screen": "build-dashboard",
     },
     "pager": {
       "enabled": true,
@@ -70,44 +97,274 @@
   },
 
   "plugins": {
-    // Every visual plugin from tfr-plugins-public, using their built-in
-    // defaults ({}). See that repository's README for what each plugin does
-    // and which fields it accepts, and SPEAKER-EFFECTS.md for the full
-    // speaker_effects catalog. speaker_effects loads with no rules
-    // configured and is a safe no-op until you add some.
+    // Plugin catalog and complete option reference:
+    // https://github.com/Blaag/tfr-plugins-public
+    // Every plugin in the tfr-plugins-public stable channel. Remove names you
+    // do not want loaded. Screen-clear effects participate in ui.screen_clear.
     "enabled": [
+      "acid_rain",
       "cat",
       "border_reflection",
+      "doom_fire",
       "film_burn",
       "flame",
       "gag",
+      "sandstorm",
       "speaker_effects",
       "terminal_reveal",
       "vortex",
       "water",
+      "water_ripple",
     ],
+    "state_directory": "~/.local/state/tfr/plugins",
     "sources": [
       {
         "repo": "Blaag/tfr-plugins-public",
         "policy": "stable-auto",
         "manifest_url": "https://github.com/Blaag/tfr-plugins-public/releases/latest/download/plugin-manifest.json",
+        "path": ".",
       },
+      // Other source forms, each as a separate object in this array:
+      // Stable notifications without automatic staging:
+      // {
+      //   "repo": "OWNER/REPOSITORY",
+      //   "policy": "stable-notify",
+      //   "manifest_url": "https://example.com/plugin-manifest.json",
+      //   "path": ".",
+      // },
+      // An immutable source pin (ref must be a full lowercase commit SHA):
+      // {
+      //   "repo": "OWNER/REPOSITORY",
+      //   "policy": "pinned",
+      //   "ref": "0123456789abcdef0123456789abcdef01234567",
+      //   "path": "packages/plugins",
+      // },
+      // Legacy development checkout tracking a branch or tag. auto_update is
+      // valid only for legacy sources; prefer a stable policy in production.
+      // {
+      //   "repo": "git@github.com:OWNER/PRIVATE-REPOSITORY.git",
+      //   "policy": "legacy",
+      //   "ref": "main",
+      //   "path": ".",
+      //   "auto_update": false,
+      // },
     ],
     "config": {
-      "cat": {},
-      "border_reflection": {},
-      "film_burn": {},
-      "flame": {},
+      "acid_rain": {
+        "density": 0.32,
+        "duration_seconds": 3,
+        "frames_per_second": 24,
+        "streak_length": 4,
+      },
+      "cat": {
+        "delay_seconds": 0.5,
+        "maximum_bytes": 1048576,
+        "maximum_lines": 10000,
+        "maximum_command_bytes": 7000,
+      },
+      "border_reflection": {
+        "duration_seconds": 1.2,
+        "frames_per_second": 24,
+        "gradient_cells": 8,
+        "minimum_interval_seconds": 30,
+        "maximum_interval_seconds": 120,
+      },
+      "doom_fire": {
+        "duration_seconds": 3.2,
+        "frames_per_second": 24,
+      },
+      "film_burn": {
+        "minimum_holes": 3,
+        "maximum_holes": 7,
+        "maximum_appearance_delay_seconds": 3,
+        "minimum_growth_duration_seconds": 3.5,
+        "maximum_growth_duration_seconds": 6,
+        "burn_duration_seconds": 0.7,
+        "frames_per_second": 24,
+      },
+      "flame": {
+        "duration_seconds": 2.1,
+        "frames_per_second": 24,
+      },
       "gag": {
         "worlds": {
           // Keys are exact world names from worlds.jsonc, not switch aliases.
           // "example-me": ["^A noisy line$", "repeated message \\d+"],
         },
       },
-      "speaker_effects": {},
-      "terminal_reveal": {},
-      "vortex": {},
-      "water": {},
+      "sandstorm": {
+        // "left-to-right" or "right-to-left".
+        "direction": "left-to-right",
+        "duration_seconds": 2.8,
+        "frames_per_second": 24,
+        "gust_strength": 1.4,
+      },
+      // Rules match attributed speaker names case-insensitively. The first
+      // matching rule wins. Replace these names and worlds with your own.
+      "speaker_effects": {
+        "rules": [
+          {
+            "speaker": "Alice",
+            "effect": "shimmer",
+            "color": "#d70000",
+            "accent_color": "#ffffff",
+            "period_seconds": 1.4,
+            "repeat_seconds": 10,
+            "frames_per_second": 20,
+            "shimmer_width": 1.5,
+            "loop": true,
+            "kinds": ["say", "pose"],
+            "worlds": ["example-me"],
+          },
+          {
+            "speaker": "Bob",
+            "effect": "age_decay",
+            "end_color": "#a9914a",
+            "duration_seconds": 30,
+            "loop": false,
+          },
+          // Additional paste-ready rule shapes. Uncomment selected objects,
+          // keep the separating commas, and replace the speaker names.
+          // {
+          //   "speaker": "Carol",
+          //   "effect": "capitalization_roll",
+          //   "color": "#5f87ff",
+          //   "accent_color": "#ffffff",
+          //   "step_seconds": 0.5,
+          // },
+          // {
+          //   "speaker": "Dave",
+          //   "effect": "comet",
+          //   "color": "#005faf",
+          //   "accent_color": "#87d7ff",
+          //   "duration_seconds": 1.2,
+          //   "trail_width": 3,
+          // },
+          // {
+          //   "speaker": "Eve",
+          //   "effect": "sparkle",
+          //   "color": "#af8700",
+          //   "accent_color": "#ffffaf",
+          //   "duration_seconds": 1.2,
+          //   "sparkle_count": 2,
+          // },
+          // {
+          //   "speaker": "Frank",
+          //   "effect": "underline_sweep",
+          //   "color": "#5fd7ff",
+          //   "duration_seconds": 1,
+          //   "wave_width": 2,
+          // },
+          // {
+          //   "speaker": "Grace",
+          //   "effect": "bold_sweep",
+          //   "color": "#ffd75f",
+          //   "duration_seconds": 1,
+          //   "wave_width": 2,
+          // },
+          // {
+          //   "speaker": "Heidi",
+          //   "effect": "reverse_sweep",
+          //   "color": "#d787ff",
+          //   "duration_seconds": 1,
+          //   "wave_width": 2,
+          // },
+          // {
+          //   "speaker": "Ivan",
+          //   "effect": "ember",
+          //   "color": "#d70000",
+          //   "duration_seconds": 1.8,
+          // },
+          // {
+          //   "speaker": "Judy",
+          //   "effect": "frost",
+          //   "color": "#5f87af",
+          //   "accent_color": "#d7ffff",
+          //   "duration_seconds": 1.6,
+          //   "wave_width": 2,
+          // },
+          // {
+          //   "speaker": "Mallory",
+          //   "effect": "rainbow_wave",
+          //   "color": "#d7d7d7",
+          //   "duration_seconds": 1.8,
+          // },
+          // color_pulse and cylon use the portable presentation API and also
+          // animate in the PWA; reduced-motion clients receive a static style.
+          // {
+          //   "speaker": "Niaj",
+          //   "effect": "color_pulse",
+          //   "color": "#5f00af",
+          //   "accent_color": "#d7afff",
+          //   "duration_seconds": 1.2,
+          //   "repeat_seconds": 10,
+          //   "frames_per_second": 20,
+          // },
+          // {
+          //   "speaker": "Olivia",
+          //   "effect": "case_wave",
+          //   "color": "#00875f",
+          //   "accent_color": "#afffd7",
+          //   "step_seconds": 0.2,
+          //   "wave_width": 2,
+          // },
+          // {
+          //   "speaker": "Peggy",
+          //   "effect": "cylon",
+          //   "color": "#180000",
+          //   "accent_color": "#ff0000",
+          //   "duration_seconds": 2,
+          //   "repeat_seconds": 2,
+          //   "trail_width": 2,
+          //   "frames_per_second": 20,
+          // },
+        ],
+      },
+      "terminal_reveal": {
+        "baud_rate": 1200,
+        "frames_per_second": 30,
+        "glitch_width": 3,
+        "settle_width": 3,
+        "speed_variation": 0.25,
+        "inline_glitch_chance": 0.35,
+        "glitch_color": "#ffffff",
+        "trail_color": "#d7d7d7",
+        "maximum_characters": 4096,
+        "maximum_duration_seconds": 10,
+        // Restrict the effect if desired. Values in kinds are canonical event
+        // kinds such as "say", "pose", "page", and "raw_output".
+        // "worlds": ["example-me"],
+        // "kinds": ["say", "pose"],
+        // Visible ASCII only; the built-in default includes letters, digits,
+        // and keyboard punctuation.
+        // "glitch_characters": "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!?",
+      },
+      "vortex": {
+        // "clockwise" or "counterclockwise".
+        "direction": "clockwise",
+        "duration_seconds": 2.8,
+        "edge_softness": 0.18,
+        "frames_per_second": 24,
+        "turns": 2.25,
+      },
+      "water": {
+        // "source" preserves text colors; "dynamic" colors fluid motion.
+        "color_mode": "source",
+        "drain_rate": 45,
+        "duration_seconds": 5,
+        "floor_restitution": 0.75,
+        "frames_per_second": 30,
+        "gravity": 12,
+        "pressure": 48,
+        "slosh_strength": 1.0,
+        "smoothing_radius": 1.4,
+        "surface_tension": 0.5,
+        "viscosity": 0.6,
+      },
+      "water_ripple": {
+        "duration_seconds": 2.6,
+        "frames_per_second": 24,
+      },
       // Built-in disguised operational dashboard. Set include_defaults to
       // false in any section to replace rather than supplement its catalog.
       "tfr.boss": {

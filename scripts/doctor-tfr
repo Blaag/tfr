@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+tfr_command=${TFR_COMMAND:-"$HOME/.local/bin/tfr"}
+if [ ! -x "$tfr_command" ]; then
+    printf '%s\n' "doctor-tfr: TFR is not installed at $tfr_command" >&2
+    printf '%s\n' "Run ./scripts/setup-tfr first." >&2
+    exit 2
+fi
+
+exec "$tfr_command" doctor "$@"

@@ -29,8 +29,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "mode",
         nargs="?",
-        choices=("ui", "gateway", "pair", "devices", "revoke-device"),
-        help="run a client, the Gateway, or local web-device administration",
+        choices=("ui", "gateway", "doctor", "pair", "devices", "revoke-device"),
+        help="run a client, the Gateway, setup diagnostics, or web-device administration",
     )
     parser.add_argument(
         "--config",
@@ -98,6 +98,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--tls-server-name",
         help="UI mode: TLS certificate hostname (defaults to --gateway-host)",
     )
+    parser.add_argument(
+        "--profile",
+        choices=("all-in-one", "local-split", "gateway", "remote-ui"),
+        help="doctor mode: deployment profile to validate",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {build_version}")
     return parser
 
@@ -121,6 +126,10 @@ def run(argv: Sequence[str] | None = None) -> int:
         or args.listen_port != DEFAULT_GATEWAY_PORT
         or args.gateway_port != DEFAULT_GATEWAY_PORT
     )
+
+    if args.profile is not None and args.mode != "doctor":
+        print("tfr: --profile requires doctor mode", file=sys.stderr)
+        return 2
 
     if args.rollback_plugin is not None:
         if (
@@ -275,6 +284,32 @@ def run(argv: Sequence[str] | None = None) -> int:
     if args.device_name is not None or args.device_id is not None:
         print("tfr: web device options require a device administration mode", file=sys.stderr)
         return 2
+
+    if args.mode == "doctor":
+        if args.profile is None:
+            print("tfr: doctor mode requires --profile", file=sys.stderr)
+            return 2
+        from tfr.doctor import run_doctor
+
+        try:
+            return asyncio.run(
+                run_doctor(
+                    profile=args.profile,
+                    config=args.config,
+                    socket_path=args.socket,
+                    listen_host=args.listen_host,
+                    listen_port=args.listen_port,
+                    gateway_host=args.gateway_host,
+                    gateway_port=args.gateway_port,
+                    token_file=args.token_file,
+                    tls_certificate=args.tls_cert,
+                    tls_private_key=args.tls_key,
+                    tls_ca=args.tls_ca,
+                    tls_server_name=args.tls_server_name,
+                )
+            )
+        except KeyboardInterrupt:
+            return 130
 
     if args.check_config and (args.socket is not None or network_arguments):
         print("tfr: transport options cannot be combined with --check-config", file=sys.stderr)

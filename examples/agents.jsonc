@@ -3,6 +3,7 @@
   "schema_version": 1,
 
   "providers": {
+    // Any OpenAI-compatible HTTP API can be configured as a provider.
     "openai": {
       "base_url": "https://api.openai.com/v1",
       "api_key": "replace-me",
@@ -14,6 +15,7 @@
   },
 
   "agents": {
+    // Each agent requires its own dedicated world connection in worlds.jsonc.
     "example-bot": {
       "world": "example-agent-world",
       "provider": "ollama",
