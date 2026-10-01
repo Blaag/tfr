@@ -250,6 +250,49 @@ def test_cli_rejects_incomplete_network_gateway_options(
     assert message in capsys.readouterr().err
 
 
+def test_doctor_requires_a_profile(capsys: pytest.CaptureFixture[str]) -> None:
+    assert run(["doctor"]) == 2
+    assert "doctor mode requires --profile" in capsys.readouterr().err
+
+
+def test_profile_is_rejected_before_other_mode_dispatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run(["--replay", str(tmp_path / "missing.jsonl"), "--profile", "all-in-one"]) == 2
+    assert "--profile requires doctor mode" in capsys.readouterr().err
+
+
+def test_doctor_dispatches_profile_and_transport_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = write_configuration(tmp_path, with_world=True)
+    received: dict[str, object] = {}
+
+    async def fake_doctor(**options: object) -> int:
+        received.update(options)
+        return 4
+
+    monkeypatch.setattr("tfr.doctor.run_doctor", fake_doctor)
+
+    result = run(
+        [
+            "doctor",
+            "--profile",
+            "remote-ui",
+            "--config",
+            str(config),
+            "--gateway-host",
+            "gateway.example.test",
+            "--token-file",
+            str(tmp_path / "gateway.token"),
+        ]
+    )
+
+    assert result == 4
+    assert received["profile"] == "remote-ui"
+    assert received["gateway_host"] == "gateway.example.test"
+
+
 def test_replay_runs_without_loading_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

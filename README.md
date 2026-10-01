@@ -11,25 +11,63 @@ The complete design and implementation sequence are in [PLAN.md](PLAN.md).
 
 ## Quick Start
 
-TFR requires `git`, Python 3.12 or newer, and
-[`uv`](https://docs.astral.sh/uv/). Clone the repository as a bootstrap checkout,
-then use its installer to resolve, verify, build, and activate the exact latest
-stable release:
+TFR requires `git` and network access. The setup assistant checks for
+[`uv`](https://docs.astral.sh/uv/), offers to install it when missing, and uses
+it to obtain Python 3.12 or newer. Clone the repository as a bootstrap checkout,
+then run:
 
 ```console
 git clone https://github.com/Blaag/tfr.git
 cd tfr
+./scripts/setup-tfr
+```
+
+The setup assistant recommends the no-Gateway, all-in-one mode for trying TFR,
+but can also configure a local Gateway plus UI, a remote Gateway host, or a
+remote UI host. It installs the latest verified stable release, creates private
+configuration, can prompt for world connection details, enables the public
+plugin catalog, generates profile launchers, and provides `tfr-doctor` checks.
+Rerun it later to change profiles; it backs up files before approved replacement
+and does not start TFR or install a background service.
+
+If `uv` is missing, the assistant offers to run Astral's official installer,
+wait while you install it yourself and re-check, or exit cleanly. Remote setup
+explains which token and public CA files a UI needs and which Gateway secrets
+must never be copied. Public plugin options are documented at
+<https://github.com/Blaag/tfr-plugins-public>.
+
+The assistant prints the exact command for the selected profile:
+
+```text
+All-in-one:            ~/.local/bin/tfr-local
+Local Gateway:         ~/.local/bin/tfr-gateway
+Local attached UI:     ~/.local/bin/tfr-ui
+Remote Gateway:        ~/.local/bin/tfr-gateway
+Remote attached UI:    ~/.local/bin/tfr-remote-ui
+Check selected setup:  ~/.local/bin/tfr-doctor
+```
+
+Nothing is started automatically. The recommended all-in-one profile does not
+require a Gateway. The local split profile runs `tfr-gateway` in one terminal
+and `tfr-ui` in another. Remote launchers include the selected TLS and token-file
+options. Rerun `setup-tfr` later to change profiles.
+
+The bootstrap checkout is not installed as `main`. The underlying installer
+fetches the official stable manifest, verifies its immutable tag and commit,
+builds that source with its committed lock file, and exposes it through
+`~/.local/bin/tfr`.
+
+## Manual Setup
+
+To install without the setup assistant:
+
+```console
 ./scripts/install-from-checkout --latest-stable
 ~/.local/bin/tfr --version
 ```
 
-The bootstrap checkout is not installed as `main`. The installer fetches the
-official stable release manifest, verifies its immutable annotated tag and exact
-commit, builds that tagged source with its committed lock file, and exposes it
-through `~/.local/bin/tfr`. Add `~/.local/bin` to `PATH` if you want to invoke
-`tfr` without its full path.
-
-Create a private working configuration from the supplied examples:
+Copy and protect the example configuration, edit `worlds.jsonc`, and validate
+the result:
 
 ```console
 tfr_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/tfr"
@@ -37,64 +75,15 @@ mkdir -p "$tfr_config_dir"
 chmod 700 "$tfr_config_dir"
 cp examples/config.jsonc examples/worlds.jsonc examples/agents.jsonc "$tfr_config_dir/"
 chmod 600 "$tfr_config_dir"/*.jsonc
-```
-
-TFR reads `config.jsonc` from that standard directory by default, regardless of
-the current directory or where the bootstrap repository was cloned. Edit
-`worlds.jsonc` there with the world addresses and logins you want to use. Edit
-`agents.jsonc` if you want agent-controlled worlds. Check the complete
-configuration before connecting:
-
-```console
 ~/.local/bin/tfr --check-config
 ```
 
-Start the persistent Gateway in one terminal:
-
-```console
-~/.local/bin/tfr gateway
-```
-
-Leave that command running. A successful startup reports its socket:
-
-```text
-TFR Gateway listening on /Users/YOU/.local/state/tfr/run/gateway.sock
-Press Ctrl-C to stop the gateway.
-```
-
-Attach the UI from a second terminal:
-
-```console
-~/.local/bin/tfr ui
-```
-
-You can attach multiple UIs to the same Gateway. `Ctrl-Q` or `/quit` closes only
-the current UI; world connections, logging, and agents continue in the Gateway.
-Use `/reload` after changing UI or UI-plugin code. It replaces the UI process,
-loads the latest code, and reconnects without stopping world sessions. Stop the
-Gateway with `Ctrl-C` when you want all managed services to shut down.
-
-The Gateway and UI use `$XDG_RUNTIME_DIR/tfr/gateway.sock` when
-`XDG_RUNTIME_DIR` is set. Otherwise they use
-`~/.local/state/tfr/run/gateway.sock`. To use another private socket directory,
-pass the identical path to both commands:
-
-```console
-~/.local/bin/tfr gateway --socket /private/path/tfr.sock
-~/.local/bin/tfr ui --socket /private/path/tfr.sock
-```
-
-The socket's existing parent directory must be owned by the current user and
-must not grant group or other permissions. If the UI reports that the gateway
-socket does not exist, confirm the Gateway is still running and that both
-commands resolve to the same socket path.
-
-For a single-process session without a persistent Gateway, use the legacy
-combined mode:
-
-```console
-~/.local/bin/tfr
-```
+Run `~/.local/bin/tfr` for all-in-one mode. For persistent local connections,
+run `~/.local/bin/tfr gateway` in one terminal and `~/.local/bin/tfr ui` in
+another. They share `$XDG_RUNTIME_DIR/tfr/gateway.sock` when set, otherwise
+`~/.local/state/tfr/run/gateway.sock`. Pass the same `--socket PATH` to both
+commands to override it. `Ctrl-Q` or `/quit` closes only the attached UI; the
+Gateway keeps worlds, logging, and agents running.
 
 ## Development
 
@@ -323,6 +312,22 @@ private key, and shared token. Bind `--listen-host` to the dedicated machine's
 Tailscale address or another specific private address; wildcard addresses are
 rejected.
 
+The recommended setup on the Gateway machine is:
+
+```console
+./scripts/setup-tfr
+# Choose "Gateway server"
+~/.local/bin/tfr-doctor
+~/.local/bin/tfr-gateway
+```
+
+The assistant generates `~/.config/tfr/remote-ui-handoff.txt` with the TLS
+hostname, port, token source path, public CA requirement, and safety guidance.
+Give the UI operator that handoff through an authenticated channel. Copy only
+the shared token and, for a private CA, its public certificate. Never copy the
+Gateway TLS private key, `worlds.jsonc`, `agents.jsonc`, world passwords, or
+provider keys. The commands below document the equivalent manual setup.
+
 Create a random token on the Gateway host and keep it owner-only:
 
 ```console
@@ -455,6 +460,25 @@ network listener. Use a normal non-root account with Python 3.12 or newer,
 network access to the Gateway. Keep the UI and Gateway on the same reviewed TFR
 revision when upgrading them.
 
+The recommended setup on the UI machine is:
+
+```console
+git clone https://github.com/Blaag/tfr.git ~/tfr
+cd ~/tfr
+./scripts/setup-tfr
+# Choose "Remote UI"
+~/.local/bin/tfr-doctor
+~/.local/bin/tfr-remote-ui
+```
+
+The assistant asks for the Gateway host, port, copied token path, optional
+public CA path, and optional TLS certificate hostname. It stores no token value
+in the generated launcher. If the Gateway is not reachable yet, setup still
+finishes; `tfr-doctor` reports the specific DNS, routing, TLS, token, or version
+problem when rerun later.
+
+The remaining steps in this section are the equivalent manual procedure.
+
 Clone the repository on the UI host as an installer bootstrap:
 
 ```console
@@ -472,8 +496,8 @@ rsync -az \
   ./ USER@UI_HOST:~/tfr/
 ```
 
-On the UI host, install and activate the exact latest stable release. This does
-not install the bootstrap checkout's branch:
+On the UI host, manually install and activate the exact latest stable release.
+This does not install the bootstrap checkout's branch:
 
 ```console
 cd ~/tfr
