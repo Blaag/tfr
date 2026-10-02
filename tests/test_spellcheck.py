@@ -68,6 +68,55 @@ def test_prefers_an_adjacent_transposition_over_a_more_frequent_shorter_word(
     ]
 
 
+@pytest.mark.parametrize(
+    ("text", "expected", "replacements"),
+    [
+        (
+            '"I recieve teh package tomorow.',
+            '"I receive the package tomorrow.',
+            [("recieve", "receive"), ("teh", "the"), ("tomorow", "tomorrow")],
+        ),
+        (
+            '"Please chek the mesage before sending.',
+            '"Please check the message before sending.',
+            [("chek", "check"), ("mesage", "message")],
+        ),
+        (
+            '"This spwlling checker catches substitution errors.',
+            '"This spelling checker catches substitution errors.',
+            [("spwlling", "spelling")],
+        ),
+        (
+            '"Tset this sentnce with punctuaction!',
+            '"Test this sentence with punctuation!',
+            [("Tset", "Test"), ("sentnce", "sentence"), ("punctuaction", "punctuation")],
+        ),
+    ],
+)
+def test_corrects_typo_shapes_in_complete_sentences(
+    checker: LocalSpellChecker,
+    text: str,
+    expected: str,
+    replacements: list[tuple[str, str]],
+) -> None:
+    result = checker.correct(text)
+
+    assert result.text == expected
+    assert [(item.original, item.replacement) for item in result.corrections] == replacements
+    assert all(
+        result.text[item.start : item.end] == item.replacement for item in result.corrections
+    )
+
+
+def test_leaves_correct_and_beyond_one_edit_words_unchanged(checker: LocalSpellChecker) -> None:
+    text = (
+        '"I went to the store to buy mushrooms and decided that I wanted '
+        "vvef jerky instead."
+    )
+
+    assert checker.correct(text).text == text
+
+
 def test_preserves_a_capitalized_name_at_the_start_of_speech(
     checker: LocalSpellChecker,
 ) -> None:
