@@ -71,8 +71,8 @@ from tfr.plugin_sources import (
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.presentation import ActiveEffectProgram
 from tfr.sessions import SessionManager, SessionState, WorldSession
-from tfr.spellcheck import Correction, LocalSpellChecker
-from tfr.text_effects import derive_bright_color, interpolate_color
+from tfr.spellcheck import Correction, LocalSpellChecker, speech_payload
+from tfr.text_effects import derive_bright_color
 from tfr.themes import ResolvedTheme, resolve_theme
 from tfr.updates import (
     BuildIdentity,
@@ -120,6 +120,8 @@ _CORE_CLIENT_COMMANDS = frozenset(
 )
 _MAX_OBSERVED_SPEAKERS = 1_000
 _MAX_OBSERVED_SPEAKER_LENGTH = 64
+_MAX_PENDING_SPELLCHECK_ECHOES = 32
+_SPELLCHECK_ECHO_TIMEOUT_SECONDS = 10.0
 
 
 class ServiceRuntime(Protocol):
@@ -148,14 +150,11 @@ class ImagePreview:
 
 
 @dataclass(frozen=True, slots=True)
-class RecentCommand:
+class PendingSpellcheckEcho:
     text: str
-    corrected_spans: tuple[tuple[int, int], ...] = ()
-    highlighted_at: float = 0.0
-    highlight_seconds: float = 3.0
-
-    def active(self, now: float) -> bool:
-        return bool(self.corrected_spans) and now < self.highlighted_at + self.highlight_seconds
+    corrections: tuple[Correction, ...]
+    connection_generation: int
+    queued_at: float
 
 
 def _row_text(row: FormattedRow) -> str:
@@ -321,8 +320,6 @@ class WorldView:
         invalidate_handler: Callable[[], None],
         animation_state: Callable[[], tuple[float, bool]],
         open_url_handler: Callable[[str], None],
-        recent_text_color: str,
-        recent_highlight_color: str,
     ) -> None:
         self.session = session
         self.display = display
@@ -330,12 +327,11 @@ class WorldView:
         self.unread_events = 0
         self.last_inbound_at: float | None = None
         self.recent_input_lines = recent_input_lines
-        self.recent_commands: deque[str | RecentCommand] = deque(maxlen=recent_input_lines)
+        self.recent_commands: deque[str] = deque(maxlen=recent_input_lines)
         self._copy_handler = copy_handler
         self._invalidate_handler = invalidate_handler
         self._animation_state = animation_state
         self._open_url_handler = open_url_handler
-        self._recent_colors = (recent_text_color, recent_highlight_color)
         self._selection_anchor: tuple[int, int] | None = None
         self._selection_head: tuple[int, int] | None = None
         self._selection_dragged = False
@@ -375,52 +371,14 @@ class WorldView:
         )
 
     def recent_input_text(self) -> StyleAndTextTuples:
-        now = time.monotonic()
         commands = [""] * (self.recent_input_lines - len(self.recent_commands))
         output: StyleAndTextTuples = []
-        entries: list[str | RecentCommand] = [*commands, *self.recent_commands]
+        entries = [*commands, *self.recent_commands]
         for line_number, entry in enumerate(entries):
             if line_number:
                 output.append(("class:input.recent", "\n"))
-            if isinstance(entry, str):
-                output.append(("class:input.recent", entry.replace("\r", "").replace("\n", " ")))
-                continue
-            text = entry.text.replace("\r", "").replace("\n", " ")
-            if not entry.active(now):
-                output.append(("class:input.recent", text))
-                continue
-            progress = (
-                min(1.0, max(0.0, (now - entry.highlighted_at) / entry.highlight_seconds))
-                if self._animation_state()[1]
-                else 0.0
-            )
-            start_color = derive_bright_color(self._recent_highlight_color())
-            end_color = self._recent_text_color()
-            color = interpolate_color(start_color, end_color, progress)
-            cursor = 0
-            for start, end in entry.corrected_spans:
-                output.append(("class:input.recent", text[cursor:start]))
-                output.append((f"bold underline fg:{color}", text[start:end]))
-                cursor = end
-            output.append(("class:input.recent", text[cursor:]))
+            output.append(("class:input.recent", entry.replace("\r", "").replace("\n", " ")))
         return output
-
-    def _recent_text_color(self) -> str:
-        return self._recent_colors[0]
-
-    def _recent_highlight_color(self) -> str:
-        return self._recent_colors[1]
-
-    def spellcheck_highlight_delay(self, now: float, *, animated: bool) -> float | None:
-        remaining = [
-            entry.highlighted_at + entry.highlight_seconds - now
-            for entry in self.recent_commands
-            if isinstance(entry, RecentCommand) and entry.active(now)
-        ]
-        if not remaining:
-            return None
-        nearest = min(remaining)
-        return min(1 / 20, nearest) if animated else nearest
 
     def output_text(self) -> StyleAndTextTuples:
         elapsed_seconds, animations_enabled = self._animation_state()
@@ -694,6 +652,9 @@ class TfrTui:
         }
         self._spellchecker = LocalSpellChecker()
         self._spellcheck_pending: dict[UUID, tuple[str, tuple[Correction, ...]]] = {}
+        self._spellcheck_echoes: dict[str, deque[PendingSpellcheckEcho]] = {
+            session.world: deque(maxlen=_MAX_PENDING_SPELLCHECK_ECHOES) for session in sessions
+        }
         self._spellcheck_undo: dict[str, str] = {}
         self._observed_speakers: dict[str, set[str]] = {
             session.world: set() for session in sessions
@@ -758,8 +719,6 @@ class TfrTui:
                     self.animations_enabled and not self.low_bandwidth,
                 ),
                 open_url_handler=self._open_url,
-                recent_text_color=self.theme.palette.muted,
-                recent_highlight_color=self.theme.palette.warning,
             )
 
         self.output_panels = {
@@ -1606,6 +1565,100 @@ class TfrTui:
     async def _open_url_in_browser(url: str) -> None:
         await asyncio.to_thread(webbrowser.open_new_tab, url)
 
+    def _spellcheck_echo_start(
+        self,
+        event: Event,
+        pending: PendingSpellcheckEcho,
+        message: str,
+    ) -> int | None:
+        payload = speech_payload(pending.text)
+        if payload is None:
+            return None
+        payload_start, candidate = payload
+        candidate_start = message.find(candidate)
+        if candidate_start < 0 or candidate_start != message.rfind(candidate):
+            return None
+
+        prefix = pending.text[:payload_start].casefold()
+        echo_prefix = message[:candidate_start].casefold()
+        echo_suffix = message[candidate_start + len(candidate) :].rstrip("\r\n")
+        character = self.views[event.world].session.config.login
+        character_name = character.character.casefold() if character is not None else None
+        if prefix.startswith('"') or prefix.startswith("say "):
+            if event.kind is not EventKind.SAY:
+                return None
+            expected = {'you say, "', "you say, “"}
+            if character_name is not None:
+                expected.update(
+                    {
+                        f'{character_name} says, "',
+                        f"{character_name} says, “",
+                    }
+                )
+            if echo_prefix not in expected or echo_suffix not in {'', '"', "”"}:
+                return None
+        else:
+            if event.kind not in {EventKind.POSE, EventKind.SPEECH} or character_name is None:
+                return None
+            if echo_prefix not in {character_name, f"{character_name} "} or echo_suffix:
+                return None
+        return payload_start
+
+    def _spellcheck_echo_spans(
+        self,
+        event: Event,
+        display_text: str,
+    ) -> tuple[StaticStyleSpan, ...]:
+        if event.kind not in {EventKind.SAY, EventKind.POSE, EventKind.SPEECH}:
+            return ()
+        message_text = event.metadata.get("message_text")
+        if not isinstance(message_text, str):
+            return ()
+
+        now = time.monotonic()
+        pending_echoes = self._spellcheck_echoes[event.world]
+        retained: deque[PendingSpellcheckEcho] = deque(
+            maxlen=_MAX_PENDING_SPELLCHECK_ECHOES
+        )
+        plain_message = terminal_plain_text(message_text)
+        plain_display = terminal_plain_text(display_text)
+        matched: PendingSpellcheckEcho | None = None
+        payload_start = 0
+        display_start = -1
+        for pending in pending_echoes:
+            if (
+                pending.connection_generation != event.connection_generation
+                or now - pending.queued_at > _SPELLCHECK_ECHO_TIMEOUT_SECONDS
+            ):
+                continue
+            candidate_start = self._spellcheck_echo_start(event, pending, plain_message)
+            if matched is None and candidate_start is not None:
+                candidate = pending.text[candidate_start:]
+                candidate_display_start = plain_display.find(candidate)
+                if candidate_display_start < 0 or candidate_display_start != plain_display.rfind(
+                    candidate
+                ):
+                    retained.append(pending)
+                    continue
+                matched = pending
+                payload_start = candidate_start
+                display_start = candidate_display_start
+                continue
+            retained.append(pending)
+        self._spellcheck_echoes[event.world] = retained
+        if matched is None:
+            return ()
+
+        style = f"bold underline fg:{derive_bright_color(self.theme.palette.warning)}"
+        return tuple(
+            StaticStyleSpan(
+                start=display_start + correction.start - payload_start,
+                end=display_start + correction.end - payload_start,
+                style=style,
+            )
+            for correction in matched.corrections
+        )
+
     def handle_event(self, event: Event) -> None:
         self.plugins.observe_ui_event(event)
         view = self.views.get(event.world)
@@ -1702,23 +1755,23 @@ class TfrTui:
                     for program in presentations
                 )
                 view.clear_selection()
-                style_spans: tuple[StaticStyleSpan, ...] = ()
+                style_spans = list(self._spellcheck_echo_spans(event, display_text))
                 if spoof_span is not None and event.spoof is not None:
                     plain_display = terminal_plain_text(display_text)
                     start, end = spoof_span
                     if plain_display[start:end].casefold() == event.spoof.speaker.casefold():
-                        style_spans = (
+                        style_spans.append(
                             StaticStyleSpan(
                                 start=start,
                                 end=end,
                                 style="reverse",
-                            ),
+                            )
                         )
                 view.display.append(
                     display_text,
                     decorations=decorations,
                     presentations=presentations,
-                    style_spans=style_spans,
+                    style_spans=tuple(style_spans),
                 )
                 should_count = True
         elif (
@@ -1736,14 +1789,16 @@ class TfrTui:
             if pending is None:
                 view.recent_commands.append(event.display_text)
             else:
-                _original, corrections = pending
-                view.recent_commands.append(
-                    RecentCommand(
-                        text=event.display_text,
-                        corrected_spans=tuple((item.start, item.end) for item in corrections),
-                        highlighted_at=time.monotonic(),
+                text, corrections = pending
+                self._spellcheck_echoes[event.world].append(
+                    PendingSpellcheckEcho(
+                        text=text,
+                        corrections=corrections,
+                        connection_generation=event.connection_generation,
+                        queued_at=time.monotonic(),
                     )
                 )
+                view.recent_commands.append(event.display_text)
         elif event.kind is EventKind.PLUGIN and event.display_text is not None:
             view.clear_selection()
             view.display.append(self.theme.ansi_text("error", f"-- {event.display_text} --"))
@@ -1923,7 +1978,7 @@ class TfrTui:
         if corrections:
             if len(self._spellcheck_pending) >= 128:
                 self._spellcheck_pending.pop(next(iter(self._spellcheck_pending)))
-            self._spellcheck_pending[request_id] = (original, corrections)
+            self._spellcheck_pending[request_id] = (text, corrections)
         try:
             await self.command_bus.submit(request)
         except UnknownSessionError:
@@ -2639,7 +2694,6 @@ class TfrTui:
             self.plugins.has_animated_border_effects if self.plugins is not None else False
         )
         has_text_effects = self._text_frame_delay(self._animation_elapsed_seconds()) is not None
-        has_spellcheck_effects = self._spellcheck_frame_delay() is not None
         can_animate = (
             self._animations_started
             and self.animations_enabled
@@ -2647,9 +2701,6 @@ class TfrTui:
             and not self.boss_mode
         )
         should_run = can_animate and (has_border_effects or has_text_effects)
-        should_run = should_run or (
-            self._animations_started and not self.boss_mode and has_spellcheck_effects
-        )
         if (
             should_run
             and restart
@@ -2696,12 +2747,6 @@ class TfrTui:
             return None
         return self.active_view.display.animation_frame_delay(elapsed_seconds)
 
-    def _spellcheck_frame_delay(self) -> float | None:
-        return self.active_view.spellcheck_highlight_delay(
-            time.monotonic(),
-            animated=self.animations_enabled and not self.low_bandwidth,
-        )
-
     async def _animate_ui(self) -> None:
         while True:
             elapsed_seconds = self._animation_elapsed_seconds()
@@ -2712,10 +2757,9 @@ class TfrTui:
                 else None
             )
             text_delay = self._text_frame_delay(elapsed_seconds) if can_animate else None
-            spellcheck_delay = self._spellcheck_frame_delay()
             delays = [
                 delay
-                for delay in (border_delay, text_delay, spellcheck_delay)
+                for delay in (border_delay, text_delay)
                 if delay is not None
             ]
             delay = min(delays, default=None)

@@ -798,7 +798,7 @@ Acceptance criteria:
   `/spellcheck on|off|status`. When the user presses Enter, automatically apply
   only high-confidence corrections before sending, while preserving commands,
   URLs, names, punctuation, and world-specific terms. Briefly animate or
-  highlight every corrected word in the input/recent-command display so the
+  highlight every corrected word in the matching world-output echo so the
   changes are unmistakable, retain an undo path, and perform correction locally
   without sending draft text to an external service.
 - [x] Detect HTTP and HTTPS URLs in chat output, render them underlined and

@@ -711,12 +711,12 @@ sending draft text to another service. URLs, paths, identifiers, capitalized
 names, world names, observed speaker names, profanity, and configured protected
 words are not replaced.
 
-Corrected words appear in recent input bold, underlined, and bright, then fade
-to the normal recent-input color over three seconds. With animations disabled
-or low-bandwidth mode active, the bright emphasis remains static for three
-seconds and then disappears. `/spellcheck undo` restores the most recent
-original pre-correction draft for the active world; it cannot retract text that
-was already sent. Add global or per-world vocabulary in `config.jsonc`:
+Corrected words appear bold, underlined, and bright in the matching speech echo
+in world output. Echo matching is local, short-lived, and exact; if no matching
+echo arrives, unrelated output is left unchanged. `/spellcheck undo` restores
+the most recent original pre-correction draft for the active world; it cannot
+retract text that was already sent. Add global or per-world vocabulary in
+`config.jsonc`:
 
 ```jsonc
 "ui": {

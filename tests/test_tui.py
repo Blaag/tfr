@@ -23,6 +23,7 @@ from tfr.borders import BorderEdge
 from tfr.config import (
     AgentsConfig,
     ConfigurationBundle,
+    LoginConfig,
     MainConfig,
     PluginSource,
     SpellcheckConfig,
@@ -58,7 +59,6 @@ from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.tui import (
     _MAX_OBSERVED_SPEAKER_LENGTH,
     _MAX_OBSERVED_SPEAKERS,
-    RecentCommand,
     TfrTui,
     _format_elapsed,
     _multiline_paste_commands,
@@ -2457,20 +2457,16 @@ async def test_submitted_text_uses_active_human_session() -> None:
     assert request.actor.id == "operator"
 
 
-async def test_spellcheck_corrects_speech_and_highlights_outbound_words(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    now = 100.0
-    monkeypatch.setattr("tfr.tui.time.monotonic", lambda: now)
+async def test_spellcheck_highlights_corrected_words_in_world_echo() -> None:
     tui = make_tui(spellcheck=SpellcheckConfig(enabled=True))
     session = tui.active_view.session
     session.state = SessionState.CONNECTED
     queue = tui.command_bus.register(session.session_id)
 
-    await tui.submit_text("alpha", '"I liek teh fox.')
+    await tui.submit_text("alpha", '"i took teh math test and failed')
     request = queue.get_nowait()
 
-    assert request.text == '"I like the fox.'
+    assert request.text == '"i took the math test and failed'
     tui.handle_event(
         Event(
             session_id=session.session_id,
@@ -2486,27 +2482,35 @@ async def test_spellcheck_corrects_speech_and_highlights_outbound_words(
             correlation_id=request.request_id,
         )
     )
+    assert tui.active_view.recent_commands[-1] == request.text
+    assert not any(
+        "underline" in style or "bold" in style
+        for style, _text in tui.active_view.recent_input_text()
+    )
 
-    entry = tui.active_view.recent_commands[-1]
-    assert isinstance(entry, RecentCommand)
-    fragments = tui.active_view.recent_input_text()
-    corrected = [(style, text) for style, text in fragments if text in {"like", "the"}]
-    assert len(corrected) == 2
-    assert all("bold" in style and "underline" in style for style, _text in corrected)
-    assert all("fg:" in style for style, _text in corrected)
+    echo = 'You say, "i took the math test and failed"\r\n'
+    tui.handle_event(
+        Event(
+            session_id=session.session_id,
+            world="alpha",
+            connection_generation=1,
+            sequence=1,
+            direction=Direction.INBOUND,
+            kind=EventKind.SAY,
+            canonical_text=echo,
+            plain_text=echo,
+            display_text=echo,
+            metadata={"message_text": echo},
+        )
+    )
 
-    now = 101.5
-    midpoint_styles = {
-        text: style
-        for style, text in tui.active_view.recent_input_text()
-        if text in {"like", "the"}
-    }
-    assert midpoint_styles["like"] != corrected[0][0]
-
-    now = 103.0
-    expired = tui.active_view.recent_input_text()
-    assert fragment_list_to_text(expired) == '\n\n"I like the fox.'
-    assert not any("underline" in style or "bold" in style for style, _text in expired)
+    output = tui.active_view.output_text()
+    assert fragment_list_to_text(output).endswith(echo.rstrip())
+    corrected = [(style, text) for style, text in output if text == "the"]
+    assert len(corrected) == 1
+    assert "bold" in corrected[0][0]
+    assert "underline" in corrected[0][0]
+    assert "fg:" in corrected[0][0]
 
 
 async def test_spellcheck_leaves_non_speech_commands_unchanged() -> None:
@@ -2534,29 +2538,136 @@ async def test_spellcheck_undo_restores_original_draft() -> None:
     assert tui.active_view.input_buffer.text == '"I liek this.'
 
 
-def test_spellcheck_highlight_holds_when_animations_are_disabled(
+async def test_spellcheck_does_not_highlight_unrelated_or_expired_echoes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = 100.0
     monkeypatch.setattr("tfr.tui.time.monotonic", lambda: now)
-    tui = make_tui()
-    tui.animations_enabled = False
-    tui.active_view.recent_commands.append(
-        RecentCommand('"I like this.', ((3, 7),), highlighted_at=100.0)
+    tui = make_tui(spellcheck=SpellcheckConfig(enabled=True))
+    session = tui.active_view.session
+    session.state = SessionState.CONNECTED
+    queue = tui.command_bus.register(session.session_id)
+
+    await tui.submit_text("alpha", '"I liek this.')
+    request = queue.get_nowait()
+    tui.handle_event(
+        Event(
+            session_id=session.session_id,
+            world="alpha",
+            connection_generation=1,
+            sequence=0,
+            direction=Direction.OUTBOUND,
+            kind=EventKind.COMMAND,
+            canonical_text=request.text,
+            plain_text=request.text,
+            display_text=request.text,
+            actor=request.actor,
+            correlation_id=request.request_id,
+        )
     )
 
-    initial = next(
-        style for style, text in tui.active_view.recent_input_text() if text == "like"
+    unrelated = 'Alice says, "I like this."\r\n'
+    tui.handle_event(
+        Event(
+            session_id=session.session_id,
+            world="alpha",
+            connection_generation=1,
+            sequence=1,
+            direction=Direction.INBOUND,
+            kind=EventKind.SAY,
+            canonical_text=unrelated,
+            plain_text=unrelated,
+            display_text=unrelated,
+            metadata={"message_text": unrelated},
+        )
     )
-    now = 102.5
-    held = next(style for style, text in tui.active_view.recent_input_text() if text == "like")
-    assert held == initial
-    assert "bold" in held and "underline" in held
+    assert not any("underline" in style for style, _text in tui.active_view.output_text())
 
-    now = 103.0
-    assert not any(
-        "underline" in style for style, _text in tui.active_view.recent_input_text()
+    longer = 'You say, "I like this. Really."\r\n'
+    tui.handle_event(
+        Event(
+            session_id=session.session_id,
+            world="alpha",
+            connection_generation=1,
+            sequence=2,
+            direction=Direction.INBOUND,
+            kind=EventKind.SAY,
+            canonical_text=longer,
+            plain_text=longer,
+            display_text=longer,
+            metadata={"message_text": longer},
+        )
     )
+    assert not any("underline" in style for style, _text in tui.active_view.output_text())
+
+    now = 111.0
+    echo = 'You say, "I like this."\r\n'
+    tui.handle_event(
+        Event(
+            session_id=session.session_id,
+            world="alpha",
+            connection_generation=1,
+            sequence=3,
+            direction=Direction.INBOUND,
+            kind=EventKind.SAY,
+            canonical_text=echo,
+            plain_text=echo,
+            display_text=echo,
+            metadata={"message_text": echo},
+        )
+    )
+    assert not any("underline" in style for style, _text in tui.active_view.output_text())
+
+
+async def test_spellcheck_highlights_pose_echo_for_configured_character() -> None:
+    tui = make_tui(spellcheck=SpellcheckConfig(enabled=True))
+    session = tui.active_view.session
+    session.config = session.config.model_copy(
+        update={"login": LoginConfig(character="Black", password="secret")}
+    )
+    session.state = SessionState.CONNECTED
+    queue = tui.command_bus.register(session.session_id)
+
+    await tui.submit_text("alpha", "pose waevs.")
+    request = queue.get_nowait()
+    assert request.text == "pose waves."
+    tui.handle_event(
+        Event(
+            session_id=session.session_id,
+            world="alpha",
+            connection_generation=1,
+            sequence=0,
+            direction=Direction.OUTBOUND,
+            kind=EventKind.COMMAND,
+            canonical_text=request.text,
+            plain_text=request.text,
+            display_text=request.text,
+            actor=request.actor,
+            correlation_id=request.request_id,
+        )
+    )
+
+    echo = "Black waves.\r\n"
+    tui.handle_event(
+        Event(
+            session_id=session.session_id,
+            world="alpha",
+            connection_generation=1,
+            sequence=1,
+            direction=Direction.INBOUND,
+            kind=EventKind.POSE,
+            canonical_text=echo,
+            plain_text=echo,
+            display_text=echo,
+            metadata={"message_text": echo},
+        )
+    )
+
+    corrected = [
+        (style, text) for style, text in tui.active_view.output_text() if text == "waves"
+    ]
+    assert len(corrected) == 1
+    assert "bold" in corrected[0][0] and "underline" in corrected[0][0]
 
 
 def test_spellcheck_observed_speaker_vocabulary_is_bounded() -> None:
