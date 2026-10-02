@@ -166,16 +166,21 @@ class LocalSpellChecker:
             candidates = [suggestion for suggestion in suggestions if suggestion.distance == 1]
             if not candidates:
                 continue
-            best = candidates[0]
-            second_count = candidates[1].count if len(candidates) > 1 else 1
+            transpositions = [
+                suggestion
+                for suggestion in candidates
+                if _is_adjacent_transposition(folded, suggestion.term.casefold())
+            ]
+            best = transpositions[0] if transpositions else candidates[0]
+            competitors = transpositions if transpositions else candidates
+            competing_counts = [
+                suggestion.count for suggestion in competitors if suggestion.term != best.term
+            ]
+            second_count = max(competing_counts, default=1)
             ratio = (
-                _TRANSPOSITION_FREQUENCY_RATIO
-                if _is_adjacent_transposition(folded, best.term.casefold())
-                else _GENERAL_FREQUENCY_RATIO
+                _TRANSPOSITION_FREQUENCY_RATIO if transpositions else _GENERAL_FREQUENCY_RATIO
             )
-            if word.istitle() and not _is_adjacent_transposition(
-                folded, best.term.casefold()
-            ):
+            if word.istitle() and not transpositions:
                 continue
             if best.count < _MINIMUM_FREQUENCY or best.count < second_count * ratio:
                 continue
