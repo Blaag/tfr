@@ -19,6 +19,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen
+      - run: ./scripts/check-security
       - run: uv run ruff check .
       - run: node --check src/tfr/web/app.mjs
       - run: node --test tests/test_web_*.mjs

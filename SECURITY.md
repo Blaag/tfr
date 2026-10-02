@@ -14,6 +14,13 @@ moderate-or-higher vulnerability in a runtime, development, or unknown-scope
 dependency. Automated pull requests and security alerts require maintainer
 review; TFR does not merge dependency changes automatically.
 
+Run `./scripts/check-security` for the same local checks enforced by CI and the
+release workflow. The command audits the complete dependency graph exported
+from `uv.lock` with `pip-audit`, then runs Bandit recursively over `src/tfr` and
+the Python maintenance scripts. Bandit blocks medium- and high-severity
+findings; its current low-severity findings are reviewed but do not block.
+Both tools are version-pinned in the development dependency group.
+
 ## Credentials
 
 TFR permits world passwords and model API keys in JSONC by design. Files that

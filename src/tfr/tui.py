@@ -18,6 +18,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
+from uuid import UUID, uuid4
 
 from PIL import Image
 from prompt_toolkit import Application
@@ -42,7 +43,7 @@ from tfr.agents import AgentRuntime
 from tfr.ansi import ansi_visible_text, safe_ansi_formatted_text, terminal_plain_text
 from tfr.borders import BorderEdge, border_cell
 from tfr.clear_effects import ScreenClearContext
-from tfr.config import ConfigurationBundle, ThemeConfig
+from tfr.config import ConfigurationBundle, SpellcheckConfig, ThemeConfig
 from tfr.core import CommandBus, EventBus, UnknownSessionError
 from tfr.events import Actor, ActorType, CommandRequest, Direction, Event, EventKind, SpoofStatus
 from tfr.image_art import (
@@ -70,6 +71,8 @@ from tfr.plugin_sources import (
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.presentation import ActiveEffectProgram
 from tfr.sessions import SessionManager, SessionState, WorldSession
+from tfr.spellcheck import Correction, LocalSpellChecker
+from tfr.text_effects import derive_bright_color, interpolate_color
 from tfr.themes import ResolvedTheme, resolve_theme
 from tfr.updates import (
     BuildIdentity,
@@ -110,10 +113,13 @@ _CORE_CLIENT_COMMANDS = frozenset(
         "reload",
         "restart",
         "sh",
+        "spellcheck",
         "update",
         "world",
     }
 )
+_MAX_OBSERVED_SPEAKERS = 1_000
+_MAX_OBSERVED_SPEAKER_LENGTH = 64
 
 
 class ServiceRuntime(Protocol):
@@ -139,6 +145,17 @@ class ImagePreview:
     encoding: str
     rendering: bool = False
     error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RecentCommand:
+    text: str
+    corrected_spans: tuple[tuple[int, int], ...] = ()
+    highlighted_at: float = 0.0
+    highlight_seconds: float = 3.0
+
+    def active(self, now: float) -> bool:
+        return bool(self.corrected_spans) and now < self.highlighted_at + self.highlight_seconds
 
 
 def _row_text(row: FormattedRow) -> str:
@@ -304,6 +321,8 @@ class WorldView:
         invalidate_handler: Callable[[], None],
         animation_state: Callable[[], tuple[float, bool]],
         open_url_handler: Callable[[str], None],
+        recent_text_color: str,
+        recent_highlight_color: str,
     ) -> None:
         self.session = session
         self.display = display
@@ -311,11 +330,12 @@ class WorldView:
         self.unread_events = 0
         self.last_inbound_at: float | None = None
         self.recent_input_lines = recent_input_lines
-        self.recent_commands: deque[str] = deque(maxlen=recent_input_lines)
+        self.recent_commands: deque[str | RecentCommand] = deque(maxlen=recent_input_lines)
         self._copy_handler = copy_handler
         self._invalidate_handler = invalidate_handler
         self._animation_state = animation_state
         self._open_url_handler = open_url_handler
+        self._recent_colors = (recent_text_color, recent_highlight_color)
         self._selection_anchor: tuple[int, int] | None = None
         self._selection_head: tuple[int, int] | None = None
         self._selection_dragged = False
@@ -355,11 +375,52 @@ class WorldView:
         )
 
     def recent_input_text(self) -> StyleAndTextTuples:
-        commands = [
-            command.replace("\r", "").replace("\n", " ") for command in self.recent_commands
+        now = time.monotonic()
+        commands = [""] * (self.recent_input_lines - len(self.recent_commands))
+        output: StyleAndTextTuples = []
+        entries: list[str | RecentCommand] = [*commands, *self.recent_commands]
+        for line_number, entry in enumerate(entries):
+            if line_number:
+                output.append(("class:input.recent", "\n"))
+            if isinstance(entry, str):
+                output.append(("class:input.recent", entry.replace("\r", "").replace("\n", " ")))
+                continue
+            text = entry.text.replace("\r", "").replace("\n", " ")
+            if not entry.active(now):
+                output.append(("class:input.recent", text))
+                continue
+            progress = (
+                min(1.0, max(0.0, (now - entry.highlighted_at) / entry.highlight_seconds))
+                if self._animation_state()[1]
+                else 0.0
+            )
+            start_color = derive_bright_color(self._recent_highlight_color())
+            end_color = self._recent_text_color()
+            color = interpolate_color(start_color, end_color, progress)
+            cursor = 0
+            for start, end in entry.corrected_spans:
+                output.append(("class:input.recent", text[cursor:start]))
+                output.append((f"bold underline fg:{color}", text[start:end]))
+                cursor = end
+            output.append(("class:input.recent", text[cursor:]))
+        return output
+
+    def _recent_text_color(self) -> str:
+        return self._recent_colors[0]
+
+    def _recent_highlight_color(self) -> str:
+        return self._recent_colors[1]
+
+    def spellcheck_highlight_delay(self, now: float, *, animated: bool) -> float | None:
+        remaining = [
+            entry.highlighted_at + entry.highlight_seconds - now
+            for entry in self.recent_commands
+            if isinstance(entry, RecentCommand) and entry.active(now)
         ]
-        lines = [""] * (self.recent_input_lines - len(commands)) + commands
-        return [("class:input.recent", "\n".join(lines))]
+        if not remaining:
+            return None
+        nearest = min(remaining)
+        return min(1 / 20, nearest) if animated else nearest
 
     def output_text(self) -> StyleAndTextTuples:
         elapsed_seconds, animations_enabled = self._animation_state()
@@ -554,6 +615,7 @@ class TfrTui:
         initial_events: Sequence[Event] = (),
         initial_scroll_to_end: bool = True,
         replay_mode: bool = False,
+        spellcheck: SpellcheckConfig | None = None,
         input: Input | None = None,
         output: Output | None = None,
     ) -> None:
@@ -624,6 +686,18 @@ class TfrTui:
         self.initial_scroll_to_end = initial_scroll_to_end
         self._startup_notices: list[tuple[str, str]] = []
         self.replay_mode = replay_mode
+        spellcheck_config = spellcheck or SpellcheckConfig()
+        self.spellcheck_enabled = spellcheck_config.enabled
+        self._spellcheck_protected_words = frozenset(spellcheck_config.protected_words)
+        self._spellcheck_world_words = {
+            world: frozenset(words) for world, words in spellcheck_config.worlds.items()
+        }
+        self._spellchecker = LocalSpellChecker()
+        self._spellcheck_pending: dict[UUID, tuple[str, tuple[Correction, ...]]] = {}
+        self._spellcheck_undo: dict[str, str] = {}
+        self._observed_speakers: dict[str, set[str]] = {
+            session.world: set() for session in sessions
+        }
         self.recent_input_lines = recent_input_lines
         self.mouse_mode = mouse_mode
         self._mosh_detected = _running_under_mosh() if mouse_mode == "auto" else False
@@ -684,6 +758,8 @@ class TfrTui:
                     self.animations_enabled and not self.low_bandwidth,
                 ),
                 open_url_handler=self._open_url,
+                recent_text_color=self.theme.palette.muted,
+                recent_highlight_color=self.theme.palette.warning,
             )
 
         self.output_panels = {
@@ -1538,6 +1614,14 @@ class TfrTui:
         should_count = False
         if event.direction is Direction.INBOUND:
             view.last_inbound_at = time.monotonic()
+            if event.provenance is not None and event.provenance.sender_name:
+                observed = self._observed_speakers[event.world]
+                sender_name = event.provenance.sender_name
+                if (
+                    len(observed) < _MAX_OBSERVED_SPEAKERS
+                    and len(sender_name) <= _MAX_OBSERVED_SPEAKER_LENGTH
+                ):
+                    observed.add(sender_name)
             event_text = event.display_text
             if event.provenance is not None and event.provenance.prefix_span is not None:
                 if view.session.show_nospoof_prefix:
@@ -1644,7 +1728,22 @@ class TfrTui:
             and event.actor.type is ActorType.HUMAN
             and event.display_text is not None
         ):
-            view.recent_commands.append(event.display_text)
+            pending = (
+                self._spellcheck_pending.pop(event.correlation_id, None)
+                if event.correlation_id is not None
+                else None
+            )
+            if pending is None:
+                view.recent_commands.append(event.display_text)
+            else:
+                _original, corrections = pending
+                view.recent_commands.append(
+                    RecentCommand(
+                        text=event.display_text,
+                        corrected_spans=tuple((item.start, item.end) for item in corrections),
+                        highlighted_at=time.monotonic(),
+                    )
+                )
         elif event.kind is EventKind.PLUGIN and event.display_text is not None:
             view.clear_selection()
             view.display.append(self.theme.ansi_text("error", f"-- {event.display_text} --"))
@@ -1802,17 +1901,40 @@ class TfrTui:
         }:
             self.add_notice(alias, "Not connected; use /connect")
             return
+        original = text
+        corrections: tuple[Correction, ...] = ()
+        if self.spellcheck_enabled:
+            protected_words = set(self._spellcheck_protected_words)
+            protected_words.update(self._spellcheck_world_words.get(alias, ()))
+            protected_words.update(self.aliases)
+            protected_words.update(self.world_switch_aliases)
+            protected_words.update(self._observed_speakers[alias])
+            result = self._spellchecker.correct(text, protected_words=protected_words)
+            text = result.text
+            corrections = result.corrections
+        request_id = uuid4()
         request = CommandRequest(
             session_id=view.session.session_id,
             world=alias,
             actor=Actor(ActorType.HUMAN, "operator"),
             text=text,
+            request_id=request_id,
         )
+        if corrections:
+            if len(self._spellcheck_pending) >= 128:
+                self._spellcheck_pending.pop(next(iter(self._spellcheck_pending)))
+            self._spellcheck_pending[request_id] = (original, corrections)
         try:
             await self.command_bus.submit(request)
         except UnknownSessionError:
+            self._spellcheck_pending.pop(request_id, None)
             self.add_notice(alias, "Connection is not accepting commands")
+        except BaseException:
+            self._spellcheck_pending.pop(request_id, None)
+            raise
         else:
+            if corrections:
+                self._spellcheck_undo[alias] = original
             self._jump_to_end(alias)
 
     async def submit_multiline_paste(self, alias: str, text: str) -> None:
@@ -2121,6 +2243,8 @@ class TfrTui:
             self._handle_mouse_command(alias, parameters)
         elif command == "animations":
             self._handle_animations_command(alias, parameters)
+        elif command == "spellcheck":
+            self._handle_spellcheck_command(alias, parameters)
         elif self.plugins is not None and await self.plugins.execute_command(
             command, tuple(parameters), alias
         ):
@@ -2158,6 +2282,7 @@ class TfrTui:
             "  /lowbw [on|off|status] - suppress continuous UI animation",
             "  /mouse auto|terminal|tfr|status - choose who handles mouse input",
             "  /animations [on|off|status] - enable continuous UI effects",
+            "  /spellcheck on|off|status|undo - correct explicit speech and poses locally",
             "  /update - update TFR and stable-auto plugins on the Gateway and all connected UIs",
             "  /update status|check - inspect stable TFR and plugin releases",
             "  /plugins - show configured, loaded, and failed plugins",
@@ -2480,6 +2605,29 @@ class TfrTui:
         state = "on" if self.animations_enabled else "off"
         self.add_notice(alias, f"Continuous UI animations are {state}")
 
+    def _handle_spellcheck_command(self, alias: str, parameters: list[str]) -> None:
+        operation = parameters[0].casefold() if len(parameters) == 1 else ""
+        if operation == "on":
+            self.spellcheck_enabled = True
+        elif operation == "off":
+            self.spellcheck_enabled = False
+        elif operation == "undo":
+            original = self._spellcheck_undo.get(alias)
+            if original is None:
+                self.add_notice(alias, "No spell-check correction is available to undo")
+                return
+            buffer = self.views[alias].input_buffer
+            buffer.document = Document(original, cursor_position=len(original))
+            self.application.layout.focus(buffer)
+            self.application.invalidate()
+            self.add_notice(alias, "Restored the original pre-correction draft")
+            return
+        elif operation not in {"", "status"} or len(parameters) > 1:
+            self.add_notice(alias, "Usage: /spellcheck on|off|status|undo")
+            return
+        state = "on" if self.spellcheck_enabled else "off"
+        self.add_notice(alias, f"Submit-time spell checking is {state}")
+
     def _animation_elapsed_seconds(self) -> float:
         now = self._animation_paused_at
         if now is None:
@@ -2491,13 +2639,17 @@ class TfrTui:
             self.plugins.has_animated_border_effects if self.plugins is not None else False
         )
         has_text_effects = self._text_frame_delay(self._animation_elapsed_seconds()) is not None
-        should_run = (
+        has_spellcheck_effects = self._spellcheck_frame_delay() is not None
+        can_animate = (
             self._animations_started
             and self.animations_enabled
             and not self.low_bandwidth
             and not self.boss_mode
         )
-        should_run = should_run and (has_border_effects or has_text_effects)
+        should_run = can_animate and (has_border_effects or has_text_effects)
+        should_run = should_run or (
+            self._animations_started and not self.boss_mode and has_spellcheck_effects
+        )
         if (
             should_run
             and restart
@@ -2544,18 +2696,30 @@ class TfrTui:
             return None
         return self.active_view.display.animation_frame_delay(elapsed_seconds)
 
+    def _spellcheck_frame_delay(self) -> float | None:
+        return self.active_view.spellcheck_highlight_delay(
+            time.monotonic(),
+            animated=self.animations_enabled and not self.low_bandwidth,
+        )
+
     async def _animate_ui(self) -> None:
         while True:
             elapsed_seconds = self._animation_elapsed_seconds()
+            can_animate = self.animations_enabled and not self.low_bandwidth
             border_delay = (
                 self.plugins.border_frame_delay(elapsed_seconds)
-                if self.plugins is not None
+                if can_animate and self.plugins is not None
                 else None
             )
-            text_delay = self._text_frame_delay(elapsed_seconds)
-            delays = [delay for delay in (border_delay, text_delay) if delay is not None]
+            text_delay = self._text_frame_delay(elapsed_seconds) if can_animate else None
+            spellcheck_delay = self._spellcheck_frame_delay()
+            delays = [
+                delay
+                for delay in (border_delay, text_delay, spellcheck_delay)
+                if delay is not None
+            ]
             delay = min(delays, default=None)
-            if delay is None or not self.animations_enabled or self.low_bandwidth or self.boss_mode:
+            if delay is None or self.boss_mode:
                 return
             await asyncio.sleep(max(1 / 30, delay))
             self.application.invalidate()
@@ -2724,6 +2888,7 @@ async def run_client(bundle: ConfigurationBundle) -> int:
             pager_overlap=bundle.main.ui.pager.overlap_lines,
             recent_input_lines=bundle.main.ui.recent_input_lines,
             mouse_mode=bundle.main.ui.mouse_mode,
+            spellcheck=bundle.main.ui.spellcheck,
             animations_enabled=bundle.main.ui.animations_enabled,
             low_bandwidth=bundle.main.ui.low_bandwidth,
             output_color=bundle.main.ui.output_color,

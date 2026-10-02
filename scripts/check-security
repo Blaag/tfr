@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+requirements=$(mktemp "${TMPDIR:-/tmp}/tfr-audit.XXXXXX")
+trap 'rm -f "$requirements"' 0
+
+cd "$repository"
+
+uv export --quiet --frozen --all-groups --no-emit-project \
+    --format requirements.txt --output-file "$requirements"
+uv run --frozen pip-audit --requirement "$requirements" --strict \
+    --disable-pip --progress-spinner off
+uv run --frozen bandit --recursive src/tfr scripts/build_update_manifest.py scripts/mock-world \
+    --severity-level medium --quiet

@@ -1240,6 +1240,7 @@ async def run_gateway_ui(
         pager_overlap=configuration.main.ui.pager.overlap_lines,
         recent_input_lines=configuration.main.ui.recent_input_lines,
         mouse_mode=configuration.main.ui.mouse_mode,
+        spellcheck=configuration.main.ui.spellcheck,
         animations_enabled=configuration.main.ui.animations_enabled,
         low_bandwidth=configuration.main.ui.low_bandwidth,
         output_color=configuration.main.ui.output_color,

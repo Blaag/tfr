@@ -794,7 +794,7 @@ Acceptance criteria:
   editing, paste, and Unicode grapheme behavior; render immediately in the normal
   color when animations or low-bandwidth mode are disabled, and keep redraw work
   bounded while typing rapidly.
-- [ ] Add optional submit-time spell checking controlled by
+- [x] Add optional submit-time spell checking controlled by
   `/spellcheck on|off|status`. When the user presses Enter, automatically apply
   only high-confidence corrections before sending, while preserving commands,
   URLs, names, punctuation, and world-specific terms. Briefly animate or

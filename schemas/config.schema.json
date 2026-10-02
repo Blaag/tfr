@@ -295,6 +295,37 @@
       "title": "ScreenClearConfig",
       "type": "object"
     },
+    "SpellcheckConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "protected_words": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 1000,
+          "title": "Protected Words",
+          "type": "array"
+        },
+        "worlds": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Worlds",
+          "type": "object"
+        }
+      },
+      "title": "SpellcheckConfig",
+      "type": "object"
+    },
     "ThemeColorsConfig": {
       "additionalProperties": false,
       "properties": {
@@ -566,6 +597,9 @@
           "default": false,
           "title": "Show Nospoof Prefix",
           "type": "boolean"
+        },
+        "spellcheck": {
+          "$ref": "#/$defs/SpellcheckConfig"
         },
         "theme": {
           "$ref": "#/$defs/ThemeConfig"
