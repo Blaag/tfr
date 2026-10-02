@@ -101,6 +101,8 @@ def test_loads_jsonc_and_resolves_references(tmp_path: Path) -> None:
     assert bundle.main.ui.theme.colors.text is None
     assert bundle.main.ui.animations_enabled is True
     assert bundle.main.ui.low_bandwidth is False
+    assert bundle.main.ui.spellcheck.enabled is False
+    assert bundle.main.ui.spellcheck.protected_words == ()
     assert bundle.main.ui.screen_clear.mode == "cycle"
     assert bundle.main.ui.screen_clear.effect is None
     assert bundle.main.ui.boss.mode == "cycle"

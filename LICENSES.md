@@ -14,6 +14,7 @@ The locked runtime dependency set was reviewed on 2026-09-23:
 | pydantic | 2.13.5 | MIT |
 | regex | 2026.9.10 | Apache-2.0 |
 | retroflow | 0.10.0 | MIT |
+| symspellpy | 6.10.0 | MIT |
 | aiohappyeyeballs | 2.7.1 | PSF-2.0 |
 | aiosignal | 1.4.0 | Apache-2.0 |
 | annotated-types | 0.8.0 | MIT |

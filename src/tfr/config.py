@@ -150,12 +150,36 @@ class ThemeConfig(StrictModel):
     colors: ThemeColorsConfig = Field(default_factory=ThemeColorsConfig)
 
 
+class SpellcheckConfig(StrictModel):
+    enabled: bool = False
+    protected_words: tuple[str, ...] = Field(default=(), max_length=1_000)
+    worlds: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def valid_protected_words(self) -> SpellcheckConfig:
+        groups = (self.protected_words, *self.worlds.values())
+        if sum(len(group) for group in groups) > 5_000:
+            raise ValueError("spellcheck cannot define more than 5000 protected words")
+        for group in groups:
+            for word in group:
+                if (
+                    not word.strip()
+                    or len(word) > 64
+                    or any(character.isspace() for character in word)
+                ):
+                    raise ValueError(
+                        "spellcheck protected words must be 1-64 characters without whitespace"
+                    )
+        return self
+
+
 class UiConfig(StrictModel):
     scrollback_lines: PositiveInt = 20_000
     recent_input_lines: int = Field(default=3, ge=0, le=20)
     mouse_mode: Literal["auto", "terminal", "tfr"] = "tfr"
     output_color: HexColor | None = None
     theme: ThemeConfig = Field(default_factory=ThemeConfig)
+    spellcheck: SpellcheckConfig = Field(default_factory=SpellcheckConfig)
     show_nospoof_prefix: bool = False
     animations_enabled: bool = True
     low_bandwidth: bool = False

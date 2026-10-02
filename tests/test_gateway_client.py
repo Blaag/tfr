@@ -1156,9 +1156,11 @@ async def test_gateway_ui_queues_plugin_source_messages_for_resumed_world(
         process_event=AsyncMock(),
     )
     notices: list[tuple[str, str]] = []
+    tui_options: dict[str, object] = {}
 
     class FakeTui:
-        def __init__(self, **_kwargs: object) -> None:
+        def __init__(self, **kwargs: object) -> None:
+            tui_options.update(kwargs)
             self.active_alias = "alpha"
             self.views = {"alpha": object(), "beta": object()}
             self.restart_requested = False
@@ -1184,6 +1186,7 @@ async def test_gateway_ui_queues_plugin_source_messages_for_resumed_world(
     configuration = UiConfiguration(main_path=Path("config.jsonc"), main=MainConfig())
 
     assert await run_gateway_ui(configuration) == 0
+    assert tui_options["spellcheck"] == configuration.main.ui.spellcheck
     assert notices == [
         ("beta", "Plugin source broken/plugins: checkout is invalid"),
         (

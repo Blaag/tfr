@@ -95,6 +95,7 @@ uv run tfr --config examples/config.jsonc
 uv run tfr gateway --config examples/config.jsonc
 uv run tfr ui --config examples/config.jsonc
 uv run tfr --replay ~/.local/state/tfr/logs/tfr-TIMESTAMP-PID.jsonl
+./scripts/check-security
 uv run ruff check .
 uv run pytest
 ```
@@ -692,12 +693,42 @@ otherwise approximate the RGB colors at the terminal's available color depth.
 Input beginning with `/` is a client command. Available commands are `/world
 ALIAS`, `/next` (`/n`), `/previous` (`/p`), `/connect`, `/disconnect`, `/reconnect`,
 `/end`, `/nospoof show|hide|status`, `/animations on|off|status`,
-`/lowbw on|off|status`, `/mouse auto|terminal|tfr|status`, `/clear`, `/boss`,
+`/lowbw on|off|status`, `/mouse auto|terminal|tfr|status`,
+`/spellcheck on|off|status|undo`, `/clear`, `/boss`,
 `/image`, `/sh`, `/reload`, `/restart`,
 `/gateway reconnect`, `/help`, and `/quit`, plus commands registered by enabled
 plugins and configured world-switch aliases such as `/g`. Begin input with `//`
 to send a literal leading slash. `/help` displays commands, aliases and any
 collisions, loaded plugins, world markers, and keybindings.
+
+Optional local spell checking is disabled by default. Enable it in
+`ui.spellcheck.enabled` or for the current process with `/spellcheck on`. It
+checks only the conversational payload after a leading `"`, `say `, `:`, or
+`pose ` (case-insensitive for word commands). Other input, including MUSH and
+system commands, pages, channels, semiposes, and multiline pastes, is unchanged.
+Corrections are conservative, English-only, and performed locally without
+sending draft text to another service. URLs, paths, identifiers, capitalized
+names, world names, observed speaker names, profanity, and configured protected
+words are not replaced.
+
+Corrected words appear in recent input bold, underlined, and bright, then fade
+to the normal recent-input color over three seconds. With animations disabled
+or low-bandwidth mode active, the bright emphasis remains static for three
+seconds and then disappears. `/spellcheck undo` restores the most recent
+original pre-correction draft for the active world; it cannot retract text that
+was already sent. Add global or per-world vocabulary in `config.jsonc`:
+
+```jsonc
+"ui": {
+  "spellcheck": {
+    "enabled": false,
+    "protected_words": ["TFR", "MUSH", "NOSPOOF"],
+    "worlds": {
+      "example-me": ["Alice", "Blaag", "TinyMUX"],
+    },
+  },
+}
+```
 
 Image output uses portable ASCII glyphs unless the target world explicitly
 declares that it preserves Unicode in `worlds.jsonc`:

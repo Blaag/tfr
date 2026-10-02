@@ -40,6 +40,17 @@
     "show_nospoof_prefix": false,
     "animations_enabled": true,
     "low_bandwidth": false,
+    // Optional local, submit-time English spell checking. Only payloads after
+    // ", say, :, or pose are eligible; all other world commands are untouched.
+    "spellcheck": {
+      "enabled": false,
+      // Terms here are recognized, never censored or replaced.
+      "protected_words": ["TFR", "MUSH", "MUX", "NOSPOOF"],
+      // Add character names and lore terms for individual worlds.
+      "worlds": {
+        // "example-me": ["Alice", "Blaag", "TinyMUX"],
+      },
+    },
     "screen_clear": {
       // "cycle", "random", or "locked". Locked mode also requires effect.
       "mode": "cycle",
