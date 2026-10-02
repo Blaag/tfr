@@ -63,6 +63,13 @@ class CorrectionResult:
     corrections: tuple[Correction, ...] = ()
 
 
+def speech_payload(text: str) -> tuple[int, str] | None:
+    prefix = _SPEECH_PREFIX.match(text)
+    if prefix is None or prefix.end() == len(text):
+        return None
+    return prefix.end(), text[prefix.end() :]
+
+
 def _is_adjacent_transposition(source: str, target: str) -> bool:
     if len(source) != len(target):
         return False
@@ -118,9 +125,10 @@ class LocalSpellChecker:
     ) -> CorrectionResult:
         if "\n" in text or "\r" in text:
             return CorrectionResult(text)
-        prefix = _SPEECH_PREFIX.match(text)
-        if prefix is None or prefix.end() == len(text):
+        payload = speech_payload(text)
+        if payload is None:
             return CorrectionResult(text)
+        payload_start = payload[0]
 
         checker = self._load()
         from symspellpy import Verbosity
@@ -137,7 +145,7 @@ class LocalSpellChecker:
         cursor = 0
         output_length = 0
         first_payload_word = True
-        for match in _WORD.finditer(text, pos=prefix.end()):
+        for match in _WORD.finditer(text, pos=payload_start):
             start, end = match.span()
             word = match.group()
             folded = word.casefold()
