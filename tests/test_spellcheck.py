@@ -57,6 +57,17 @@ def test_preserves_punctuation_and_transfers_initial_casing(checker: LocalSpellC
     assert result.text == '"The fox says, “like!”'
 
 
+def test_prefers_an_adjacent_transposition_over_a_more_frequent_shorter_word(
+    checker: LocalSpellChecker,
+) -> None:
+    result = checker.correct('"tset for spelling errors"')
+
+    assert result.text == '"test for spelling errors"'
+    assert [(item.original, item.replacement) for item in result.corrections] == [
+        ("tset", "test")
+    ]
+
+
 def test_preserves_a_capitalized_name_at_the_start_of_speech(
     checker: LocalSpellChecker,
 ) -> None:
