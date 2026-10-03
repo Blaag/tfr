@@ -820,6 +820,8 @@ with `[A]`, followed by `(Xs)`/`(Xm)`/`(Xh)`/`(Xd)` showing how long it has been
 since that world last received inbound input, once it has received any. Each
 world retains its own draft, command history, rendered scrollback,
 pager state, and unread count while inactive.
+Unread worlds are also summarized in the output pane's bottom border near the
+editor. Narrow terminals show only complete world entries followed by `...`.
 The active world's recently sent commands remain directly above the editor.
 These lines are separate from server output, so server speech echoes are not
 duplicated. Configure their number with `ui.recent_input_lines` (default `3`, or

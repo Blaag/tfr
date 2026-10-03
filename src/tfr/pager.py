@@ -9,7 +9,7 @@ from prompt_toolkit.utils import get_cwidth
 
 from tfr.ansi import project_ansi, safe_ansi_formatted_text, terminal_plain_text
 from tfr.presentation import ActiveEffectProgram
-from tfr.text_effects import TextDecoration, TextEffectKind
+from tfr.text_effects import TextDecoration, TextEffectKind, interpolate_color, validate_color
 from tfr.urls import find_urls
 
 
@@ -174,6 +174,39 @@ class StaticStyleSpan:
             raise ValueError("static style span is invalid")
 
 
+@dataclass(frozen=True, slots=True)
+class TransientStyleSpan:
+    start: int
+    end: int
+    style: str
+    start_color: str
+    end_color: str
+    started_at: float
+    duration_seconds: float = 3.0
+
+    def __post_init__(self) -> None:
+        if self.start < 0 or self.end <= self.start or not self.style:
+            raise ValueError("transient style span is invalid")
+        object.__setattr__(self, "start_color", validate_color(self.start_color))
+        object.__setattr__(self, "end_color", validate_color(self.end_color))
+        if self.duration_seconds <= 0:
+            raise ValueError("transient style duration must be positive")
+
+    def style_at(self, now: float, *, animated: bool) -> str:
+        elapsed = max(0.0, now - self.started_at)
+        if elapsed >= self.duration_seconds:
+            return ""
+        progress = min(1.0, elapsed / self.duration_seconds) if animated else 0.0
+        color = interpolate_color(self.start_color, self.end_color, progress)
+        return f"{self.style} fg:{color}"
+
+    def frame_delay(self, now: float, *, animated: bool) -> float | None:
+        remaining = self.started_at + self.duration_seconds - now
+        if remaining <= 0:
+            return None
+        return min(1 / 20, remaining) if animated else remaining
+
+
 def _append_fragment(row: list[tuple[str, str]], style: str, text: str) -> None:
     if row and row[-1][0] == style:
         previous_style, previous_text = row[-1]
@@ -193,6 +226,8 @@ def wrap_ansi_text(
     animations_enabled: bool = False,
     url_spans: tuple[tuple[int, int], ...] = (),
     style_spans: tuple[StaticStyleSpan, ...] = (),
+    transient_style_spans: tuple[TransientStyleSpan, ...] = (),
+    now_seconds: float = 0.0,
     row_offsets: list[int] | None = None,
 ) -> tuple[FormattedRow, ...]:
     if width <= 0:
@@ -275,6 +310,11 @@ def wrap_ansi_text(
             for span in style_spans:
                 if span.start <= visible_offset < span.end:
                     rendered_style = f"{rendered_style} {span.style}".strip()
+            for span in transient_style_spans:
+                if span.start <= visible_offset < span.end:
+                    effect_style = span.style_at(now_seconds, animated=animations_enabled)
+                    if effect_style:
+                        rendered_style = f"{rendered_style} {effect_style}".strip()
             if character == "\t":
                 cell_width = 8 - (column % 8)
                 remaining = cell_width
@@ -344,6 +384,7 @@ class DisplayBuffer:
         self._entry_recallable: list[bool] = []
         self._entry_urls: list[tuple[tuple[int, int, str], ...]] = []
         self._entry_style_spans: list[tuple[StaticStyleSpan, ...]] = []
+        self._entry_transient_style_spans: list[tuple[TransientStyleSpan, ...]] = []
         self._entry_row_starts: list[list[int]] = []
         self.rows: list[FormattedRow] = []
         self._screen_start_entry = 0
@@ -360,6 +401,7 @@ class DisplayBuffer:
         decorations: tuple[TextDecoration, ...] = (),
         presentations: tuple[ActiveEffectProgram, ...] = (),
         style_spans: tuple[StaticStyleSpan, ...] = (),
+        transient_style_spans: tuple[TransientStyleSpan, ...] = (),
         recallable: bool = True,
     ) -> None:
         urls = find_urls(terminal_plain_text(text))
@@ -384,6 +426,7 @@ class DisplayBuffer:
         self._entry_recallable.append(recallable)
         self._entry_urls.append(urls)
         self._entry_style_spans.append(style_spans)
+        self._entry_transient_style_spans.append(transient_style_spans)
         self._entry_row_starts.append(row_starts)
         self.rows.extend(new_rows)
         self.pager.append_rows(len(new_rows))
@@ -402,6 +445,7 @@ class DisplayBuffer:
             self._entry_recallable.pop(0)
             self._entry_urls.pop(0)
             self._entry_style_spans.pop(0)
+            self._entry_transient_style_spans.pop(0)
             self._entry_row_starts.pop(0)
             removed_entries += 1
         self._screen_start_entry = max(0, self._screen_start_entry - removed_entries)
@@ -622,10 +666,13 @@ class DisplayBuffer:
         *,
         elapsed_seconds: float | None = None,
         animations_enabled: bool = False,
+        now_seconds: float | None = None,
     ) -> tuple[FormattedRow, ...]:
         start, end = self._visible_bounds()
-        if elapsed_seconds is None or not (
-            any(self._entry_decorations) or any(self._entry_presentations)
+        if (elapsed_seconds is None and now_seconds is None) or not (
+            any(self._entry_decorations)
+            or any(self._entry_presentations)
+            or any(self._entry_transient_style_spans)
         ):
             return tuple(self.rows[start:end])
         visible: list[FormattedRow] = []
@@ -635,6 +682,12 @@ class DisplayBuffer:
             offset = self._entry_row_offsets[index]
             decorations = self._entry_decorations[index]
             presentations = self._entry_presentations[index]
+            transient_spans = tuple(
+                span
+                for span in self._entry_transient_style_spans[index]
+                if now_seconds is not None
+                and span.frame_delay(now_seconds, animated=False) is not None
+            )
             rows = (
                 list(
                     wrap_ansi_text(
@@ -643,16 +696,18 @@ class DisplayBuffer:
                         default_style=self.default_style,
                         decorations=decorations,
                         presentations=presentations,
-                        elapsed_seconds=elapsed_seconds,
+                        elapsed_seconds=elapsed_seconds or 0.0,
                         animations_enabled=animations_enabled,
                         url_spans=tuple(
                             (url_start, url_end)
                             for url_start, url_end, _url in self._entry_urls[index]
                         ),
                         style_spans=self._entry_style_spans[index],
+                        transient_style_spans=transient_spans,
+                        now_seconds=now_seconds if now_seconds is not None else 0.0,
                     )
                 )[offset:]
-                if decorations or presentations
+                if decorations or presentations or transient_spans
                 else base_rows
             )
             visible.extend(rows[max(0, start - row_start) : end - row_start])
@@ -663,6 +718,7 @@ class DisplayBuffer:
         *,
         elapsed_seconds: float | None = None,
         animations_enabled: bool = False,
+        now_seconds: float | None = None,
     ) -> tuple[FormattedRow, ...]:
         """Like :meth:`visible_rows`, but padded to the pane's full height.
 
@@ -675,6 +731,7 @@ class DisplayBuffer:
         rows = self.visible_rows(
             elapsed_seconds=elapsed_seconds,
             animations_enabled=animations_enabled,
+            now_seconds=now_seconds,
         )
         pad_count = self.pager.height - len(rows)
         if pad_count <= 0:
@@ -695,6 +752,16 @@ class DisplayBuffer:
                 for presentation in self._entry_presentations[index]
                 if (delay := presentation.frame_delay(elapsed_seconds)) is not None
             )
+        return min(delays, default=None)
+
+    def transient_style_frame_delay(self, now: float, *, animated: bool) -> float | None:
+        start, end = self._visible_bounds()
+        delays = [
+            delay
+            for index, _row_start in self._visible_entries(start, end)
+            for span in self._entry_transient_style_spans[index]
+            if (delay := span.frame_delay(now, animated=animated)) is not None
+        ]
         return min(delays, default=None)
 
     def url_at(self, row: int, column: int) -> str | None:

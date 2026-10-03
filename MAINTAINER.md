@@ -7,6 +7,7 @@ building, publishing, and installing them.
 
 | Command | Intended user | Purpose |
 | --- | --- | --- |
+| `./scripts/release-end-to-end VERSION` | Maintainer | Run local CI/security checks, merge the current work and version bump through protected PRs, require passing CI/Dependency Review/CodeQL, push the stable tag, approve protected publication, and verify the immutable release. |
 | `./scripts/publish-release` | Maintainer | Validate that the current `main` commit is ready for the version in `pyproject.toml`. It makes no release change without `--push`. |
 | `./scripts/publish-release --push` | Maintainer | Create and push the matching annotated `vX.Y.Z` tag, triggering the protected release workflow. |
 | `./scripts/install-from-checkout` | Operator or developer | Build the current clean checkout into an isolated local release and optionally activate it. It does not publish anything. |
@@ -18,6 +19,47 @@ The actual package build and GitHub Release publication are performed by
 the unprivileged build job from the protected job with `contents: write`.
 
 ## Stable Release Process
+
+### Automated end-to-end release
+
+For the normal path, start from a clean feature branch containing the release's
+changes, or from a clean `main` when those changes have already been merged:
+
+```console
+./scripts/release-end-to-end 0.1.24
+```
+
+The script is pinned to the official `Blaag/tfr` repository and fails closed. It:
+
+1. Verifies the active main-branch and stable-tag rulesets, release-environment
+   reviewer, immutable-release setting, GitHub authentication, lock file, and clean
+   checkout.
+2. Runs the same security, lint, web, end-to-end, Python, and package-build checks as
+   CI.
+3. Pushes the current feature branch, creates or reuses its PR, requires the complete
+   CI, Dependency Review, and CodeQL check set, and squash-merges without bypassing
+   repository rules.
+4. Creates `release/vVERSION`, updates `pyproject.toml` and `uv.lock`, reruns all local
+   checks, commits the version, and merges its protected PR after the same checks pass.
+5. Waits for CI and CodeQL to pass on the exact merged `main` commit.
+6. Previews `./scripts/publish-release`, requires you to type the exact tag, and pushes
+   the immutable tag.
+7. Waits for the release build to pass, requires you to type the exact tag again,
+   approves the protected `release` environment through GitHub, and waits for
+   publication.
+8. Verifies that the GitHub Release is immutable and contains the wheel, source
+   distribution, and `update-manifest.json`.
+
+The script never uses `--admin`, force-pushes, deletes tags, dismisses failures, or
+approves publication before the protected build passes. Any command or check failure
+stops execution. If OpenCode runs the command, invoke `/release` first; running it
+directly in your shell does not use the OpenCode gate.
+
+After the stable tag is pushed, rerun the script only after understanding the failure.
+The tag and release are intentionally immutable; use the failure-recovery guidance
+below rather than deleting or replacing them.
+
+### Manual release
 
 Before publishing, update `project.version` in `pyproject.toml`, refresh
 `uv.lock`, commit the version change, and push `main`. Versions must be stable

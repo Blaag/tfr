@@ -38,6 +38,7 @@ from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import Output
 from prompt_toolkit.styles import Style
+from prompt_toolkit.utils import get_cwidth
 
 from tfr.agents import AgentRuntime
 from tfr.ansi import ansi_visible_text, safe_ansi_formatted_text, terminal_plain_text
@@ -61,6 +62,7 @@ from tfr.pager import (
     FormattedRow,
     PagerMode,
     StaticStyleSpan,
+    TransientStyleSpan,
     rows_to_formatted_text,
 )
 from tfr.plugin_sources import (
@@ -385,6 +387,7 @@ class WorldView:
         rows = self.display.padded_visible_rows(
             elapsed_seconds=elapsed_seconds,
             animations_enabled=animations_enabled,
+            now_seconds=time.monotonic(),
         )
         # Selection anchor/head coordinates are content-relative (matching
         # _selection_point()), so the padding at the front of `rows` must be
@@ -1410,6 +1413,12 @@ class TfrTui:
         length = width if edge in {BorderEdge.TOP, BorderEdge.BOTTOM} else inner_height
         elapsed = self._border_frame_elapsed
         output: StyleAndTextTuples = []
+        activity = (
+            self._activity_border_text(length)
+            if panel == "output" and edge is BorderEdge.BOTTOM
+            else ""
+        )
+        activity_start = 2 if activity else -1
 
         def mouse_handler(event: MouseEvent) -> object:
             return view.handle_border_mouse(event, edge, panel=panel)
@@ -1425,12 +1434,39 @@ class TfrTui:
                 focused=view.session.world == self.active_alias,
                 elapsed_seconds=elapsed,
             )
+            if activity_start <= index < activity_start + len(activity):
+                fragment = replace(fragment, character=activity[index - activity_start])
             if self.animations_enabled and self.plugins is not None:
                 fragment = self.plugins.transform_border(context, fragment)
             output.append((fragment.style, fragment.character, mouse_handler))
             if edge in {BorderEdge.LEFT, BorderEdge.RIGHT} and index + 1 < length:
                 output.append(("", "\n"))
         return output
+
+    def _activity_border_text(self, border_width: int) -> str:
+        unread = [
+            f"{''.join(character if get_cwidth(character) == 1 else '?' for character in alias)} "
+            f"+{self.views[alias].unread_events}"
+            for alias in self.aliases
+            if self.views[alias].unread_events
+        ]
+        if not unread:
+            return ""
+        maximum = border_width - 4
+        prefix = " Activity in world(s): "
+        ellipsis = "... "
+        if len(prefix) + len(ellipsis) > maximum:
+            return ""
+        complete = prefix + ", ".join(unread) + " "
+        if len(complete) <= maximum:
+            return complete
+        included: list[str] = []
+        for entry in unread:
+            candidate = prefix + ", ".join((*included, entry)) + ", ... "
+            if len(candidate) > maximum:
+                break
+            included.append(entry)
+        return prefix + ", ".join(included) + (", ... " if included else "... ")
 
     def _before_render(self, app: Application[Any]) -> None:
         self._border_frame_elapsed = self._animation_elapsed_seconds()
@@ -1608,7 +1644,7 @@ class TfrTui:
         self,
         event: Event,
         display_text: str,
-    ) -> tuple[StaticStyleSpan, ...]:
+    ) -> tuple[TransientStyleSpan, ...]:
         if event.kind not in {EventKind.SAY, EventKind.POSE, EventKind.SPEECH}:
             return ()
         message_text = event.metadata.get("message_text")
@@ -1649,12 +1685,15 @@ class TfrTui:
         if matched is None:
             return ()
 
-        style = f"bold underline fg:{derive_bright_color(self.theme.palette.warning)}"
+        highlight_color = derive_bright_color(self.theme.palette.warning)
         return tuple(
-            StaticStyleSpan(
+            TransientStyleSpan(
                 start=display_start + correction.start - payload_start,
                 end=display_start + correction.end - payload_start,
-                style=style,
+                style="bold underline",
+                start_color=highlight_color,
+                end_color=self.theme.output_color,
+                started_at=now,
             )
             for correction in matched.corrections
         )
@@ -1755,7 +1794,8 @@ class TfrTui:
                     for program in presentations
                 )
                 view.clear_selection()
-                style_spans = list(self._spellcheck_echo_spans(event, display_text))
+                transient_style_spans = self._spellcheck_echo_spans(event, display_text)
+                style_spans: list[StaticStyleSpan] = []
                 if spoof_span is not None and event.spoof is not None:
                     plain_display = terminal_plain_text(display_text)
                     start, end = spoof_span
@@ -1772,6 +1812,7 @@ class TfrTui:
                     decorations=decorations,
                     presentations=presentations,
                     style_spans=tuple(style_spans),
+                    transient_style_spans=transient_style_spans,
                 )
                 should_count = True
         elif (
@@ -2694,6 +2735,7 @@ class TfrTui:
             self.plugins.has_animated_border_effects if self.plugins is not None else False
         )
         has_text_effects = self._text_frame_delay(self._animation_elapsed_seconds()) is not None
+        has_spellcheck_effects = self._spellcheck_frame_delay() is not None
         can_animate = (
             self._animations_started
             and self.animations_enabled
@@ -2701,6 +2743,9 @@ class TfrTui:
             and not self.boss_mode
         )
         should_run = can_animate and (has_border_effects or has_text_effects)
+        should_run = should_run or (
+            self._animations_started and not self.boss_mode and has_spellcheck_effects
+        )
         if (
             should_run
             and restart
@@ -2747,6 +2792,12 @@ class TfrTui:
             return None
         return self.active_view.display.animation_frame_delay(elapsed_seconds)
 
+    def _spellcheck_frame_delay(self) -> float | None:
+        return self.active_view.display.transient_style_frame_delay(
+            time.monotonic(),
+            animated=self.animations_enabled and not self.low_bandwidth,
+        )
+
     async def _animate_ui(self) -> None:
         while True:
             elapsed_seconds = self._animation_elapsed_seconds()
@@ -2757,9 +2808,10 @@ class TfrTui:
                 else None
             )
             text_delay = self._text_frame_delay(elapsed_seconds) if can_animate else None
+            spellcheck_delay = self._spellcheck_frame_delay()
             delays = [
                 delay
-                for delay in (border_delay, text_delay)
+                for delay in (border_delay, text_delay, spellcheck_delay)
                 if delay is not None
             ]
             delay = min(delays, default=None)

@@ -932,7 +932,7 @@ class GatewayUiRuntime:
         self._update_transaction_active = True
         try:
             result = await self.client.update()
-            if result.get("updated") is False:
+            if result.get("updated") is False or result.get("restart_required") is False:
                 self._update_transaction_active = False
             return result
         except BaseException:

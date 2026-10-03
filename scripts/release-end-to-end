@@ -1,0 +1,435 @@
+#!/bin/sh
+set -eu
+
+GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_REPLACE_OBJECTS
+
+EXPECTED_REPOSITORY=Blaag/tfr
+POLL_SECONDS=${TFR_RELEASE_POLL_SECONDS:-5}
+TIMEOUT_SECONDS=${TFR_RELEASE_TIMEOUT_SECONDS:-1800}
+
+usage() {
+    cat <<'EOF'
+Usage: ./scripts/release-end-to-end VERSION
+
+Run the complete stable release process for VERSION (for example, 0.1.24):
+validate locally, merge the current feature branch through a protected PR,
+create and merge the release-version PR, wait for CI and CodeQL on main,
+push the protected tag, approve the release environment, and verify the
+immutable GitHub Release.
+
+The checkout must be clean. The script never uses administrator bypasses,
+force-pushes, deletes tags, or dismisses failed checks. It requires typed
+confirmation before pushing the release tag and before approving publication.
+EOF
+}
+
+fail() {
+    printf 'release-end-to-end: %s\n' "$1" >&2
+    exit 2
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
+}
+
+assert_clean_checkout() {
+    status=$(git status --porcelain=v1 --untracked-files=all)
+    [ -z "$status" ] || fail "checkout has modified, staged, or untracked files"
+    for operation in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply BISECT_LOG; do
+        operation_path=$(git rev-parse --path-format=absolute --git-path "$operation")
+        [ ! -e "$operation_path" ] || fail "a Git operation is still in progress: $operation"
+    done
+}
+
+run_local_checks() {
+    printf '\n==> Running local CI and security checks\n'
+    uv sync --frozen
+    ./scripts/check-security
+    uv run ruff check .
+    node --check src/tfr/web/app.mjs
+    node --test tests/test_web_*.mjs
+    npm --prefix tests/e2e ci
+    npm --prefix tests/e2e exec -- playwright install --with-deps webkit
+    npm --prefix tests/e2e test
+    uv run pytest -q -k 'not test_two_worlds_exchange_traffic_without_leakage'
+    uv build --out-dir "$temporary_directory/dist" --clear
+}
+
+verify_github_protections() {
+    ruleset_list="$temporary_directory/rulesets.json"
+    rulesets="$temporary_directory/ruleset-details.json"
+    environment="$temporary_directory/release-environment.json"
+    immutable="$temporary_directory/immutable-releases.json"
+
+    gh api "repos/$EXPECTED_REPOSITORY/rulesets" >"$ruleset_list"
+    : >"$rulesets"
+    for ruleset_id in $(jq -r '.[].id' "$ruleset_list"); do
+        gh api "repos/$EXPECTED_REPOSITORY/rulesets/$ruleset_id" >>"$rulesets"
+    done
+    jq -s -e '
+        any(.[];
+            .target == "branch" and
+            .enforcement == "active" and
+            (.conditions.ref_name.include | index("refs/heads/main") != null)
+        ) and
+        any(.[];
+            .target == "branch" and
+            .enforcement == "active" and
+            (.conditions.ref_name.include | index("refs/heads/main") != null) and
+            .bypass_actors == [] and
+            .current_user_can_bypass == "never" and
+            any(.rules[]; .type == "pull_request") and
+            any(.rules[];
+                .type == "required_status_checks" and
+                any(.parameters.required_status_checks[]; .context == "test") and
+                any(.parameters.required_status_checks[]; .context == "dependency-review")
+            ) and
+            any(.rules[];
+                .type == "code_scanning" and
+                any(.parameters.code_scanning_tools[];
+                    .tool == "CodeQL" and
+                    .security_alerts_threshold == "medium_or_higher" and
+                    .alerts_threshold == "errors"
+                )
+            )
+        ) and
+        any(.[];
+            .target == "tag" and
+            .enforcement == "active" and
+            (.conditions.ref_name.include | index("refs/tags/v*") != null) and
+            .bypass_actors == [] and
+            .current_user_can_bypass == "never" and
+            any(.rules[]; .type == "update") and
+            any(.rules[]; .type == "deletion") and
+            any(.rules[]; .type == "non_fast_forward")
+        )
+    ' "$rulesets" >/dev/null || fail "required main and stable-tag rulesets are not active"
+
+    github_user=$(gh api user --jq .login)
+    gh api "repos/$EXPECTED_REPOSITORY/environments/release" >"$environment"
+    jq -e --arg user "$github_user" '
+        any(.protection_rules[];
+            .type == "required_reviewers" and
+            .prevent_self_review == false and
+            any(.reviewers[]; .type == "User" and .reviewer.login == $user)
+        )
+    ' "$environment" >/dev/null || fail "release environment does not permit explicit approval"
+
+    gh api "repos/$EXPECTED_REPOSITORY/immutable-releases" >"$immutable"
+    jq -e '.enabled == true' "$immutable" >/dev/null || \
+        fail "immutable GitHub Releases are not enabled"
+}
+
+pr_for_branch() {
+    branch=$1
+    prs=$(gh pr list --repo "$EXPECTED_REPOSITORY" --state open --base main --head "$branch" \
+        --json number)
+    count=$(printf '%s' "$prs" | jq 'length')
+    [ "$count" -le 1 ] || fail "multiple open PRs target main from $branch"
+    if [ "$count" -eq 1 ]; then
+        printf '%s' "$prs" | jq -r '.[0].number'
+    fi
+}
+
+wait_for_pr_checks() {
+    pr=$1
+    label=$2
+    deadline=$(($(date +%s) + TIMEOUT_SECONDS))
+    checks_file="$temporary_directory/pr-$pr-checks.json"
+
+    printf '\n==> Waiting for %s PR checks\n' "$label"
+    while :; do
+        set +e
+        gh pr checks "$pr" --repo "$EXPECTED_REPOSITORY" \
+            --json name,workflow,bucket,state >"$checks_file"
+        check_status=$?
+        set -e
+        if [ "$check_status" -ne 0 ] && [ "$check_status" -ne 8 ]; then
+            fail "cannot inspect checks for PR #$pr"
+        fi
+        if jq -e '
+            any(.[]; .name == "test") and
+            any(.[]; .name == "dependency-review") and
+            any(.[]; .name == "CodeQL") and
+            any(.[]; .name == "Analyze (actions)") and
+            any(.[]; .name == "Analyze (javascript-typescript)") and
+            any(.[]; .name == "Analyze (python)")
+        ' "$checks_file" >/dev/null; then
+            break
+        fi
+        [ "$(date +%s)" -lt "$deadline" ] || fail "timed out waiting for PR checks to register"
+        sleep "$POLL_SECONDS"
+    done
+
+    gh pr checks "$pr" --repo "$EXPECTED_REPOSITORY" --watch --fail-fast
+    gh pr checks "$pr" --repo "$EXPECTED_REPOSITORY" \
+        --json name,workflow,bucket,state >"$checks_file"
+    jq -e '
+        length > 0 and
+        all(.[]; .bucket == "pass") and
+        any(.[]; .name == "test" and .bucket == "pass") and
+        any(.[]; .name == "dependency-review" and .bucket == "pass") and
+        any(.[]; .name == "CodeQL" and .bucket == "pass") and
+        any(.[]; .name == "Analyze (actions)" and .bucket == "pass") and
+        any(.[]; .name == "Analyze (javascript-typescript)" and .bucket == "pass") and
+        any(.[]; .name == "Analyze (python)" and .bucket == "pass")
+    ' "$checks_file" >/dev/null || fail "PR #$pr does not have a complete passing check set"
+}
+
+merge_pr() {
+    pr=$1
+    label=$2
+    expected_head=$(git rev-parse HEAD)
+    actual_head=$(gh pr view "$pr" --repo "$EXPECTED_REPOSITORY" --json headRefOid --jq .headRefOid)
+    [ "$actual_head" = "$expected_head" ] || fail "$label PR head changed after local validation"
+
+    printf '\n==> Merging %s PR #%s\n' "$label" "$pr"
+    gh pr merge "$pr" --repo "$EXPECTED_REPOSITORY" --squash --delete-branch \
+        --match-head-commit "$expected_head"
+    merged=$(gh pr view "$pr" --repo "$EXPECTED_REPOSITORY" --json mergedAt --jq '.mergedAt != null')
+    [ "$merged" = true ] || fail "$label PR was not merged"
+}
+
+wait_for_workflow() {
+    workflow=$1
+    commit=$2
+    deadline=$(($(date +%s) + TIMEOUT_SECONDS))
+    run_id=
+
+    while [ -z "$run_id" ]; do
+        runs=$(gh run list --repo "$EXPECTED_REPOSITORY" --workflow "$workflow" \
+            --commit "$commit" --limit 10 --json databaseId,headSha,status,conclusion)
+        matching=$(printf '%s' "$runs" | jq --arg commit "$commit" \
+            '[.[] | select(.headSha == $commit)]')
+        count=$(printf '%s' "$matching" | jq 'length')
+        [ "$count" -le 1 ] || fail "multiple $workflow runs found for $commit"
+        if [ "$count" -eq 1 ]; then
+            run_id=$(printf '%s' "$matching" | jq -r '.[0].databaseId')
+            break
+        fi
+        [ "$(date +%s)" -lt "$deadline" ] || fail "timed out waiting for $workflow on $commit"
+        sleep "$POLL_SECONDS"
+    done
+
+    printf '\n==> Waiting for %s run %s\n' "$workflow" "$run_id" >&2
+    gh run watch "$run_id" --repo "$EXPECTED_REPOSITORY" --exit-status --compact >&2
+    printf '%s\n' "$run_id"
+}
+
+confirm_exact() {
+    expected=$1
+    prompt=$2
+    printf '%s' "$prompt" >/dev/tty
+    IFS= read -r confirmation </dev/tty || fail "confirmation input ended"
+    [ "$confirmation" = "$expected" ] || fail "confirmation did not match $expected"
+}
+
+wait_for_release_approval() {
+    run_id=$1
+    commit=$2
+    deadline=$(($(date +%s) + TIMEOUT_SECONDS))
+    pending_file="$temporary_directory/pending-deployments.json"
+
+    printf '\n==> Waiting for protected release approval\n' >&2
+    while :; do
+        run=$(gh run view "$run_id" --repo "$EXPECTED_REPOSITORY" \
+            --json status,conclusion,headSha,jobs)
+        [ "$(printf '%s' "$run" | jq -r .headSha)" = "$commit" ] || \
+            fail "release workflow commit changed"
+        status=$(printf '%s' "$run" | jq -r .status)
+        conclusion=$(printf '%s' "$run" | jq -r '.conclusion // ""')
+        if [ "$status" = completed ]; then
+            [ "$conclusion" = success ] || fail "release workflow completed with $conclusion"
+            fail "release workflow completed before an approval was requested"
+        fi
+        gh api "repos/$EXPECTED_REPOSITORY/actions/runs/$run_id/pending_deployments" \
+            >"$pending_file"
+        count=$(jq '[.[] | select(.environment.name == "release")] | length' "$pending_file")
+        [ "$count" -le 1 ] || fail "multiple release environment approvals are pending"
+        if [ "$count" -eq 1 ]; then
+            jq -e '
+                .[] |
+                select(.environment.name == "release") |
+                .current_user_can_approve == true
+            ' "$pending_file" >/dev/null || fail "current GitHub user cannot approve the release"
+            jq -e '
+                .jobs[] |
+                select(.name == "build") |
+                .status == "completed" and .conclusion == "success"
+            ' <<EOF >/dev/null || fail "release build did not pass before approval"
+$run
+EOF
+            jq -r '.[] | select(.environment.name == "release") | .environment.id' \
+                "$pending_file"
+            return
+        fi
+        [ "$(date +%s)" -lt "$deadline" ] || fail "timed out waiting for release approval"
+        sleep "$POLL_SECONDS"
+    done
+}
+
+[ "$#" -eq 1 ] || {
+    usage >&2
+    exit 2
+}
+case $1 in
+    -h|--help)
+        usage
+        exit 0
+        ;;
+esac
+version=$1
+printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || \
+    fail "VERSION must be a stable semantic version"
+tag="v$version"
+release_branch="release/$tag"
+
+for command in git gh uv node npm jq unzip date mktemp grep cut; do
+    require_command "$command"
+done
+
+repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+git_root=$(git -C "$repository" rev-parse --show-toplevel 2>/dev/null) || \
+    fail "the script must be run from a Git checkout"
+[ "$git_root" = "$repository" ] || fail "the script is not at the checkout root"
+cd "$repository"
+
+temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/tfr-release.XXXXXX")
+trap 'rm -rf "$temporary_directory"' 0 HUP INT TERM
+
+assert_clean_checkout
+gh auth status >/dev/null
+actual_repository=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+[ "$actual_repository" = "$EXPECTED_REPOSITORY" ] || \
+    fail "expected $EXPECTED_REPOSITORY, found $actual_repository"
+verify_github_protections
+uv lock --check
+
+current_branch=$(git branch --show-current)
+[ -n "$current_branch" ] || fail "detached HEAD cannot be released"
+[ "$current_branch" != "$release_branch" ] || \
+    fail "start from a feature branch or main, not $release_branch"
+git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+if [ "$current_branch" = main ]; then
+    [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || \
+        fail "local main must exactly match origin/main"
+fi
+git show-ref --verify --quiet "refs/heads/$release_branch" && \
+    fail "local branch already exists: $release_branch"
+remote_release_branch=$(git ls-remote --heads origin "refs/heads/$release_branch") || \
+    fail "cannot inspect remote release branch"
+[ -z "$remote_release_branch" ] || fail "remote branch already exists: $release_branch"
+
+run_local_checks
+assert_clean_checkout
+
+if [ "$current_branch" != main ]; then
+    printf '\n==> Publishing feature branch %s\n' "$current_branch"
+    git push --set-upstream origin "$current_branch"
+    feature_pr=$(pr_for_branch "$current_branch")
+    if [ -z "$feature_pr" ]; then
+        feature_pr_url=$(gh pr create --repo "$EXPECTED_REPOSITORY" --base main \
+            --head "$current_branch" --fill)
+        feature_pr=$(gh pr view "$feature_pr_url" --repo "$EXPECTED_REPOSITORY" \
+            --json number --jq .number)
+    fi
+    gh pr view "$feature_pr" --repo "$EXPECTED_REPOSITORY" \
+        --json baseRefName,isDraft,state \
+        --jq '.baseRefName == "main" and .isDraft == false and .state == "OPEN"' |
+        grep -qx true || fail "feature PR is not an open, non-draft PR to main"
+    wait_for_pr_checks "$feature_pr" feature
+    merge_pr "$feature_pr" feature
+fi
+
+git switch --create "$release_branch" --track "origin/main"
+
+printf '\n==> Preparing %s\n' "$tag"
+uv version "$version" --no-sync
+uv lock --check
+changed=$(git diff --name-only)
+[ -n "$changed" ] || fail "version $version does not change the release metadata"
+for path in $changed; do
+    case $path in
+        pyproject.toml|uv.lock) ;;
+        *) fail "version update unexpectedly changed $path" ;;
+    esac
+done
+project_version=$(uv version --short)
+[ "$project_version" = "$version" ] || fail "project version is $project_version, expected $version"
+
+run_local_checks
+git diff --check
+git add pyproject.toml uv.lock
+git commit -m "release: $tag"
+assert_clean_checkout
+release_head=$(git rev-parse HEAD)
+git push --set-upstream origin "$release_branch"
+
+release_pr_url=$(gh pr create --repo "$EXPECTED_REPOSITORY" --base main \
+    --head "$release_branch" --title "release: $tag" \
+    --body "Prepare stable release $tag.")
+release_pr=$(gh pr view "$release_pr_url" --repo "$EXPECTED_REPOSITORY" \
+    --json number --jq .number)
+wait_for_pr_checks "$release_pr" release
+merge_pr "$release_pr" release
+
+git switch main
+git pull --ff-only origin main
+assert_clean_checkout
+release_commit=$(git rev-parse HEAD)
+[ "$release_commit" != "$release_head" ] || \
+    fail "release PR was not squash-merged as expected"
+remote_main=$(git ls-remote origin refs/heads/main | cut -f1)
+[ "$release_commit" = "$remote_main" ] || fail "local main does not match origin/main"
+
+wait_for_workflow CI "$release_commit" >/dev/null
+wait_for_workflow CodeQL "$release_commit" >/dev/null
+
+./scripts/publish-release
+confirm_exact "$tag" "Type $tag to create and push the protected release tag: "
+./scripts/publish-release --push
+
+release_run=
+deadline=$(($(date +%s) + TIMEOUT_SECONDS))
+while [ -z "${release_run:-}" ]; do
+    runs=$(gh run list --repo "$EXPECTED_REPOSITORY" --workflow Release --branch "$tag" \
+        --event push --limit 10 --json databaseId,headSha,status,conclusion)
+    matching=$(printf '%s' "$runs" | jq --arg commit "$release_commit" \
+        '[.[] | select(.headSha == $commit)]')
+    count=$(printf '%s' "$matching" | jq 'length')
+    [ "$count" -le 1 ] || fail "multiple release workflows found for $tag"
+    if [ "$count" -eq 1 ]; then
+        release_run=$(printf '%s' "$matching" | jq -r '.[0].databaseId')
+        break
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] || fail "timed out waiting for the release workflow"
+    sleep "$POLL_SECONDS"
+done
+
+environment_id=$(wait_for_release_approval "$release_run" "$release_commit")
+confirm_exact "$tag" "Type $tag to approve publication to the release environment: "
+jq -n --argjson environment_id "$environment_id" --arg tag "$tag" '{
+    environment_ids: [$environment_id],
+    state: "approved",
+    comment: ("Approved publication of " + $tag)
+}' | gh api --method POST \
+    "repos/$EXPECTED_REPOSITORY/actions/runs/$release_run/pending_deployments" --input - \
+    >/dev/null
+
+gh run watch "$release_run" --repo "$EXPECTED_REPOSITORY" --exit-status --compact
+release_file="$temporary_directory/release.json"
+gh release view "$tag" --repo "$EXPECTED_REPOSITORY" \
+    --json tagName,isDraft,isPrerelease,isImmutable,assets,url >"$release_file"
+jq -e --arg tag "$tag" --arg version "$version" '
+    .tagName == $tag and
+    .isDraft == false and
+    .isPrerelease == false and
+    .isImmutable == true and
+    ([.assets[].name] | index("tfr-" + $version + "-py3-none-any.whl") != null) and
+    ([.assets[].name] | index("tfr-" + $version + ".tar.gz") != null) and
+    ([.assets[].name] | index("update-manifest.json") != null)
+' "$release_file" >/dev/null || fail "published release is not immutable and complete"
+
+printf '\nRelease published and verified: %s\n' \
+    "$(jq -r .url "$release_file")"
