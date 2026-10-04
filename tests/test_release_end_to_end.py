@@ -347,19 +347,16 @@ def run_with_confirmations(
     repository: Path, environment: dict[str, str], confirmations: list[str]
 ) -> tuple[int, str]:
     terminal, slave = pty.openpty()
-    terminal_path = os.ttyname(slave)
     process = subprocess.Popen(
         [
-            "/bin/sh",
-            "-c",
-            'exec 0<>"$1"; exec 1>&0; exec 2>&0; shift; exec "$@"',
-            "release-test",
-            terminal_path,
             str(repository / "scripts" / "release-end-to-end"),
             "0.1.1",
         ],
         cwd=repository,
         env=environment,
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
         start_new_session=True,
     )
     os.close(slave)
@@ -385,7 +382,7 @@ def run_with_confirmations(
                 return returncode, output.decode(errors="replace")
         process.kill()
         process.wait()
-        raise AssertionError("release script timed out")
+        raise AssertionError(f"release script timed out:\n{output.decode(errors='replace')}")
     finally:
         os.close(terminal)
 
