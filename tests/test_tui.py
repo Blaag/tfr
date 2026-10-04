@@ -1946,6 +1946,23 @@ def test_combo_streak_bolds_third_message_body_and_overlays_border() -> None:
     assert "> Speaking Spree! <" in border
 
 
+def test_combo_notice_is_confined_to_output_bottom_border() -> None:
+    tui = make_tui()
+    for sequence in range(1, 4):
+        tui.handle_event(combo_say(tui, sequence))
+
+    for panel in ("output", "input"):
+        for edge in BorderEdge:
+            rendered = fragment_list_to_text(
+                tui._border_text(tui.active_view, panel, edge, 4)
+            )
+            if panel == "output" and edge is BorderEdge.BOTTOM:
+                assert "> Speaking Spree! <" in rendered
+            else:
+                assert "Speaking Spree" not in rendered
+                assert "Spree" not in rendered
+
+
 def test_combo_streak_counts_silently_while_low_bandwidth() -> None:
     tui = make_tui()
     tui.low_bandwidth = True
@@ -1979,6 +1996,80 @@ def test_combo_streak_counts_in_inactive_world_without_delayed_visual() -> None:
 
     tui.handle_event(replace(combo_say(tui, 4), world="beta"))
     assert tui._combo_notices["beta"].text == "> Rampage! <"
+
+
+def test_tinymux_local_says_and_poses_share_combo_streak() -> None:
+    tui = make_tui(server="tinymux")
+    session = tui.active_view.session
+    session.config = session.config.model_copy(
+        update={"login": LoginConfig(character="Hamilton", password="secret")}
+    )
+    provenance = Provenance(sender_dbref=42, adapter="tinymux")
+    messages = (
+        (EventKind.SAY, 'You say, "one"'),
+        (EventKind.SPEECH, "Hamilton poses two"),
+        (EventKind.SAY, 'You say, "three"'),
+    )
+    for sequence, (kind, text) in enumerate(messages, 1):
+        tui.handle_event(
+            Event(
+                session_id=session.session_id,
+                world="alpha",
+                connection_generation=1,
+                sequence=sequence,
+                direction=Direction.INBOUND,
+                kind=kind,
+                canonical_text=text,
+                plain_text=text,
+                display_text=text,
+                parser_name="tinymux",
+                provenance=provenance,
+            )
+        )
+
+    assert tui._combo_notices["alpha"].text == "> Speaking Spree! <"
+    assert session.config.login is not None
+    assert session.config.login.password.get_secret_value() == "secret"
+
+
+def test_repeated_empty_speech_does_not_stop_later_output() -> None:
+    tui = make_tui()
+    session = tui.active_view.session
+    for sequence in range(10):
+        text = 'Alice says, ""'
+        tui.handle_event(
+            Event(
+                session_id=session.session_id,
+                world="alpha",
+                connection_generation=1,
+                sequence=sequence,
+                direction=Direction.INBOUND,
+                kind=EventKind.SAY,
+                canonical_text=text,
+                plain_text=text,
+                display_text=text,
+                provenance=Provenance(sender_name="Alice"),
+            )
+        )
+
+    following = 'Bob says, "still visible"'
+    tui.handle_event(
+        Event(
+            session_id=session.session_id,
+            world="alpha",
+            connection_generation=1,
+            sequence=11,
+            direction=Direction.INBOUND,
+            kind=EventKind.SAY,
+            canonical_text=following,
+            plain_text=following,
+            display_text=following,
+            provenance=Provenance(sender_name="Bob"),
+        )
+    )
+
+    assert fragment_list_to_text(tui.active_view.output_text()).endswith(following)
+    assert not tui._combo_notices
 
 
 def test_disabling_motion_cancels_combo_visuals_without_resume() -> None:

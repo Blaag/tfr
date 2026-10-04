@@ -229,7 +229,7 @@ function showCombo(event, node) {
   if (!combo || combo.presented) return;
   combo.presented = true;
   if (!motionAllowsAnimation(elements.motionPreference.value, window.matchMedia("(prefers-reduced-motion: reduce)").matches)) return;
-  animateComboText(node.querySelector(".event-text"), combo);
+  if (node) animateComboText(node.querySelector(".event-text"), combo);
   comboNoticeAnimation?.cancel();
   elements.comboNotice.hidden = false;
   elements.comboNotice.textContent = combo.notice;
@@ -886,7 +886,7 @@ function addEvent(message) {
     if (event.world === state.selectedWorld && !state.historyReset) showHistoryNotice("");
   }
   if (connection.ready) recordLiveHistoryEvent(world, event);
-  if (connection.ready) event.combo = observeCombo(state.comboStreaks, event);
+  if (connection.ready) event.combo = observeCombo(state.comboStreaks, event, Date.now(), world);
   events.push(event);
   eventIds.add(event.id);
   let evicted = false;
@@ -906,8 +906,10 @@ function addEvent(message) {
     return;
   }
   const reading = readingState(event.world);
-  if (event.combo && (event.world !== state.selectedWorld || !reading.atLive)) {
+  if (event.combo && event.world !== state.selectedWorld) {
     event.combo.presented = true;
+  } else if (event.combo && !reading.atLive) {
+    showCombo(event, null);
   }
   if (event.world !== state.selectedWorld) {
     state.unread.set(event.world, (state.unread.get(event.world) || 0) + 1);
@@ -933,6 +935,7 @@ function resetGatewayState() {
   state.unread.clear();
   state.reading.clear();
   state.shownHistoryNotices.clear();
+  state.comboStreaks.clear();
   state.cursor = null;
   safeRemove("tfr.cursor");
 }

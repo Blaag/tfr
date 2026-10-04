@@ -722,9 +722,12 @@ retract text that was already sent. Add global or per-world vocabulary in
 "ui": {
   "spellcheck": {
     "enabled": false,
+    // Protected in every world.
     "protected_words": ["TFR", "MUSH", "NOSPOOF"],
+    // Each key is an exact world name from worlds.jsonc. Its words are
+    // additionally protected only while sending to that world.
     "worlds": {
-      "example-me": ["Alice", "Blaag", "TinyMUX"],
+      "my-world-name": ["Alice", "Blaag", "TinyMUX"],
     },
   },
 }

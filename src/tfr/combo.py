@@ -59,16 +59,24 @@ class ComboTracker:
         self.timeout_seconds = timeout_seconds
         self._streaks: dict[str, _Streak] = {}
 
-    def observe(self, event: Event, text: str, now: float) -> Combo | None:
-        speaker = _speaker(event, text)
+    def observe(
+        self,
+        event: Event,
+        text: str,
+        now: float,
+        *,
+        character_name: str | None = None,
+    ) -> Combo | None:
+        speaker = _speaker(event, text, character_name)
         if speaker is None or event.kind not in {
             EventKind.SAY,
             EventKind.POSE,
+            EventKind.SPEECH,
             EventKind.RAW_OUTPUT,
         }:
             return None
         span = message_body_span(event, text, speaker)
-        if span is None:
+        if span is None or span[0] >= span[1]:
             return None
         identity = (
             ("dbref", event.provenance.sender_dbref)
@@ -87,25 +95,40 @@ class ComboTracker:
         return Combo(count, speaker, *span) if count >= 3 else None
 
 
-def _speaker(event: Event, text: str) -> str | None:
+def _speaker(event: Event, text: str, character_name: str | None) -> str | None:
     if event.provenance is not None and event.provenance.sender_name:
         return event.provenance.sender_name
+    plain = terminal_plain_text(text).lstrip()
+    say = _SAY_BODY.match(plain)
+    if say is not None:
+        prefix = plain[: say.start("body")]
+        visible = re.sub(r"\s+says?,\s+[\"“]$", "", prefix, flags=re.IGNORECASE).strip()
+        if visible.casefold() == "you" and character_name is not None:
+            return character_name
+        return visible or None
+    if character_name is not None and _starts_with_speaker(plain, character_name):
+        return character_name
     if event.parser_name not in {"bare", "generic"}:
         return None
-    plain = terminal_plain_text(text).lstrip()
     token = plain.split(maxsplit=1)[0] if plain else ""
     if token.casefold().endswith(("'s", "’s")):
         token = token[:-2]
     return token or None
 
 
+def _starts_with_speaker(text: str, speaker: str) -> bool:
+    if text[: len(speaker)].casefold() != speaker.casefold():
+        return False
+    suffix = text[len(speaker) :]
+    return bool(suffix and (suffix[0].isspace() or suffix[:2].casefold() in {"'s", "’s"}))
+
+
 def message_body_span(event: Event, text: str, speaker: str) -> tuple[int, int] | None:
     plain = terminal_plain_text(text).rstrip("\r\n")
-    if event.kind is EventKind.SAY:
+    if event.kind in {EventKind.SAY, EventKind.SPEECH}:
         match = _SAY_BODY.match(plain)
-        if match is None:
-            return None
-        return match.start("body"), match.end("body")
+        if match is not None:
+            return match.start("body"), match.end("body")
     prefix = speaker
     if plain[: len(prefix)].casefold() != prefix.casefold():
         return None

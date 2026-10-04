@@ -1685,7 +1685,11 @@ class TfrTui:
             activity_text = self._activity_border_text(max(0, length - activity_start - 2))
             if activity_text:
                 activity = f" {activity_text}"
-        notice = self._combo_notices.get(view.session.world)
+        notice = (
+            self._combo_notices.get(view.session.world)
+            if panel == "output" and edge is BorderEdge.BOTTOM
+            else None
+        )
         notice_start = -1
         notice_style = ""
         if (
@@ -1732,7 +1736,11 @@ class TfrTui:
                     character=activity[index - activity_start],
                     style="class:border.activity",
                 )
-            if notice is not None and notice_start <= index < notice_start + len(notice.text):
+            if (
+                notice is not None
+                and notice_start >= 0
+                and notice_start <= index < notice_start + len(notice.text)
+            ):
                 fragment = replace(
                     fragment,
                     character=notice.text[index - notice_start],
@@ -2206,11 +2214,12 @@ class TfrTui:
                 )
                 elapsed_seconds = self._animation_elapsed_seconds()
                 combo = None
-                if self._accept_combo_events and not (
-                    event.kind is EventKind.RAW_OUTPUT and not (decorations or presentations)
-                ):
+                if self._accept_combo_events:
                     combo = self._combo_tracker.observe(
-                        effect_event, display_text, time.monotonic()
+                        effect_event,
+                        display_text,
+                        time.monotonic(),
+                        character_name=view.session.character_name,
                     )
                 combo_enabled = (
                     self.animations_enabled

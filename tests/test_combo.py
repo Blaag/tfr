@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import random
 from datetime import UTC, datetime
 from uuid import uuid4
+
+import pytest
 
 from tfr.combo import ComboTracker
 from tfr.events import Confidence, Direction, Event, EventKind, Provenance
@@ -65,3 +68,39 @@ def test_possessive_pose_excludes_speaker_from_effect_span() -> None:
 
     assert combo is not None
     assert (pose.display_text or "")[combo.body_start : combo.body_end] == "cigarette goes out"
+
+
+def test_empty_speech_never_starts_or_advances_a_combo() -> None:
+    tracker = ComboTracker()
+    for now in range(10):
+        assert tracker.observe(event('Alice says, ""'), 'Alice says, ""', now) is None
+
+    assert tracker.observe(event('Alice says, "one"'), 'Alice says, "one"', 11) is None
+    assert tracker.observe(event('Alice says, "two"'), 'Alice says, "two"', 12) is None
+    assert tracker.observe(event('Alice says, "three"'), 'Alice says, "three"', 13) is not None
+
+
+@pytest.mark.parametrize("target", range(3, 8))
+@pytest.mark.parametrize("seed", range(8))
+def test_deterministic_mixed_say_pose_chains_reach_every_combo_level(
+    target: int,
+    seed: int,
+) -> None:
+    generator = random.Random(seed)
+    tracker = ComboTracker()
+    combo = None
+    for count in range(1, target + 1):
+        if generator.choice((True, False)):
+            text = f'Alice says, "message {count}"'
+            item = event(text)
+        else:
+            possessive = generator.choice(("", "'s", "’s"))
+            text = f"Alice{possessive} poses message {count}"
+            item = event(text, kind=EventKind.POSE)
+        combo = tracker.observe(item, text, count)
+        assert (combo is not None) is (count >= 3), f"seed={seed}, count={count}"
+        if combo is not None:
+            assert combo.count == count
+
+    assert combo is not None
+    assert combo.count == target
