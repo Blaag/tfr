@@ -10,6 +10,7 @@ export GIT_NO_REPLACE_OBJECTS GIT_PAGER GH_PAGER PAGER
 EXPECTED_REPOSITORY=Blaag/tfr
 POLL_SECONDS=${TFR_RELEASE_POLL_SECONDS:-5}
 TIMEOUT_SECONDS=${TFR_RELEASE_TIMEOUT_SECONDS:-1800}
+CONFIRM_TIMEOUT_SECONDS=${TFR_RELEASE_CONFIRM_TIMEOUT_SECONDS:-300}
 
 usage() {
     cat <<'EOF'
@@ -228,9 +229,22 @@ confirm_exact() {
     expected=$1
     prompt=$2
     [ -t 0 ] || fail "confirmation requires an interactive terminal"
-    printf '%s' "$prompt" >&2
-    IFS= read -r confirmation || fail "confirmation input ended"
-    [ "$confirmation" = "$expected" ] || fail "confirmation did not match $expected"
+    python3 -c '
+import select
+import sys
+
+expected, prompt, timeout_text = sys.argv[1:]
+timeout = int(timeout_text)
+print(f"{prompt}(expires in {timeout}s) ", end="", file=sys.stderr, flush=True)
+ready, _, _ = select.select([sys.stdin], [], [], timeout)
+if not ready:
+    raise SystemExit(f"confirmation timed out after {timeout}s")
+confirmation = sys.stdin.readline()
+if not confirmation:
+    raise SystemExit("confirmation input ended")
+if confirmation.rstrip("\r\n") != expected:
+    raise SystemExit(f"confirmation did not match {expected}")
+' "$expected" "$prompt" "$CONFIRM_TIMEOUT_SECONDS" || fail "confirmation failed"
 }
 
 wait_for_release_approval() {
@@ -293,9 +307,15 @@ printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0
 tag="v$version"
 release_branch="release/$tag"
 
-for command in git gh uv node npm jq unzip date mktemp grep cut; do
+for command in git gh uv node npm jq unzip date mktemp grep cut python3; do
     require_command "$command"
 done
+
+case $CONFIRM_TIMEOUT_SECONDS in
+    ''|*[!0-9]*) fail "TFR_RELEASE_CONFIRM_TIMEOUT_SECONDS must be a positive integer" ;;
+esac
+[ "$CONFIRM_TIMEOUT_SECONDS" -gt 0 ] || \
+    fail "TFR_RELEASE_CONFIRM_TIMEOUT_SECONDS must be greater than zero"
 
 repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 git_root=$(git -C "$repository" rev-parse --show-toplevel 2>/dev/null) || \
@@ -348,6 +368,7 @@ if [ "$current_branch" != main ]; then
         grep -qx true || fail "feature PR is not an open, non-draft PR to main"
     wait_for_pr_checks "$feature_pr" feature
     merge_pr "$feature_pr" feature
+    git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
 fi
 
 git switch --create "$release_branch" --track "origin/main"

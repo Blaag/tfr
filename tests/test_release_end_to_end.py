@@ -203,6 +203,9 @@ elif args[:2] == ["pr", "merge"]:
     expected = value("--match-head-commit")
     if head != expected:
         raise SystemExit("head changed")
+    tracking = subprocess.check_output(
+        ["git", "rev-parse", "refs/remotes/origin/main"], text=True
+    ).strip()
     parent = subprocess.check_output(
         ["git", "ls-remote", "origin", "refs/heads/main"], text=True
     ).split()[0]
@@ -211,6 +214,9 @@ elif args[:2] == ["pr", "merge"]:
         ["git", "commit-tree", tree, "-p", parent, "-m", f"merge PR {number}"], text=True
     ).strip()
     subprocess.run(["git", "push", "--quiet", "origin", f"{commit}:refs/heads/main"], check=True)
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", tracking], check=True
+    )
     (state / f"merged-{number}").touch()
 elif args[:2] == ["run", "list"]:
     workflow = value("--workflow")
@@ -342,6 +348,7 @@ else:
             "TFR_FAKE_STATE": str(state),
             "TFR_RELEASE_POLL_SECONDS": "0",
             "TFR_RELEASE_TIMEOUT_SECONDS": "30",
+            "TFR_RELEASE_CONFIRM_TIMEOUT_SECONDS": "2",
             "TFR_FAKE_CODEQL_FAILURE": "1" if codeql_failure else "0",
         }
     )
@@ -409,6 +416,20 @@ def test_release_end_to_end_runs_protected_pipeline(tmp_path: Path) -> None:
     assert "--method POST" in log
     assert (Path(environment["TFR_FAKE_STATE"]) / "approved").exists()
     assert "Release published and verified" in output
+    assert git(repository, "show", "origin/main:feature.txt") == "feature"
+
+
+def test_release_end_to_end_times_out_unanswered_confirmation(tmp_path: Path) -> None:
+    repository, environment = create_fixture(tmp_path)
+
+    returncode, output = run_with_confirmations(repository, environment, [])
+
+    assert returncode != 0
+    assert "confirmation timed out after 2s" in output
+    log = Path(environment["TFR_FAKE_LOG"]).read_text(encoding="utf-8")
+    assert "publish \n" in log
+    assert "publish --push\n" not in log
+    assert "pending_deployments" not in log
 
 
 def test_release_end_to_end_stops_on_security_failure(tmp_path: Path) -> None:

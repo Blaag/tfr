@@ -55,6 +55,14 @@ approves publication before the protected build passes. Any command or check fai
 stops execution. If OpenCode runs the command, invoke `/release` first; running it
 directly in your shell does not use the OpenCode gate.
 
+Run the script in an interactive terminal and enter each exact-tag confirmation only
+when its prompt appears. Do not preload confirmations through a pipe or pseudo-terminal:
+earlier interactive `gh ... --watch` commands may consume buffered input. Each prompt
+expires after five minutes and fails closed instead of waiting indefinitely. Maintainers
+can shorten that bound for supervised automation with the positive-integer
+`TFR_RELEASE_CONFIRM_TIMEOUT_SECONDS` environment variable; it does not remove or
+automatically answer either confirmation.
+
 After the stable tag is pushed, rerun the script only after understanding the failure.
 The tag and release are intentionally immutable; use the failure-recovery guidance
 below rather than deleting or replacing them.
