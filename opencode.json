@@ -1,8 +1,10 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "subagent_depth": 0,
-  "instructions": ["OPENCODE-CONTRACT.md"],
-  "permission": {
-    "task": "deny"
-  }
+  "permissions": [
+    {
+      "action": "subagent",
+      "resource": "*",
+      "effect": "deny"
+    }
+  ]
 }

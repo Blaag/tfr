@@ -1,7 +1,10 @@
 ---
 description: Start a bounded diff review cycle
 agent: build
+subagent: false
 ---
+
+<!-- tfr-command:review-start -->
 
 Immediately execute this test-first review cycle; do not merely describe it or wait for another
 message. Before reading code or inspecting the diff, run `uv run pytest -q`,

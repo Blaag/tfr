@@ -13,3 +13,4 @@ test-results/
 run-gateway-on-dedicated-vm.txt
 start-ui.sh
 sync-files.sh
+.opencode/

@@ -1,22 +1,36 @@
 import assert from "node:assert/strict"
+import { readFile } from "node:fs/promises"
 import test from "node:test"
 
 import {
   contentBearingGitDiff,
   createContractHooks,
   releaseAffectingCommand,
-} from "../plugins/enforce-contract.js"
+} from "../lib/enforce-contract.js"
+import * as plugin from "../plugins/enforce-contract.js"
 
-const bash = (sessionID, command) => [
-  { tool: "bash", sessionID, callID: "call" },
-  { args: { command } },
-]
+const shell = (sessionID, command) => ({ tool: "shell", sessionID, input: { command } })
+const command = (sessionID, name) => ({
+  sessionID,
+  prompt: { text: `<!-- tfr-command:${name} -->\n\nRun ${name}.` },
+})
 
-const runReviewChecks = async (hooks, sessionID) => {
-  await hooks["tool.execute.before"](...bash(sessionID, "uv run pytest -q"))
-  await hooks["tool.execute.before"](...bash(sessionID, "uv run bandit -q -r src"))
-  await hooks["tool.execute.before"](...bash(sessionID, "uv run pip-audit"))
+const runReviewChecks = (hooks, sessionID) => {
+  hooks.handleTool(shell(sessionID, "uv run pytest -q"))
+  hooks.handleTool(shell(sessionID, "uv run bandit -q -r src"))
+  hooks.handleTool(shell(sessionID, "uv run pip-audit"))
 }
+
+test("auto-loaded plugin module exports exactly one plugin", () => {
+  assert.deepEqual(Object.keys(plugin), ["default"])
+  assert.equal(plugin.default.id, "tfr.enforce-contract")
+})
+
+test("V2 project instructions mirror the canonical contract", async () => {
+  const agents = await readFile(new URL("../../AGENTS.md", import.meta.url), "utf8")
+  const contract = await readFile(new URL("../../OPENCODE-CONTRACT.md", import.meta.url), "utf8")
+  assert.equal(agents, contract)
+})
 
 test("identifies only content-bearing git diff commands", () => {
   assert.equal(contentBearingGitDiff("git diff -- src/app.py"), true)
@@ -26,121 +40,100 @@ test("identifies only content-bearing git diff commands", () => {
   assert.equal(contentBearingGitDiff("git status --short"), false)
 })
 
-test("rejects every subagent invocation", async () => {
+test("recognizes command markers and removes them before admission", () => {
   const hooks = createContractHooks()
-  await assert.rejects(
-    hooks["tool.execute.before"](
-      { tool: "task", sessionID: "subagent", callID: "call" },
-      { args: {} },
-    ),
+  const event = command("marker", "release")
+  hooks.handlePrompt(event)
+  assert.equal(event.prompt.text, "Run release.")
+})
+
+test("rejects every subagent invocation", () => {
+  const hooks = createContractHooks()
+  assert.throws(
+    () => hooks.handleTool({ tool: "task", sessionID: "subagent", input: {} }),
+    /prohibits subagents/,
+  )
+  assert.throws(
+    () => hooks.handleTool({ tool: "subagent", sessionID: "subagent", input: {} }),
     /prohibits subagents/,
   )
 })
 
-test("allows exactly one content-bearing diff per explicit review cycle", async () => {
+test("allows exactly one content-bearing diff per explicit review cycle", () => {
   const hooks = createContractHooks()
   const sessionID = "bounded-review"
 
-  await assert.rejects(
-    hooks["tool.execute.before"](...bash(sessionID, "git diff")),
-    /review-start/,
-  )
-  await hooks["command.execute.before"]({ command: "review-start", sessionID }, {})
-  await runReviewChecks(hooks, sessionID)
-  await hooks["tool.execute.before"](...bash(sessionID, "git diff -- src"))
-  await assert.rejects(
-    hooks["tool.execute.before"](...bash(sessionID, "git diff -- tests")),
-    /already consumed/,
-  )
-  await assert.rejects(
-    hooks["command.execute.before"]({ command: "review-start", sessionID }, {}),
-    /review-end/,
-  )
-  await hooks["command.execute.before"]({ command: "review-end", sessionID }, {})
-  await assert.rejects(
-    hooks["tool.execute.before"](...bash(sessionID, "git diff")),
-    /review-start/,
-  )
+  assert.throws(() => hooks.handleTool(shell(sessionID, "git diff")), /review-start/)
+  hooks.handlePrompt(command(sessionID, "review-start"))
+  runReviewChecks(hooks, sessionID)
+  hooks.handleTool(shell(sessionID, "git diff -- src"))
+  assert.throws(() => hooks.handleTool(shell(sessionID, "git diff -- tests")), /already consumed/)
+  assert.throws(() => hooks.handlePrompt(command(sessionID, "review-start")), /review-end/)
+  hooks.handlePrompt(command(sessionID, "review-end"))
+  assert.throws(() => hooks.handleTool(shell(sessionID, "git diff")), /review-start/)
 })
 
-test("requires security tooling before a review can end", async () => {
+test("requires security tooling before a review can end", () => {
   const hooks = createContractHooks()
   const sessionID = "security-review"
 
-  await hooks["command.execute.before"]({ command: "review-start", sessionID }, {})
-  await assert.rejects(
-    hooks["tool.execute.before"](...bash(sessionID, "git diff")),
+  hooks.handlePrompt(command(sessionID, "review-start"))
+  assert.throws(
+    () => hooks.handleTool(shell(sessionID, "git diff")),
     /full test suite, Bandit, pip-audit/,
   )
-  await hooks["tool.execute.before"](...bash(sessionID, "uv run pytest -q"))
-  await assert.rejects(
-    hooks["command.execute.before"]({ command: "review-end", sessionID }, {}),
+  hooks.handleTool(shell(sessionID, "uv run pytest -q"))
+  assert.throws(
+    () => hooks.handlePrompt(command(sessionID, "review-end")),
     /content-bearing git diff, Bandit, pip-audit/,
   )
-  await hooks["tool.execute.before"](...bash(sessionID, "uv run bandit -q -r src"))
-  await assert.rejects(
-    hooks["tool.execute.before"](...bash(sessionID, "git diff")),
-    /pip-audit/,
-  )
-  await hooks["tool.execute.before"](...bash(sessionID, "uv run pip-audit"))
-  await hooks["tool.execute.before"](...bash(sessionID, "git diff"))
-  await hooks["command.execute.before"]({ command: "review-end", sessionID }, {})
+  hooks.handleTool(shell(sessionID, "uv run bandit -q -r src"))
+  assert.throws(() => hooks.handleTool(shell(sessionID, "git diff")), /pip-audit/)
+  hooks.handleTool(shell(sessionID, "uv run pip-audit"))
+  hooks.handleTool(shell(sessionID, "git diff"))
+  hooks.handlePrompt(command(sessionID, "review-end"))
 })
 
-test("bounds manual review investigation after automated checks", async () => {
+test("bounds manual review investigation after automated checks", () => {
   const hooks = createContractHooks()
   const sessionID = "bounded-investigation"
 
-  await hooks["command.execute.before"]({ command: "review-start", sessionID }, {})
-  await assert.rejects(
-    hooks["tool.execute.before"](
-      { tool: "read", sessionID, callID: "call" },
-      { args: { filePath: "src/app.py" } },
-    ),
+  hooks.handlePrompt(command(sessionID, "review-start"))
+  assert.throws(
+    () => hooks.handleTool({ tool: "read", sessionID, input: { filePath: "src/app.py" } }),
     /automated checks and inspect the diff/,
   )
-  await runReviewChecks(hooks, sessionID)
-  await hooks["tool.execute.before"](...bash(sessionID, "git diff"))
-  await assert.rejects(
-    hooks["tool.execute.before"](
-      { tool: "glob", sessionID, callID: "call" },
-      { args: { pattern: "**/*" } },
-    ),
+  runReviewChecks(hooks, sessionID)
+  hooks.handleTool(shell(sessionID, "git diff"))
+  assert.throws(
+    () => hooks.handleTool({ tool: "glob", sessionID, input: { pattern: "**/*" } }),
     /Broad file exploration/,
   )
   for (let index = 0; index < 6; index += 1) {
-    await hooks["tool.execute.before"](
-      { tool: "grep", sessionID, callID: `call-${index}` },
-      { args: { pattern: `candidate-${index}`, path: "src" } },
-    )
+    hooks.handleTool({
+      tool: "grep",
+      sessionID,
+      input: { pattern: `candidate-${index}`, path: "src" },
+    })
   }
-  await assert.rejects(
-    hooks["tool.execute.before"](
-      { tool: "read", sessionID, callID: "call-limit" },
-      { args: { filePath: "src/app.py" } },
-    ),
+  assert.throws(
+    () => hooks.handleTool({ tool: "read", sessionID, input: { filePath: "src/app.py" } }),
     /six targeted-investigation limit/,
   )
 })
 
-test("allows non-content diff checks outside review cycles", async () => {
+test("allows non-content diff checks outside review cycles", () => {
   const hooks = createContractHooks()
-  await hooks["tool.execute.before"](...bash("checks", "git diff --check"))
-  await hooks["tool.execute.before"](...bash("checks", "git diff --quiet"))
+  hooks.handleTool(shell("checks", "git diff --check"))
+  hooks.handleTool(shell("checks", "git diff --quiet"))
 })
 
 test("identifies release-affecting commands", () => {
   assert.equal(releaseAffectingCommand("./scripts/publish-release"), false)
   assert.equal(releaseAffectingCommand("./scripts/publish-release --push"), true)
   assert.equal(releaseAffectingCommand("./scripts/release-end-to-end 1.2.3"), true)
-  assert.equal(
-    releaseAffectingCommand("git status --short -- scripts/release-end-to-end"),
-    false,
-  )
-  assert.equal(
-    releaseAffectingCommand("git add -- scripts/publish-release"),
-    false,
-  )
+  assert.equal(releaseAffectingCommand("git status --short -- scripts/release-end-to-end"), false)
+  assert.equal(releaseAffectingCommand("git add -- scripts/publish-release"), false)
   assert.equal(releaseAffectingCommand("git tag -a v1.2.3 -m release"), true)
   assert.equal(releaseAffectingCommand("git push origin refs/tags/v1.2.3"), true)
   assert.equal(releaseAffectingCommand("gh release create v1.2.3"), true)
@@ -148,13 +141,13 @@ test("identifies release-affecting commands", () => {
   assert.equal(releaseAffectingCommand("uv run pytest"), false)
 })
 
-test("requires one explicit authorization per release command", async () => {
+test("requires one explicit authorization per release command", () => {
   const hooks = createContractHooks()
   const sessionID = "release-gate"
-  const release = bash(sessionID, "./scripts/publish-release --push")
+  const release = shell(sessionID, "./scripts/publish-release --push")
 
-  await assert.rejects(hooks["tool.execute.before"](...release), /run \/release first/)
-  await hooks["command.execute.before"]({ command: "release", sessionID }, {})
-  await hooks["tool.execute.before"](...release)
-  await assert.rejects(hooks["tool.execute.before"](...release), /run \/release first/)
+  assert.throws(() => hooks.handleTool(release), /run \/release first/)
+  hooks.handlePrompt(command(sessionID, "release"))
+  hooks.handleTool(release)
+  assert.throws(() => hooks.handleTool(release), /run \/release first/)
 })
