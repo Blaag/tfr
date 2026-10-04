@@ -175,7 +175,8 @@ class SpellcheckConfig(StrictModel):
 
 class TypingGlowConfig(StrictModel):
     enabled: bool = True
-    duration_seconds: float = Field(default=1.0, gt=0, le=60)
+    duration_seconds: float = Field(default=0.5, gt=0, le=60)
+    highlight_color: HexColor = "#ffffff"
 
 
 class UiConfig(StrictModel):

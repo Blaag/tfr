@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -86,6 +87,7 @@ def make_tui(
     mouse_mode: str = "tfr",
     spellcheck: SpellcheckConfig | None = None,
     typing_glow: TypingGlowConfig | None = None,
+    character: str | None = None,
 ) -> TfrTui:
     event_bus = EventBus()
     command_bus = CommandBus()
@@ -99,6 +101,11 @@ def make_tui(
                 autoconnect=False,
                 server=server,
                 capabilities=WorldCapabilitiesConfig(unicode=unicode),
+                login=(
+                    LoginConfig(character=character, password="test-secret")
+                    if character is not None
+                    else None
+                ),
             ),
             defaults=WorldDefaults(),
             event_bus=event_bus,
@@ -1870,6 +1877,42 @@ async def test_speaker_effects_animate_visually_but_keep_stored_text() -> None:
     assert fragment_list_to_text(tui.active_view.display.formatted_text()).startswith("Alice")
 
 
+async def test_bare_pose_infers_first_token_only_for_display_effects() -> None:
+    tui = make_tui(server="bare")
+    await add_speaker_effects(tui)
+    tui.low_bandwidth = True
+    event = Event(
+        session_id=tui.active_view.session.session_id,
+        world="alpha",
+        connection_generation=1,
+        sequence=0,
+        direction=Direction.INBOUND,
+        kind=EventKind.RAW_OUTPUT,
+        canonical_text="Alice's cigarette goes out.",
+        plain_text="Alice's cigarette goes out.",
+        display_text="Alice's cigarette goes out.",
+        parser_name="bare",
+    )
+
+    tui.handle_event(event)
+
+    output = tui.active_view.output_text()
+    alice = next((style, text) for style, text in output if text == "Alice")
+    assert alice == ("fg:#a9914a", "Alice")
+    assert event.kind is EventKind.RAW_OUTPUT
+    assert event.provenance is None
+
+    unrelated = replace(
+        event,
+        sequence=1,
+        canonical_text="Someone mentions Alice later.",
+        plain_text="Someone mentions Alice later.",
+        display_text="Someone mentions Alice later.",
+    )
+    tui.handle_event(unrelated)
+    assert not tui.active_view.display._entry_decorations[1]
+
+
 async def test_speaker_effects_keep_static_color_when_animations_are_off() -> None:
     tui = make_tui()
     await add_speaker_effects(tui)
@@ -2170,7 +2213,7 @@ async def test_output_border_summarizes_unread_world_activity() -> None:
 
     bottom = tui._border_text(view, "output", BorderEdge.BOTTOM, 2)
 
-    assert fragment_list_to_text(bottom) == "└Activity in world(s): beta +2 ────────────────────┘"
+    assert fragment_list_to_text(bottom) == "└──────────── Activity in world(s): beta +2 ───────┘"
     activity_styles = [style for style, text, *_mouse in bottom if text.isalpha()]
     assert activity_styles and all(style == "class:border.activity" for style in activity_styles)
 
@@ -2179,7 +2222,7 @@ async def test_output_border_summarizes_unread_world_activity() -> None:
     label = [
         (style, text)
         for index, (style, text, *_mouse) in enumerate(effected)
-        if 1 <= index < 31
+        if 13 <= index < 43
     ]
     assert "Activity in world(s): beta +2" in fragment_list_to_text(label)
     assert all(style == "class:border.activity" for style, _text in label)
@@ -2192,7 +2235,7 @@ async def test_output_border_summarizes_unread_world_activity() -> None:
 
 def test_output_border_activity_uses_complete_entries_when_narrow() -> None:
     tui = make_tui()
-    tui.active_view.display.resize(width=40, height=2)
+    tui.active_view.display.resize(width=52, height=2)
     tui.views["alpha"].unread_events = 11
     tui.views["beta"].unread_events = 2
 
@@ -2456,8 +2499,8 @@ def test_more_count_is_fixed_width_first_in_output_border() -> None:
     bottom = tui._border_text(tui.active_view, "output", BorderEdge.BOTTOM, 3)
     assert "rows 1-3/5" in status
     assert "More" not in status
-    assert fragment_list_to_text(bottom).startswith("└More    2 ")
-    assert all(style == "class:border.more" for style, _text, *_mouse in bottom[1:11])
+    assert fragment_list_to_text(bottom).startswith("└── More    2")
+    assert all(style == "class:border.more" for style, _text, *_mouse in bottom[3:13])
 
 
 def test_more_count_caps_at_9999_and_precedes_activity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2469,7 +2512,7 @@ def test_more_count_caps_at_9999_and_precedes_activity(monkeypatch: pytest.Monke
 
     bottom = fragment_list_to_text(tui._border_text(view, "output", BorderEdge.BOTTOM, 3))
 
-    assert bottom.startswith("└More 9999 Activity in world(s): beta +4 ")
+    assert bottom.startswith("└── More 9999 Activity in world(s): beta +4 ")
 
 
 def test_human_commands_are_shown_in_recent_input_not_world_output() -> None:
@@ -2628,7 +2671,11 @@ async def test_spellcheck_highlights_bare_echo_after_gateway_round_trip(
 ) -> None:
     now = 100.0
     monkeypatch.setattr("tfr.tui.time.monotonic", lambda: now)
-    tui = make_tui(server="bare", spellcheck=SpellcheckConfig(enabled=True))
+    tui = make_tui(
+        server="bare",
+        spellcheck=SpellcheckConfig(enabled=True),
+        character="Hamilton",
+    )
     session = tui.active_view.session
     session.state = SessionState.CONNECTED
     session.connection_generation = 1
@@ -2653,10 +2700,10 @@ async def test_spellcheck_highlights_bare_echo_after_gateway_round_trip(
     tui.handle_event(received_outbound)
 
     inbound_queue = tui.event_bus.subscribe()
-    await session._publish_inbound(f"{request.text}\r\n")
+    await session._publish_inbound('Hamilton says, "I like this."\r\n')
     inbound = inbound_queue.get_nowait()
     tui.event_bus.unsubscribe(inbound_queue)
-    assert inbound.kind is EventKind.RAW_OUTPUT
+    assert inbound.kind is EventKind.SAY
     assert inbound.parser_name == "bare"
     _cursor, received_inbound = event_from_message(event_message(2, inbound))
     tui.handle_event(received_inbound)
@@ -2716,14 +2763,14 @@ async def test_spellcheck_does_not_consume_bare_raw_line_that_quotes_command() -
     assert len(tui._spellcheck_echoes["alpha"]) == 1
 
 
-def test_typing_glow_fades_from_accent_and_is_disabled_by_lowbw(
+def test_typing_glow_fades_from_configured_highlight_and_is_disabled_by_lowbw(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = 100.0
     monkeypatch.setattr("tfr.tui.time.monotonic", lambda: now)
     tui = make_tui(
         theme=ThemeConfig(preset="catppuccin-mocha"),
-        typing_glow=TypingGlowConfig(duration_seconds=1.0),
+        typing_glow=TypingGlowConfig(duration_seconds=0.5),
     )
     view = tui.active_view
 
@@ -2731,15 +2778,15 @@ def test_typing_glow_fades_from_accent_and_is_disabled_by_lowbw(
     initial = view.typing_glow_processor.apply_transformation(
         SimpleNamespace(fragments=[("", "ab")])  # type: ignore[arg-type]
     ).fragments
-    assert all("fg:#89b4fa" in style for style, _text, *_handler in initial)
+    assert all("fg:#ffffff" in style for style, _text, *_handler in initial)
 
-    now = 100.5
+    now = 100.25
     midpoint = view.typing_glow_processor.apply_transformation(
         SimpleNamespace(fragments=[("", "ab")])  # type: ignore[arg-type]
     ).fragments
     assert midpoint[0][0] not in {initial[0][0], ""}
 
-    now = 101.0
+    now = 100.5
     expired = view.typing_glow_processor.apply_transformation(
         SimpleNamespace(fragments=[("", "ab")])  # type: ignore[arg-type]
     ).fragments
@@ -2751,6 +2798,18 @@ def test_typing_glow_fades_from_accent_and_is_disabled_by_lowbw(
         SimpleNamespace(fragments=[("", "abc")])  # type: ignore[arg-type]
     )
     assert view.typing_glow_tracker.timestamps[-1] is None
+
+
+def test_typing_glow_uses_custom_highlight_color() -> None:
+    tui = make_tui(typing_glow=TypingGlowConfig(highlight_color="#ff00ff"))
+    view = tui.active_view
+
+    view.input_buffer.insert_text("a")
+    fragments = view.typing_glow_processor.apply_transformation(
+        SimpleNamespace(fragments=[("", "a")])  # type: ignore[arg-type]
+    ).fragments
+
+    assert fragments[0][0] == "fg:#ff00ff"
 
 
 def test_typing_glow_tracks_independent_insertions_and_middle_edits(
@@ -2855,7 +2914,11 @@ async def test_spellcheck_output_highlight_expires_in_low_bandwidth(
 ) -> None:
     now = 100.0
     monkeypatch.setattr("tfr.tui.time.monotonic", lambda: now)
-    tui = make_tui(spellcheck=SpellcheckConfig(enabled=True))
+    tui = make_tui(
+        server="bare",
+        spellcheck=SpellcheckConfig(enabled=True),
+        character="Hamilton",
+    )
     tui._set_low_bandwidth(True)
     session = tui.active_view.session
     session.state = SessionState.CONNECTED
@@ -2878,7 +2941,7 @@ async def test_spellcheck_output_highlight_expires_in_low_bandwidth(
             correlation_id=request.request_id,
         )
     )
-    echo = 'You say, "I like this."\r\n'
+    echo = 'Hamilton says, "I like this."\r\n'
     tui.handle_event(
         Event(
             session_id=session.session_id,
@@ -2890,6 +2953,7 @@ async def test_spellcheck_output_highlight_expires_in_low_bandwidth(
             canonical_text=echo,
             plain_text=echo,
             display_text=echo,
+            parser_name="bare",
             metadata={"message_text": echo},
         )
     )
@@ -3007,8 +3071,11 @@ async def test_spellcheck_does_not_highlight_unrelated_or_expired_echoes(
     assert not any("underline" in style for style, _text in tui.active_view.output_text())
 
 
-async def test_spellcheck_highlights_pose_echo_for_configured_character() -> None:
-    tui = make_tui(spellcheck=SpellcheckConfig(enabled=True))
+@pytest.mark.parametrize("possessive", ["", "'s", "’s"])
+async def test_spellcheck_highlights_bare_pose_echo_for_configured_character(
+    possessive: str,
+) -> None:
+    tui = make_tui(server="bare", spellcheck=SpellcheckConfig(enabled=True))
     session = tui.active_view.session
     session.config = session.config.model_copy(
         update={"login": LoginConfig(character="Black", password="secret")}
@@ -3035,7 +3102,7 @@ async def test_spellcheck_highlights_pose_echo_for_configured_character() -> Non
         )
     )
 
-    echo = "Black waves.\r\n"
+    echo = f"Black{possessive} waves.\r\n"
     tui.handle_event(
         Event(
             session_id=session.session_id,
@@ -3043,10 +3110,11 @@ async def test_spellcheck_highlights_pose_echo_for_configured_character() -> Non
             connection_generation=1,
             sequence=1,
             direction=Direction.INBOUND,
-            kind=EventKind.POSE,
+            kind=EventKind.RAW_OUTPUT,
             canonical_text=echo,
             plain_text=echo,
             display_text=echo,
+            parser_name="bare",
             metadata={"message_text": echo},
         )
     )

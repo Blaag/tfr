@@ -536,7 +536,7 @@
       "additionalProperties": false,
       "properties": {
         "duration_seconds": {
-          "default": 1.0,
+          "default": 0.5,
           "exclusiveMinimum": 0,
           "maximum": 60,
           "title": "Duration Seconds",
@@ -546,6 +546,12 @@
           "default": true,
           "title": "Enabled",
           "type": "boolean"
+        },
+        "highlight_color": {
+          "default": "#ffffff",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "title": "Highlight Color",
+          "type": "string"
         }
       },
       "title": "TypingGlowConfig",

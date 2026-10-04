@@ -303,8 +303,10 @@ def test_runtime_world_descriptors_include_switch_aliases() -> None:
             server="tinymux",
             aliases=("a", "main"),
             capabilities=SimpleNamespace(unicode=True),
+            login=SimpleNamespace(character="Hamilton", password="never-serialize-me"),
         ),
         encoding="utf-8",
+        character_name="Hamilton",
         show_nospoof_prefix=False,
     )
     runtime = GatewayRuntime(
@@ -317,9 +319,12 @@ def test_runtime_world_descriptors_include_switch_aliases() -> None:
         history=SimpleNamespace(limits={"alpha": 100}),  # type: ignore[arg-type]
     )
 
-    assert runtime.world_descriptors()[0]["aliases"] == ["a", "main"]
-    assert runtime.world_descriptors()[0]["connection_generation"] == 3
-    assert runtime.world_descriptors()[0]["capabilities"] == {"unicode": True}
+    descriptor = runtime.world_descriptors()[0]
+    assert descriptor["aliases"] == ["a", "main"]
+    assert descriptor["connection_generation"] == 3
+    assert descriptor["capabilities"] == {"unicode": True}
+    assert descriptor["character"] == "Hamilton"
+    assert "password" not in descriptor
 
 
 async def test_server_handshake_backfill_command_ack_and_detach() -> None:

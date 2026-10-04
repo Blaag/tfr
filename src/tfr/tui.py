@@ -47,7 +47,17 @@ from tfr.borders import BorderEdge, border_cell
 from tfr.clear_effects import ScreenClearContext
 from tfr.config import ConfigurationBundle, SpellcheckConfig, ThemeConfig, TypingGlowConfig
 from tfr.core import CommandBus, EventBus, UnknownSessionError
-from tfr.events import Actor, ActorType, CommandRequest, Direction, Event, EventKind, SpoofStatus
+from tfr.events import (
+    Actor,
+    ActorType,
+    CommandRequest,
+    Confidence,
+    Direction,
+    Event,
+    EventKind,
+    Provenance,
+    SpoofStatus,
+)
 from tfr.image_art import (
     DEFAULT_IMAGE_WIDTH,
     MAXIMUM_IMAGE_WIDTH,
@@ -921,7 +931,7 @@ class TfrTui:
                     self.animations_enabled and not self.low_bandwidth,
                 ),
                 typing_glow=self.typing_glow,
-                typing_glow_start_color=self.theme.palette.accent,
+                typing_glow_start_color=self.typing_glow.highlight_color,
                 typing_glow_end_color=self.theme.palette.text,
                 open_url_handler=self._open_url,
             )
@@ -1617,14 +1627,14 @@ class TfrTui:
         output: StyleAndTextTuples = []
         more = ""
         activity = ""
+        more_start = 3
+        activity_start = 13
         if panel == "output" and edge is BorderEdge.BOTTOM:
-            if view.display.pager.more_rows:
-                candidate = f"More {min(9_999, view.display.pager.more_rows):>4} "
-                if len(candidate) <= length - 2:
-                    more = candidate
-            activity = self._activity_border_text(max(0, length - 2 - len(more)))
-        label = more + activity
-        label_start = 1 if label else -1
+            if view.display.pager.more_rows and activity_start < length:
+                more = f" More {min(9_999, view.display.pager.more_rows):>4}"
+            activity_text = self._activity_border_text(max(0, length - activity_start - 2))
+            if activity_text:
+                activity = f" {activity_text}"
 
         def mouse_handler(event: MouseEvent) -> object:
             return view.handle_border_mouse(event, edge, panel=panel)
@@ -1642,16 +1652,17 @@ class TfrTui:
             )
             if self.animations_enabled and self.plugins is not None:
                 fragment = self.plugins.transform_border(context, fragment)
-            if label_start <= index < label_start + len(label):
-                label_index = index - label_start
+            if more_start <= index < more_start + len(more):
                 fragment = replace(
                     fragment,
-                    character=label[label_index],
-                    style=(
-                        "class:border.more"
-                        if label_index < len(more)
-                        else "class:border.activity"
-                    ),
+                    character=more[index - more_start],
+                    style="class:border.more",
+                )
+            elif activity_start <= index < activity_start + len(activity):
+                fragment = replace(
+                    fragment,
+                    character=activity[index - activity_start],
+                    style="class:border.activity",
                 )
             output.append((fragment.style, fragment.character, mouse_handler))
             if edge in {BorderEdge.LEFT, BorderEdge.RIGHT} and index + 1 < length:
@@ -1836,12 +1847,13 @@ class TfrTui:
         prefix = pending.text[:payload_start].casefold()
         echo_prefix = message[:candidate_start].casefold()
         echo_suffix = message[candidate_start + len(candidate) :].rstrip("\r\n")
-        if event.kind is EventKind.RAW_OUTPUT and event.parser_name in {"bare", "generic"}:
-            return payload_start if message.rstrip("\r\n") == pending.text else None
-        character = self.views[event.world].session.config.login
-        character_name = character.character.casefold() if character is not None else None
+        bare_raw = event.kind is EventKind.RAW_OUTPUT and event.parser_name in {"bare", "generic"}
+        if bare_raw and message.rstrip("\r\n") == pending.text:
+            return payload_start
+        character = self.views[event.world].session.character_name
+        character_name = character.casefold() if character is not None else None
         if prefix.startswith('"') or prefix.startswith("say "):
-            if event.kind is not EventKind.SAY:
+            if event.kind is not EventKind.SAY and not bare_raw:
                 return None
             expected = {'you say, "', "you say, “"}
             if character_name is not None:
@@ -1854,9 +1866,18 @@ class TfrTui:
             if echo_prefix not in expected or echo_suffix not in {'', '"', "”"}:
                 return None
         else:
-            if event.kind not in {EventKind.POSE, EventKind.SPEECH} or character_name is None:
+            if (
+                event.kind not in {EventKind.POSE, EventKind.SPEECH}
+                and not bare_raw
+            ) or character_name is None:
                 return None
-            if echo_prefix not in {character_name, f"{character_name} "} or echo_suffix:
+            expected = {
+                character_name,
+                f"{character_name} ",
+                f"{character_name}'s ",
+                f"{character_name}’s ",
+            }
+            if echo_prefix not in expected or echo_suffix:
                 return None
         return payload_start
 
@@ -1920,6 +1941,32 @@ class TfrTui:
             for correction in matched.corrections
         )
 
+    @staticmethod
+    def _inferred_display_speaker(event: Event, event_text: str | None) -> Event:
+        if (
+            event_text is None
+            or event.parser_name not in {"bare", "generic"}
+            or event.provenance is not None
+            or event.kind not in {EventKind.RAW_OUTPUT, EventKind.SAY}
+        ):
+            return event
+        plain_text = terminal_plain_text(event_text).lstrip()
+        token = plain_text.split(maxsplit=1)[0] if plain_text else ""
+        if token.casefold().endswith(("'s", "’s")):
+            token = token[:-2]
+        if not token or len(token) > _MAX_OBSERVED_SPEAKER_LENGTH:
+            return event
+        return replace(
+            event,
+            kind=EventKind.POSE if event.kind is EventKind.RAW_OUTPUT else event.kind,
+            provenance=Provenance(
+                sender_name=token,
+                adapter=event.parser_name,
+                confidence=Confidence.INFERRED,
+            ),
+            confidence=Confidence.INFERRED,
+        )
+
     def handle_event(self, event: Event) -> None:
         self.plugins.observe_ui_event(event)
         view = self.views.get(event.world)
@@ -1981,14 +2028,15 @@ class TfrTui:
                 else event_text
             )
             if display_text is not None:
+                effect_event = self._inferred_display_speaker(display_event, event_text)
                 decorations = (
-                    self.plugins.decorate_display(display_event, display_text)
+                    self.plugins.decorate_display(effect_event, display_text)
                     if self.plugins is not None
                     else ()
                 )
                 presentations = (
                     self.plugins.presentation_programs(
-                        display_event,
+                        effect_event,
                         terminal_plain_text(display_text),
                     )
                     if self.plugins is not None

@@ -78,6 +78,7 @@ class FakeRuntime:
                 "connection_generation": 1,
                 "server": "bare",
                 "encoding": "utf-8",
+                "character": "Hamilton",
                 "capabilities": {"unicode": True},
                 "aliases": self.aliases,
                 "agent": False,
@@ -616,6 +617,7 @@ def test_remote_world_session_defaults_new_fields_for_older_gateways() -> None:
     descriptor = FakeRuntime(SimpleNamespace()).world_descriptors()[0]  # type: ignore[arg-type]
     descriptor.pop("aliases")
     descriptor.pop("capabilities")
+    descriptor.pop("character")
 
     session = RemoteWorldSession(
         SimpleNamespace(),  # type: ignore[arg-type]
@@ -625,6 +627,32 @@ def test_remote_world_session_defaults_new_fields_for_older_gateways() -> None:
 
     assert session.config.aliases == ()
     assert session.config.capabilities.unicode is False
+    assert session.character_name is None
+
+
+def test_remote_world_session_retains_non_secret_character_name() -> None:
+    descriptor = FakeRuntime(SimpleNamespace()).world_descriptors()[0]  # type: ignore[arg-type]
+
+    session = RemoteWorldSession(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        descriptor,
+        show_nospoof_prefix=False,
+    )
+
+    assert session.character_name == "Hamilton"
+    assert "password" not in descriptor
+
+
+def test_remote_world_session_rejects_invalid_character_name() -> None:
+    descriptor = FakeRuntime(SimpleNamespace()).world_descriptors()[0]  # type: ignore[arg-type]
+    descriptor["character"] = ""
+
+    with pytest.raises(ValueError, match="character must be a non-empty string or null"):
+        RemoteWorldSession(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            descriptor,
+            show_nospoof_prefix=False,
+        )
 
 
 def test_remote_world_session_rejects_invalid_capabilities() -> None:

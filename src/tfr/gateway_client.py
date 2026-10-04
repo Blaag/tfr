@@ -94,6 +94,12 @@ class RemoteWorldSession:
         ):
             raise ValueError("connection_generation must be a non-negative integer")
         self.connection_generation = connection_generation
+        character_name = descriptor.get("character")
+        if character_name is not None and (
+            not isinstance(character_name, str) or not character_name.strip()
+        ):
+            raise ValueError("character must be a non-empty string or null")
+        self.character_name = character_name
         self.config = WorldConfig(
             host="gateway.invalid",
             port=1,
