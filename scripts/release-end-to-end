@@ -247,6 +247,23 @@ if confirmation.rstrip("\r\n") != expected:
 ' "$expected" "$prompt" "$CONFIRM_TIMEOUT_SECONDS" || fail "confirmation failed"
 }
 
+assert_no_preloaded_input() {
+    [ -t 0 ] || return 0
+    python3 -c '
+import os
+import select
+import sys
+
+ready, _, _ = select.select([sys.stdin], [], [], 0)
+if ready:
+    queued = os.read(sys.stdin.fileno(), 4096)
+    if queued:
+        raise SystemExit(
+            "preloaded terminal input is forbidden; enter confirmations only when prompted"
+        )
+' || fail "release input validation failed"
+}
+
 wait_for_release_approval() {
     run_id=$1
     commit=$2
@@ -333,6 +350,7 @@ actual_repository=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
     fail "expected $EXPECTED_REPOSITORY, found $actual_repository"
 verify_github_protections
 uv lock --check
+assert_no_preloaded_input
 
 current_branch=$(git branch --show-current)
 [ -n "$current_branch" ] || fail "detached HEAD cannot be released"

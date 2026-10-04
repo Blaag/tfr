@@ -36,3 +36,5 @@ These rules are mandatory for every OpenCode conversation in this repository.
 - Never create or publish a release unless the user explicitly invokes `/release`.
 - `/release` authorizes exactly one release-affecting command in that session and is consumed even when the command fails.
 - Use `./scripts/publish-release --push` as the canonical release path. Do not bypass or weaken the release gate.
+- For a full OpenCode-operated release, invoke `./scripts/release-end-to-end-agent VERSION` directly as the single release-affecting command; it reaches the canonical publish path after protected checks.
+- Never pipe or preload release confirmations, construct an ad hoc PTY wrapper, or invoke `scripts/release-end-to-end` through `script`, `expect`, or equivalent automation.

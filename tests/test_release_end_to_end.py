@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 RELEASE_SCRIPT = Path(__file__).parents[1] / "scripts" / "release-end-to-end"
+AGENT_RELEASE_SCRIPT = Path(__file__).parents[1] / "scripts" / "release-end-to-end-agent"
 
 
 def git(repository: Path, *arguments: str) -> str:
@@ -43,6 +44,8 @@ def create_fixture(
     (repository / "tests" / "e2e").mkdir(parents=True)
     shutil.copy2(RELEASE_SCRIPT, repository / "scripts" / "release-end-to-end")
     (repository / "scripts" / "release-end-to-end").chmod(0o755)
+    shutil.copy2(AGENT_RELEASE_SCRIPT, repository / "scripts" / "release-end-to-end-agent")
+    (repository / "scripts" / "release-end-to-end-agent").chmod(0o755)
     (repository / "pyproject.toml").write_text(
         '[project]\nname = "tfr"\nversion = "0.1.0"\n', encoding="utf-8"
     )
@@ -430,6 +433,64 @@ def test_release_end_to_end_times_out_unanswered_confirmation(tmp_path: Path) ->
     assert "publish \n" in log
     assert "publish --push\n" not in log
     assert "pending_deployments" not in log
+
+
+def test_release_end_to_end_rejects_preloaded_confirmations(tmp_path: Path) -> None:
+    repository, environment = create_fixture(tmp_path)
+
+    terminal, slave = pty.openpty()
+    os.write(terminal, b"v0.1.1\nv0.1.1\n")
+    process = subprocess.Popen(
+        [str(repository / "scripts" / "release-end-to-end"), "0.1.1"],
+        cwd=repository,
+        env=environment,
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        start_new_session=True,
+    )
+    os.close(slave)
+    output = bytearray()
+    deadline = time.monotonic() + 10
+    try:
+        while process.poll() is None and time.monotonic() < deadline:
+            ready, _, _ = select.select([terminal], [], [], 0.1)
+            if ready:
+                try:
+                    output.extend(os.read(terminal, 4096))
+                except OSError:
+                    break
+        assert process.wait(timeout=1) != 0
+    finally:
+        os.close(terminal)
+
+    assert "preloaded terminal input is forbidden" in output.decode(errors="replace")
+    log = Path(environment["TFR_FAKE_LOG"]).read_text(encoding="utf-8")
+    assert "gh pr create" not in log
+    assert "gh pr merge" not in log
+    assert "publish" not in log
+
+
+def test_agent_release_driver_answers_only_observed_prompts(tmp_path: Path) -> None:
+    repository, environment = create_fixture(tmp_path)
+    environment["TFR_RELEASE_DRIVER_TIMEOUT_SECONDS"] = "30"
+
+    result = subprocess.run(
+        [str(repository / "scripts" / "release-end-to-end-agent"), "0.1.1"],
+        cwd=repository,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.count("Type v0.1.1") == 2
+    assert "Release published and verified" in result.stdout
+    log = Path(environment["TFR_FAKE_LOG"]).read_text(encoding="utf-8")
+    assert "publish --push\n" in log
+    assert (Path(environment["TFR_FAKE_STATE"]) / "approved").exists()
 
 
 def test_release_end_to_end_stops_on_security_failure(tmp_path: Path) -> None:
