@@ -8,6 +8,7 @@ building, publishing, and installing them.
 | Command | Intended user | Purpose |
 | --- | --- | --- |
 | `./scripts/release-end-to-end VERSION` | Maintainer | Run local CI/security checks, merge the current work and version bump through protected PRs, require passing CI/Dependency Review/CodeQL, push the stable tag, approve protected publication, and verify the immutable release. |
+| `./scripts/release-end-to-end-agent VERSION` | OpenCode release agent | Run the same protected end-to-end release while answering each exact-tag confirmation only after its prompt is observed. Requires prior `/release` authorization. |
 | `./scripts/publish-release` | Maintainer | Validate that the current `main` commit is ready for the version in `pyproject.toml`. It makes no release change without `--push`. |
 | `./scripts/publish-release --push` | Maintainer | Create and push the matching annotated `vX.Y.Z` tag, triggering the protected release workflow. |
 | `./scripts/install-from-checkout` | Operator or developer | Build the current clean checkout into an isolated local release and optionally activate it. It does not publish anything. |
@@ -54,6 +55,21 @@ The script never uses `--admin`, force-pushes, deletes tags, dismisses failures,
 approves publication before the protected build passes. Any command or check failure
 stops execution. If OpenCode runs the command, invoke `/release` first; running it
 directly in your shell does not use the OpenCode gate.
+
+Run the script in an interactive terminal and enter each exact-tag confirmation only
+when its prompt appears. Do not preload confirmations through a pipe or pseudo-terminal:
+the script detects queued terminal input before release work and fails closed. Earlier
+interactive `gh ... --watch` commands may otherwise consume buffered input. Each prompt
+expires after five minutes and fails closed instead of waiting indefinitely. Maintainers
+can shorten that bound for supervised automation with the positive-integer
+`TFR_RELEASE_CONFIRM_TIMEOUT_SECONDS` environment variable; it does not remove or
+automatically answer either confirmation.
+
+After explicit `/release` authorization, OpenCode must invoke
+`./scripts/release-end-to-end-agent VERSION` directly instead of constructing a PTY or
+piping confirmations. The driver mirrors output, waits for each exact version-specific
+prompt, responds once in the required order, enforces its own one-hour overall timeout,
+and requires the orchestrator's final immutable-release verification before succeeding.
 
 After the stable tag is pushed, rerun the script only after understanding the failure.
 The tag and release are intentionally immutable; use the failure-recovery guidance
