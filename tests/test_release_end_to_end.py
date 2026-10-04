@@ -346,17 +346,25 @@ else:
 def run_with_confirmations(
     repository: Path, environment: dict[str, str], confirmations: list[str]
 ) -> tuple[int, str]:
-    pid, terminal = pty.fork()
-    if pid == 0:
-        os.chdir(repository)
-        os.execve(
+    terminal, slave = pty.openpty()
+    terminal_path = os.ttyname(slave)
+    process = subprocess.Popen(
+        [
+            "/bin/sh",
+            "-c",
+            'exec 0<>"$1"; exec 1>&0; exec 2>&0; shift; exec "$@"',
+            "release-test",
+            terminal_path,
             str(repository / "scripts" / "release-end-to-end"),
-            ["release-end-to-end", "0.1.1"],
-            environment,
-        )
+            "0.1.1",
+        ],
+        cwd=repository,
+        env=environment,
+        start_new_session=True,
+    )
+    os.close(slave)
     output = bytearray()
     confirmation = 0
-    status = 0
     deadline = time.monotonic() + 30
     try:
         while time.monotonic() < deadline:
@@ -372,11 +380,11 @@ def run_with_confirmations(
                     while confirmation < min(prompts, len(confirmations)):
                         os.write(terminal, confirmations[confirmation].encode() + b"\n")
                         confirmation += 1
-            finished, status = os.waitpid(pid, os.WNOHANG)
-            if finished:
-                return os.waitstatus_to_exitcode(status), output.decode(errors="replace")
-        os.kill(pid, 9)
-        os.waitpid(pid, 0)
+            returncode = process.poll()
+            if returncode is not None:
+                return returncode, output.decode(errors="replace")
+        process.kill()
+        process.wait()
         raise AssertionError("release script timed out")
     finally:
         os.close(terminal)
