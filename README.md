@@ -789,6 +789,13 @@ them. Use `/lowbw on` to retain static styling but stop scheduled redraws. World
 traffic and keyboard input still redraw normally. `ui.animations_enabled` and
 `ui.low_bandwidth` select the initial state for each attached UI.
 
+Newly typed input glows in the theme's accent color and fades to normal text over
+one second by default. Configure `ui.typing_glow.enabled` and
+`ui.typing_glow.duration_seconds` to disable or tune it. `/animations off` and
+`/lowbw on` suppress the typing effect. Spellcheck corrections remain bold and
+underlined in recent input and matching world echoes; those highlights fade when
+animations are enabled and remain static until expiry in low-bandwidth mode.
+
 Ctrl-L clears the active draft and visible recent-input rows, then snapshots and
 clears the visible output. Input history remains available with Up. UI plugins
 can register finite output-only screen-clear transitions;
@@ -821,7 +828,9 @@ since that world last received inbound input, once it has received any. Each
 world retains its own draft, command history, rendered scrollback,
 pager state, and unread count while inactive.
 Unread worlds are also summarized in the output pane's bottom border near the
-editor. Narrow terminals show only complete world entries followed by `...`.
+editor. When output remains below the current view, the border begins with a
+fixed-width reversed `More` count (visually capped at `9999`) before the activity
+summary. Narrow terminals show only complete world entries followed by `...`.
 The active world's recently sent commands remain directly above the editor.
 These lines are separate from server output, so server speech echoes are not
 duplicated. Configure their number with `ui.recent_input_lines` (default `3`, or

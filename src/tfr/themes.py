@@ -257,6 +257,8 @@ _DEFAULT_STYLES = MappingProxyType(
         "status.lowbw": "bold fg:#000000 bg:#d7af00",
         "selection": "reverse",
         "border.output": "fg:#5f87af",
+        "border.more": "reverse fg:#5f87af",
+        "border.activity": "fg:#d7af00",
         "border.input": "fg:#87afff",
         "boss": "fg:#a8a8a8 bg:#1c1c1c",
         "boss.chart": "fg:#ffffff bg:#1c1c1c",
@@ -279,6 +281,8 @@ def _palette_styles(palette: ThemePalette) -> Mapping[str, str]:
             "status.lowbw": f"bold fg:{palette.background} bg:{palette.warning}",
             "selection": f"fg:{palette.selected_text} bg:{palette.selection}",
             "border.output": f"fg:{palette.overlay}",
+            "border.more": f"reverse fg:{palette.overlay}",
+            "border.activity": f"fg:{palette.warning}",
             "border.input": f"fg:{palette.accent}",
             "boss": f"fg:{palette.muted} bg:{palette.background}",
             "boss.chart": f"fg:{palette.text} bg:{palette.background}",
@@ -305,6 +309,7 @@ def _legacy_styles(palette: ThemePalette, overridden: set[str]) -> Mapping[str, 
         styles["status"] = f"fg:{palette.text} bg:{palette.surface}"
     if "overlay" in overridden:
         styles["border.output"] = f"fg:{palette.overlay}"
+        styles["border.more"] = f"reverse fg:{palette.overlay}"
     if "text" in overridden:
         styles["application"] = _replace_style_color(styles["application"], "fg", palette.text)
         styles["boss.chart"] = _replace_style_color(styles["boss.chart"], "fg", palette.text)
@@ -320,6 +325,7 @@ def _legacy_styles(palette: ThemePalette, overridden: set[str]) -> Mapping[str, 
     if "info" in overridden:
         styles["world.unread"] = f"bold fg:{palette.info}"
     if "warning" in overridden:
+        styles["border.activity"] = f"fg:{palette.warning}"
         styles["status.lowbw"] = _replace_style_color(
             styles["status.lowbw"], "bg", palette.warning
         )
