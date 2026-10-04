@@ -35,6 +35,7 @@ from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import BufferControl, DynamicContainer, FormattedTextControl, HSplit
 from prompt_toolkit.layout.containers import VSplit, Window
 from prompt_toolkit.layout.layout import Layout
+from prompt_toolkit.layout.processors import Processor, Transformation, TransformationInput
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import Output
 from prompt_toolkit.styles import Style
@@ -44,7 +45,7 @@ from tfr.agents import AgentRuntime
 from tfr.ansi import ansi_visible_text, safe_ansi_formatted_text, terminal_plain_text
 from tfr.borders import BorderEdge, border_cell
 from tfr.clear_effects import ScreenClearContext
-from tfr.config import ConfigurationBundle, SpellcheckConfig, ThemeConfig
+from tfr.config import ConfigurationBundle, SpellcheckConfig, ThemeConfig, TypingGlowConfig
 from tfr.core import CommandBus, EventBus, UnknownSessionError
 from tfr.events import Actor, ActorType, CommandRequest, Direction, Event, EventKind, SpoofStatus
 from tfr.image_art import (
@@ -74,7 +75,7 @@ from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.presentation import ActiveEffectProgram
 from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.spellcheck import Correction, LocalSpellChecker, speech_payload
-from tfr.text_effects import derive_bright_color
+from tfr.text_effects import derive_bright_color, interpolate_color
 from tfr.themes import ResolvedTheme, resolve_theme
 from tfr.updates import (
     BuildIdentity,
@@ -159,8 +160,162 @@ class PendingSpellcheckEcho:
     queued_at: float
 
 
+class RecentCommand(str):
+    transient_style_spans: tuple[TransientStyleSpan, ...]
+
+    def __new__(
+        cls,
+        text: str,
+        transient_style_spans: tuple[TransientStyleSpan, ...] = (),
+    ) -> RecentCommand:
+        value = super().__new__(cls, text)
+        value.transient_style_spans = transient_style_spans
+        return value
+
+
+class TypingGlowTracker:
+    def __init__(self) -> None:
+        self.text = ""
+        self.timestamps: list[float | None] = []
+
+    def sync(self, text: str) -> None:
+        if text == self.text:
+            return
+        prefix = 0
+        maximum_prefix = min(len(self.text), len(text))
+        while prefix < maximum_prefix and self.text[prefix] == text[prefix]:
+            prefix += 1
+        suffix = 0
+        maximum_suffix = min(len(self.text) - prefix, len(text) - prefix)
+        while suffix < maximum_suffix and self.text[-1 - suffix] == text[-1 - suffix]:
+            suffix += 1
+        tail = self.timestamps[len(self.timestamps) - suffix :] if suffix else []
+        self.timestamps = [
+            *self.timestamps[:prefix],
+            *([None] * (len(text) - prefix - suffix)),
+            *tail,
+        ]
+        self.text = text
+
+    def inserted(self, text: str, start: int, length: int, now: float) -> None:
+        self.sync(text)
+        end = min(len(self.timestamps), start + length)
+        for index in range(max(0, start), end):
+            self.timestamps[index] = now
+
+    def frame_delay(self, now: float, duration_seconds: float) -> float | None:
+        remaining = [
+            timestamp + duration_seconds - now
+            for timestamp in self.timestamps
+            if timestamp is not None and timestamp + duration_seconds > now
+        ]
+        return min(1 / 30, min(remaining)) if remaining else None
+
+
+class TypingGlowBuffer(Buffer):
+    def __init__(
+        self,
+        *,
+        tracker: TypingGlowTracker,
+        enabled: Callable[[], bool],
+        inserted_handler: Callable[[], None],
+        **kwargs: Any,
+    ) -> None:
+        self._typing_glow_tracker = tracker
+        self._typing_glow_enabled = enabled
+        self._typing_glow_inserted_handler = inserted_handler
+        super().__init__(**kwargs)
+
+    def insert_text(
+        self,
+        data: str,
+        overwrite: bool = False,
+        move_cursor: bool = True,
+        fire_event: bool = True,
+    ) -> None:
+        start = self.cursor_position
+        super().insert_text(
+            data,
+            overwrite=overwrite,
+            move_cursor=move_cursor,
+            fire_event=fire_event,
+        )
+        if fire_event and data and self._typing_glow_enabled():
+            self._typing_glow_tracker.inserted(self.text, start, len(data), time.monotonic())
+            self._typing_glow_inserted_handler()
+
+
+class TypingGlowProcessor(Processor):
+    def __init__(
+        self,
+        *,
+        tracker: TypingGlowTracker,
+        enabled: Callable[[], bool],
+        duration_seconds: float,
+        start_color: str,
+        end_color: str,
+    ) -> None:
+        self.tracker = tracker
+        self.enabled = enabled
+        self.duration_seconds = duration_seconds
+        self.start_color = start_color
+        self.end_color = end_color
+
+    def apply_transformation(self, transformation_input: TransformationInput) -> Transformation:
+        fragments = transformation_input.fragments
+        text = "".join(fragment[1] for fragment in fragments)
+        self.tracker.sync(text)
+        if not self.enabled():
+            return Transformation(fragments)
+        now = time.monotonic()
+        output: StyleAndTextTuples = []
+        offset = 0
+        for fragment in fragments:
+            style, value, *handler = fragment
+            for character in value:
+                timestamp = (
+                    self.tracker.timestamps[offset]
+                    if offset < len(self.tracker.timestamps)
+                    else None
+                )
+                rendered_style = style
+                if timestamp is not None:
+                    elapsed = max(0.0, now - timestamp)
+                    if elapsed < self.duration_seconds:
+                        progress = elapsed / self.duration_seconds
+                        color = interpolate_color(self.start_color, self.end_color, progress)
+                        rendered_style = f"{style} fg:{color}".strip()
+                output.append((rendered_style, character, *handler))
+                offset += 1
+        return Transformation(output)
+
+
 def _row_text(row: FormattedRow) -> str:
     return "".join(text for _style, text in row)
+
+
+def _transient_plain_text(
+    text: str,
+    *,
+    base_style: str,
+    spans: tuple[TransientStyleSpan, ...],
+    now: float,
+    animated: bool,
+) -> StyleAndTextTuples:
+    output: StyleAndTextTuples = []
+    for index, character in enumerate(text):
+        style = base_style
+        for span in spans:
+            if span.start <= index < span.end:
+                effect = span.style_at(now, animated=animated)
+                if effect:
+                    style = f"{style} {effect}".strip()
+        if output and len(output[-1]) == 2 and output[-1][0] == style:
+            previous_style, previous_text = output[-1]
+            output[-1] = (previous_style, previous_text + character)
+        else:
+            output.append((style, character))
+    return output
 
 
 def _osc52_sequence(text: str) -> str:
@@ -320,7 +475,11 @@ class WorldView:
         accept_handler: Any,
         copy_handler: Callable[[str], None],
         invalidate_handler: Callable[[], None],
+        typing_inserted_handler: Callable[[], None],
         animation_state: Callable[[], tuple[float, bool]],
+        typing_glow: TypingGlowConfig,
+        typing_glow_start_color: str,
+        typing_glow_end_color: str,
         open_url_handler: Callable[[str], None],
     ) -> None:
         self.session = session
@@ -329,7 +488,7 @@ class WorldView:
         self.unread_events = 0
         self.last_inbound_at: float | None = None
         self.recent_input_lines = recent_input_lines
-        self.recent_commands: deque[str] = deque(maxlen=recent_input_lines)
+        self.recent_commands: deque[RecentCommand] = deque(maxlen=recent_input_lines)
         self._copy_handler = copy_handler
         self._invalidate_handler = invalidate_handler
         self._animation_state = animation_state
@@ -339,7 +498,18 @@ class WorldView:
         self._selection_dragged = False
         self._selection_active = False
         self._selection_dragging = False
-        self.input_buffer = Buffer(
+        self.typing_glow_tracker = TypingGlowTracker()
+        self.typing_glow_processor = TypingGlowProcessor(
+            tracker=self.typing_glow_tracker,
+            enabled=lambda: typing_glow.enabled and self._animation_state()[1],
+            duration_seconds=typing_glow.duration_seconds,
+            start_color=typing_glow_start_color,
+            end_color=typing_glow_end_color,
+        )
+        self.input_buffer = TypingGlowBuffer(
+            tracker=self.typing_glow_tracker,
+            enabled=lambda: typing_glow.enabled and self._animation_state()[1],
+            inserted_handler=typing_inserted_handler,
             accept_handler=accept_handler,
             history=InMemoryHistory(),
             multiline=False,
@@ -367,20 +537,46 @@ class WorldView:
                     ),
                     dont_extend_width=True,
                 ),
-                Window(content=BufferControl(buffer=self.input_buffer), height=1),
+                Window(
+                    content=BufferControl(
+                        buffer=self.input_buffer,
+                        input_processors=[self.typing_glow_processor],
+                    ),
+                    height=1,
+                ),
             ],
             height=1,
         )
 
     def recent_input_text(self) -> StyleAndTextTuples:
-        commands = [""] * (self.recent_input_lines - len(self.recent_commands))
+        commands = [RecentCommand("")] * (self.recent_input_lines - len(self.recent_commands))
         output: StyleAndTextTuples = []
         entries = [*commands, *self.recent_commands]
+        now = time.monotonic()
+        _elapsed, animated = self._animation_state()
         for line_number, entry in enumerate(entries):
             if line_number:
                 output.append(("class:input.recent", "\n"))
-            output.append(("class:input.recent", entry.replace("\r", "").replace("\n", " ")))
+            text = str(entry).replace("\r", "").replace("\n", " ")
+            output.extend(
+                _transient_plain_text(
+                    text,
+                    base_style="class:input.recent",
+                    spans=getattr(entry, "transient_style_spans", ()),
+                    now=now,
+                    animated=animated,
+                )
+            )
         return output
+
+    def transient_style_frame_delay(self, now: float, *, animated: bool) -> float | None:
+        delays = [
+            span.frame_delay(now, animated=animated)
+            for command in self.recent_commands
+            for span in getattr(command, "transient_style_spans", ())
+        ]
+        active = [delay for delay in delays if delay is not None]
+        return min(active, default=None)
 
     def output_text(self) -> StyleAndTextTuples:
         elapsed_seconds, animations_enabled = self._animation_state()
@@ -577,6 +773,7 @@ class TfrTui:
         initial_scroll_to_end: bool = True,
         replay_mode: bool = False,
         spellcheck: SpellcheckConfig | None = None,
+        typing_glow: TypingGlowConfig | None = None,
         input: Input | None = None,
         output: Output | None = None,
     ) -> None:
@@ -620,6 +817,7 @@ class TfrTui:
         self.animations_enabled = animations_enabled
         self.low_bandwidth = low_bandwidth
         self.theme: ResolvedTheme = resolve_theme(theme, output_color=output_color)
+        self.typing_glow = typing_glow or TypingGlowConfig()
         resolved_output_color = self.theme.output_color if theme is not None else output_color
         self._animation_epoch = time.monotonic()
         self._animation_paused_at = self._animation_epoch if low_bandwidth else None
@@ -695,7 +893,7 @@ class TfrTui:
                     self._spawn(self.submit_text(world, text))
                 else:
                     view = self.views[world]
-                    view.recent_commands.append("")
+                    view.recent_commands.append(RecentCommand(""))
                     buffer.history_forward(count=1_000_000)
                     buffer.document = Document()
                     self.application.invalidate()
@@ -717,10 +915,14 @@ class TfrTui:
                 accept_handler=accept,
                 copy_handler=self._copy_selection,
                 invalidate_handler=lambda: self.application.invalidate(),
+                typing_inserted_handler=self._typing_glow_inserted,
                 animation_state=lambda: (
                     self._border_frame_elapsed,
                     self.animations_enabled and not self.low_bandwidth,
                 ),
+                typing_glow=self.typing_glow,
+                typing_glow_start_color=self.theme.palette.accent,
+                typing_glow_end_color=self.theme.palette.text,
                 open_url_handler=self._open_url,
             )
 
@@ -1413,12 +1615,16 @@ class TfrTui:
         length = width if edge in {BorderEdge.TOP, BorderEdge.BOTTOM} else inner_height
         elapsed = self._border_frame_elapsed
         output: StyleAndTextTuples = []
-        activity = (
-            self._activity_border_text(length)
-            if panel == "output" and edge is BorderEdge.BOTTOM
-            else ""
-        )
-        activity_start = 2 if activity else -1
+        more = ""
+        activity = ""
+        if panel == "output" and edge is BorderEdge.BOTTOM:
+            if view.display.pager.more_rows:
+                candidate = f"More {min(9_999, view.display.pager.more_rows):>4} "
+                if len(candidate) <= length - 2:
+                    more = candidate
+            activity = self._activity_border_text(max(0, length - 2 - len(more)))
+        label = more + activity
+        label_start = 1 if label else -1
 
         def mouse_handler(event: MouseEvent) -> object:
             return view.handle_border_mouse(event, edge, panel=panel)
@@ -1434,16 +1640,25 @@ class TfrTui:
                 focused=view.session.world == self.active_alias,
                 elapsed_seconds=elapsed,
             )
-            if activity_start <= index < activity_start + len(activity):
-                fragment = replace(fragment, character=activity[index - activity_start])
             if self.animations_enabled and self.plugins is not None:
                 fragment = self.plugins.transform_border(context, fragment)
+            if label_start <= index < label_start + len(label):
+                label_index = index - label_start
+                fragment = replace(
+                    fragment,
+                    character=label[label_index],
+                    style=(
+                        "class:border.more"
+                        if label_index < len(more)
+                        else "class:border.activity"
+                    ),
+                )
             output.append((fragment.style, fragment.character, mouse_handler))
             if edge in {BorderEdge.LEFT, BorderEdge.RIGHT} and index + 1 < length:
                 output.append(("", "\n"))
         return output
 
-    def _activity_border_text(self, border_width: int) -> str:
+    def _activity_border_text(self, maximum: int) -> str:
         unread = [
             f"{''.join(character if get_cwidth(character) == 1 else '?' for character in alias)} "
             f"+{self.views[alias].unread_events}"
@@ -1452,8 +1667,7 @@ class TfrTui:
         ]
         if not unread:
             return ""
-        maximum = border_width - 4
-        prefix = " Activity in world(s): "
+        prefix = "Activity in world(s): "
         ellipsis = "... "
         if len(prefix) + len(ellipsis) > maximum:
             return ""
@@ -1487,6 +1701,10 @@ class TfrTui:
         task = asyncio.create_task(coroutine)
         self._background_tasks.add(task)
         task.add_done_callback(self._background_task_done)
+
+    def _typing_glow_inserted(self) -> None:
+        self._sync_animation_task(restart=True)
+        self.application.invalidate()
 
     def _background_task_done(self, task: asyncio.Task[Any]) -> None:
         self._background_tasks.discard(task)
@@ -1618,6 +1836,8 @@ class TfrTui:
         prefix = pending.text[:payload_start].casefold()
         echo_prefix = message[:candidate_start].casefold()
         echo_suffix = message[candidate_start + len(candidate) :].rstrip("\r\n")
+        if event.kind is EventKind.RAW_OUTPUT and event.parser_name in {"bare", "generic"}:
+            return payload_start if message.rstrip("\r\n") == pending.text else None
         character = self.views[event.world].session.config.login
         character_name = character.character.casefold() if character is not None else None
         if prefix.startswith('"') or prefix.startswith("say "):
@@ -1645,7 +1865,9 @@ class TfrTui:
         event: Event,
         display_text: str,
     ) -> tuple[TransientStyleSpan, ...]:
-        if event.kind not in {EventKind.SAY, EventKind.POSE, EventKind.SPEECH}:
+        if event.kind not in {EventKind.SAY, EventKind.POSE, EventKind.SPEECH} and not (
+            event.kind is EventKind.RAW_OUTPUT and event.parser_name in {"bare", "generic"}
+        ):
             return ()
         message_text = event.metadata.get("message_text")
         if not isinstance(message_text, str):
@@ -1828,18 +2050,35 @@ class TfrTui:
                 else None
             )
             if pending is None:
-                view.recent_commands.append(event.display_text)
+                view.recent_commands.append(RecentCommand(event.display_text))
             else:
                 text, corrections = pending
+                now = time.monotonic()
                 self._spellcheck_echoes[event.world].append(
                     PendingSpellcheckEcho(
                         text=text,
                         corrections=corrections,
                         connection_generation=event.connection_generation,
-                        queued_at=time.monotonic(),
+                        queued_at=now,
                     )
                 )
-                view.recent_commands.append(event.display_text)
+                highlight_color = derive_bright_color(self.theme.palette.warning)
+                view.recent_commands.append(
+                    RecentCommand(
+                        event.display_text,
+                        tuple(
+                            TransientStyleSpan(
+                                start=correction.start,
+                                end=correction.end,
+                                style="bold underline",
+                                start_color=highlight_color,
+                                end_color=self.theme.palette.muted,
+                                started_at=now,
+                            )
+                            for correction in corrections
+                        ),
+                    )
+                )
         elif event.kind is EventKind.PLUGIN and event.display_text is not None:
             view.clear_selection()
             view.display.append(self.theme.ansi_text("error", f"-- {event.display_text} --"))
@@ -1920,8 +2159,6 @@ class TfrTui:
                 f"rows {start + 1 if end else 0}-{end}/{pager.total_rows} ",
             )
         ]
-        if pager.more_rows:
-            status.append(("class:status.more", f" More {pager.more_rows} "))
         if self.low_bandwidth:
             status.append(("class:status.lowbw", " LOWBW "))
         if not self.animations_enabled:
@@ -2736,13 +2973,14 @@ class TfrTui:
         )
         has_text_effects = self._text_frame_delay(self._animation_elapsed_seconds()) is not None
         has_spellcheck_effects = self._spellcheck_frame_delay() is not None
+        has_typing_glow = self._typing_glow_frame_delay() is not None
         can_animate = (
             self._animations_started
             and self.animations_enabled
             and not self.low_bandwidth
             and not self.boss_mode
         )
-        should_run = can_animate and (has_border_effects or has_text_effects)
+        should_run = can_animate and (has_border_effects or has_text_effects or has_typing_glow)
         should_run = should_run or (
             self._animations_started and not self.boss_mode and has_spellcheck_effects
         )
@@ -2793,9 +3031,19 @@ class TfrTui:
         return self.active_view.display.animation_frame_delay(elapsed_seconds)
 
     def _spellcheck_frame_delay(self) -> float | None:
-        return self.active_view.display.transient_style_frame_delay(
-            time.monotonic(),
-            animated=self.animations_enabled and not self.low_bandwidth,
+        now = time.monotonic()
+        animated = self.animations_enabled and not self.low_bandwidth
+        delays = (
+            self.active_view.display.transient_style_frame_delay(now, animated=animated),
+            self.active_view.transient_style_frame_delay(now, animated=animated),
+        )
+        return min((delay for delay in delays if delay is not None), default=None)
+
+    def _typing_glow_frame_delay(self) -> float | None:
+        if not self.typing_glow.enabled or not self.animations_enabled or self.low_bandwidth:
+            return None
+        return self.active_view.typing_glow_tracker.frame_delay(
+            time.monotonic(), self.typing_glow.duration_seconds
         )
 
     async def _animate_ui(self) -> None:
@@ -2809,9 +3057,10 @@ class TfrTui:
             )
             text_delay = self._text_frame_delay(elapsed_seconds) if can_animate else None
             spellcheck_delay = self._spellcheck_frame_delay()
+            typing_glow_delay = self._typing_glow_frame_delay() if can_animate else None
             delays = [
                 delay
-                for delay in (border_delay, text_delay, spellcheck_delay)
+                for delay in (border_delay, text_delay, spellcheck_delay, typing_glow_delay)
                 if delay is not None
             ]
             delay = min(delays, default=None)
@@ -2985,6 +3234,7 @@ async def run_client(bundle: ConfigurationBundle) -> int:
             recent_input_lines=bundle.main.ui.recent_input_lines,
             mouse_mode=bundle.main.ui.mouse_mode,
             spellcheck=bundle.main.ui.spellcheck,
+            typing_glow=getattr(bundle.main.ui, "typing_glow", TypingGlowConfig()),
             animations_enabled=bundle.main.ui.animations_enabled,
             low_bandwidth=bundle.main.ui.low_bandwidth,
             output_color=bundle.main.ui.output_color,

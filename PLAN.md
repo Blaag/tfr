@@ -788,7 +788,7 @@ Acceptance criteria:
 - [x] Make low-bandwidth mode disable every animation, including screen-clear
   plugin animations. Clearing the screen while `lowbw` is enabled must complete
   immediately without rendering or scheduling animated effect frames.
-- [ ] Add a configurable input typing-fade effect where each newly typed
+- [x] Add a configurable input typing-fade effect where each newly typed
   character appears in a bright highlight and independently fades to the normal
   input color over a configurable duration. Preserve cursor movement, selection,
   editing, paste, and Unicode grapheme behavior; render immediately in the normal
@@ -921,6 +921,12 @@ Acceptance criteria:
   translation, opacity, and overlay primitives remain follow-up work and must not
   constrain the PWA to terminal capabilities. Keep client commands and actions
   outside the presentation language.
+- [ ] Finish migrating display plugins from named terminal-only effects to the
+  bounded portable presentation mini-DSL. Inventory remaining plugins, express
+  every portable effect with typed programs and explicit reduced-motion and
+  unsupported-client fallbacks, implement the corresponding safe PWA renderers,
+  and retain terminal-only behavior only where the shared language cannot
+  represent it without weakening its bounds.
 - [x] Fix speaker effects not working on poses.
 
 ## Test Strategy

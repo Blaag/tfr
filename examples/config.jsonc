@@ -40,6 +40,12 @@
     "show_nospoof_prefix": false,
     "animations_enabled": true,
     "low_bandwidth": false,
+    // Newly typed characters fade from the theme accent to the normal text
+    // color. /animations off and /lowbw suppress the effect.
+    // "typing_glow": {
+    //   "enabled": true,
+    //   "duration_seconds": 1.0,
+    // },
     // Optional local, submit-time English spell checking. Only payloads after
     // ", say, :, or pose are eligible; all other world commands are untouched.
     "spellcheck": {
