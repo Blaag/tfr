@@ -140,15 +140,19 @@ wait_for_pr_checks() {
     label=$2
     deadline=$(($(date +%s) + TIMEOUT_SECONDS))
     checks_file="$temporary_directory/pr-$pr-checks.json"
+    checks_error="$temporary_directory/pr-$pr-checks.error"
 
     printf '\n==> Waiting for %s PR checks\n' "$label"
     while :; do
         set +e
         gh pr checks "$pr" --repo "$EXPECTED_REPOSITORY" \
-            --json name,workflow,bucket,state >"$checks_file"
+            --json name,workflow,bucket,state >"$checks_file" 2>"$checks_error"
         check_status=$?
         set -e
-        if [ "$check_status" -ne 0 ] && [ "$check_status" -ne 8 ]; then
+        if [ "$check_status" -eq 1 ] && grep -q '^no checks reported on ' "$checks_error"; then
+            printf '[]\n' >"$checks_file"
+        elif [ "$check_status" -ne 0 ] && [ "$check_status" -ne 8 ]; then
+            cat "$checks_error" >&2
             fail "cannot inspect checks for PR #$pr"
         fi
         if jq -e '

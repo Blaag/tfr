@@ -165,6 +165,11 @@ elif args[:2] == ["pr", "view"]:
     else:
         raise SystemExit(f"unsupported pr view fields: {fields}")
 elif args[:2] == ["pr", "checks"]:
+    registration = state / f"checks-{args[2]}"
+    if not registration.exists():
+        registration.touch()
+        print(f"no checks reported on the '{args[2]}' branch", file=sys.stderr)
+        raise SystemExit(1)
     checks = [
         {"name": "CodeQL", "workflow": "", "bucket": "pass", "state": "SUCCESS"},
         {"name": "Analyze (actions)", "workflow": "CodeQL", "bucket": "pass", "state": "SUCCESS"},
