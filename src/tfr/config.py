@@ -173,6 +173,11 @@ class SpellcheckConfig(StrictModel):
         return self
 
 
+class TypingGlowConfig(StrictModel):
+    enabled: bool = True
+    duration_seconds: float = Field(default=1.0, gt=0, le=60)
+
+
 class UiConfig(StrictModel):
     scrollback_lines: PositiveInt = 20_000
     recent_input_lines: int = Field(default=3, ge=0, le=20)
@@ -180,6 +185,7 @@ class UiConfig(StrictModel):
     output_color: HexColor | None = None
     theme: ThemeConfig = Field(default_factory=ThemeConfig)
     spellcheck: SpellcheckConfig = Field(default_factory=SpellcheckConfig)
+    typing_glow: TypingGlowConfig = Field(default_factory=TypingGlowConfig)
     show_nospoof_prefix: bool = False
     animations_enabled: bool = True
     low_bandwidth: bool = False

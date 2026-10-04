@@ -28,6 +28,7 @@ from tfr.config import (
     PluginSource,
     SpellcheckConfig,
     ThemeConfig,
+    TypingGlowConfig,
     UpdateConfig,
     WorldCapabilitiesConfig,
     WorldConfig,
@@ -45,6 +46,7 @@ from tfr.events import (
     SpoofAssessment,
     SpoofStatus,
 )
+from tfr.gateway_protocol import event_from_message, event_message
 from tfr.pager import PagerMode
 from tfr.plugin_api import (
     BorderFragment,
@@ -83,6 +85,7 @@ def make_tui(
     world_aliases: Mapping[str, tuple[str, ...]] | None = None,
     mouse_mode: str = "tfr",
     spellcheck: SpellcheckConfig | None = None,
+    typing_glow: TypingGlowConfig | None = None,
 ) -> TfrTui:
     event_bus = EventBus()
     command_bus = CommandBus()
@@ -120,6 +123,7 @@ def make_tui(
         output_color=output_color,
         mouse_mode=mouse_mode,
         spellcheck=spellcheck,
+        typing_glow=typing_glow,
         input=input or DummyInput(),
         output=DummyOutput(),
     )
@@ -2166,19 +2170,19 @@ async def test_output_border_summarizes_unread_world_activity() -> None:
 
     bottom = tui._border_text(view, "output", BorderEdge.BOTTOM, 2)
 
-    assert fragment_list_to_text(bottom) == (
-        "└─ Activity in world(s): beta +2 ──────────────────┘"
-    )
+    assert fragment_list_to_text(bottom) == "└Activity in world(s): beta +2 ────────────────────┘"
+    activity_styles = [style for style, text, *_mouse in bottom if text.isalpha()]
+    assert activity_styles and all(style == "class:border.activity" for style in activity_styles)
 
     await add_animated_border(tui)
     effected = tui._border_text(view, "output", BorderEdge.BOTTOM, 2)
     label = [
         (style, text)
         for index, (style, text, *_mouse) in enumerate(effected)
-        if 2 <= index < 32
+        if 1 <= index < 31
     ]
     assert "Activity in world(s): beta +2" in fragment_list_to_text(label)
-    assert all("reverse" in style for style, _text in label)
+    assert all(style == "class:border.activity" for style, _text in label)
 
     tui.switch_world("beta")
     assert "Activity in world(s)" not in fragment_list_to_text(
@@ -2188,7 +2192,7 @@ async def test_output_border_summarizes_unread_world_activity() -> None:
 
 def test_output_border_activity_uses_complete_entries_when_narrow() -> None:
     tui = make_tui()
-    tui.active_view.display.resize(width=42, height=2)
+    tui.active_view.display.resize(width=40, height=2)
     tui.views["alpha"].unread_events = 11
     tui.views["beta"].unread_events = 2
 
@@ -2441,7 +2445,7 @@ def test_nospoof_message_preserves_ansi_color_in_tui_output() -> None:
     assert "bold" in hi_style
 
 
-def test_more_count_is_visible_in_status_bar() -> None:
+def test_more_count_is_fixed_width_first_in_output_border() -> None:
     tui = make_tui()
     display = tui.active_view.display
     display.resize(width=80, height=3)
@@ -2449,8 +2453,23 @@ def test_more_count_is_visible_in_status_bar() -> None:
     display.append("one\ntwo\nthree\nfour\nfive")
 
     status = fragment_list_to_text(tui.status_bar())
+    bottom = tui._border_text(tui.active_view, "output", BorderEdge.BOTTOM, 3)
     assert "rows 1-3/5" in status
-    assert "More 2" in status
+    assert "More" not in status
+    assert fragment_list_to_text(bottom).startswith("└More    2 ")
+    assert all(style == "class:border.more" for style, _text, *_mouse in bottom[1:11])
+
+
+def test_more_count_caps_at_9999_and_precedes_activity(monkeypatch: pytest.MonkeyPatch) -> None:
+    tui = make_tui()
+    view = tui.active_view
+    view.display.resize(width=80, height=3)
+    tui.views["beta"].unread_events = 4
+    monkeypatch.setattr(type(view.display.pager), "more_rows", property(lambda _pager: 20_000))
+
+    bottom = fragment_list_to_text(tui._border_text(view, "output", BorderEdge.BOTTOM, 3))
+
+    assert bottom.startswith("└More 9999 Activity in world(s): beta +4 ")
 
 
 def test_human_commands_are_shown_in_recent_input_not_world_output() -> None:
@@ -2565,10 +2584,11 @@ async def test_spellcheck_highlights_corrected_words_in_world_echo(
         )
     )
     assert tui.active_view.recent_commands[-1] == request.text
-    assert not any(
-        "underline" in style or "bold" in style
-        for style, _text in tui.active_view.recent_input_text()
-    )
+    recent_corrected = [
+        (style, text) for style, text in tui.active_view.recent_input_text() if text == "the"
+    ]
+    assert len(recent_corrected) == 1
+    assert "underline" in recent_corrected[0][0] and "bold" in recent_corrected[0][0]
 
     echo = 'You say, "i took the math test and failed"\r\n'
     tui.handle_event(
@@ -2601,6 +2621,172 @@ async def test_spellcheck_highlights_corrected_words_in_world_echo(
     now = 103.0
     expired = tui.active_view.output_text()
     assert not any("underline" in style for style, _text in expired)
+
+
+async def test_spellcheck_highlights_bare_echo_after_gateway_round_trip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 100.0
+    monkeypatch.setattr("tfr.tui.time.monotonic", lambda: now)
+    tui = make_tui(server="bare", spellcheck=SpellcheckConfig(enabled=True))
+    session = tui.active_view.session
+    session.state = SessionState.CONNECTED
+    session.connection_generation = 1
+    queue = tui.command_bus.register(session.session_id)
+
+    await tui.submit_text("alpha", '"I liek this.')
+    request = queue.get_nowait()
+    outbound = Event(
+        session_id=session.session_id,
+        world="alpha",
+        connection_generation=1,
+        sequence=0,
+        direction=Direction.OUTBOUND,
+        kind=EventKind.COMMAND,
+        canonical_text=request.text,
+        plain_text=request.text,
+        display_text=request.text,
+        actor=request.actor,
+        correlation_id=request.request_id,
+    )
+    _cursor, received_outbound = event_from_message(event_message(1, outbound))
+    tui.handle_event(received_outbound)
+
+    inbound_queue = tui.event_bus.subscribe()
+    await session._publish_inbound(f"{request.text}\r\n")
+    inbound = inbound_queue.get_nowait()
+    tui.event_bus.unsubscribe(inbound_queue)
+    assert inbound.kind is EventKind.RAW_OUTPUT
+    assert inbound.parser_name == "bare"
+    _cursor, received_inbound = event_from_message(event_message(2, inbound))
+    tui.handle_event(received_inbound)
+
+    assert any(
+        text == "like" and "bold" in style and "underline" in style
+        for style, text in tui.active_view.recent_input_text()
+    )
+    assert any(
+        text == "like" and "bold" in style and "underline" in style
+        for style, text in tui.active_view.output_text()
+    )
+
+
+async def test_spellcheck_does_not_consume_bare_raw_line_that_quotes_command() -> None:
+    tui = make_tui(server="bare", spellcheck=SpellcheckConfig(enabled=True))
+    session = tui.active_view.session
+    session.state = SessionState.CONNECTED
+    queue = tui.command_bus.register(session.session_id)
+
+    await tui.submit_text("alpha", '"I liek this.')
+    request = queue.get_nowait()
+    tui.handle_event(
+        Event(
+            session_id=session.session_id,
+            world="alpha",
+            connection_generation=1,
+            sequence=0,
+            direction=Direction.OUTBOUND,
+            kind=EventKind.COMMAND,
+            canonical_text=request.text,
+            plain_text=request.text,
+            display_text=request.text,
+            actor=request.actor,
+            correlation_id=request.request_id,
+        )
+    )
+
+    quoted = f"Someone repeats: {request.text}"
+    tui.handle_event(
+        Event(
+            session_id=session.session_id,
+            world="alpha",
+            connection_generation=1,
+            sequence=1,
+            direction=Direction.INBOUND,
+            kind=EventKind.RAW_OUTPUT,
+            canonical_text=quoted,
+            plain_text=quoted,
+            display_text=quoted,
+            parser_name="bare",
+            metadata={"message_text": quoted},
+        )
+    )
+
+    assert not any("underline" in style for style, _text in tui.active_view.output_text())
+    assert len(tui._spellcheck_echoes["alpha"]) == 1
+
+
+def test_typing_glow_fades_from_accent_and_is_disabled_by_lowbw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 100.0
+    monkeypatch.setattr("tfr.tui.time.monotonic", lambda: now)
+    tui = make_tui(
+        theme=ThemeConfig(preset="catppuccin-mocha"),
+        typing_glow=TypingGlowConfig(duration_seconds=1.0),
+    )
+    view = tui.active_view
+
+    view.input_buffer.insert_text("ab")
+    initial = view.typing_glow_processor.apply_transformation(
+        SimpleNamespace(fragments=[("", "ab")])  # type: ignore[arg-type]
+    ).fragments
+    assert all("fg:#89b4fa" in style for style, _text, *_handler in initial)
+
+    now = 100.5
+    midpoint = view.typing_glow_processor.apply_transformation(
+        SimpleNamespace(fragments=[("", "ab")])  # type: ignore[arg-type]
+    ).fragments
+    assert midpoint[0][0] not in {initial[0][0], ""}
+
+    now = 101.0
+    expired = view.typing_glow_processor.apply_transformation(
+        SimpleNamespace(fragments=[("", "ab")])  # type: ignore[arg-type]
+    ).fragments
+    assert all("fg:" not in style for style, _text, *_handler in expired)
+
+    tui._set_low_bandwidth(True)
+    view.input_buffer.insert_text("c")
+    view.typing_glow_processor.apply_transformation(
+        SimpleNamespace(fragments=[("", "abc")])  # type: ignore[arg-type]
+    )
+    assert view.typing_glow_tracker.timestamps[-1] is None
+
+
+def test_typing_glow_tracks_independent_insertions_and_middle_edits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 100.0
+    monkeypatch.setattr("tfr.tui.time.monotonic", lambda: now)
+    tui = make_tui(typing_glow=TypingGlowConfig(duration_seconds=1.0))
+    view = tui.active_view
+
+    view.input_buffer.insert_text("a")
+    now = 100.5
+    view.input_buffer.insert_text("b")
+    now = 100.75
+    staggered = view.typing_glow_processor.apply_transformation(
+        SimpleNamespace(fragments=[("", "ab")])  # type: ignore[arg-type]
+    ).fragments
+    assert staggered[0][0] != staggered[1][0]
+
+    view.input_buffer.cursor_position = 0
+    view.input_buffer.insert_text("x")
+    edited = view.typing_glow_processor.apply_transformation(
+        SimpleNamespace(fragments=[("", "xab")])  # type: ignore[arg-type]
+    ).fragments
+    assert edited[0][0] != edited[1][0]
+    assert edited[1][0] != edited[2][0]
+
+    view.input_buffer.cursor_position = 1
+    view.input_buffer.delete_before_cursor(count=1)
+    after_delete = view.typing_glow_processor.apply_transformation(
+        SimpleNamespace(fragments=[("", "ab")])  # type: ignore[arg-type]
+    ).fragments
+    assert [style for style, _text, *_handler in after_delete] == [
+        staggered[0][0],
+        staggered[1][0],
+    ]
 
 
 async def test_spellcheck_output_highlight_expires_without_animation_and_is_not_recalled(
@@ -2709,8 +2895,10 @@ async def test_spellcheck_output_highlight_expires_in_low_bandwidth(
     )
 
     assert any("underline" in style for style, _text in tui.active_view.output_text())
+    assert any("underline" in style for style, _text in tui.active_view.recent_input_text())
     now = 103.0
     assert not any("underline" in style for style, _text in tui.active_view.output_text())
+    assert not any("underline" in style for style, _text in tui.active_view.recent_input_text())
 
 
 async def test_spellcheck_leaves_non_speech_commands_unchanged() -> None:

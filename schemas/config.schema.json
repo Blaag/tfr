@@ -532,6 +532,25 @@
       "title": "ThemeConfig",
       "type": "object"
     },
+    "TypingGlowConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_seconds": {
+          "default": 1.0,
+          "exclusiveMinimum": 0,
+          "maximum": 60,
+          "title": "Duration Seconds",
+          "type": "number"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "TypingGlowConfig",
+      "type": "object"
+    },
     "UiConfig": {
       "additionalProperties": false,
       "properties": {
@@ -603,6 +622,9 @@
         },
         "theme": {
           "$ref": "#/$defs/ThemeConfig"
+        },
+        "typing_glow": {
+          "$ref": "#/$defs/TypingGlowConfig"
         }
       },
       "title": "UiConfig",

@@ -7,6 +7,7 @@ import pytest
 
 from tfr.config import (
     ConfigurationError,
+    TypingGlowConfig,
     WorldConfig,
     WorldsConfig,
     credential_permission_warning,
@@ -15,6 +16,13 @@ from tfr.config import (
     load_configuration,
     load_ui_configuration,
 )
+
+
+def test_typing_glow_duration_is_positive_and_bounded() -> None:
+    with pytest.raises(ValueError):
+        TypingGlowConfig(duration_seconds=0)
+    with pytest.raises(ValueError):
+        TypingGlowConfig(duration_seconds=61)
 
 MAIN = """
 {
@@ -103,6 +111,8 @@ def test_loads_jsonc_and_resolves_references(tmp_path: Path) -> None:
     assert bundle.main.ui.low_bandwidth is False
     assert bundle.main.ui.spellcheck.enabled is False
     assert bundle.main.ui.spellcheck.protected_words == ()
+    assert bundle.main.ui.typing_glow.enabled is True
+    assert bundle.main.ui.typing_glow.duration_seconds == 1.0
     assert bundle.main.ui.screen_clear.mode == "cycle"
     assert bundle.main.ui.screen_clear.effect is None
     assert bundle.main.ui.boss.mode == "cycle"
