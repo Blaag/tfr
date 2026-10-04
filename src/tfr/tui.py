@@ -33,7 +33,7 @@ from prompt_toolkit.input import Input
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import BufferControl, DynamicContainer, FormattedTextControl, HSplit
-from prompt_toolkit.layout.containers import VSplit, Window
+from prompt_toolkit.layout.containers import Float, FloatContainer, VSplit, Window
 from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.layout.processors import Processor, Transformation, TransformationInput
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
@@ -45,6 +45,7 @@ from tfr.agents import AgentRuntime
 from tfr.ansi import ansi_visible_text, safe_ansi_formatted_text, terminal_plain_text
 from tfr.borders import BorderEdge, border_cell
 from tfr.clear_effects import ScreenClearContext
+from tfr.combo import Combo, ComboTracker
 from tfr.config import ConfigurationBundle, SpellcheckConfig, ThemeConfig, TypingGlowConfig
 from tfr.core import CommandBus, EventBus, UnknownSessionError
 from tfr.events import (
@@ -85,7 +86,7 @@ from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.presentation import ActiveEffectProgram
 from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.spellcheck import Correction, LocalSpellChecker, speech_payload
-from tfr.text_effects import derive_bright_color, interpolate_color
+from tfr.text_effects import TextDecoration, TextEffectKind, derive_bright_color, interpolate_color
 from tfr.themes import ResolvedTheme, resolve_theme
 from tfr.updates import (
     BuildIdentity,
@@ -183,6 +184,25 @@ class RecentCommand(str):
         return value
 
 
+@dataclass(frozen=True, slots=True)
+class ComboNotice:
+    text: str
+    color: str
+    started_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class FireworkParticle:
+    world: str
+    started_at: float
+    origin_x: float
+    origin_y: float
+    velocity_x: float
+    velocity_y: float
+    color: str
+    glyph: str
+
+
 class TypingGlowTracker:
     def __init__(self) -> None:
         self.text = ""
@@ -264,12 +284,14 @@ class TypingGlowProcessor(Processor):
         duration_seconds: float,
         start_color: str,
         end_color: str,
+        bold: bool,
     ) -> None:
         self.tracker = tracker
         self.enabled = enabled
         self.duration_seconds = duration_seconds
         self.start_color = start_color
         self.end_color = end_color
+        self.bold = bold
 
     def apply_transformation(self, transformation_input: TransformationInput) -> Transformation:
         fragments = transformation_input.fragments
@@ -294,7 +316,8 @@ class TypingGlowProcessor(Processor):
                     if elapsed < self.duration_seconds:
                         progress = elapsed / self.duration_seconds
                         color = interpolate_color(self.start_color, self.end_color, progress)
-                        rendered_style = f"{style} fg:{color}".strip()
+                        emphasis = " bold" if self.bold else ""
+                        rendered_style = f"{style} fg:{color}{emphasis}".strip()
                 output.append((rendered_style, character, *handler))
                 offset += 1
         return Transformation(output)
@@ -490,6 +513,7 @@ class WorldView:
         typing_glow: TypingGlowConfig,
         typing_glow_start_color: str,
         typing_glow_end_color: str,
+        typing_glow_bold: bool,
         open_url_handler: Callable[[str], None],
     ) -> None:
         self.session = session
@@ -515,6 +539,7 @@ class WorldView:
             duration_seconds=typing_glow.duration_seconds,
             start_color=typing_glow_start_color,
             end_color=typing_glow_end_color,
+            bold=typing_glow_bold,
         )
         self.input_buffer = TypingGlowBuffer(
             tracker=self.typing_glow_tracker,
@@ -832,6 +857,10 @@ class TfrTui:
         self._animation_epoch = time.monotonic()
         self._animation_paused_at = self._animation_epoch if low_bandwidth else None
         self._border_frame_elapsed = 0.0
+        self._combo_tracker = ComboTracker()
+        self._accept_combo_events = True
+        self._combo_notices: dict[str, ComboNotice] = {}
+        self._firework_particles: list[FireworkParticle] = []
         self._animation_task: asyncio.Task[None] | None = None
         self._animations_started = False
         self._activity_ticker_task: asyncio.Task[None] | None = None
@@ -933,6 +962,7 @@ class TfrTui:
                 typing_glow=self.typing_glow,
                 typing_glow_start_color=self.typing_glow.highlight_color,
                 typing_glow_end_color=self.theme.palette.text,
+                typing_glow_bold=self.typing_glow.bold,
                 open_url_handler=self._open_url,
             )
 
@@ -1013,13 +1043,33 @@ class TfrTui:
             always_hide_cursor=True,
             style="class:application",
         )
-        root = DynamicContainer(
+        normal_content = DynamicContainer(
             lambda: (
                 self.image_preview_window
                 if self.image_preview is not None
                 else self.boss_window if self.boss_mode else self.normal_root
             )
         )
+        self._firework_floats = [
+            Float(
+                content=Window(
+                    content=FormattedTextControl(
+                        lambda index=index: self._firework_particle_text(index)
+                    ),
+                    width=1,
+                    height=1,
+                    always_hide_cursor=True,
+                ),
+                top=0,
+                left=0,
+                width=1,
+                height=1,
+                transparent=True,
+                z_index=20,
+            )
+            for index in range(36)
+        ]
+        root = FloatContainer(content=normal_content, floats=self._firework_floats)
         self.application: Application[int] = Application(
             layout=Layout(root, focused_element=self.active_view.input_buffer),
             key_bindings=bindings,
@@ -1635,6 +1685,24 @@ class TfrTui:
             activity_text = self._activity_border_text(max(0, length - activity_start - 2))
             if activity_text:
                 activity = f" {activity_text}"
+        notice = self._combo_notices.get(view.session.world)
+        notice_start = -1
+        notice_style = ""
+        if (
+            panel == "output"
+            and edge is BorderEdge.BOTTOM
+            and notice is not None
+            and self.animations_enabled
+            and not self.low_bandwidth
+        ):
+            age = time.monotonic() - notice.started_at
+            if age >= 3.6:
+                self._combo_notices.pop(view.session.world, None)
+                notice = None
+            elif len(notice.text) <= length - 2:
+                notice_start = max(1, (length - len(notice.text)) // 2)
+                reversed_phase = age >= 3.0 and int((age - 3.0) / 0.1) % 2 == 0
+                notice_style = f"fg:{notice.color}" + (" reverse" if reversed_phase else "")
 
         def mouse_handler(event: MouseEvent) -> object:
             return view.handle_border_mouse(event, edge, panel=panel)
@@ -1663,6 +1731,12 @@ class TfrTui:
                     fragment,
                     character=activity[index - activity_start],
                     style="class:border.activity",
+                )
+            if notice is not None and notice_start <= index < notice_start + len(notice.text):
+                fragment = replace(
+                    fragment,
+                    character=notice.text[index - notice_start],
+                    style=notice_style,
                 )
             output.append((fragment.style, fragment.character, mouse_handler))
             if edge in {BorderEdge.LEFT, BorderEdge.RIGHT} and index + 1 < length:
@@ -1698,6 +1772,7 @@ class TfrTui:
         size = app.output.get_size()
         output_height = max(1, size.rows - 7 - self.recent_input_lines)
         output_width = max(1, size.columns - 2)
+        self._position_firework_particles(output_width, output_height)
         layout_changed = False
         for view in self.views.values():
             if view.display.width != output_width or view.display.pager.height != output_height:
@@ -1941,6 +2016,93 @@ class TfrTui:
             for correction in matched.corrections
         )
 
+    def _combo_decoration(self, combo: Combo, elapsed_seconds: float) -> TextDecoration | None:
+        if combo.count == 4:
+            effect, duration, pulses = TextEffectKind.COMBO_PULSE, 1.0, 2
+        elif combo.count == 5:
+            effect, duration, pulses = TextEffectKind.COMBO_FLASH_UPPER, 2.0, 1
+        elif combo.count == 6:
+            effect, duration, pulses = TextEffectKind.COMBO_CYLON, 4.0, 1
+        elif combo.count == 7:
+            effect, duration, pulses = TextEffectKind.COMBO_PULSE, 2.0, 2
+        else:
+            return None
+        return TextDecoration(
+            start=combo.body_start,
+            end=combo.body_end,
+            effect=effect,
+            base_color=self.theme.output_color,
+            accent_color="#ffffff",
+            interval_seconds=duration,
+            repeat_seconds=duration + 1,
+            phase_offset_seconds=-elapsed_seconds,
+            frames_per_second=20,
+            loop=False,
+            effect_width=2,
+            sparkle_count=pulses,
+        )
+
+    def _start_fireworks(self, event: Event) -> None:
+        value = event.event_id.int & 0xFFFFFFFF
+
+        def random_value() -> float:
+            nonlocal value
+            value = (1_664_525 * value + 1_013_904_223) & 0xFFFFFFFF
+            return value / 2**32
+
+        colors = ("#ff0000", "#ff8000", "#0070dd", "#ffff00", "#a335ee")
+        glyphs = ("*", "+", "·")
+        now = time.monotonic()
+        for _burst in range(1 + int(random_value() * 3)):
+            delay = random_value() * 2
+            origin_x = 0.12 + random_value() * 0.76
+            origin_y = 0.12 + random_value() * 0.45
+            color = colors[int(random_value() * len(colors))]
+            for _particle in range(12):
+                self._firework_particles.append(
+                    FireworkParticle(
+                        world=event.world,
+                        started_at=now + delay,
+                        origin_x=origin_x,
+                        origin_y=origin_y,
+                        velocity_x=(random_value() - 0.5) * 0.34,
+                        velocity_y=-(0.22 + random_value() * 0.34),
+                        color=color,
+                        glyph=glyphs[int(random_value() * len(glyphs))],
+                    )
+                )
+        self._firework_particles = self._firework_particles[-36:]
+
+    def _firework_particle_text(self, index: int) -> StyleAndTextTuples:
+        if not self.animations_enabled or self.low_bandwidth:
+            return []
+        if index >= len(self._firework_particles):
+            return []
+        particle = self._firework_particles[index]
+        age = time.monotonic() - particle.started_at
+        if particle.world != self.active_alias or not 0 <= age < 2.2:
+            return []
+        return [(f"fg:{particle.color} bold", particle.glyph)]
+
+    def _position_firework_particles(self, width: int, height: int) -> None:
+        now = time.monotonic()
+        self._firework_particles = [
+            particle
+            for particle in self._firework_particles
+            if now - particle.started_at < 2.2
+        ]
+        for index, float_container in enumerate(self._firework_floats):
+            if index >= len(self._firework_particles):
+                float_container.top = 0
+                float_container.left = 0
+                continue
+            particle = self._firework_particles[index]
+            age = max(0.0, now - particle.started_at)
+            x = particle.origin_x + particle.velocity_x * age
+            y = particle.origin_y + particle.velocity_y * age + 0.28 * age * age
+            float_container.left = 1 + min(width - 1, max(0, int(x * width)))
+            float_container.top = 2 + min(height - 1, max(0, int(y * height)))
+
     @staticmethod
     def _inferred_display_speaker(event: Event, event_text: str | None) -> Event:
         if (
@@ -2043,6 +2205,29 @@ class TfrTui:
                     else ()
                 )
                 elapsed_seconds = self._animation_elapsed_seconds()
+                combo = None
+                if self._accept_combo_events and not (
+                    event.kind is EventKind.RAW_OUTPUT and not (decorations or presentations)
+                ):
+                    combo = self._combo_tracker.observe(
+                        effect_event, display_text, time.monotonic()
+                    )
+                combo_enabled = (
+                    self.animations_enabled
+                    and not self.low_bandwidth
+                    and event.world == self.active_alias
+                )
+                combo_decoration = (
+                    self._combo_decoration(combo, elapsed_seconds)
+                    if combo is not None and combo_enabled
+                    else None
+                )
+                if combo is not None and combo_enabled:
+                    self._combo_notices[event.world] = ComboNotice(
+                        combo.notice, combo.color, time.monotonic()
+                    )
+                    if combo.count == 7:
+                        self._start_fireworks(event)
                 event_age_seconds = max(0.0, time.time() - event.timestamp.timestamp())
                 decorations = tuple(
                     replace(
@@ -2056,6 +2241,8 @@ class TfrTui:
                     )
                     for decoration in decorations
                 )
+                if combo_decoration is not None:
+                    decorations = (*decorations, combo_decoration)
                 presentations = tuple(
                     ActiveEffectProgram(
                         program,
@@ -2065,6 +2252,20 @@ class TfrTui:
                 )
                 view.clear_selection()
                 transient_style_spans = self._spellcheck_echo_spans(event, display_text)
+                if combo is not None and combo_enabled and combo.count == 3:
+                    transient_style_spans = (
+                        *transient_style_spans,
+                        TransientStyleSpan(
+                            start=combo.body_start,
+                            end=combo.body_end,
+                            style="bold",
+                            start_color=self.theme.output_color,
+                            end_color=self.theme.output_color,
+                            started_at=time.monotonic(),
+                            duration_seconds=0.25,
+                            purpose="combo",
+                        ),
+                    )
                 style_spans: list[StaticStyleSpan] = []
                 if spoof_span is not None and event.spoof is not None:
                     plain_display = terminal_plain_text(display_text)
@@ -2968,6 +3169,8 @@ class TfrTui:
             self._animation_epoch += now - self._animation_paused_at
             self._animation_paused_at = None
         self.low_bandwidth = enabled
+        if enabled:
+            self._clear_combo_visuals()
         if enabled and self._screen_clear_world is not None:
             self._stop_screen_clear()
 
@@ -2982,9 +3185,17 @@ class TfrTui:
         elif operation != "status" or len(parameters) > 1:
             self.add_notice(alias, "Usage: /animations [on|off|status]")
             return
+        if not self.animations_enabled:
+            self._clear_combo_visuals()
         self._sync_animation_task()
         state = "on" if self.animations_enabled else "off"
         self.add_notice(alias, f"Continuous UI animations are {state}")
+
+    def _clear_combo_visuals(self) -> None:
+        self._combo_notices.clear()
+        self._firework_particles.clear()
+        for view in self.views.values():
+            view.display.clear_combo_effects()
 
     def _handle_spellcheck_command(self, alias: str, parameters: list[str]) -> None:
         operation = parameters[0].casefold() if len(parameters) == 1 else ""
@@ -3022,13 +3233,21 @@ class TfrTui:
         has_text_effects = self._text_frame_delay(self._animation_elapsed_seconds()) is not None
         has_spellcheck_effects = self._spellcheck_frame_delay() is not None
         has_typing_glow = self._typing_glow_frame_delay() is not None
+        has_combo_notice = self._combo_frame_delay() is not None
+        has_fireworks = self._firework_frame_delay() is not None
         can_animate = (
             self._animations_started
             and self.animations_enabled
             and not self.low_bandwidth
             and not self.boss_mode
         )
-        should_run = can_animate and (has_border_effects or has_text_effects or has_typing_glow)
+        should_run = can_animate and (
+            has_border_effects
+            or has_text_effects
+            or has_typing_glow
+            or has_combo_notice
+            or has_fireworks
+        )
         should_run = should_run or (
             self._animations_started and not self.boss_mode and has_spellcheck_effects
         )
@@ -3078,6 +3297,22 @@ class TfrTui:
             return None
         return self.active_view.display.animation_frame_delay(elapsed_seconds)
 
+    def _combo_frame_delay(self) -> float | None:
+        notice = self._combo_notices.get(self.active_alias)
+        if notice is None:
+            return None
+        remaining = notice.started_at + 3.6 - time.monotonic()
+        return min(0.1, remaining) if remaining > 0 else None
+
+    def _firework_frame_delay(self) -> float | None:
+        now = time.monotonic()
+        if not any(
+            particle.world == self.active_alias and now - particle.started_at < 2.2
+            for particle in self._firework_particles
+        ):
+            return None
+        return 1 / 20
+
     def _spellcheck_frame_delay(self) -> float | None:
         now = time.monotonic()
         animated = self.animations_enabled and not self.low_bandwidth
@@ -3106,9 +3341,18 @@ class TfrTui:
             text_delay = self._text_frame_delay(elapsed_seconds) if can_animate else None
             spellcheck_delay = self._spellcheck_frame_delay()
             typing_glow_delay = self._typing_glow_frame_delay() if can_animate else None
+            combo_delay = self._combo_frame_delay() if can_animate else None
+            firework_delay = self._firework_frame_delay() if can_animate else None
             delays = [
                 delay
-                for delay in (border_delay, text_delay, spellcheck_delay, typing_glow_delay)
+                for delay in (
+                    border_delay,
+                    text_delay,
+                    spellcheck_delay,
+                    typing_glow_delay,
+                    combo_delay,
+                    firework_delay,
+                )
                 if delay is not None
             ]
             delay = min(delays, default=None)
@@ -3177,8 +3421,10 @@ class TfrTui:
         installed_signals: list[signal.Signals] = []
         try:
             self._before_render(self.application)
+            self._accept_combo_events = False
             for event in self.initial_events:
                 self.handle_event(event)
+            self._accept_combo_events = True
             for alias, text in self._startup_notices:
                 self.add_notice(alias, text)
             self._startup_notices.clear()

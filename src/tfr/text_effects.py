@@ -46,6 +46,9 @@ class TextEffectKind(StrEnum):
     REVERSE_SWEEP = "reverse_sweep"
     AGE_DECAY = "age_decay"
     TERMINAL_REVEAL = "terminal_reveal"
+    COMBO_PULSE = "combo_pulse"
+    COMBO_FLASH_UPPER = "combo_flash_upper"
+    COMBO_CYLON = "combo_cylon"
 
 
 def validate_color(value: str) -> str:
@@ -350,6 +353,37 @@ class TextDecoration:
         if phase_seconds >= self.burst_duration_seconds:
             return self._base_style(), character
         progress = phase_seconds / self.burst_duration_seconds
+        if self.effect is TextEffectKind.COMBO_PULSE:
+            intensity = math.sin(math.pi * self.sparkle_count * progress) ** 2
+            return (
+                f"fg:{interpolate_color(self.base_color, self.accent_color, intensity)}",
+                character,
+            )
+        if self.effect is TextEffectKind.COMBO_FLASH_UPPER:
+            replacement = character.upper()
+            if get_cwidth(replacement) != get_cwidth(character):
+                replacement = character
+            color = self.accent_color if int(phase_seconds / 0.1) % 2 == 0 else self.base_color
+            return f"fg:{color}", replacement
+        if self.effect is TextEffectKind.COMBO_CYLON:
+            sweep_duration = self.burst_duration_seconds / 2
+            if phase_seconds >= sweep_duration:
+                fade = (phase_seconds - sweep_duration) / sweep_duration
+                return (
+                    f"fg:{interpolate_color(self.accent_color, self.base_color, fade)}",
+                    character,
+                )
+            trips = 4
+            sweep = (phase_seconds / sweep_duration) * trips
+            fractional = sweep % 1
+            position = (
+                fractional if int(sweep) % 2 == 0 else 1 - fractional
+            ) * max(0, self.length - 1)
+            intensity = max(0.0, 1.0 - abs(index - position) / self.effect_width)
+            return (
+                f"fg:{interpolate_color(self.base_color, self.accent_color, intensity)}",
+                character,
+            )
         if self.effect is TextEffectKind.CAPITALIZATION_ROLL:
             active = int(phase_seconds / self.interval_seconds) % self.length
             replacement = character.upper() if index == active else character.lower()

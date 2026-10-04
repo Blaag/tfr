@@ -46,6 +46,7 @@
     //   "enabled": true,
     //   "duration_seconds": 0.5,
     //   "highlight_color": "#ffffff",
+    //   "bold": true,
     // },
     // Optional local, submit-time English spell checking. Only payloads after
     // ", say, :, or pose are eligible; all other world commands are untouched.

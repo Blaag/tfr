@@ -183,6 +183,7 @@ class TransientStyleSpan:
     end_color: str
     started_at: float
     duration_seconds: float = 3.0
+    purpose: str = ""
 
     def __post_init__(self) -> None:
         if self.start < 0 or self.end <= self.start or not self.style:
@@ -431,6 +432,21 @@ class DisplayBuffer:
         self.rows.extend(new_rows)
         self.pager.append_rows(len(new_rows))
         self._trim_rows()
+
+    def clear_combo_effects(self) -> None:
+        combo_effects = {
+            TextEffectKind.COMBO_PULSE,
+            TextEffectKind.COMBO_FLASH_UPPER,
+            TextEffectKind.COMBO_CYLON,
+        }
+        self._entry_decorations = [
+            tuple(item for item in decorations if item.effect not in combo_effects)
+            for decorations in self._entry_decorations
+        ]
+        self._entry_transient_style_spans = [
+            tuple(item for item in spans if item.purpose != "combo")
+            for spans in self._entry_transient_style_spans
+        ]
 
     def _trim_rows(self) -> None:
         trim_count = max(0, len(self.rows) - self.max_rows)
