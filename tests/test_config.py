@@ -23,6 +23,8 @@ def test_typing_glow_duration_is_positive_and_bounded() -> None:
         TypingGlowConfig(duration_seconds=0)
     with pytest.raises(ValueError):
         TypingGlowConfig(duration_seconds=61)
+    with pytest.raises(ValueError):
+        TypingGlowConfig(highlight_color="white")
 
 MAIN = """
 {
@@ -112,7 +114,8 @@ def test_loads_jsonc_and_resolves_references(tmp_path: Path) -> None:
     assert bundle.main.ui.spellcheck.enabled is False
     assert bundle.main.ui.spellcheck.protected_words == ()
     assert bundle.main.ui.typing_glow.enabled is True
-    assert bundle.main.ui.typing_glow.duration_seconds == 1.0
+    assert bundle.main.ui.typing_glow.duration_seconds == 0.5
+    assert bundle.main.ui.typing_glow.highlight_color == "#ffffff"
     assert bundle.main.ui.screen_clear.mode == "cycle"
     assert bundle.main.ui.screen_clear.effect is None
     assert bundle.main.ui.boss.mode == "cycle"

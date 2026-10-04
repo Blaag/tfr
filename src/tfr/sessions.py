@@ -161,6 +161,10 @@ class WorldSession:
         return self.config.encoding or self.defaults.encoding
 
     @property
+    def character_name(self) -> str | None:
+        return self.config.login.character if self.config.login is not None else None
+
+    @property
     def reconnect(self) -> bool:
         if self.config.reconnect is None:
             return self.defaults.reconnect

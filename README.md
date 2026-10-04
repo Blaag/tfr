@@ -789,9 +789,9 @@ them. Use `/lowbw on` to retain static styling but stop scheduled redraws. World
 traffic and keyboard input still redraw normally. `ui.animations_enabled` and
 `ui.low_bandwidth` select the initial state for each attached UI.
 
-Newly typed input glows in the theme's accent color and fades to normal text over
-one second by default. Configure `ui.typing_glow.enabled` and
-`ui.typing_glow.duration_seconds` to disable or tune it. `/animations off` and
+Newly typed input glows bright white and fades to normal text over half a second
+by default. Configure `ui.typing_glow.enabled`, `ui.typing_glow.duration_seconds`,
+and `ui.typing_glow.highlight_color` to disable or tune it. `/animations off` and
 `/lowbw on` suppress the typing effect. Spellcheck corrections remain bold and
 underlined in recent input and matching world echoes; those highlights fade when
 animations are enabled and remain static until expiry in low-bandwidth mode.
@@ -828,9 +828,11 @@ since that world last received inbound input, once it has received any. Each
 world retains its own draft, command history, rendered scrollback,
 pager state, and unread count while inactive.
 Unread worlds are also summarized in the output pane's bottom border near the
-editor. When output remains below the current view, the border begins with a
-fixed-width reversed `More` count (visually capped at `9999`) before the activity
-summary. Narrow terminals show only complete world entries followed by `...`.
+editor. After a two-cell inset, the border permanently reserves a ten-cell pager
+field so activity always begins in the same column. When output remains below the
+current view, that field contains a reversed `More` count (visually capped at
+`9999`); otherwise it remains normal border glyphs. Narrow terminals show only
+complete world entries followed by `...`.
 The active world's recently sent commands remain directly above the editor.
 These lines are separate from server output, so server speech echoes are not
 duplicated. Configure their number with `ui.recent_input_lines` (default `3`, or
@@ -1048,6 +1050,12 @@ source tag. Prefixes are retained in canonical logs even when hidden from the
 display. Set the initial behavior with `provenance.show_prefix`, then use
 `/nospoof show`, `/nospoof hide`, or `/nospoof status` at runtime. This affects
 future display only and never removes provenance from canonical logs.
+For bare and generic output without sender provenance, the terminal presentation
+pipeline offers the first visible word (with an optional possessive removed) as
+an inferred pose speaker to display decorators. This lets configured speaker
+effects cover lines such as `Hamilton smokes a cig`, at the cost of an occasional
+visual false positive. The inference never changes event history, logs, agents,
+spoof checks, or plugin event observers.
 When NOSPOOF is enabled, TFR also compares apparent say and known pose speakers
 with server attribution. Spoofed speaker names use a persistent inverse marker
 in both the terminal UI and PWA, independent of normal text effects.

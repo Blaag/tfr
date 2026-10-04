@@ -628,6 +628,7 @@ class GatewayRuntime:
                 "connection_generation": session.connection_generation,
                 "server": session.config.server,
                 "encoding": session.encoding,
+                "character": session.character_name,
                 "capabilities": {
                     "unicode": session.config.capabilities.unicode,
                 },
