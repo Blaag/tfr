@@ -3,7 +3,14 @@ from __future__ import annotations
 from prompt_toolkit.formatted_text import fragment_list_to_text
 
 from tfr.ansi import terminal_plain_text
-from tfr.pager import DisplayBuffer, PagerMode, PagerState, StaticStyleSpan, wrap_ansi_text
+from tfr.pager import (
+    DisplayBuffer,
+    PagerMode,
+    PagerState,
+    StaticStyleSpan,
+    TransientStyleSpan,
+    wrap_ansi_text,
+)
 from tfr.presentation import ActiveEffectProgram, PresentationStyle, character_sweep, color_pulse
 from tfr.text_effects import TextDecoration, TextEffectKind, validate_decorations
 
@@ -408,6 +415,54 @@ def test_static_security_style_survives_reflow_and_recall() -> None:
 
     assert styled == "Bob"
     assert recalled == (('Bob says, "Hello"', (), (), (span,)),)
+
+
+def test_transient_style_survives_reflow_until_expiry_and_is_not_recalled() -> None:
+    span = TransientStyleSpan(
+        0,
+        3,
+        "bold underline",
+        "#ffffff",
+        "#808080",
+        started_at=100,
+    )
+    display = DisplayBuffer(max_rows=20, width=20, height=4, pager_enabled=False)
+    display.append('Bob says, "Hello"', transient_style_spans=(span,))
+
+    display.resize(width=5, height=4)
+    active = display.visible_rows(
+        now_seconds=101.5,
+        animations_enabled=True,
+    )
+    expired = display.visible_rows(
+        now_seconds=103,
+        animations_enabled=True,
+    )
+
+    assert "".join(
+        text for row in active for style, text in row if "underline" in style
+    ) == "Bob"
+    assert not any("underline" in style for row in expired for style, _text in row)
+    assert expired[0] is display.rows[0]
+    assert display.recent_entries(4) == (('Bob says, "Hello"', (), (), ()),)
+
+
+def test_transient_style_schedules_fade_frames_and_final_expiry_redraw() -> None:
+    span = TransientStyleSpan(
+        0,
+        3,
+        "bold underline",
+        "#ffffff",
+        "#808080",
+        started_at=100,
+    )
+    display = DisplayBuffer(max_rows=20, width=20, height=4, pager_enabled=False)
+    display.append("Bob says hello", transient_style_spans=(span,))
+
+    assert display.transient_style_frame_delay(100, animated=True) == 0.05
+    assert round(display.transient_style_frame_delay(102.99, animated=True) or 0, 2) == 0.01
+    assert display.transient_style_frame_delay(100, animated=False) == 3.0
+    assert display.transient_style_frame_delay(103, animated=True) is None
 
 
 def test_url_underline_survives_the_per_frame_decoration_rewrap() -> None:

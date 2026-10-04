@@ -201,6 +201,7 @@ async def test_coordinated_update_prepares_and_commits_every_connected_ui(
             "version": manifest.version,
             "commit": manifest.commit,
             "release_url": manifest.release_url,
+            "restart_required": True,
         }
         assert events.count((0, "prepare")) == 1
         assert events.count((1, "prepare")) == 1
@@ -225,7 +226,12 @@ async def test_coordinated_update_rejects_an_unmanaged_connected_ui(
     history = EventHistory(bus, {"alpha": 10})
     history.start()
     runtime = FakeRuntime(history)
-    runtime.update_checker = SimpleNamespace(config=UpdateConfig())
+    runtime.update_checker = SimpleNamespace(
+        config=UpdateConfig(),
+        check=AsyncMock(
+            return_value=UpdateResult(checked_at=None, manifest=update_manifest())
+        ),
+    )
     socket_path = Path("/tmp") / f"tfr-update-{uuid4().hex[:8]}" / "gateway.sock"
     server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
     await server.start()
@@ -391,6 +397,153 @@ async def test_coordinated_update_does_nothing_when_everything_is_current(
         await bus.close()
 
 
+async def test_reconnected_outdated_ui_updates_without_restarting_current_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    manifest = update_manifest()
+    current = current_build()
+    runtime.build = type(current)(manifest.version, manifest.commit, current.protocol)
+    runtime.update_checker = SimpleNamespace(
+        config=UpdateConfig(),
+        check=AsyncMock(return_value=UpdateResult(checked_at=None, manifest=manifest)),
+    )
+    runtime.plugin_update_checker = SimpleNamespace(
+        stable_auto_update_available=AsyncMock(return_value=False)
+    )
+    staged = StagedManagedUpdate(
+        release_id=f"{manifest.version}+stable.{manifest.commit}",
+        version=manifest.version,
+        commit=manifest.commit,
+        release_url=manifest.release_url,
+        manifest=manifest,
+    )
+    stage = AsyncMock(return_value=staged)
+    activate = Mock()
+    monkeypatch.setattr("tfr.gateway.stage_managed_update", stage)
+    monkeypatch.setattr("tfr.gateway.activate_managed_update", activate)
+    monkeypatch.setattr("tfr.gateway_client.managed_restart_command", lambda _args: ["tfr"])
+    socket_path = Path("/tmp") / f"tfr-update-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+
+    builds = iter(
+        (
+            runtime.build,
+            type(current)("1.2.2", "c" * 40, current.protocol),
+            type(current)("1.2.2", "c" * 40, current.protocol),
+        )
+    )
+    monkeypatch.setattr("tfr.gateway_client.current_build", lambda: next(builds))
+    current_client = await GatewayClient.connect(socket_path)
+    outdated_client = await GatewayClient.connect(socket_path)
+    current_prepare = AsyncMock()
+    current_commit = AsyncMock()
+    outdated_prepare = AsyncMock(return_value={"version": manifest.version})
+    committed = asyncio.Event()
+
+    async def commit_outdated(_release_id: str) -> None:
+        committed.set()
+
+    current_client.update_check_handler = AsyncMock(return_value={"available": False})
+    current_client.update_prepare_handler = current_prepare
+    current_client.update_commit_handler = current_commit
+    outdated_client.update_prepare_handler = outdated_prepare
+    outdated_client.update_commit_handler = commit_outdated
+    current_client.start()
+    outdated_client.start()
+    try:
+        await outdated_client.stop()
+        await _wait_until(lambda: len(server._update_participants) == 1)
+
+        assert await current_client.update() == {"updated": False}
+        outdated_prepare.assert_not_awaited()
+        stage.assert_not_awaited()
+        activate.assert_not_called()
+
+        await outdated_client.reconnect()
+        await _wait_until(lambda: len(server._update_participants) == 2)
+        result = await outdated_client.update()
+        await asyncio.wait_for(committed.wait(), timeout=1)
+        await _wait_until(lambda: server._accepting_update_participants)
+
+        assert result["updated"] is True
+        assert result["restart_required"] is True
+        current_prepare.assert_not_awaited()
+        current_commit.assert_not_awaited()
+        outdated_prepare.assert_awaited_once()
+        activate.assert_not_called()
+        assert not server._update_restart.is_set()
+    finally:
+        await current_client.stop()
+        await outdated_client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+
+
+async def test_gateway_only_update_does_not_restart_current_ui(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    manifest = update_manifest()
+    current = current_build()
+    runtime.build = current
+    runtime.update_checker = SimpleNamespace(
+        config=UpdateConfig(),
+        check=AsyncMock(return_value=UpdateResult(checked_at=None, manifest=manifest)),
+    )
+    runtime.plugin_update_checker = SimpleNamespace(
+        stable_auto_update_available=AsyncMock(return_value=False)
+    )
+    staged = StagedManagedUpdate(
+        release_id=f"{manifest.version}+stable.{manifest.commit}",
+        version=manifest.version,
+        commit=manifest.commit,
+        release_url=manifest.release_url,
+        manifest=manifest,
+    )
+    stage = AsyncMock(return_value=staged)
+    activate = Mock()
+    monkeypatch.setattr("tfr.gateway.stage_managed_update", stage)
+    monkeypatch.setattr("tfr.gateway.activate_managed_update", activate)
+    monkeypatch.setattr(
+        "tfr.gateway_client.current_build",
+        lambda: type(current)(manifest.version, manifest.commit, current.protocol),
+    )
+    socket_path = Path("/tmp") / f"tfr-update-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    prepare = AsyncMock()
+    commit = AsyncMock()
+    client.update_check_handler = AsyncMock(return_value={"available": False})
+    client.update_prepare_handler = prepare
+    client.update_commit_handler = commit
+    client.start()
+    try:
+        result = await client.update()
+        await asyncio.wait_for(server.wait_update_restart(), timeout=1)
+
+        assert result["updated"] is True
+        assert result["restart_required"] is False
+        prepare.assert_not_awaited()
+        commit.assert_not_awaited()
+        stage.assert_awaited_once()
+        activate.assert_called_once_with(staged.release_id)
+    finally:
+        await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+
+
 async def test_coordinated_update_runs_for_a_stable_auto_plugin_update(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -442,13 +595,16 @@ async def test_coordinated_update_runs_for_a_stable_auto_plugin_update(
     client.start()
     try:
         result = await client.update()
-        await asyncio.wait_for(server.wait_update_restart(), timeout=1)
+        await _wait_until(lambda: client.update_commit_handler.await_count == 1)
+        await _wait_until(lambda: server._accepting_update_participants)
         assert result["updated"] is True
+        assert result["restart_required"] is True
         stage.assert_awaited_once_with(
             runtime.update_checker.config,
             expected_manifest=manifest,
         )
-        activate.assert_called_once_with(staged.release_id)
+        activate.assert_not_called()
+        assert not server._update_restart.is_set()
     finally:
         await client.stop()
         await server.stop()
@@ -614,6 +770,22 @@ async def make_plugin_manager(client: GatewayClient) -> PluginManager:
         targets={session.world: session.session_id for session in client.sessions},
         scope="ui",
     )
+
+
+async def test_gateway_ui_runtime_clears_update_transaction_without_local_restart() -> None:
+    client = SimpleNamespace(
+        update=AsyncMock(return_value={"updated": True, "restart_required": False}),
+        event_bus=SimpleNamespace(add_processor=lambda _processor: None),
+    )
+    runtime = GatewayUiRuntime(
+        client,  # type: ignore[arg-type]
+        SimpleNamespace(process_event=Mock()),  # type: ignore[arg-type]
+    )
+
+    result = await runtime.request_update()
+
+    assert result == {"updated": True, "restart_required": False}
+    assert runtime._update_transaction_active is False
 
 
 async def test_gateway_ui_runtime_publishes_gateway_world_and_activity_events() -> None:

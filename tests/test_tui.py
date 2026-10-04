@@ -2158,6 +2158,84 @@ def test_border_text_surrounds_the_inner_output_width() -> None:
     assert left == "│\n│"
 
 
+async def test_output_border_summarizes_unread_world_activity() -> None:
+    tui = make_tui()
+    view = tui.active_view
+    view.display.resize(width=50, height=2)
+    tui.views["beta"].unread_events = 2
+
+    bottom = tui._border_text(view, "output", BorderEdge.BOTTOM, 2)
+
+    assert fragment_list_to_text(bottom) == (
+        "└─ Activity in world(s): beta +2 ──────────────────┘"
+    )
+
+    await add_animated_border(tui)
+    effected = tui._border_text(view, "output", BorderEdge.BOTTOM, 2)
+    label = [
+        (style, text)
+        for index, (style, text, *_mouse) in enumerate(effected)
+        if 2 <= index < 32
+    ]
+    assert "Activity in world(s): beta +2" in fragment_list_to_text(label)
+    assert all("reverse" in style for style, _text in label)
+
+    tui.switch_world("beta")
+    assert "Activity in world(s)" not in fragment_list_to_text(
+        tui._border_text(tui.active_view, "output", BorderEdge.BOTTOM, 2)
+    )
+
+
+def test_output_border_activity_uses_complete_entries_when_narrow() -> None:
+    tui = make_tui()
+    tui.active_view.display.resize(width=42, height=2)
+    tui.views["alpha"].unread_events = 11
+    tui.views["beta"].unread_events = 2
+
+    bottom = fragment_list_to_text(
+        tui._border_text(tui.active_view, "output", BorderEdge.BOTTOM, 2)
+    )
+
+    assert "Activity in world(s): alpha +11, ..." in bottom
+    assert "beta" not in bottom
+
+    tui.active_view.display.resize(width=20, height=2)
+    hidden = fragment_list_to_text(
+        tui._border_text(tui.active_view, "output", BorderEdge.BOTTOM, 2)
+    )
+    assert hidden == "└────────────────────┘"
+
+
+def test_output_border_activity_replaces_non_single_cell_alias_characters() -> None:
+    tui = make_tui()
+    beta = tui.views.pop("beta")
+    tui.views["界"] = beta
+    tui.aliases[1] = "界"
+    beta.unread_events = 2
+
+    bottom = fragment_list_to_text(
+        tui._border_text(tui.active_view, "output", BorderEdge.BOTTOM, 2)
+    )
+
+    assert "Activity in world(s): ? +2" in bottom
+    assert len(bottom) == tui.active_view.display.width + 2
+
+
+def test_output_border_activity_replaces_combining_alias_characters() -> None:
+    tui = make_tui()
+    beta = tui.views.pop("beta")
+    tui.views["e\u0301"] = beta
+    tui.aliases[1] = "e\u0301"
+    beta.unread_events = 2
+
+    bottom = fragment_list_to_text(
+        tui._border_text(tui.active_view, "output", BorderEdge.BOTTOM, 2)
+    )
+
+    assert "Activity in world(s): e? +2" in bottom
+    assert len(bottom) == tui.active_view.display.width + 2
+
+
 def test_releasing_selection_over_border_finishes_copy() -> None:
     tui = make_tui()
     view = tui.active_view
@@ -2457,7 +2535,11 @@ async def test_submitted_text_uses_active_human_session() -> None:
     assert request.actor.id == "operator"
 
 
-async def test_spellcheck_highlights_corrected_words_in_world_echo() -> None:
+async def test_spellcheck_highlights_corrected_words_in_world_echo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 100.0
+    monkeypatch.setattr("tfr.tui.time.monotonic", lambda: now)
     tui = make_tui(spellcheck=SpellcheckConfig(enabled=True))
     session = tui.active_view.session
     session.state = SessionState.CONNECTED
@@ -2511,6 +2593,124 @@ async def test_spellcheck_highlights_corrected_words_in_world_echo() -> None:
     assert "bold" in corrected[0][0]
     assert "underline" in corrected[0][0]
     assert "fg:" in corrected[0][0]
+
+    now = 101.5
+    midpoint = next(style for style, text in tui.active_view.output_text() if text == "the")
+    assert midpoint != corrected[0][0]
+
+    now = 103.0
+    expired = tui.active_view.output_text()
+    assert not any("underline" in style for style, _text in expired)
+
+
+async def test_spellcheck_output_highlight_expires_without_animation_and_is_not_recalled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 100.0
+    monkeypatch.setattr("tfr.tui.time.monotonic", lambda: now)
+    tui = make_tui(spellcheck=SpellcheckConfig(enabled=True))
+    tui.animations_enabled = False
+    session = tui.active_view.session
+    session.state = SessionState.CONNECTED
+    queue = tui.command_bus.register(session.session_id)
+
+    await tui.submit_text("alpha", '"I liek this.')
+    request = queue.get_nowait()
+    tui.handle_event(
+        Event(
+            session_id=session.session_id,
+            world="alpha",
+            connection_generation=1,
+            sequence=0,
+            direction=Direction.OUTBOUND,
+            kind=EventKind.COMMAND,
+            canonical_text=request.text,
+            plain_text=request.text,
+            display_text=request.text,
+            actor=request.actor,
+            correlation_id=request.request_id,
+        )
+    )
+    echo = 'You say, "I like this."\r\n'
+    tui.handle_event(
+        Event(
+            session_id=session.session_id,
+            world="alpha",
+            connection_generation=1,
+            sequence=1,
+            direction=Direction.INBOUND,
+            kind=EventKind.SAY,
+            canonical_text=echo,
+            plain_text=echo,
+            display_text=echo,
+            metadata={"message_text": echo},
+        )
+    )
+
+    initial = next(style for style, text in tui.active_view.output_text() if text == "like")
+    now = 102.5
+    held = next(style for style, text in tui.active_view.output_text() if text == "like")
+    assert held == initial
+
+    tui.active_view.display.clear_screen()
+    await tui._handle_client_command("alpha", "/recall 1")
+    assert not any(
+        "underline" in style for style, _text in tui.active_view.output_text()
+    )
+
+    now = 103.0
+    assert not any(
+        "underline" in style for style, _text in tui.active_view.output_text()
+    )
+
+
+async def test_spellcheck_output_highlight_expires_in_low_bandwidth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 100.0
+    monkeypatch.setattr("tfr.tui.time.monotonic", lambda: now)
+    tui = make_tui(spellcheck=SpellcheckConfig(enabled=True))
+    tui._set_low_bandwidth(True)
+    session = tui.active_view.session
+    session.state = SessionState.CONNECTED
+    queue = tui.command_bus.register(session.session_id)
+
+    await tui.submit_text("alpha", '"I liek this.')
+    request = queue.get_nowait()
+    tui.handle_event(
+        Event(
+            session_id=session.session_id,
+            world="alpha",
+            connection_generation=1,
+            sequence=0,
+            direction=Direction.OUTBOUND,
+            kind=EventKind.COMMAND,
+            canonical_text=request.text,
+            plain_text=request.text,
+            display_text=request.text,
+            actor=request.actor,
+            correlation_id=request.request_id,
+        )
+    )
+    echo = 'You say, "I like this."\r\n'
+    tui.handle_event(
+        Event(
+            session_id=session.session_id,
+            world="alpha",
+            connection_generation=1,
+            sequence=1,
+            direction=Direction.INBOUND,
+            kind=EventKind.SAY,
+            canonical_text=echo,
+            plain_text=echo,
+            display_text=echo,
+            metadata={"message_text": echo},
+        )
+    )
+
+    assert any("underline" in style for style, _text in tui.active_view.output_text())
+    now = 103.0
+    assert not any("underline" in style for style, _text in tui.active_view.output_text())
 
 
 async def test_spellcheck_leaves_non_speech_commands_unchanged() -> None:

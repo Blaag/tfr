@@ -846,6 +846,7 @@ class GatewayServer:
         self._accepting_update_participants = True
         self._staged_update: StagedManagedUpdate | None = None
         self._update_transaction_participants: tuple[_GatewayUpdateParticipant, ...] = ()
+        self._update_gateway_restart = False
         self._update_task: asyncio.Task[None] | None = None
         self._update_restart = asyncio.Event()
 
@@ -1302,6 +1303,10 @@ class GatewayServer:
                         "version": staged.version,
                         "commit": staged.commit,
                         "release_url": staged.release_url,
+                        "restart_required": any(
+                            participant.connection_id == client_id
+                            for participant in self._update_transaction_participants
+                        ),
                     }
                     start_update = True
             elif message_type == "pair_device":
@@ -1364,6 +1369,7 @@ class GatewayServer:
                 self._update_task is not None and not self._update_task.done()
             ):
                 raise ValueError("a coordinated update is already in progress")
+            self._update_gateway_restart = False
             if self.runtime.update_checker is None:
                 raise ValueError("stable updates are unavailable")
             async with self._update_participants_lock:
@@ -1371,18 +1377,15 @@ class GatewayServer:
                 participants = tuple(self._update_participants.values())
                 self._update_transaction_participants = participants
             incompatible = [
-                participant
-                for participant in participants
-                if not participant.managed_updates
-                or participant.build is None
+                participant for participant in participants if participant.build is None
             ]
             if incompatible:
                 async with self._update_participants_lock:
                     self._accepting_update_participants = True
                     self._update_transaction_participants = ()
                 raise ValueError(
-                    "all connected native UIs must support managed updates; "
-                    f"{len(incompatible)} UI(s) cannot participate"
+                    "all connected native UIs must report their build; "
+                    f"{len(incompatible)} UI(s) cannot be evaluated"
                 )
             try:
                 update_result = await self.runtime.update_checker.check()
@@ -1391,47 +1394,85 @@ class GatewayServer:
                 manifest = update_result.manifest
                 if manifest is None:
                     raise ValueError("stable TFR update check returned no release manifest")
-                builds = [getattr(self.runtime, "build", current_build())]
-                builds.extend(
-                    participant.build
+                gateway_build = getattr(self.runtime, "build", current_build())
+                gateway_core_update = update_result.available_for(gateway_build)
+                participant_core_updates = {
+                    participant.connection_id: update_result.available_for(participant.build)
                     for participant in participants
                     if participant.build is not None
+                }
+                current_participants = tuple(
+                    participant
+                    for participant in participants
+                    if not participant_core_updates[participant.connection_id]
                 )
-                update_available = any(
-                    update_result.available_for(build) for build in builds
+                unsupported = [
+                    participant
+                    for participant in current_participants
+                    if not participant.update_checks
+                ]
+                if unsupported:
+                    raise ValueError(
+                        "all current native UIs must support update availability checks; "
+                        f"{len(unsupported)} UI(s) cannot be checked"
+                    )
+                plugin_checker = getattr(self.runtime, "plugin_update_checker", None)
+                gateway_plugin_check: Awaitable[bool] | None = (
+                    plugin_checker.stable_auto_update_available()
+                    if plugin_checker is not None and not gateway_core_update
+                    else None
                 )
-                if not update_available:
-                    unsupported = [
-                        participant for participant in participants if not participant.update_checks
-                    ]
-                    if unsupported:
-                        raise ValueError(
-                            "all connected native UIs must support update availability checks; "
-                            f"{len(unsupported)} UI(s) cannot participate"
-                        )
-                    plugin_checks: list[Awaitable[bool | dict[str, Any] | None]] = []
-                    plugin_checker = getattr(self.runtime, "plugin_update_checker", None)
-                    if plugin_checker is not None:
-                        plugin_checks.append(plugin_checker.stable_auto_update_available())
-                    plugin_checks.extend(
-                        self._request_update_participant(
-                            participant,
-                            "update_check",
-                            timeout=UPDATE_PREPARE_TIMEOUT_SECONDS,
-                        )
-                        for participant in participants
+                participant_plugin_checks = tuple(
+                    self._request_update_participant(
+                        participant,
+                        "update_check",
+                        timeout=UPDATE_PREPARE_TIMEOUT_SECONDS,
                     )
-                    plugin_results = await asyncio.gather(*plugin_checks)
-                    update_available = any(
-                        result is True
-                        or isinstance(result, dict)
-                        and result.get("available") is True
-                        for result in plugin_results
+                    for participant in current_participants
+                )
+                plugin_results = await asyncio.gather(
+                    *(
+                        ((gateway_plugin_check,) if gateway_plugin_check is not None else ())
+                        + participant_plugin_checks
                     )
-                if not update_available:
+                )
+                result_offset = 1 if gateway_plugin_check is not None else 0
+                gateway_plugin_update = (
+                    bool(plugin_results[0]) if gateway_plugin_check is not None else False
+                )
+                participant_plugin_updates = {
+                    participant.connection_id: (
+                        isinstance(result, dict) and result.get("available") is True
+                    )
+                    for participant, result in zip(
+                        current_participants,
+                        plugin_results[result_offset:],
+                        strict=True,
+                    )
+                }
+                selected_participants = tuple(
+                    participant
+                    for participant in participants
+                    if participant_core_updates[participant.connection_id]
+                    or participant_plugin_updates.get(participant.connection_id, False)
+                )
+                unmanaged = [
+                    participant
+                    for participant in selected_participants
+                    if not participant.managed_updates
+                ]
+                if unmanaged:
+                    raise ValueError(
+                        "all connected native UIs must support managed updates when they require "
+                        "an update; "
+                        f"{len(unmanaged)} UI(s) cannot participate"
+                    )
+                update_gateway = gateway_core_update or gateway_plugin_update
+                if not update_gateway and not selected_participants:
                     async with self._update_participants_lock:
                         self._accepting_update_participants = True
                         self._update_transaction_participants = ()
+                    self._update_gateway_restart = False
                     return None
                 staged = await stage_managed_update(
                     self.runtime.update_checker.config,
@@ -1444,7 +1485,7 @@ class GatewayServer:
                 raise
             incompatible = [
                 participant
-                for participant in participants
+                for participant in selected_participants
                 if participant.build is None
                 or not staged.manifest.supports(participant.build)
             ]
@@ -1457,6 +1498,8 @@ class GatewayServer:
                     f"{len(incompatible)} UI(s) cannot participate"
                 )
             self._staged_update = staged
+            self._update_transaction_participants = selected_participants
+            self._update_gateway_restart = update_gateway
             return staged
 
     async def _coordinate_update(self) -> None:
@@ -1488,6 +1531,7 @@ class GatewayServer:
                 await self.update_notice(f"Gateway update aborted: {exc}")
             print(f"tfr: coordinated update aborted: {exc}", file=sys.stderr, flush=True)
             self._staged_update = None
+            self._update_gateway_restart = False
             async with self._update_participants_lock:
                 self._accepting_update_participants = True
                 self._update_transaction_participants = ()
@@ -1512,22 +1556,30 @@ class GatewayServer:
                     file=sys.stderr,
                     flush=True,
                 )
-        try:
-            await asyncio.to_thread(activate_managed_update, staged.release_id)
-        except (InstallationError, OSError) as exc:
-            print(f"tfr: Gateway update activation failed: {exc}", file=sys.stderr, flush=True)
-            if self.update_notice is not None:
-                await self.update_notice(f"Gateway update activation failed: {exc}")
-            async with self._update_participants_lock:
-                self._accepting_update_participants = True
-                self._update_transaction_participants = ()
+        if self._update_gateway_restart:
+            try:
+                await asyncio.to_thread(activate_managed_update, staged.release_id)
+            except (InstallationError, OSError) as exc:
+                print(f"tfr: Gateway update activation failed: {exc}", file=sys.stderr, flush=True)
+                if self.update_notice is not None:
+                    await self.update_notice(f"Gateway update activation failed: {exc}")
+                async with self._update_participants_lock:
+                    self._accepting_update_participants = True
+                    self._update_transaction_participants = ()
+                return
+            print(
+                f"tfr: activated Gateway {staged.version}. {staged.release_url}",
+                file=sys.stderr,
+                flush=True,
+            )
+            self._update_restart.set()
             return
-        print(
-            f"tfr: activated Gateway {staged.version}. {staged.release_url}",
-            file=sys.stderr,
-            flush=True,
-        )
-        self._update_restart.set()
+
+        self._staged_update = None
+        self._update_gateway_restart = False
+        async with self._update_participants_lock:
+            self._accepting_update_participants = True
+            self._update_transaction_participants = ()
 
     async def _request_update_participant(
         self,
