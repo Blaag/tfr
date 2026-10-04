@@ -64,6 +64,7 @@ _ASSETS = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.mjs": ("app.mjs", "text/javascript; charset=utf-8"),
     "/command.mjs": ("command.mjs", "text/javascript; charset=utf-8"),
+    "/combo.mjs": ("combo.mjs", "text/javascript; charset=utf-8"),
     "/connection-lifecycle.mjs": (
         "connection-lifecycle.mjs",
         "text/javascript; charset=utf-8",
@@ -406,7 +407,7 @@ class WebGatewayServer:
                 web.get(
                     "/{asset:index.html|app.mjs|command.mjs|connection-lifecycle.mjs|"
                     "event-details.mjs|history-notice.mjs|linkify.mjs|motion.mjs|pairing.mjs|"
-                    "presentation.mjs|swipe.mjs|text-runs.mjs|styles.css|manifest.webmanifest|"
+                    "presentation.mjs|combo.mjs|swipe.mjs|text-runs.mjs|styles.css|manifest.webmanifest|"
                     "sw.js|icon.svg|icon-512.png|"
                     "apple-touch-icon.png}",
                     self._asset,

@@ -1,5 +1,6 @@
 import { createPairingSubmission, pairingCodeFromLink, submitPairing } from "./pairing.mjs";
 import { isMultilineWorldCommand, normalizeWorldCommand } from "./command.mjs";
+import { observeCombo } from "./combo.mjs";
 import { createConnectionLifecycle } from "./connection-lifecycle.mjs";
 import { connectionNotice, eventDetailRows } from "./event-details.mjs";
 import {
@@ -70,6 +71,8 @@ const elements = {
   updateNotice: document.querySelector("#update-notice"),
   applyUpdate: document.querySelector("#apply-update"),
   toast: document.querySelector("#toast"),
+  comboNotice: document.querySelector("#combo-notice"),
+  comboFireworks: document.querySelector("#combo-fireworks"),
 };
 
 const state = {
@@ -93,6 +96,7 @@ const state = {
   serviceWorkerRegistration: null,
   reloadingForUpdate: false,
   shownHistoryNotices: new Map(),
+  comboStreaks: new Map(),
 };
 const pairingSubmission = createPairingSubmission(
   (code) => submitPairing(document, code),
@@ -110,6 +114,133 @@ let liveRenderFrame = null;
 let preserveLiveDuringViewportChange = false;
 const installedTextRunColors = new Set();
 const activePresentationAnimations = new Set();
+let comboNoticeAnimation = null;
+const comboTimers = new Set();
+
+function scheduleCombo(callback, delay) {
+  const timer = window.setTimeout(() => {
+    comboTimers.delete(timer);
+    callback();
+  }, delay);
+  comboTimers.add(timer);
+  return timer;
+}
+
+function cancelComboVisuals() {
+  for (const timer of comboTimers) window.clearTimeout(timer);
+  comboTimers.clear();
+  for (const node of document.querySelectorAll(".combo-text, .combo-notice, .combo-fireworks i")) {
+    for (const animation of node.getAnimations()) animation.cancel();
+  }
+  elements.comboNotice.hidden = true;
+  elements.comboFireworks.replaceChildren();
+}
+
+function comboTextNodes(root, start, end) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const selected = [];
+  let offset = 0;
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const next = offset + Array.from(node.data).length;
+    if (start < next && end > offset) selected.push({ node, start: Math.max(0, start - offset), end: Math.min(next, end) - offset });
+    offset = next;
+  }
+  return selected;
+}
+
+function codeUnitOffset(text, scalarOffset) {
+  return Array.from(text).slice(0, scalarOffset).join("").length;
+}
+
+function animateComboText(root, combo) {
+  if (!combo || combo.count > 7) return;
+  const wrappers = [];
+  for (const part of comboTextNodes(root, combo.body_start, combo.body_end).toReversed()) {
+    const range = document.createRange();
+    range.setStart(part.node, codeUnitOffset(part.node.data, part.start));
+    range.setEnd(part.node, codeUnitOffset(part.node.data, part.end));
+    const wrapper = document.createElement("span");
+    wrapper.className = `combo-text combo-${combo.count}`;
+    range.surroundContents(wrapper);
+    wrappers.push(wrapper);
+  }
+  for (const wrapper of wrappers) {
+    if (combo.count === 3) wrapper.animate([{ fontWeight: 800 }, { fontWeight: 800 }], { duration: 250 });
+    if (combo.count === 4) wrapper.animate([{ color: "inherit" }, { color: "#ffffff" }, { color: "inherit" }, { color: "#ffffff" }, { color: "inherit" }], { duration: 1000 });
+    if (combo.count === 5) {
+      wrapper.animate([{ color: "inherit" }, { color: "#ffffff" }], { duration: 200, iterations: 10, direction: "alternate", easing: "steps(1)" });
+      scheduleCombo(() => wrapper.classList.remove("combo-5"), 2000);
+    }
+    if (combo.count === 6) {
+      const characters = Array.from(wrapper.textContent || "");
+      const spans = characters.map((character) => {
+        const span = document.createElement("span");
+        span.textContent = character;
+        return span;
+      });
+      wrapper.replaceChildren(...spans);
+      spans.forEach((span, index) => {
+        const frames = [];
+        for (let frame = 0; frame <= 40; frame += 1) {
+          const progress = frame / 40;
+          if (progress >= 0.5) {
+            frames.push({ color: progress === 0.5 ? "#ffffff" : "inherit", offset: progress });
+            continue;
+          }
+          const sweep = progress * 8;
+          const fraction = sweep % 1;
+          const position = (Math.floor(sweep) % 2 === 0 ? fraction : 1 - fraction) * Math.max(0, spans.length - 1);
+          frames.push({ color: Math.abs(index - position) <= 1 ? "#ffffff" : "inherit", offset: progress });
+        }
+        span.animate(frames, { duration: 4000, easing: "linear" });
+      });
+    }
+    if (combo.count === 7) wrapper.animate([{ color: "inherit" }, { color: "#ffffff" }, { color: "inherit" }, { color: "#ffffff" }, { color: "inherit" }], { duration: 2000 });
+  }
+}
+
+function launchFireworks(eventId) {
+  let seed = [...eventId].reduce((value, character) => (value * 33 + character.codePointAt(0)) >>> 0, 5381);
+  const random = () => ((seed = (1664525 * seed + 1013904223) >>> 0) / 2 ** 32);
+  const colors = ["#ff0000", "#ff8000", "#0070dd", "#ffff00", "#a335ee"];
+  const count = 1 + Math.floor(random() * 3);
+  for (let firework = 0; firework < count; firework += 1) {
+    const x = 10 + random() * 80;
+    const y = 10 + random() * 55;
+    const delay = random() * 1800;
+    scheduleCombo(() => {
+      for (let index = 0; index < 16; index += 1) {
+        const particle = document.createElement("i");
+        particle.style.setProperty("--x", `${x}vw`);
+        particle.style.setProperty("--y", `${y}vh`);
+        particle.style.setProperty("--dx", `${(random() - 0.5) * 9}rem`);
+        particle.style.setProperty("--dy", `${(random() - 0.7) * 8}rem`);
+        particle.style.background = colors[Math.floor(random() * colors.length)];
+        elements.comboFireworks.append(particle);
+        particle.addEventListener("animationend", () => particle.remove(), { once: true });
+      }
+    }, delay);
+  }
+}
+
+function showCombo(event, node) {
+  const combo = event.combo;
+  if (!combo || combo.presented) return;
+  combo.presented = true;
+  if (!motionAllowsAnimation(elements.motionPreference.value, window.matchMedia("(prefers-reduced-motion: reduce)").matches)) return;
+  animateComboText(node.querySelector(".event-text"), combo);
+  comboNoticeAnimation?.cancel();
+  elements.comboNotice.hidden = false;
+  elements.comboNotice.textContent = combo.notice;
+  elements.comboNotice.style.color = combo.color;
+  comboNoticeAnimation = elements.comboNotice.animate(
+    [{ filter: "invert(0)" }, { filter: "invert(0)", offset: 0.833 }, { filter: "invert(1)", offset: 0.861 }, { filter: "invert(0)", offset: 0.889 }, { filter: "invert(1)", offset: 0.917 }, { filter: "invert(0)", offset: 0.944 }, { filter: "invert(1)", offset: 0.972 }, { filter: "invert(0)" }],
+    { duration: 3600 },
+  );
+  comboNoticeAnimation.addEventListener("finish", () => { elements.comboNotice.hidden = true; }, { once: true });
+  if (combo.count === 7) launchFireworks(event.id);
+}
 
 function cancelPresentationAnimations() {
   for (const animation of activePresentationAnimations) animation.cancel();
@@ -589,6 +720,7 @@ function eventNode(event, { animate = true } = {}) {
   body.append(text);
 
   item.append(body);
+  if (animate) showCombo(event, item);
   return item;
 }
 
@@ -754,6 +886,7 @@ function addEvent(message) {
     if (event.world === state.selectedWorld && !state.historyReset) showHistoryNotice("");
   }
   if (connection.ready) recordLiveHistoryEvent(world, event);
+  if (connection.ready) event.combo = observeCombo(state.comboStreaks, event);
   events.push(event);
   eventIds.add(event.id);
   let evicted = false;
@@ -773,6 +906,9 @@ function addEvent(message) {
     return;
   }
   const reading = readingState(event.world);
+  if (event.combo && (event.world !== state.selectedWorld || !reading.atLive)) {
+    event.combo.presented = true;
+  }
   if (event.world !== state.selectedWorld) {
     state.unread.set(event.world, (state.unread.get(event.world) || 0) + 1);
     if (!reading.atLive) reading.unseenLive += 1;
@@ -1347,6 +1483,7 @@ elements.textSmaller.addEventListener("click", () => applyTextSize(textSizePrefe
 elements.textReset.addEventListener("click", () => applyTextSize(0));
 elements.textLarger.addEventListener("click", () => applyTextSize(textSizePreference() + 1));
 elements.motionPreference.addEventListener("change", () => {
+  cancelComboVisuals();
   applyMotionPreference(elements.motionPreference.value);
   renderTranscript({ restorePosition: true });
 });

@@ -300,6 +300,45 @@ a:focus-visible {
   touch-action: pan-y pinch-zoom;
 }
 
+.combo-notice {
+  position: fixed;
+  z-index: 30;
+  right: 1rem;
+  bottom: calc(var(--safe-bottom) + 4.8rem);
+  left: 1rem;
+  pointer-events: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-weight: 900;
+  text-align: center;
+  text-shadow: 0 0 0.7rem currentColor;
+}
+
+.combo-text.combo-5 { text-transform: uppercase; }
+
+.combo-fireworks {
+  position: fixed;
+  z-index: 29;
+  inset: 4.4rem 0 4.6rem;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.combo-fireworks i {
+  position: absolute;
+  left: var(--x);
+  top: var(--y);
+  width: 0.28rem;
+  height: 0.28rem;
+  border-radius: 50%;
+  animation: combo-particle 1.8s ease-out forwards;
+}
+
+@keyframes combo-particle {
+  0% { transform: translate(0, 0); opacity: 1; }
+  65% { opacity: 1; }
+  100% { transform: translate(var(--dx), calc(var(--dy) + 7rem)); opacity: 0; }
+}
+
 .event-list {
   min-height: 100%;
   margin: 0;

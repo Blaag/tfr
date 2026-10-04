@@ -790,8 +790,10 @@ traffic and keyboard input still redraw normally. `ui.animations_enabled` and
 `ui.low_bandwidth` select the initial state for each attached UI.
 
 Newly typed input glows bright white and fades to normal text over half a second
-by default. Configure `ui.typing_glow.enabled`, `ui.typing_glow.duration_seconds`,
-and `ui.typing_glow.highlight_color` to disable or tune it. `/animations off` and
+by default. Newly inserted characters are bold during the fade. Configure
+`ui.typing_glow.enabled`, `ui.typing_glow.duration_seconds`,
+`ui.typing_glow.highlight_color`, and `ui.typing_glow.bold` to tune it.
+`/animations off` and
 `/lowbw on` suppress the typing effect. Spellcheck corrections remain bold and
 underlined in recent input and matching world echoes; those highlights fade when
 animations are enabled and remain static until expiry in low-bandwidth mode.
@@ -833,6 +835,17 @@ field so activity always begins in the same column. When output remains below th
 current view, that field contains a reversed `More` count (visually capped at
 `9999`); otherwise it remains normal border glyphs. Narrow terminals show only
 complete world entries followed by `...`.
+Consecutive attributed says or poses from the same speaker form a five-minute
+conversation combo. The third message starts a white `Speaking Spree`; subsequent
+messages advance through green `Rampage`, blue `Dominating`, purple `Unstoppable`,
+and orange `GODLIKE`. The message-body animation intensifies at each level, and
+Godlike adds a bounded deterministic firework burst over the output viewport.
+Further messages update the centered border/HUD notice as `GODLIKE x2`, `x3`, and
+so on without repeating message effects or fireworks. Another speaker or more
+than five minutes of inactivity resets the streak. Bare-world pose attribution
+uses the same presentation-only first-word fallback as speaker effects. Combo
+state continues counting while `/animations off`, `/lowbw`, or reduced motion is
+active, but those modes suppress every combo visual and never replay it later.
 The active world's recently sent commands remain directly above the editor.
 These lines are separate from server output, so server speech echoes are not
 duplicated. Configure their number with `ui.recent_input_lines` (default `3`, or

@@ -535,6 +535,11 @@
     "TypingGlowConfig": {
       "additionalProperties": false,
       "properties": {
+        "bold": {
+          "default": true,
+          "title": "Bold",
+          "type": "boolean"
+        },
         "duration_seconds": {
           "default": 0.5,
           "exclusiveMinimum": 0,

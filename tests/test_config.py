@@ -116,6 +116,7 @@ def test_loads_jsonc_and_resolves_references(tmp_path: Path) -> None:
     assert bundle.main.ui.typing_glow.enabled is True
     assert bundle.main.ui.typing_glow.duration_seconds == 0.5
     assert bundle.main.ui.typing_glow.highlight_color == "#ffffff"
+    assert bundle.main.ui.typing_glow.bold is True
     assert bundle.main.ui.screen_clear.mode == "cycle"
     assert bundle.main.ui.screen_clear.effect is None
     assert bundle.main.ui.boss.mode == "cycle"

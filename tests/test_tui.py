@@ -1913,6 +1913,120 @@ async def test_bare_pose_infers_first_token_only_for_display_effects() -> None:
     assert not tui.active_view.display._entry_decorations[1]
 
 
+def combo_say(tui: TfrTui, sequence: int, speaker: str = "Alice") -> Event:
+    text = f'{speaker} says, "message {sequence}"'
+    return Event(
+        session_id=tui.active_view.session.session_id,
+        world="alpha",
+        connection_generation=1,
+        sequence=sequence,
+        direction=Direction.INBOUND,
+        kind=EventKind.SAY,
+        canonical_text=text,
+        plain_text=text,
+        display_text=text,
+        provenance=Provenance(sender_name=speaker),
+    )
+
+
+def test_combo_streak_bolds_third_message_body_and_overlays_border() -> None:
+    tui = make_tui()
+    tui.active_view.display.resize(width=60, height=4)
+
+    for sequence in range(1, 4):
+        tui.handle_event(combo_say(tui, sequence))
+
+    output = tui.active_view.output_text()
+    message_style = next(style for style, text in output if text == "message 3")
+    assert "bold" in message_style
+    assert "bold" not in next(style for style, text in output if "Alice" in text)
+    border = fragment_list_to_text(
+        tui._border_text(tui.active_view, "output", BorderEdge.BOTTOM, 4)
+    )
+    assert "> Speaking Spree! <" in border
+
+
+def test_combo_streak_counts_silently_while_low_bandwidth() -> None:
+    tui = make_tui()
+    tui.low_bandwidth = True
+    for sequence in range(1, 4):
+        tui.handle_event(combo_say(tui, sequence))
+
+    assert not tui._combo_notices
+    assert not tui.active_view.display._entry_decorations[-1]
+
+    tui.low_bandwidth = False
+    tui.handle_event(combo_say(tui, 4))
+
+    assert tui._combo_notices["alpha"].text == "> Rampage! <"
+    assert any(
+        decoration.effect is TextEffectKind.COMBO_PULSE
+        for decoration in tui.active_view.display._entry_decorations[-1]
+    )
+
+
+def test_combo_streak_counts_in_inactive_world_without_delayed_visual() -> None:
+    tui = make_tui()
+    for sequence in range(1, 4):
+        event = replace(combo_say(tui, sequence), world="beta")
+        tui.handle_event(event)
+
+    assert "beta" not in tui._combo_notices
+    tui.switch_world("beta")
+    assert "> Speaking Spree! <" not in fragment_list_to_text(
+        tui._border_text(tui.active_view, "output", BorderEdge.BOTTOM, 4)
+    )
+
+    tui.handle_event(replace(combo_say(tui, 4), world="beta"))
+    assert tui._combo_notices["beta"].text == "> Rampage! <"
+
+
+def test_disabling_motion_cancels_combo_visuals_without_resume() -> None:
+    tui = make_tui()
+    for sequence in range(1, 5):
+        tui.handle_event(combo_say(tui, sequence))
+    assert tui.active_view.display._entry_decorations[-1]
+
+    tui._set_low_bandwidth(True)
+    tui._set_low_bandwidth(False)
+
+    assert not tui._combo_notices
+    assert not tui._firework_particles
+    assert not tui.active_view.display._entry_decorations[-1]
+
+
+def test_godlike_starts_bounded_fireworks_once_and_higher_counts_only_update_notice() -> None:
+    tui = make_tui()
+    expected = {
+        4: TextEffectKind.COMBO_PULSE,
+        5: TextEffectKind.COMBO_FLASH_UPPER,
+        6: TextEffectKind.COMBO_CYLON,
+        7: TextEffectKind.COMBO_PULSE,
+    }
+    for sequence in range(1, 8):
+        tui.handle_event(combo_say(tui, sequence))
+        if sequence in expected:
+            assert any(
+                decoration.effect is expected[sequence]
+                for decoration in tui.active_view.display._entry_decorations[-1]
+            )
+
+    particle_count = len(tui._firework_particles)
+    assert 12 <= particle_count <= 36
+    assert tui._combo_notices["alpha"].text == "> GODLIKE! <"
+    tui._position_firework_particles(80, 24)
+    assert all(
+        isinstance(float_container.left, int) and isinstance(float_container.top, int)
+        for float_container in tui._firework_floats[:particle_count]
+    )
+
+    tui.handle_event(combo_say(tui, 8))
+
+    assert len(tui._firework_particles) == particle_count
+    assert tui._combo_notices["alpha"].text == "> GODLIKE x2 <"
+    assert not tui.active_view.display._entry_decorations[-1]
+
+
 async def test_speaker_effects_keep_static_color_when_animations_are_off() -> None:
     tui = make_tui()
     await add_speaker_effects(tui)
@@ -2809,7 +2923,7 @@ def test_typing_glow_uses_custom_highlight_color() -> None:
         SimpleNamespace(fragments=[("", "a")])  # type: ignore[arg-type]
     ).fragments
 
-    assert fragments[0][0] == "fg:#ff00ff"
+    assert fragments[0][0] == "fg:#ff00ff bold"
 
 
 def test_typing_glow_tracks_independent_insertions_and_middle_edits(
