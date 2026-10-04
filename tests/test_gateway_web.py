@@ -347,12 +347,16 @@ class FakeRuntime:
                 "state": "connected",
                 "aliases": ["a"],
                 "connection_generation": self.connection_generation,
+                "server": "bare",
+                "character": "Hamilton",
             },
             {
                 "world": "agent-world",
                 "state": "connected",
                 "aliases": [],
                 "connection_generation": 1,
+                "server": "tinymux",
+                "character": None,
             },
         ]
 
@@ -1242,6 +1246,8 @@ async def test_websocket_snapshot_commands_and_idempotency(tmp_path: Path) -> No
                 "world": "alpha",
                 "state": "connected",
                 "aliases": ["a"],
+                "server": "bare",
+                "character": "Hamilton",
                 "connection_generation": "1",
                 "history": {
                     "connection_generation": "1",
@@ -1251,6 +1257,7 @@ async def test_websocket_snapshot_commands_and_idempotency(tmp_path: Path) -> No
                 },
             }
         ]
+        assert "password" not in hello["worlds"][0]
         assert snapshot["event"]["text"] == "retained message"
         assert snapshot["event"]["connection_generation"] == "1"
         assert ready["type"] == "ready"

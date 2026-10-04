@@ -947,6 +947,8 @@ class WebGatewayServer:
             "world": world,
             "state": descriptor["state"],
             "aliases": descriptor["aliases"],
+            "server": descriptor["server"],
+            "character": descriptor.get("character"),
             "connection_generation": str(generation),
             "history": {
                 "connection_generation": str(generation),

@@ -67,6 +67,7 @@ await context.addInitScript(() => {
     constructor() {
       super();
       this.readyState = FakeWebSocket.CONNECTING;
+      window.__fakeSocket = this;
       queueMicrotask(() => {
         this.readyState = FakeWebSocket.OPEN;
         this.dispatchEvent(new Event("open"));
@@ -80,6 +81,8 @@ await context.addInitScript(() => {
               world: "dev-local",
               state: "connected",
               aliases: ["dev"],
+              server: "bare",
+              character: "Black",
               connection_generation: "1",
               history: {
                 connection_generation: "1",
@@ -170,6 +173,70 @@ try {
     await page.locator("#event-list .event").first().getAttribute("data-event-id"),
     "event-200",
   );
+  assert.equal((await page.request.get(`${origin}/combo.mjs`)).status(), 200);
+  await page.locator("#motion-preference").evaluate((select) => {
+    select.value = "full";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  if (await page.locator("#return-live").isVisible()) await page.locator("#return-live").click();
+  await page.waitForTimeout(100);
+
+  await page.evaluate(() => {
+    for (const [index, [kind, text]] of [
+      ["say", 'Black says, "warmup one"'],
+      ["raw_output", "Black poses warmup two"],
+    ].entries()) {
+      window.__fakeSocket.message({
+        type: "event",
+        protocol: 1,
+        cursor: String(701 + index),
+        event: {
+          id: `combo-warmup-${index}`,
+          timestamp: new Date().toISOString(),
+          world: "dev-local",
+          connection_generation: "1",
+          direction: "inbound",
+          kind,
+          text,
+          redacted: false,
+          text_truncated: false,
+        },
+      });
+    }
+  });
+  const comboEvents = [
+    ["say", 'Black says, "combo three"', "Speaking Spree!"],
+    ["raw_output", "Black poses combo four", "Rampage!"],
+    ["say", 'Black says, "combo five"', "Dominating!"],
+    ["raw_output", "Black's pose combo six", "Unstoppable!"],
+    ["say", 'Black says, "combo seven"', "GODLIKE!"],
+  ];
+  for (const [index, [kind, text, notice]] of comboEvents.entries()) {
+    if (await page.locator("#return-live").isVisible()) await page.locator("#return-live").click();
+    await page.waitForTimeout(100);
+    await page.evaluate(({ index, kind, text }) => {
+      window.__fakeSocket.message({
+        type: "event",
+        protocol: 1,
+        cursor: String(703 + index),
+        event: {
+          id: `combo-level-${index + 3}`,
+          timestamp: new Date().toISOString(),
+          world: "dev-local",
+          connection_generation: "1",
+          direction: "inbound",
+          kind,
+          text,
+          redacted: false,
+          text_truncated: false,
+        },
+      });
+    }, { index, kind, text });
+    await page.waitForFunction(
+      (expected) => document.querySelector("#combo-notice")?.textContent.includes(expected),
+      notice,
+    );
+  }
 
   await page.setViewportSize({ width: 390, height: 520 });
   await page.locator("#command-input").focus();

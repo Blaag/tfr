@@ -36,10 +36,48 @@ test("bare pose inference is bounded to events with configured presentation", ()
   const streaks = new Map();
   const room = { world: "alpha", kind: "raw_output", text: "Alice waves" };
   assert.equal(observeCombo(streaks, room, 0), null);
-  const pose = { ...room, presentation: { programs: [] } };
-  assert.equal(observeCombo(streaks, pose, 1), null);
-  assert.equal(observeCombo(streaks, pose, 2), null);
-  assert.equal(observeCombo(streaks, pose, 3).count, 3);
+  const world = { server: "bare" };
+  assert.equal(observeCombo(streaks, room, 1, world), null);
+  assert.equal(observeCombo(streaks, room, 2, world), null);
+  assert.equal(observeCombo(streaks, room, 3, world).count, 3);
+});
+
+test("deterministic mixed say and pose chains reach levels three through seven", () => {
+  for (let seed = 0; seed < 8; seed += 1) {
+    for (let target = 3; target <= 7; target += 1) {
+      const streaks = new Map();
+      let value = seed + 1;
+      const random = () => ((value = (1664525 * value + 1013904223) >>> 0) / 2 ** 32);
+      let combo = null;
+      for (let count = 1; count <= target; count += 1) {
+        const item = random() < 0.5
+          ? say("Alice", `message ${count}`)
+          : { world: "alpha", kind: "pose", text: `${random() < 0.5 ? "Alice" : "Alice's"} poses message ${count}`, provenance: { sender_name: "Alice" } };
+        combo = observeCombo(streaks, item, count, { server: "tinymux" });
+        assert.equal(combo !== null, count >= 3, `seed=${seed}, count=${count}`);
+        if (combo) assert.equal(combo.count, count);
+      }
+      assert.equal(combo.count, target);
+    }
+  }
+});
+
+test("configured local character resolves You say and terse self poses", () => {
+  const streaks = new Map();
+  const world = { server: "tinymux", character: "Hamilton" };
+  assert.equal(observeCombo(streaks, { world: "alpha", kind: "speech", text: 'You say, "one"' }, 1, world), null);
+  assert.equal(observeCombo(streaks, { world: "alpha", kind: "speech", text: "Hamilton poses two" }, 2, world), null);
+  assert.equal(observeCombo(streaks, { world: "alpha", kind: "say", text: 'You say, "three"' }, 3, world).count, 3);
+});
+
+test("empty speech never starts or advances a combo", () => {
+  const streaks = new Map();
+  for (let count = 0; count < 10; count += 1) {
+    assert.equal(observeCombo(streaks, say("Alice", ""), count), null);
+  }
+  assert.equal(observeCombo(streaks, say("Alice", "one"), 11), null);
+  assert.equal(observeCombo(streaks, say("Alice", "two"), 12), null);
+  assert.equal(observeCombo(streaks, say("Alice", "three"), 13).count, 3);
 });
 
 test("combo body offsets use Unicode scalar positions", () => {
