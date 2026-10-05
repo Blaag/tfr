@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 from tfr.config import ConfigurationError, load_configuration, load_ui_configuration
+from tfr.executables import find_uv as _find_uv
 from tfr.gateway_client import GatewayClient
 from tfr.gateway_transport import (
     create_gateway_client_tls_context,
@@ -17,16 +18,6 @@ from tfr.gateway_transport import (
 from tfr.updates import current_build
 
 DoctorProfile = Literal["all-in-one", "local-split", "gateway", "remote-ui"]
-
-
-def _find_uv() -> Path | None:
-    discovered = shutil.which("uv")
-    if discovered is not None:
-        return Path(discovered)
-    for candidate in (Path.home() / ".local/bin/uv", Path.home() / ".cargo/bin/uv"):
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    return None
 
 
 class Doctor:

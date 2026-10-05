@@ -253,6 +253,19 @@ def test_mobile_composer_keeps_a_visible_send_button() -> None:
     assert ".send-button {" in styles
 
 
+def test_world_composer_uses_native_spelling_but_secret_and_lab_inputs_do_not() -> None:
+    page = files("tfr").joinpath("web", "index.html").read_text(encoding="utf-8")
+    composer = page[page.index('id="command-input"') : page.index('id="send-button"')]
+    pairing = page[page.index('id="pairing-link"') : page.index('type="submit"')]
+    lab = page[page.index('id="effects-lab-command-input"') : page.index(
+        'placeholder="/teststreak', page.index('id="effects-lab-command-input"')
+    )]
+
+    assert 'spellcheck="true"' in composer and 'autocorrect="on"' in composer
+    assert 'spellcheck="false"' in pairing and 'autocorrect="off"' in pairing
+    assert 'spellcheck="false"' in lab and 'autocorrect="off"' in lab
+
+
 def test_mobile_send_submits_before_ios_keyboard_layout_shift() -> None:
     application = files("tfr").joinpath("web", "app.mjs").read_text(encoding="utf-8")
     start = application.index('elements.sendButton.addEventListener(\n  "touchstart"')

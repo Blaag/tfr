@@ -1475,10 +1475,13 @@ class GatewayServer:
                         self._update_transaction_participants = ()
                     self._update_gateway_restart = False
                     return None
-                staged = await stage_managed_update(
-                    self.runtime.update_checker.config,
-                    expected_manifest=manifest,
-                )
+                try:
+                    staged = await stage_managed_update(
+                        self.runtime.update_checker.config,
+                        expected_manifest=manifest,
+                    )
+                except InstallationError as exc:
+                    raise ValueError(f"Gateway host update staging failed: {exc}") from exc
             except BaseException:
                 async with self._update_participants_lock:
                     self._accepting_update_participants = True

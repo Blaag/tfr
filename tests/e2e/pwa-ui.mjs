@@ -193,6 +193,8 @@ try {
     await page.locator("#event-list .event").first().getAttribute("data-event-id"),
     "event-200",
   );
+  assert.equal(await page.locator("#command-input").getAttribute("spellcheck"), "true");
+  assert.equal(await page.locator("#command-input").getAttribute("autocorrect"), "on");
   assert.equal((await page.request.get(`${origin}/combo.mjs`)).status(), 200);
   await page.locator("#motion-preference").evaluate((select) => {
     select.value = "full";
@@ -261,6 +263,10 @@ try {
   await page.locator("#settings-button").click();
   await page.locator("#effects-lab-button").click();
   await page.locator("#effects-lab[open]").waitFor();
+  assert.equal(
+    await page.locator("#effects-lab-command-input").getAttribute("spellcheck"),
+    "false",
+  );
   await page.locator("#effects-lab-combos button").getByText("Godlike", { exact: true }).click();
   await page.waitForFunction(() => document.querySelector("#effects-lab-notice")?.textContent.includes("GODLIKE"));
   await page.locator("#effects-lab-speakers button").getByText("Bob").click();
@@ -270,6 +276,15 @@ try {
   assert.match(await page.locator("#effects-lab-notice").innerText(), /Rampage/);
   assert.equal(await page.evaluate(() => window.__sentCommands.length), sentBeforeLab);
   await page.locator("#effects-lab-close").click();
+  await page.locator("#settings-button").click();
+  await page.locator("#spelling-suggestions").uncheck();
+  assert.equal(await page.locator("#command-input").getAttribute("spellcheck"), "false");
+  assert.equal(await page.locator("#command-input").getAttribute("autocorrect"), "off");
+  assert.equal(
+    await page.evaluate(() => localStorage.getItem("tfr.spellingSuggestions")),
+    "off",
+  );
+  await page.locator("#settings-dialog .close-button").click();
 
   await page.setViewportSize({ width: 390, height: 520 });
   await page.locator("#command-input").focus();

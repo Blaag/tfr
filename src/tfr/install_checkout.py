@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from tfr.executables import require_uv
 from tfr.installations import (
     InstallationError,
     InstallationLayout,
@@ -550,6 +551,11 @@ def _run(arguments: list[str], *, capture: bool = False) -> subprocess.Completed
         environment["GIT_CONFIG_NOSYSTEM"] = "1"
         environment["GIT_TERMINAL_PROMPT"] = "0"
         environment["GCM_INTERACTIVE"] = "Never"
+    if arguments[0] == "uv":
+        try:
+            arguments = [str(require_uv()), *arguments[1:]]
+        except FileNotFoundError as exc:
+            raise InstallationError(str(exc)) from exc
     try:
         return subprocess.run(
             arguments,
