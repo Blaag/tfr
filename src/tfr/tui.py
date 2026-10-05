@@ -107,7 +107,9 @@ _CORE_CLIENT_COMMANDS = frozenset(
         "clear",
         "connect",
         "disconnect",
+        "demoeffects",
         "end",
+        "effects",
         "exit",
         "gateway",
         "help",
@@ -128,6 +130,8 @@ _CORE_CLIENT_COMMANDS = frozenset(
         "restart",
         "sh",
         "spellcheck",
+        "testspeaker",
+        "teststreak",
         "update",
         "world",
     }
@@ -189,6 +193,7 @@ class ComboNotice:
     text: str
     color: str
     started_at: float
+    count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -861,6 +866,11 @@ class TfrTui:
         self._accept_combo_events = True
         self._combo_notices: dict[str, ComboNotice] = {}
         self._firework_particles: list[FireworkParticle] = []
+        self.effects_lab_open = False
+        self.effects_lab_force_motion = False
+        self.effects_display = DisplayBuffer(max_rows=2_000, width=80, height=20)
+        self._effects_task: asyncio.Task[None] | None = None
+        self._effects_notice: ComboNotice | None = None
         self._animation_task: asyncio.Task[None] | None = None
         self._animations_started = False
         self._activity_ticker_task: asyncio.Task[None] | None = None
@@ -1017,6 +1027,39 @@ class TfrTui:
             ],
             style="class:application",
         )
+        self.effects_lab_root = HSplit(
+            [
+                Window(
+                    content=FormattedTextControl(
+                        lambda: [
+                            (
+                                "class:notice.warning",
+                                " LOCAL EFFECTS LAB — NOTHING HERE IS SENT TO A WORLD ",
+                            )
+                        ]
+                    ),
+                    height=1,
+                ),
+                Window(
+                    content=FormattedTextControl(self._effects_lab_text),
+                    wrap_lines=False,
+                ),
+                Window(content=FormattedTextControl(self._effects_notice_text), height=1),
+                DynamicContainer(lambda: self.input_panels[self.active_alias]),
+                Window(
+                    content=FormattedTextControl(
+                        lambda: [
+                            (
+                                "class:status",
+                                "/teststreak all|3..7  /testspeaker NAME  /effects close",
+                            )
+                        ]
+                    ),
+                    height=1,
+                ),
+            ],
+            style="class:application",
+        )
         self.boss_control = FormattedTextControl(
             self.boss_text,
             focusable=True,
@@ -1047,29 +1090,28 @@ class TfrTui:
             lambda: (
                 self.image_preview_window
                 if self.image_preview is not None
-                else self.boss_window if self.boss_mode else self.normal_root
+                else self.boss_window
+                if self.boss_mode
+                else self.effects_lab_root
+                if self.effects_lab_open
+                else self.normal_root
             )
         )
-        self._firework_floats = [
-            Float(
-                content=Window(
-                    content=FormattedTextControl(
-                        lambda index=index: self._firework_particle_text(index)
-                    ),
-                    width=1,
-                    height=1,
-                    always_hide_cursor=True,
-                ),
-                top=0,
-                left=0,
-                width=1,
-                height=1,
-                transparent=True,
-                z_index=20,
-            )
-            for index in range(36)
-        ]
-        root = FloatContainer(content=normal_content, floats=self._firework_floats)
+        self._firework_width = 1
+        self._firework_height = 1
+        self._firework_float = Float(
+            content=Window(
+                content=FormattedTextControl(self._firework_layer_text),
+                width=lambda: self._firework_width,
+                height=lambda: self._firework_height,
+                always_hide_cursor=True,
+            ),
+            top=2,
+            left=1,
+            transparent=True,
+            z_index=20,
+        )
+        root = FloatContainer(content=normal_content, floats=[self._firework_float])
         self.application: Application[int] = Application(
             layout=Layout(root, focused_element=self.active_view.input_buffer),
             key_bindings=bindings,
@@ -1670,6 +1712,8 @@ class TfrTui:
         panel: str,
         edge: BorderEdge,
         inner_height: int,
+        *,
+        force_animation: bool = False,
     ) -> StyleAndTextTuples:
         width = max(1, view.display.width + 2)
         length = width if edge in {BorderEdge.TOP, BorderEdge.BOTTOM} else inner_height
@@ -1692,21 +1736,54 @@ class TfrTui:
         )
         notice_start = -1
         notice_style = ""
+        notice_text = notice.text if notice is not None else ""
+        notice_age = 0.0
         if (
             panel == "output"
             and edge is BorderEdge.BOTTOM
             and notice is not None
-            and self.animations_enabled
-            and not self.low_bandwidth
+            and (
+                (self.animations_enabled and not self.low_bandwidth)
+                or force_animation
+            )
         ):
-            age = time.monotonic() - notice.started_at
-            if age >= 3.6:
+            notice_age = time.monotonic() - notice.started_at
+            if notice_age >= 3.6:
                 self._combo_notices.pop(view.session.world, None)
                 notice = None
-            elif len(notice.text) <= length - 2:
-                notice_start = max(1, (length - len(notice.text)) // 2)
-                reversed_phase = age >= 3.0 and int((age - 3.0) / 0.1) % 2 == 0
-                notice_style = f"fg:{notice.color}" + (" reverse" if reversed_phase else "")
+            else:
+                if notice.count == 3 and notice_age < 0.5:
+                    visible = max(1, round(len(notice.text) * notice_age / 0.5))
+                    left = (len(notice.text) - visible) // 2
+                    notice_text = " " * left + notice.text[left : left + visible]
+                elif notice.count == 5 and notice_age < 0.6:
+                    glyphs = "?#01*"
+                    frame = int(notice_age * 20)
+                    notice_text = "".join(
+                        character
+                        if character.isspace() or (index + frame) % 4 == 0
+                        else glyphs[(index + frame) % len(glyphs)]
+                        for index, character in enumerate(notice.text.upper())
+                    )
+                elif notice.count == 7:
+                    notice_text = f"═══ {notice.text.strip('> <')} ═══"
+                if len(notice_text) <= length - 2:
+                    center = max(1, (length - len(notice_text)) // 2)
+                    if notice.count == 6 and notice_age < 1.2:
+                        travel = max(1, length - len(notice_text) - 1)
+                        phase = notice_age / 1.2
+                        notice_start = round(
+                            travel * (phase * 2 if phase <= 0.5 else (1 - phase) * 2)
+                        )
+                    else:
+                        notice_start = center
+                    reversed_phase = (
+                        notice_age >= 3.0 and int((notice_age - 3.0) / 0.1) % 2 == 0
+                    )
+                    impact = notice.count >= 6 and 1.2 <= notice_age < 1.5
+                    notice_style = f"fg:{notice.color} bold" + (
+                        " reverse" if reversed_phase or impact else ""
+                    )
 
         def mouse_handler(event: MouseEvent) -> object:
             return view.handle_border_mouse(event, edge, panel=panel)
@@ -1722,8 +1799,18 @@ class TfrTui:
                 focused=view.session.world == self.active_alias,
                 elapsed_seconds=elapsed,
             )
-            if self.animations_enabled and self.plugins is not None:
+            if (
+                (self.animations_enabled and not self.low_bandwidth) or force_animation
+            ) and self.plugins is not None:
                 fragment = self.plugins.transform_border(context, fragment)
+            if notice is not None and notice_start >= 0 and notice.count >= 3:
+                distance = min(
+                    abs(index - notice_start),
+                    abs(index - (notice_start + len(notice_text))),
+                )
+                wave = int(notice_age * 16) % max(1, length // 2)
+                if abs(distance - wave) <= 1:
+                    fragment = replace(fragment, style=f"fg:{notice.color} bold reverse")
             if more_start <= index < more_start + len(more):
                 fragment = replace(
                     fragment,
@@ -1739,11 +1826,11 @@ class TfrTui:
             if (
                 notice is not None
                 and notice_start >= 0
-                and notice_start <= index < notice_start + len(notice.text)
+                and notice_start <= index < notice_start + len(notice_text)
             ):
                 fragment = replace(
                     fragment,
-                    character=notice.text[index - notice_start],
+                    character=notice_text[index - notice_start],
                     style=notice_style,
                 )
             output.append((fragment.style, fragment.character, mouse_handler))
@@ -1781,6 +1868,7 @@ class TfrTui:
         output_height = max(1, size.rows - 7 - self.recent_input_lines)
         output_width = max(1, size.columns - 2)
         self._position_firework_particles(output_width, output_height)
+        self.effects_display.resize(width=output_width, height=output_height)
         layout_changed = False
         for view in self.views.values():
             if view.display.width != output_width or view.display.pager.height != output_height:
@@ -2032,7 +2120,7 @@ class TfrTui:
         elif combo.count == 6:
             effect, duration, pulses = TextEffectKind.COMBO_CYLON, 4.0, 1
         elif combo.count == 7:
-            effect, duration, pulses = TextEffectKind.COMBO_PULSE, 2.0, 2
+            effect, duration, pulses = TextEffectKind.COMBO_GODLIKE, 2.0, 2
         else:
             return None
         return TextDecoration(
@@ -2061,12 +2149,18 @@ class TfrTui:
         colors = ("#ff0000", "#ff8000", "#0070dd", "#ffff00", "#a335ee")
         glyphs = ("*", "+", "·")
         now = time.monotonic()
-        for _burst in range(1 + int(random_value() * 3)):
-            delay = random_value() * 2
+        bursts = 1 + int(random_value() * 3)
+        particle_budget = min(
+            1_024,
+            max(1, round(self._firework_width * self._firework_height * 0.20)),
+        )
+        per_burst, remainder = divmod(particle_budget, bursts)
+        for burst in range(bursts):
+            delay = random_value() * 0.3
             origin_x = 0.12 + random_value() * 0.76
             origin_y = 0.12 + random_value() * 0.45
             color = colors[int(random_value() * len(colors))]
-            for _particle in range(12):
+            for _particle in range(per_burst + (1 if burst < remainder else 0)):
                 self._firework_particles.append(
                     FireworkParticle(
                         world=event.world,
@@ -2079,37 +2173,45 @@ class TfrTui:
                         glyph=glyphs[int(random_value() * len(glyphs))],
                     )
                 )
-        self._firework_particles = self._firework_particles[-36:]
+        self._firework_particles = self._firework_particles[-1_024:]
 
-    def _firework_particle_text(self, index: int) -> StyleAndTextTuples:
-        if not self.animations_enabled or self.low_bandwidth:
+    def _firework_layer_text(self) -> StyleAndTextTuples:
+        if not (self.animations_enabled and not self.low_bandwidth) and not (
+            self.effects_lab_open and self.effects_lab_force_motion
+        ):
             return []
-        if index >= len(self._firework_particles):
-            return []
-        particle = self._firework_particles[index]
-        age = time.monotonic() - particle.started_at
-        if particle.world != self.active_alias or not 0 <= age < 2.2:
-            return []
-        return [(f"fg:{particle.color} bold", particle.glyph)]
+        now = time.monotonic()
+        cells: dict[tuple[int, int], tuple[str, str]] = {}
+        maximum_cells = max(1, int(self._firework_width * self._firework_height * 0.15))
+        for particle in self._firework_particles:
+            age = now - particle.started_at
+            if particle.world != self.active_alias or not 0 <= age < 2.2:
+                continue
+            x = particle.origin_x + particle.velocity_x * age
+            y = particle.origin_y + particle.velocity_y * age + 0.28 * age * age
+            column = min(self._firework_width - 1, max(0, int(x * self._firework_width)))
+            row = min(self._firework_height - 1, max(0, int(y * self._firework_height)))
+            cells.setdefault((row, column), (f"fg:{particle.color} bold", particle.glyph))
+            if len(cells) >= maximum_cells:
+                break
+        output: StyleAndTextTuples = []
+        for row in range(self._firework_height):
+            for column in range(self._firework_width):
+                style, glyph = cells.get((row, column), ("", " "))
+                output.append((style, glyph))
+            if row + 1 < self._firework_height:
+                output.append(("", "\n"))
+        return output
 
     def _position_firework_particles(self, width: int, height: int) -> None:
+        self._firework_width = max(1, width)
+        self._firework_height = max(1, height)
         now = time.monotonic()
         self._firework_particles = [
             particle
             for particle in self._firework_particles
             if now - particle.started_at < 2.2
         ]
-        for index, float_container in enumerate(self._firework_floats):
-            if index >= len(self._firework_particles):
-                float_container.top = 0
-                float_container.left = 0
-                continue
-            particle = self._firework_particles[index]
-            age = max(0.0, now - particle.started_at)
-            x = particle.origin_x + particle.velocity_x * age
-            y = particle.origin_y + particle.velocity_y * age + 0.28 * age * age
-            float_container.left = 1 + min(width - 1, max(0, int(x * width)))
-            float_container.top = 2 + min(height - 1, max(0, int(y * height)))
 
     @staticmethod
     def _inferred_display_speaker(event: Event, event_text: str | None) -> Event:
@@ -2233,7 +2335,7 @@ class TfrTui:
                 )
                 if combo is not None and combo_enabled:
                     self._combo_notices[event.world] = ComboNotice(
-                        combo.notice, combo.color, time.monotonic()
+                        combo.notice, combo.color, time.monotonic(), combo.count
                     )
                     if combo.count == 7:
                         self._start_fireworks(event)
@@ -2482,6 +2584,15 @@ class TfrTui:
             text = text[1:]
         elif text.startswith("/"):
             await self._handle_client_command(alias, text)
+            return
+
+        if self.effects_lab_open:
+            self.effects_display.append(
+                self.theme.ansi_text(
+                    "warning", "-- Effects Lab accepts local /test commands only --"
+                )
+            )
+            self.application.invalidate()
             return
 
         view = self.views[alias]
@@ -2836,6 +2947,12 @@ class TfrTui:
             self._handle_animations_command(alias, parameters)
         elif command == "spellcheck":
             self._handle_spellcheck_command(alias, parameters)
+        elif command in {"effects", "demoeffects"}:
+            await self._handle_effects_command(parameters)
+        elif command == "teststreak":
+            await self._handle_teststreak(parameters)
+        elif command == "testspeaker":
+            self._handle_testspeaker(parameters)
         elif self.plugins is not None and await self.plugins.execute_command(
             command, tuple(parameters), alias
         ):
@@ -2874,6 +2991,9 @@ class TfrTui:
             "  /mouse auto|terminal|tfr|status - choose who handles mouse input",
             "  /animations [on|off|status] - enable continuous UI effects",
             "  /spellcheck on|off|status|undo - correct explicit speech and poses locally",
+            "  /effects - open the local Effects Lab; /demoeffects is an alias",
+            "  /teststreak [all|3..7] - preview combo effects without sending anything",
+            "  /testspeaker NAME - preview configured speaker decorators locally",
             "  /update - update TFR and stable-auto plugins on the Gateway and all connected UIs",
             "  /update status|check - inspect stable TFR and plugin releases",
             "  /plugins - show configured, loaded, and failed plugins",
@@ -2916,6 +3036,291 @@ class TfrTui:
                 description = self.plugins.registry.command_help.get(command, "plugin command")
                 lines.append(f"  /{command} ({plugin}) - {description}")
         return "\n".join(lines)
+
+    def _effects_notice_text(self) -> StyleAndTextTuples:
+        if not self._effects_motion_enabled():
+            return [("class:notice.warning", " Effects suppressed; use /effects force on ")]
+        notice = self._effects_notice
+        if notice is None:
+            return [("class:border", "─" * max(1, self.effects_display.width))]
+        alias = self.active_alias
+        previous = self._combo_notices.get(alias)
+        self._combo_notices[alias] = notice
+        try:
+            fragments = self._border_text(
+                self.active_view,
+                "output",
+                BorderEdge.BOTTOM,
+                self.effects_display.pager.height,
+                force_animation=self.effects_lab_force_motion,
+            )
+        finally:
+            if previous is None:
+                self._combo_notices.pop(alias, None)
+            else:
+                self._combo_notices[alias] = previous
+        if time.monotonic() - notice.started_at >= 3.6:
+            self._effects_notice = None
+        return fragments[1:-1]
+
+    def _effects_lab_text(self) -> StyleAndTextTuples:
+        rows = self.effects_display.padded_visible_rows(
+            elapsed_seconds=self._effects_animation_elapsed_seconds(),
+            animations_enabled=self._effects_motion_enabled(),
+            now_seconds=time.monotonic(),
+        )
+        return rows_to_formatted_text(rows)
+
+    async def _handle_effects_command(self, parameters: list[str]) -> None:
+        operation = parameters[0].casefold() if parameters else "open"
+        if operation in {"close", "off", "stop"}:
+            self.effects_lab_open = False
+            self.effects_lab_force_motion = False
+            if self._effects_task is not None:
+                self._effects_task.cancel()
+                self._effects_task = None
+            self._effects_notice = None
+            self._firework_particles.clear()
+            self.application.invalidate()
+            return
+        if operation == "force":
+            if len(parameters) != 2 or parameters[1].casefold() not in {"on", "off"}:
+                self.effects_display.append("Usage: /effects force on|off", recallable=False)
+                return
+            self.effects_lab_open = True
+            self.effects_lab_force_motion = parameters[1].casefold() == "on"
+            self._sync_animation_task(restart=True)
+            self.application.invalidate()
+            return
+        self.effects_lab_open = True
+        if operation in {"open", "list"}:
+            speakers = tuple(
+                demo.label for demo in self.plugins.effect_demos() if demo.category == "speaker"
+            )
+            lines = [
+                "Effects Lab",
+                "  /teststreak all       play every combo tier",
+                "  /teststreak 3..7      preview one tier immediately",
+                "  /testspeaker NAME     preview the real configured rule",
+                "  /effects effect NAME preview a built-in text effect",
+                "  /effects force on     override motion only inside this lab",
+                "  /effects close        return to the active world",
+                "",
+                "Configured speakers: " + (", ".join(speakers) if speakers else "none registered"),
+            ]
+            self.effects_display.append("\n".join(lines), recallable=False)
+        elif operation == "combos":
+            await self._handle_teststreak(["all"])
+        elif operation == "speakers":
+            for speaker in (
+                demo.label for demo in self.plugins.effect_demos() if demo.category == "speaker"
+            ):
+                self._handle_testspeaker([speaker])
+        elif operation == "all":
+            for speaker in (
+                demo.label for demo in self.plugins.effect_demos() if demo.category == "speaker"
+            ):
+                self._handle_testspeaker([speaker])
+            await self._handle_teststreak(["all"])
+        elif operation == "effect" and len(parameters) == 2:
+            self._show_text_effect_demo(parameters[1])
+        else:
+            names = ", ".join(effect.value for effect in TextEffectKind)
+            self.effects_display.append(f"Built-in effects: {names}", recallable=False)
+        self.application.invalidate()
+
+    def _effects_motion_enabled(self) -> bool:
+        return self.effects_lab_force_motion or (
+            self.animations_enabled and not self.low_bandwidth
+        )
+
+    def _effects_animation_elapsed_seconds(self) -> float:
+        if self.effects_lab_open and self.effects_lab_force_motion:
+            return time.monotonic() - self._animation_epoch
+        return self._animation_elapsed_seconds()
+
+    def _effect_demo_event(
+        self,
+        speaker: str,
+        kind: EventKind,
+        text: str,
+        *,
+        world: str | None = None,
+    ) -> Event:
+        session = self.views[world].session if world in self.views else self.active_view.session
+        return Event(
+            session_id=session.session_id,
+            world=session.world,
+            connection_generation=session.connection_generation,
+            sequence=0,
+            direction=Direction.INBOUND,
+            kind=kind,
+            timestamp=datetime.now(UTC),
+            canonical_text=text,
+            plain_text=text,
+            display_text=text,
+            parser_name="effects-lab",
+            provenance=Provenance(sender_name=speaker, confidence=Confidence.INFERRED),
+        )
+
+    def _append_effect_demo(self, event: Event) -> None:
+        text = self.plugins.transform_display(event) or event.display_text
+        if text is None:
+            return
+        decorations = self.plugins.decorate_display(event, text)
+        programs = self.plugins.presentation_programs(event, terminal_plain_text(text))
+        elapsed = self._effects_animation_elapsed_seconds()
+        decorations = tuple(
+            replace(item, phase_offset_seconds=-elapsed) for item in decorations
+        )
+        presentations = tuple(
+            ActiveEffectProgram(item, phase_offset_seconds=-elapsed) for item in programs
+        )
+        self.effects_display.append(
+            text,
+            decorations=decorations,
+            presentations=presentations,
+            recallable=False,
+        )
+        self._sync_animation_task(restart=True)
+        self.application.invalidate()
+
+    def _handle_testspeaker(self, parameters: list[str]) -> None:
+        self.effects_lab_open = True
+        if not parameters:
+            speakers = tuple(
+                demo.label for demo in self.plugins.effect_demos() if demo.category == "speaker"
+            )
+            self.effects_display.append(
+                "Configured speakers: " + (", ".join(speakers) if speakers else "none"),
+                recallable=False,
+            )
+            return
+        speaker = " ".join(parameters)
+        demo = next(
+            (
+                candidate
+                for candidate in self.plugins.effect_demos()
+                if candidate.label.casefold() == speaker.casefold()
+            ),
+            None,
+        )
+        if demo is None:
+            self.effects_display.append(
+                f"No configured effect demo for {speaker}", recallable=False
+            )
+            return
+        self.effects_display.append(
+            f"-- Configured speaker preview: {speaker} --", recallable=False
+        )
+        world = next((candidate for candidate in demo.worlds if candidate in self.views), None)
+        for sample in demo.samples:
+            self._append_effect_demo(
+                self._effect_demo_event(
+                    speaker,
+                    sample.kind,
+                    sample.text,
+                    world=world,
+                )
+            )
+
+    def _show_text_effect_demo(self, name: str) -> None:
+        try:
+            effect = TextEffectKind(name.casefold())
+        except ValueError:
+            self.effects_display.append(f"Unknown effect: {name}", recallable=False)
+            return
+        text = f"{effect.value}: The quick brown fox previews this effect."
+        start = text.index(":") + 2
+        interval = (
+            0.05
+            if effect is TextEffectKind.TERMINAL_REVEAL
+            else 0.08
+            if effect in {TextEffectKind.CAPITALIZATION_ROLL, TextEffectKind.CASE_WAVE}
+            else 2.0
+        )
+        decoration = TextDecoration(
+            start=start,
+            end=len(text),
+            effect=effect,
+            base_color=self.theme.output_color,
+            accent_color="#ffffff",
+            interval_seconds=interval,
+            repeat_seconds=10,
+            phase_offset_seconds=-self._effects_animation_elapsed_seconds(),
+            frames_per_second=20,
+            loop=False,
+            effect_width=3,
+            sparkle_count=4,
+        )
+        self.effects_display.append(text, decorations=(decoration,), recallable=False)
+        self._sync_animation_task(restart=True)
+        self.application.invalidate()
+
+    async def _handle_teststreak(self, parameters: list[str]) -> None:
+        self.effects_lab_open = True
+        value = parameters[0].casefold() if parameters else "all"
+        if value == "all":
+            if self._effects_task is not None:
+                self._effects_task.cancel()
+            self._effects_task = asyncio.create_task(
+                self._play_streak_demos(), name="tfr-effects-streak-demo"
+            )
+            self._background_tasks.add(self._effects_task)
+            self._effects_task.add_done_callback(self._background_task_done)
+            return
+        try:
+            count = int(value)
+        except ValueError:
+            count = 0
+        if not 3 <= count <= 8:
+            self.effects_display.append("Usage: /teststreak [all|3|4|5|6|7|8]", recallable=False)
+            return
+        self._show_combo_demo(count)
+
+    async def _play_streak_demos(self) -> None:
+        try:
+            for count in range(3, 9):
+                self._show_combo_demo(count)
+                await asyncio.sleep(4.2)
+        except asyncio.CancelledError:
+            return
+        finally:
+            self._effects_task = None
+
+    def _show_combo_demo(self, count: int) -> None:
+        text = f'Demo says, "This message triggers combo level {count}."'
+        body_start = text.index('"') + 1
+        combo = Combo(count, "Demo", body_start, len(text) - 1)
+        elapsed = self._effects_animation_elapsed_seconds()
+        decoration = self._combo_decoration(combo, elapsed)
+        transient = ()
+        if count == 3:
+            transient = (
+                TransientStyleSpan(
+                    start=body_start,
+                    end=len(text) - 1,
+                    style="bold",
+                    start_color=self.theme.output_color,
+                    end_color=self.theme.output_color,
+                    started_at=time.monotonic(),
+                    duration_seconds=0.25,
+                    purpose="combo",
+                ),
+            )
+        self.effects_display.append(
+            text,
+            decorations=(decoration,) if decoration is not None else (),
+            transient_style_spans=transient,
+            recallable=False,
+        )
+        self._effects_notice = ComboNotice(combo.notice, combo.color, time.monotonic(), count)
+        if count == 7:
+            self._start_fireworks(
+                self._effect_demo_event("Demo", EventKind.SAY, text)
+            )
+        self._sync_animation_task(restart=True)
+        self.application.invalidate()
 
     def _plugin_status_text(self) -> str:
         requested = self.plugins.requested_plugins
@@ -3246,8 +3651,10 @@ class TfrTui:
         has_fireworks = self._firework_frame_delay() is not None
         can_animate = (
             self._animations_started
-            and self.animations_enabled
-            and not self.low_bandwidth
+            and (
+                (self.animations_enabled and not self.low_bandwidth)
+                or (self.effects_lab_open and self.effects_lab_force_motion)
+            )
             and not self.boss_mode
         )
         should_run = can_animate and (
@@ -3302,12 +3709,20 @@ class TfrTui:
             self.application.invalidate()
 
     def _text_frame_delay(self, elapsed_seconds: float) -> float | None:
+        if self.effects_lab_open:
+            return self.effects_display.animation_frame_delay(
+                self._effects_animation_elapsed_seconds()
+            )
         if self.inspector_agent is not None or self._screen_clear_world == self.active_alias:
             return None
         return self.active_view.display.animation_frame_delay(elapsed_seconds)
 
     def _combo_frame_delay(self) -> float | None:
-        notice = self._combo_notices.get(self.active_alias)
+        notice = (
+            self._effects_notice
+            if self.effects_lab_open
+            else self._combo_notices.get(self.active_alias)
+        )
         if notice is None:
             return None
         remaining = notice.started_at + 3.6 - time.monotonic()
@@ -3341,7 +3756,9 @@ class TfrTui:
     async def _animate_ui(self) -> None:
         while True:
             elapsed_seconds = self._animation_elapsed_seconds()
-            can_animate = self.animations_enabled and not self.low_bandwidth
+            can_animate = (self.animations_enabled and not self.low_bandwidth) or (
+                self.effects_lab_open and self.effects_lab_force_motion
+            )
             border_delay = (
                 self.plugins.border_frame_delay(elapsed_seconds)
                 if can_animate and self.plugins is not None

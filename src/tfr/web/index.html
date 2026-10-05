@@ -111,6 +111,7 @@
             <span>Line wrap</span>
             <input id="line-wrap" type="checkbox" role="switch" checked>
           </label>
+          <button id="effects-lab-button" type="button">Open Effects Lab</button>
         </fieldset>
         <section class="about-settings" aria-labelledby="about-heading">
           <h3 id="about-heading" class="settings-heading">About</h3>
@@ -121,6 +122,39 @@
         </section>
         <button id="unpair-device" class="unpair-device" type="button">Unpair this phone</button>
       </form>
+    </dialog>
+
+    <dialog id="effects-lab" class="effects-lab" aria-labelledby="effects-lab-title">
+      <section class="effects-lab-sheet">
+        <header>
+          <div>
+            <p class="eyebrow">Local preview — nothing is sent</p>
+            <h2 id="effects-lab-title">Effects Lab</h2>
+          </div>
+          <button id="effects-lab-close" class="close-button" type="button" aria-label="Close Effects Lab">×</button>
+        </header>
+        <label class="setting-row">
+          <span>Force full motion in lab</span>
+          <input id="effects-lab-force-motion" type="checkbox" role="switch">
+        </label>
+        <section>
+          <h3>Combo streaks</h3>
+          <div id="effects-lab-combos" class="effects-lab-buttons"></div>
+        </section>
+        <section>
+          <h3>Configured speakers</h3>
+          <div id="effects-lab-speakers" class="effects-lab-buttons"></div>
+        </section>
+        <div id="effects-lab-stage" class="effects-lab-stage">
+          <p id="effects-lab-message" class="event-text">Choose an effect to preview.</p>
+          <div id="effects-lab-notice" class="combo-notice" hidden></div>
+          <div id="effects-lab-fireworks" class="combo-fireworks"></div>
+        </div>
+        <form id="effects-lab-command" class="effects-lab-command">
+          <input id="effects-lab-command-input" type="text" autocomplete="off" placeholder="/teststreak all or /testspeaker Bob">
+          <button type="submit">Run</button>
+        </form>
+      </section>
     </dialog>
 
     <dialog id="history-dialog" class="history-dialog" aria-labelledby="history-dialog-title">

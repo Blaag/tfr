@@ -145,9 +145,17 @@ async def test_two_worlds_exchange_traffic_without_leakage() -> None:
             writer.write(bytes((Command.IAC, Command.WILL, Option.ECHO)))
             writer.write(f"welcome {label}\r\nPrompt>".encode())
             await writer.drain()
-            negotiation = await reader.readexactly(3)
-            assert negotiation == bytes((Command.IAC, Command.DO, Option.ECHO))
-            future.set_result(await reader.readline())
+            negotiation = bytes((Command.IAC, Command.DO, Option.ECHO))
+            received_bytes = bytearray()
+            while negotiation not in received_bytes or b"\n" not in received_bytes:
+                chunk = await reader.read(1_024)
+                if not chunk:
+                    break
+                received_bytes.extend(chunk)
+            assert negotiation in received_bytes
+            received_bytes = bytearray(bytes(received_bytes).replace(negotiation, b"", 1))
+            newline = received_bytes.index(b"\n") + 1
+            future.set_result(bytes(received_bytes[:newline]))
             writer.close()
             await writer.wait_closed()
 
@@ -175,8 +183,10 @@ async def test_two_worlds_exchange_traffic_without_leakage() -> None:
     )
 
     try:
-        await asyncio.gather(alpha.start(), beta.start())
-        await asyncio.gather(alpha.wait_connected(), beta.wait_connected())
+        await asyncio.wait_for(asyncio.gather(alpha.start(), beta.start()), timeout=5)
+        await asyncio.wait_for(
+            asyncio.gather(alpha.wait_connected(), beta.wait_connected()), timeout=5
+        )
         await command_bus.submit(
             CommandRequest(
                 session_id=alpha.session_id,
@@ -193,9 +203,11 @@ async def test_two_worlds_exchange_traffic_without_leakage() -> None:
                 text="look beta",
             )
         )
-        assert await received["alpha"] == b"look alpha\r\n"
-        assert await received["beta"] == b"look beta\r\n"
-        await asyncio.gather(alpha.wait_closed(), beta.wait_closed())
+        assert await asyncio.wait_for(received["alpha"], timeout=5) == b"look alpha\r\n"
+        assert await asyncio.wait_for(received["beta"], timeout=5) == b"look beta\r\n"
+        await asyncio.wait_for(
+            asyncio.gather(alpha.wait_closed(), beta.wait_closed()), timeout=5
+        )
     finally:
         await asyncio.gather(alpha.stop(), beta.stop())
         for server in servers:

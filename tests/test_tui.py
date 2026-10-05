@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -51,6 +52,8 @@ from tfr.gateway_protocol import event_from_message, event_message
 from tfr.pager import PagerMode
 from tfr.plugin_api import (
     BorderFragment,
+    EffectDemo,
+    EffectDemoSample,
     ScreenClearContext,
     TextDecoration,
     TextEffectKind,
@@ -241,6 +244,17 @@ async def add_speaker_effects(
                 )
 
             registrar.register_display_decorator("speaker-fixture", decorate)  # type: ignore[attr-defined]
+            registrar.register_effect_demo(  # type: ignore[attr-defined]
+                EffectDemo(
+                    id="speaker:alice",
+                    label="Alice",
+                    category="speaker",
+                    samples=(
+                        EffectDemoSample(EventKind.SAY, 'Alice says, "Preview message."'),
+                        EffectDemoSample(EventKind.POSE, "Alice previews the pose effect."),
+                    ),
+                )
+            )
 
     tui.plugins = await PluginManager.load(
         enabled=("speaker-fixture",),
@@ -1935,6 +1949,8 @@ def test_combo_streak_bolds_third_message_body_and_overlays_border() -> None:
 
     for sequence in range(1, 4):
         tui.handle_event(combo_say(tui, sequence))
+    notice = tui._combo_notices["alpha"]
+    tui._combo_notices["alpha"] = replace(notice, started_at=notice.started_at - 0.6)
 
     output = tui.active_view.output_text()
     message_style = next(style for style, text in output if text == "message 3")
@@ -1950,6 +1966,8 @@ def test_combo_notice_is_confined_to_output_bottom_border() -> None:
     tui = make_tui()
     for sequence in range(1, 4):
         tui.handle_event(combo_say(tui, sequence))
+    notice = tui._combo_notices["alpha"]
+    tui._combo_notices["alpha"] = replace(notice, started_at=notice.started_at - 0.6)
 
     for panel in ("output", "input"):
         for edge in BorderEdge:
@@ -2072,6 +2090,60 @@ def test_repeated_empty_speech_does_not_stop_later_output() -> None:
     assert not tui._combo_notices
 
 
+async def test_effects_lab_commands_are_local_and_use_real_renderers() -> None:
+    tui = make_tui()
+    await add_speaker_effects(tui)
+    session = tui.active_view.session
+    session.state = SessionState.CONNECTED
+    queue = tui.command_bus.register(session.session_id)
+
+    await tui.submit_text("alpha", "/effects")
+    await tui.submit_text("alpha", "/teststreak 6")
+    await tui.submit_text("alpha", "/testspeaker Alice")
+
+    assert tui.effects_lab_open is True
+    assert queue.empty()
+    assert tui._effects_notice is not None
+    assert tui._effects_notice.text == "> Unstoppable! <"
+    rendered = fragment_list_to_text(tui.effects_display.formatted_text())
+    assert "Configured speaker preview: Alice" in rendered
+    assert "Alice says" in rendered
+
+    await tui.submit_text("alpha", "this must not be sent")
+    assert queue.empty()
+
+    await tui.submit_text("alpha", "/effects close")
+    assert tui.effects_lab_open is False
+
+
+async def test_effects_lab_full_streak_playback_is_cancellable() -> None:
+    tui = make_tui()
+    await tui.submit_text("alpha", "/teststreak all")
+    assert tui._effects_task is not None
+
+    await tui.submit_text("alpha", "/effects close")
+    await asyncio.sleep(0)
+
+    assert tui._effects_task is None
+    assert not tui._firework_particles
+
+
+async def test_effects_lab_force_motion_is_local_and_resets_on_close() -> None:
+    tui = make_tui()
+    tui._set_low_bandwidth(True)
+
+    await tui.submit_text("alpha", "/effects force on")
+
+    assert tui.effects_lab_force_motion is True
+    assert tui._effects_motion_enabled() is True
+    assert tui.low_bandwidth is True
+
+    await tui.submit_text("alpha", "/effects close")
+
+    assert tui.effects_lab_force_motion is False
+    assert tui.low_bandwidth is True
+
+
 def test_disabling_motion_cancels_combo_visuals_without_resume() -> None:
     tui = make_tui()
     for sequence in range(1, 5):
@@ -2088,11 +2160,12 @@ def test_disabling_motion_cancels_combo_visuals_without_resume() -> None:
 
 def test_godlike_starts_bounded_fireworks_once_and_higher_counts_only_update_notice() -> None:
     tui = make_tui()
+    tui._position_firework_particles(80, 24)
     expected = {
         4: TextEffectKind.COMBO_PULSE,
         5: TextEffectKind.COMBO_FLASH_UPPER,
         6: TextEffectKind.COMBO_CYLON,
-        7: TextEffectKind.COMBO_PULSE,
+        7: TextEffectKind.COMBO_GODLIKE,
     }
     for sequence in range(1, 8):
         tui.handle_event(combo_say(tui, sequence))
@@ -2103,13 +2176,22 @@ def test_godlike_starts_bounded_fireworks_once_and_higher_counts_only_update_not
             )
 
     particle_count = len(tui._firework_particles)
-    assert 12 <= particle_count <= 36
-    assert tui._combo_notices["alpha"].text == "> GODLIKE! <"
-    tui._position_firework_particles(80, 24)
-    assert all(
-        isinstance(float_container.left, int) and isinstance(float_container.top, int)
-        for float_container in tui._firework_floats[:particle_count]
+    expected_particles = min(
+        1_024,
+        max(1, round(tui._firework_width * tui._firework_height * 0.20)),
     )
+    assert particle_count == expected_particles
+    assert tui._combo_notices["alpha"].text == "> GODLIKE! <"
+    assert len(fragment_list_to_text(tui._firework_layer_text())) >= 80 * 24
+    now = time.monotonic()
+    tui._firework_particles = [
+        replace(particle, started_at=now - 2) for particle in tui._firework_particles
+    ]
+    occupied = sum(
+        character not in {" ", "\n"}
+        for character in fragment_list_to_text(tui._firework_layer_text())
+    )
+    assert 80 * 24 * 0.10 <= occupied <= 80 * 24 * 0.15
 
     tui.handle_event(combo_say(tui, 8))
 

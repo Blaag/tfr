@@ -49,6 +49,7 @@ class TextEffectKind(StrEnum):
     COMBO_PULSE = "combo_pulse"
     COMBO_FLASH_UPPER = "combo_flash_upper"
     COMBO_CYLON = "combo_cylon"
+    COMBO_GODLIKE = "combo_godlike"
 
 
 def validate_color(value: str) -> str:
@@ -356,7 +357,13 @@ class TextDecoration:
         if self.effect is TextEffectKind.COMBO_PULSE:
             intensity = math.sin(math.pi * self.sparkle_count * progress) ** 2
             return (
-                f"fg:{interpolate_color(self.base_color, self.accent_color, intensity)}",
+                " ".join(
+                    (
+                        f"fg:{interpolate_color(self.base_color, self.accent_color, intensity)}",
+                        "bold" if intensity > 0.35 else "",
+                        "reverse" if intensity > 0.82 else "",
+                    )
+                ).strip(),
                 character,
             )
         if self.effect is TextEffectKind.COMBO_FLASH_UPPER:
@@ -364,7 +371,10 @@ class TextDecoration:
             if get_cwidth(replacement) != get_cwidth(character):
                 replacement = character
             color = self.accent_color if int(phase_seconds / 0.1) % 2 == 0 else self.base_color
-            return f"fg:{color}", replacement
+            style = f"fg:{color} bold" + (
+                " reverse" if int(phase_seconds / 0.1) % 4 == 0 else ""
+            )
+            return style, replacement
         if self.effect is TextEffectKind.COMBO_CYLON:
             sweep_duration = self.burst_duration_seconds / 2
             if phase_seconds >= sweep_duration:
@@ -381,9 +391,17 @@ class TextDecoration:
             ) * max(0, self.length - 1)
             intensity = max(0.0, 1.0 - abs(index - position) / self.effect_width)
             return (
-                f"fg:{interpolate_color(self.base_color, self.accent_color, intensity)}",
+                f"fg:{interpolate_color(self.base_color, self.accent_color, intensity)}"
+                + (" bold reverse" if intensity > 0.72 else ""),
                 character,
             )
+        if self.effect is TextEffectKind.COMBO_GODLIKE:
+            palette = ("#ff8000", "#ffff00", "#ffffff", "#ffff00", "#ff8000")
+            scaled = ((index / max(1, self.length)) + progress * 2) % 1 * (len(palette) - 1)
+            section = min(len(palette) - 2, int(scaled))
+            color = interpolate_color(palette[section], palette[section + 1], scaled - section)
+            flash = int(phase_seconds / 0.25) % 4 == 0
+            return f"fg:{color} bold" + (" reverse" if flash else ""), character
         if self.effect is TextEffectKind.CAPITALIZATION_ROLL:
             active = int(phase_seconds / self.interval_seconds) % self.length
             replacement = character.upper() if index == active else character.lower()

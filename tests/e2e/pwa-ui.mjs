@@ -94,6 +94,26 @@ await context.addInitScript(() => {
           ],
           history_reset: false,
           history_truncated: false,
+          effect_demos: [
+            {
+              id: "speaker:bob",
+              label: "Bob",
+              category: "speaker",
+              samples: [
+                {
+                  id: "demo-bob",
+                  timestamp: new Date().toISOString(),
+                  world: "dev-local",
+                  connection_generation: "1",
+                  direction: "inbound",
+                  kind: "say",
+                  text: 'Bob says, "Configured effect preview."',
+                  redacted: false,
+                  text_truncated: false,
+                },
+              ],
+            },
+          ],
         });
         for (const event of events) this.message(event);
         this.message({ type: "ready", protocol: 1, cursor: "700" });
@@ -237,6 +257,19 @@ try {
       notice,
     );
   }
+  const sentBeforeLab = await page.evaluate(() => window.__sentCommands.length);
+  await page.locator("#settings-button").click();
+  await page.locator("#effects-lab-button").click();
+  await page.locator("#effects-lab[open]").waitFor();
+  await page.locator("#effects-lab-combos button").getByText("Godlike", { exact: true }).click();
+  await page.waitForFunction(() => document.querySelector("#effects-lab-notice")?.textContent.includes("GODLIKE"));
+  await page.locator("#effects-lab-speakers button").getByText("Bob").click();
+  assert.match(await page.locator("#effects-lab-message").innerText(), /Bob says/);
+  await page.locator("#effects-lab-command-input").fill("/teststreak 4");
+  await page.locator("#effects-lab-command button").click();
+  assert.match(await page.locator("#effects-lab-notice").innerText(), /Rampage/);
+  assert.equal(await page.evaluate(() => window.__sentCommands.length), sentBeforeLab);
+  await page.locator("#effects-lab-close").click();
 
   await page.setViewportSize({ width: 390, height: 520 });
   await page.locator("#command-input").focus();

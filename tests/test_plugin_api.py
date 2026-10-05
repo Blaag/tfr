@@ -9,6 +9,8 @@ from tfr.plugin_api import (
     BossViewEvent,
     BossViewHandle,
     BossWorldStatus,
+    EffectDemo,
+    EffectDemoSample,
     escape_world_text,
 )
 
@@ -22,6 +24,8 @@ def test_public_plugin_api_exposes_version_and_world_text_escaping() -> None:
     assert BossViewEvent
     assert BossViewHandle
     assert BossWorldStatus
+    assert EffectDemo
+    assert EffectDemoSample
     assert escape_world_text(text, "bare") == text
     assert escape_world_text(text, "tinymux") == r"%ba%t\[\%\]\{x\}\(\)\,\;\#\\"
     assert escape_world_text(text, "tinymush") == r"%ba%t\[\%\]\{x\}(),\;#\\"

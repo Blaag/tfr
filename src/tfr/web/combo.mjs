@@ -1,5 +1,26 @@
 export const COMBO_TIMEOUT_MS = 300_000;
 
+export function fireworkParticleBudget(width, height, cellWidth = 8, lineHeight = 16) {
+  const columns = Math.max(1, Math.floor(width / Math.max(1, cellWidth)));
+  const rows = Math.max(1, Math.floor(height / Math.max(1, lineHeight)));
+  const cells = columns * rows;
+  return Math.min(1024, Math.max(1, Math.min(Math.round(cells * 0.12), Math.floor(cells * 0.15))));
+}
+
+export function validatedComboCue(value, text) {
+  const length = Array.from(text || "").length;
+  if (
+    !value || typeof value !== "object" ||
+    !Number.isInteger(value.count) || value.count < 3 || value.count > 1_000_000 ||
+    typeof value.speaker !== "string" || !value.speaker || value.speaker.length > 100 ||
+    !Number.isInteger(value.body_start) || !Number.isInteger(value.body_end) ||
+    value.body_start < 0 || value.body_end <= value.body_start || value.body_end > length ||
+    typeof value.notice !== "string" || !value.notice || value.notice.length > 100 ||
+    !/^#[0-9a-fA-F]{6}$/.test(value.color)
+  ) return null;
+  return { ...value };
+}
+
 const LEVELS = {
   3: ["> Speaking Spree! <", "#ffffff"],
   4: ["> Rampage! <", "#1eff00"],

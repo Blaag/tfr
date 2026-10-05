@@ -17,6 +17,8 @@ from tfr.plugins import (
     PLUGIN_ENTRY_POINT_GROUP,
     BossViewContext,
     BossViewEvent,
+    EffectDemo,
+    EffectDemoSample,
     EventPatch,
     PluginLifecycleEvent,
     PluginManager,
@@ -27,6 +29,42 @@ from tfr.plugins import (
 )
 from tfr.presentation import color_pulse
 from tfr.text_effects import TextDecoration, TextEffectKind
+
+
+def test_effect_demo_registration_is_typed_bounded_and_discoverable() -> None:
+    registry = PluginRegistry()
+    registrar = PluginRegistrar("fixture", registry)
+    demo = EffectDemo(
+        id="speaker:alice",
+        label="Alice",
+        category="speaker",
+        samples=(EffectDemoSample(EventKind.SAY, 'Alice says, "Preview."'),),
+    )
+
+    registrar.register_effect_demo(demo)
+
+    assert registry.effect_demos["speaker:alice"] == ("fixture", demo)
+    with pytest.raises(ValueError, match="one bounded line"):
+        EffectDemoSample(EventKind.SAY, "bad\nline")
+
+
+def test_configured_speaker_effect_demo_preserves_world_scope() -> None:
+    manager = PluginManager(
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        scope="ui",
+    )
+    manager.config = {
+        "speaker_effects": {
+            "rules": [{"speaker": "Bob", "worlds": ["alpha"], "effect": "cylon"}]
+        }
+    }
+
+    demo = manager.effect_demos()[0]
+
+    assert demo.label == "Bob"
+    assert demo.worlds == ("alpha",)
 
 
 class MemorySink:

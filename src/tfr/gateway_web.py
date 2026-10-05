@@ -13,13 +13,14 @@ from email.utils import format_datetime
 from importlib.resources import files
 from typing import Any
 from urllib.parse import urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from aiohttp import WSMsgType, web
 
 from tfr.ansi import BrowserTextSpan, ansi_visible_text, browser_text_spans, terminal_plain_text
+from tfr.combo import Combo, ComboTracker
 from tfr.core import UnknownSessionError
-from tfr.events import ActorType, Event, EventKind
+from tfr.events import ActorType, Confidence, Direction, Event, EventKind, Provenance
 from tfr.gateway import GatewayRuntime, HistorySubscription, SequencedEvent
 from tfr.gateway_devices import DeviceRecord, DeviceStore
 from tfr.plugins import PluginManager
@@ -29,6 +30,7 @@ WEB_PROTOCOL_VERSION = 1
 SESSION_COOKIE = "__Host-tfr_session"
 TAILSCALE_LOGIN_HEADER = "Tailscale-User-Login"
 MAX_WEB_MESSAGE_BYTES = 65_536
+MAX_WEB_EFFECT_DEMOS_BYTES = 131_072
 MAX_COMMANDS_PER_MINUTE = 30
 MAX_PAIRING_ATTEMPTS_PER_MINUTE = 20
 MAX_GLOBAL_PAIRING_ATTEMPTS_PER_MINUTE = 100
@@ -70,6 +72,7 @@ _ASSETS = {
         "text/javascript; charset=utf-8",
     ),
     "/event-details.mjs": ("event-details.mjs", "text/javascript; charset=utf-8"),
+    "/effects-lab.mjs": ("effects-lab.mjs", "text/javascript; charset=utf-8"),
     "/history-notice.mjs": ("history-notice.mjs", "text/javascript; charset=utf-8"),
     "/linkify.mjs": ("linkify.mjs", "text/javascript; charset=utf-8"),
     "/motion.mjs": ("motion.mjs", "text/javascript; charset=utf-8"),
@@ -90,6 +93,7 @@ def browser_event(
     cursor: int,
     event: Event,
     plugins: PluginManager | None = None,
+    combo: Combo | None = None,
 ) -> dict[str, Any] | None:
     if not _browser_event_allowed(event):
         return None
@@ -143,6 +147,15 @@ def browser_event(
             value["event"]["spoof_sender_confidence"] = (
                 event.spoof.attribution_confidence.value
             )
+    if combo is not None and 0 <= combo.body_start < combo.body_end <= len(text):
+        value["event"]["combo"] = {
+            "count": combo.count,
+            "speaker": combo.speaker,
+            "body_start": combo.body_start,
+            "body_end": combo.body_end,
+            "notice": combo.notice,
+            "color": combo.color,
+        }
     speaker_span = event.spoof.speaker_span if event.spoof is not None else None
     if speaker_span is not None and not (0 <= speaker_span[0] < speaker_span[1] <= len(text)):
         speaker_span = None
@@ -165,7 +178,7 @@ def browser_event(
         delay = event.metadata.get("delay_seconds")
         if isinstance(delay, (int, float)) and not isinstance(delay, bool):
             value["event"]["reconnect_delay_seconds"] = delay
-    for optional_field in ("presentation", "text_runs", "provenance"):
+    for optional_field in ("presentation", "combo", "text_runs", "provenance"):
         if len(json.dumps(value, ensure_ascii=True).encode("utf-8")) <= MAX_WEB_MESSAGE_BYTES:
             break
         value["event"].pop(optional_field, None)
@@ -406,7 +419,7 @@ class WebGatewayServer:
                 web.get("/ws", self._websocket),
                 web.get(
                     "/{asset:index.html|app.mjs|command.mjs|connection-lifecycle.mjs|"
-                    "event-details.mjs|history-notice.mjs|linkify.mjs|motion.mjs|pairing.mjs|"
+                    "event-details.mjs|effects-lab.mjs|history-notice.mjs|linkify.mjs|motion.mjs|pairing.mjs|"
                     "presentation.mjs|combo.mjs|swipe.mjs|text-runs.mjs|styles.css|manifest.webmanifest|"
                     "sw.js|icon.svg|icon-512.png|"
                     "apple-touch-icon.png}",
@@ -751,9 +764,12 @@ class WebGatewayServer:
                 device,
                 session_token,
                 history_reset=history_reset,
+                combo_tracker=(combo_tracker := ComboTracker()),
             )
             sender = asyncio.create_task(
-                self._send_events(socket, subscription, device, session_token),
+                self._send_events(
+                    socket, subscription, device, session_token, combo_tracker
+                ),
                 name=f"tfr-web-events-{device.device_id}",
             )
             receiver = asyncio.create_task(
@@ -854,7 +870,24 @@ class WebGatewayServer:
         session_token: str | None,
         *,
         history_reset: bool,
+        combo_tracker: ComboTracker,
     ) -> None:
+        descriptors = {
+            str(descriptor["world"]): descriptor
+            for descriptor in self.runtime.world_descriptors()
+        }
+        authorized = self._authorized_worlds(device)
+        for item in subscription.snapshot.events:
+            event = item.event
+            if event.world not in authorized or not _browser_event_allowed(event):
+                continue
+            descriptor = descriptors.get(event.world, {})
+            combo_tracker.observe(
+                event,
+                terminal_plain_text(_browser_event_source_text(event)),
+                event.timestamp.timestamp(),
+                character_name=descriptor.get("character"),
+            )
         visible: list[tuple[str, dict[str, Any]]] = []
         visible_counts: dict[tuple[str, int], int] = defaultdict(int)
         selected_counts: Counter[tuple[str, int]] = Counter(
@@ -909,6 +942,7 @@ class WebGatewayServer:
                     for descriptor in self.runtime.world_descriptors()
                     if descriptor["world"] in self._authorized_worlds(device)
                 ],
+                "effect_demos": self._effect_demos(device),
                 "snapshot_count": len(visible),
             },
         ):
@@ -932,6 +966,62 @@ class WebGatewayServer:
                 "cursor": str(subscription.snapshot.cursor),
             },
         )
+
+    def _effect_demos(self, device: DeviceRecord) -> list[dict[str, Any]]:
+        worlds = sorted(self._authorized_worlds(device))
+        if not worlds:
+            return []
+        demos = self.runtime.plugins.effect_demos()[:100]
+        if not demos:
+            return []
+        output = []
+        encoded_bytes = 2
+        for demo in demos:
+            world = next(
+                (candidate for candidate in demo.worlds if candidate in worlds),
+                worlds[0] if not demo.worlds else None,
+            )
+            if world is None:
+                continue
+            session = self.runtime.session_for(world)
+            samples = []
+            for sample in demo.samples:
+                kind, text = sample.kind, sample.text
+                event = Event(
+                    session_id=session.session_id,
+                    world=world,
+                    connection_generation=session.connection_generation,
+                    sequence=0,
+                    direction=Direction.INBOUND,
+                    kind=kind,
+                    event_id=uuid4(),
+                    timestamp=datetime.now(UTC),
+                    canonical_text=text,
+                    plain_text=text,
+                    display_text=text,
+                    parser_name="effects-lab",
+                    confidence=Confidence.INFERRED,
+                    provenance=Provenance(
+                        sender_name=demo.label if demo.category == "speaker" else None,
+                        confidence=Confidence.INFERRED,
+                    ),
+                )
+                projected = browser_event(0, event, self.runtime.plugins)
+                if projected is not None:
+                    samples.append(projected["event"])
+            descriptor = {
+                "id": demo.id,
+                "label": demo.label,
+                "category": demo.category,
+                "samples": samples,
+                "worlds": list(demo.worlds),
+            }
+            descriptor_bytes = len(json.dumps(descriptor, ensure_ascii=True).encode("utf-8"))
+            if encoded_bytes + descriptor_bytes > MAX_WEB_EFFECT_DEMOS_BYTES:
+                break
+            output.append(descriptor)
+            encoded_bytes += descriptor_bytes
+        return output
 
     @staticmethod
     def _browser_world_descriptor(
@@ -968,6 +1058,7 @@ class WebGatewayServer:
         subscription: HistorySubscription,
         device: DeviceRecord,
         session_token: str | None,
+        combo_tracker: ComboTracker,
     ) -> None:
         while True:
             item: SequencedEvent | None = await subscription.queue.get()
@@ -988,7 +1079,23 @@ class WebGatewayServer:
                     socket, code=1008, message=b"World authorization changed"
                 )
                 return
-            message = browser_event(item.cursor, item.event, self.runtime.plugins)
+            descriptor = next(
+                (
+                    value
+                    for value in self.runtime.world_descriptors()
+                    if value["world"] == item.event.world
+                ),
+                {},
+            )
+            combo = combo_tracker.observe(
+                item.event,
+                terminal_plain_text(_browser_event_source_text(item.event)),
+                item.event.timestamp.timestamp(),
+                character_name=descriptor.get("character"),
+            )
+            message = browser_event(
+                item.cursor, item.event, self.runtime.plugins, combo=combo
+            )
             if message is not None:
                 if not await self._send_if_active(
                     socket,
