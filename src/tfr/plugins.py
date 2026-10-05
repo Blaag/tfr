@@ -274,6 +274,43 @@ class PluginBossView:
     refresh_interval_seconds: float | None
 
 
+@dataclass(frozen=True, slots=True)
+class EffectDemoSample:
+    kind: EventKind
+    text: str
+
+    def __post_init__(self) -> None:
+        if self.kind not in {EventKind.SAY, EventKind.POSE, EventKind.SPEECH}:
+            raise ValueError("effect demo samples must be speech or poses")
+        if not self.text or len(self.text) > 2_048 or any(
+            character in self.text for character in "\r\n"
+        ):
+            raise ValueError("effect demo sample text must be one bounded line")
+
+
+@dataclass(frozen=True, slots=True)
+class EffectDemo:
+    id: str
+    label: str
+    category: str
+    samples: tuple[EffectDemoSample, ...]
+    worlds: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.id or len(self.id) > 100 or not self.label or len(self.label) > 100:
+            raise ValueError("effect demo id and label must contain 1-100 characters")
+        if self.category not in {"speaker", "text", "border", "screen", "combo"}:
+            raise ValueError("effect demo category is invalid")
+        if not 1 <= len(self.samples) <= 10 or any(
+            type(sample) is not EffectDemoSample for sample in self.samples
+        ):
+            raise ValueError("effect demos must contain 1-10 typed samples")
+        if len(self.worlds) > 100 or any(
+            not world or len(world) > 100 for world in self.worlds
+        ):
+            raise ValueError("effect demo worlds must contain bounded world names")
+
+
 class CommandHandler(Protocol):
     def __call__(
         self,
@@ -428,6 +465,7 @@ class PluginRegistry:
         self.status_segments: dict[str, tuple[str, StatusSegment]] = {}
         self.key_bindings: dict[str, tuple[PluginKeyBinding, KeyHandler]] = {}
         self.lifecycle_handlers: dict[str, tuple[str, LifecycleHandler]] = {}
+        self.effect_demos: dict[str, tuple[str, EffectDemo]] = {}
 
     @staticmethod
     def _add(registrations: dict[str, Any], name: str, value: Any) -> None:
@@ -502,6 +540,11 @@ class PluginRegistrar:
         handler: PresentationDecorator,
     ) -> None:
         PluginRegistry._add(self._registry.presentation_decorators, name, (self.plugin, handler))
+
+    def register_effect_demo(self, demo: EffectDemo) -> None:
+        if type(demo) is not EffectDemo:
+            raise PluginRegistrationError("effect demo registration requires EffectDemo")
+        PluginRegistry._add(self._registry.effect_demos, demo.id, (self.plugin, demo))
 
     def register_border_effect(
         self,
@@ -698,6 +741,7 @@ class PluginManager:
             tuple[UUID, str], tuple[EffectProgram, ...]
         ] = {}
         self.requested_plugins: tuple[str, ...] = ()
+        self.config: Mapping[str, Any] = MappingProxyType({})
         self._loaded_plugins: list[str] = []
         self.load_failures: dict[str, str] = {}
         if scope != "gateway":
@@ -754,6 +798,12 @@ class PluginManager:
         )
         points = tuple(points) + tuple(extra_discovered)
         manager.requested_plugins = tuple(dict.fromkeys(enabled))
+        manager.config = MappingProxyType(
+            {
+                name: MappingProxyType(dict(value)) if isinstance(value, Mapping) else value
+                for name, value in config.items()
+            }
+        )
         available: dict[str, DiscoveredPlugin] = {}
         duplicates: set[str] = set()
         for point in points:
@@ -785,6 +835,7 @@ class PluginManager:
                 manager.registry.status_segments,
                 manager.registry.key_bindings,
                 manager.registry.lifecycle_handlers,
+                manager.registry.effect_demos,
             )
             snapshots = [dict(registration) for registration in registrations]
             try:
@@ -810,6 +861,67 @@ class PluginManager:
             else:
                 manager._loaded_plugins.append(name)
         return manager
+
+    def configured_speaker_effects(self) -> tuple[str, ...]:
+        value = self.config.get("speaker_effects", {})
+        if not isinstance(value, Mapping):
+            return ()
+        rules = value.get("rules", ())
+        if not isinstance(rules, (list, tuple)):
+            return ()
+        speakers = []
+        for rule in rules[:1_000]:
+            if not isinstance(rule, Mapping):
+                continue
+            speaker = rule.get("speaker")
+            if isinstance(speaker, str) and 0 < len(speaker) <= 100 and speaker not in speakers:
+                speakers.append(speaker)
+        return tuple(speakers)
+
+    def effect_demos(self) -> tuple[EffectDemo, ...]:
+        registered = [demo for _plugin, demo in self.registry.effect_demos.values()]
+        registered_speakers = {
+            demo.label.casefold() for demo in registered if demo.category == "speaker"
+        }
+        value = self.config.get("speaker_effects", {})
+        rules = value.get("rules", ()) if isinstance(value, Mapping) else ()
+        for rule in rules if isinstance(rules, (list, tuple)) else ():
+            if not isinstance(rule, Mapping):
+                continue
+            speaker = rule.get("speaker")
+            if not isinstance(speaker, str) or not 0 < len(speaker) <= 100:
+                continue
+            if speaker.casefold() in registered_speakers:
+                continue
+            worlds_value = rule.get("worlds", ())
+            worlds = (
+                tuple(
+                    world
+                    for world in worlds_value[:100]
+                    if isinstance(world, str) and 0 < len(world) <= 100
+                )
+                if isinstance(worlds_value, (list, tuple))
+                else ()
+            )
+            registered.append(
+                EffectDemo(
+                    id=f"speaker:{speaker.casefold()}",
+                    label=speaker,
+                    category="speaker",
+                    samples=(
+                        EffectDemoSample(
+                            EventKind.SAY,
+                            f'{speaker} says, "This is the configured say effect."',
+                        ),
+                        EffectDemoSample(
+                            EventKind.POSE,
+                            f"{speaker} demonstrates the configured pose effect.",
+                        ),
+                    ),
+                    worlds=worlds,
+                )
+            )
+        return tuple(registered[:1_000])
 
     def context(self, plugin: str, world: str) -> PluginCommandContext:
         return PluginCommandContext(

@@ -1,8 +1,17 @@
 import { createPairingSubmission, pairingCodeFromLink, submitPairing } from "./pairing.mjs";
 import { isMultilineWorldCommand, normalizeWorldCommand } from "./command.mjs";
-import { observeCombo } from "./combo.mjs";
+import {
+  fireworkParticleBudget,
+  observeCombo,
+  validatedComboCue,
+} from "./combo.mjs";
 import { createConnectionLifecycle } from "./connection-lifecycle.mjs";
 import { connectionNotice, eventDetailRows } from "./event-details.mjs";
+import {
+  comboLabDefinition,
+  parseEffectsLabCommand,
+  validatedEffectDemos,
+} from "./effects-lab.mjs";
 import {
   generationIsNewer,
   historyNoticeDecision,
@@ -73,6 +82,18 @@ const elements = {
   toast: document.querySelector("#toast"),
   comboNotice: document.querySelector("#combo-notice"),
   comboFireworks: document.querySelector("#combo-fireworks"),
+  effectsLabButton: document.querySelector("#effects-lab-button"),
+  effectsLab: document.querySelector("#effects-lab"),
+  effectsLabClose: document.querySelector("#effects-lab-close"),
+  effectsLabForceMotion: document.querySelector("#effects-lab-force-motion"),
+  effectsLabCombos: document.querySelector("#effects-lab-combos"),
+  effectsLabSpeakers: document.querySelector("#effects-lab-speakers"),
+  effectsLabStage: document.querySelector("#effects-lab-stage"),
+  effectsLabMessage: document.querySelector("#effects-lab-message"),
+  effectsLabNotice: document.querySelector("#effects-lab-notice"),
+  effectsLabFireworks: document.querySelector("#effects-lab-fireworks"),
+  effectsLabCommand: document.querySelector("#effects-lab-command"),
+  effectsLabCommandInput: document.querySelector("#effects-lab-command-input"),
 };
 
 const state = {
@@ -97,6 +118,7 @@ const state = {
   reloadingForUpdate: false,
   shownHistoryNotices: new Map(),
   comboStreaks: new Map(),
+  effectDemos: [],
 };
 const pairingSubmission = createPairingSubmission(
   (code) => submitPairing(document, code),
@@ -200,28 +222,147 @@ function animateComboText(root, combo) {
   }
 }
 
-function launchFireworks(eventId) {
+function launchFireworks(eventId, stage = elements.comboFireworks) {
   let seed = [...eventId].reduce((value, character) => (value * 33 + character.codePointAt(0)) >>> 0, 5381);
   const random = () => ((seed = (1664525 * seed + 1013904223) >>> 0) / 2 ** 32);
   const colors = ["#ff0000", "#ff8000", "#0070dd", "#ffff00", "#a335ee"];
+  const styles = getComputedStyle(stage);
+  const cellWidth = Math.max(6, Number.parseFloat(styles.fontSize) * 0.62 || 8);
+  const lineHeight = Math.max(10, Number.parseFloat(styles.lineHeight) || 16);
+  const budget = fireworkParticleBudget(stage.clientWidth, stage.clientHeight, cellWidth, lineHeight);
   const count = 1 + Math.floor(random() * 3);
+  const particlesPerBurst = Math.floor(budget / count);
+  const particleRemainder = budget % count;
   for (let firework = 0; firework < count; firework += 1) {
     const x = 10 + random() * 80;
     const y = 10 + random() * 55;
     const delay = random() * 1800;
     scheduleCombo(() => {
-      for (let index = 0; index < 16; index += 1) {
+      const burstBudget = particlesPerBurst + (firework < particleRemainder ? 1 : 0);
+      for (let index = 0; index < burstBudget; index += 1) {
         const particle = document.createElement("i");
-        particle.style.setProperty("--x", `${x}vw`);
-        particle.style.setProperty("--y", `${y}vh`);
+        particle.style.setProperty("--x", `${x}%`);
+        particle.style.setProperty("--y", `${y}%`);
         particle.style.setProperty("--dx", `${(random() - 0.5) * 9}rem`);
         particle.style.setProperty("--dy", `${(random() - 0.7) * 8}rem`);
         particle.style.background = colors[Math.floor(random() * colors.length)];
-        elements.comboFireworks.append(particle);
+        stage.append(particle);
         particle.addEventListener("animationend", () => particle.remove(), { once: true });
       }
     }, delay);
   }
+}
+
+function comboNoticeFrames(count) {
+  if (count === 3) {
+    return [
+      { transform: "scaleX(0)", opacity: 0 },
+      { transform: "scaleX(1.08)", opacity: 1, offset: 0.12 },
+      { transform: "scaleX(1)", opacity: 1, offset: 0.82 },
+      { filter: "invert(1)", opacity: 1, offset: 0.9 },
+      { opacity: 0 },
+    ];
+  }
+  if (count === 4) {
+    return [
+      { transform: "translateX(-1rem)", opacity: 0 },
+      { transform: "translateX(.25rem)", opacity: 1, offset: 0.12 },
+      { transform: "translateX(-.25rem)", offset: 0.18 },
+      { transform: "translateX(0)", opacity: 1, offset: 0.84 },
+      { filter: "invert(1)", offset: 0.92 },
+      { opacity: 0 },
+    ];
+  }
+  if (count === 5) {
+    return [
+      { letterSpacing: "-.25em", filter: "blur(3px)", opacity: 0 },
+      { letterSpacing: ".16em", filter: "blur(0)", opacity: 1, offset: 0.18 },
+      { letterSpacing: "normal", opacity: 1, offset: 0.84 },
+      { filter: "invert(1)", offset: 0.92 },
+      { opacity: 0 },
+    ];
+  }
+  if (count === 6) {
+    return [
+      { transform: "translateX(-45vw)", opacity: 1 },
+      { transform: "translateX(45vw)", offset: 0.14 },
+      { transform: "translateX(-20vw)", offset: 0.25 },
+      { transform: "scale(1.28)", filter: "invert(1)", offset: 0.34 },
+      { transform: "scale(1)", filter: "invert(0)", opacity: 1, offset: 0.84 },
+      { filter: "invert(1)", offset: 0.92 },
+      { opacity: 0 },
+    ];
+  }
+  if (count === 7) {
+    return [
+      { transform: "scale(.7) rotate(-3deg)", opacity: 0 },
+      { transform: "scale(1.25) rotate(3deg)", opacity: 1, offset: 0.15 },
+      { transform: "scale(1.1) rotate(0)", opacity: 1, offset: 0.7 },
+      { transform: "translateY(-2rem) scale(1.2)", opacity: 0 },
+    ];
+  }
+  return [{ opacity: 1 }, { opacity: 1, offset: 0.84 }, { filter: "invert(1)", offset: 0.92 }, { opacity: 0 }];
+}
+
+function labMotionEnabled() {
+  return elements.effectsLabForceMotion.checked || motionAllowsAnimation(
+    elements.motionPreference.value,
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
+}
+
+function previewLabCombo(count) {
+  const definition = comboLabDefinition(count);
+  if (!definition) return;
+  const { notice, color } = definition;
+  elements.effectsLabMessage.textContent = `Demo says, "This triggers combo level ${count}."`;
+  elements.effectsLabNotice.textContent = notice;
+  elements.effectsLabNotice.style.color = color;
+  elements.effectsLabNotice.hidden = false;
+  if (!labMotionEnabled()) return;
+  const combo = {
+    count,
+    body_start: 12,
+    body_end: Array.from(elements.effectsLabMessage.textContent).length - 1,
+  };
+  animateComboText(elements.effectsLabMessage, combo);
+  elements.effectsLabNotice.animate(
+    comboNoticeFrames(count),
+    { duration: 3600 },
+  );
+  if (count === 7) launchFireworks(`effects-lab-${count}`, elements.effectsLabFireworks);
+}
+
+function previewLabSpeaker(demo) {
+  const sample = demo?.samples?.[0];
+  if (!sample) return;
+  elements.effectsLabMessage.replaceChildren();
+  appendEventText(
+    elements.effectsLabMessage,
+    { ...sample, timestamp: new Date().toISOString() },
+    { animate: labMotionEnabled(), animationsEnabled: labMotionEnabled() },
+  );
+}
+
+function renderEffectsLabCatalog() {
+  elements.effectsLabCombos.replaceChildren();
+  for (let count = 3; count <= 8; count += 1) {
+    const definition = comboLabDefinition(count);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = definition.label;
+    button.addEventListener("click", () => previewLabCombo(count));
+    elements.effectsLabCombos.append(button);
+  }
+  elements.effectsLabSpeakers.replaceChildren();
+  for (const demo of state.effectDemos) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = demo.label;
+    button.addEventListener("click", () => previewLabSpeaker(demo));
+    elements.effectsLabSpeakers.append(button);
+  }
+  if (!state.effectDemos.length) elements.effectsLabSpeakers.textContent = "No configured speaker demos registered.";
 }
 
 function showCombo(event, node) {
@@ -235,7 +376,7 @@ function showCombo(event, node) {
   elements.comboNotice.textContent = combo.notice;
   elements.comboNotice.style.color = combo.color;
   comboNoticeAnimation = elements.comboNotice.animate(
-    [{ filter: "invert(0)" }, { filter: "invert(0)", offset: 0.833 }, { filter: "invert(1)", offset: 0.861 }, { filter: "invert(0)", offset: 0.889 }, { filter: "invert(1)", offset: 0.917 }, { filter: "invert(0)", offset: 0.944 }, { filter: "invert(1)", offset: 0.972 }, { filter: "invert(0)" }],
+    comboNoticeFrames(combo.count),
     { duration: 3600 },
   );
   comboNoticeAnimation.addEventListener("finish", () => { elements.comboNotice.hidden = true; }, { once: true });
@@ -635,12 +776,16 @@ function applyTextStyle(element, style) {
   element.classList.add(...textRunClassNames(style));
 }
 
-function appendEventText(container, event, { animate = true } = {}) {
+function appendEventText(
+  container,
+  event,
+  { animate = true, animationsEnabled: animationOverride = null } = {},
+) {
   const runs = validatedTextRuns(event);
-  const animationsEnabled = motionAllowsAnimation(
-    elements.motionPreference.value,
-    window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-  );
+  const animationsEnabled = animationOverride ?? motionAllowsAnimation(
+      elements.motionPreference.value,
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+    );
   let presentationWrapper = null;
   let activeProgram = null;
   for (const run of splitPresentationRuns(event, runs, animationsEnabled)) {
@@ -886,7 +1031,10 @@ function addEvent(message) {
     if (event.world === state.selectedWorld && !state.historyReset) showHistoryNotice("");
   }
   if (connection.ready) recordLiveHistoryEvent(world, event);
-  if (connection.ready) event.combo = observeCombo(state.comboStreaks, event, Date.now(), world);
+  if (connection.ready) {
+    event.combo = validatedComboCue(event.combo, event.text)
+      || observeCombo(state.comboStreaks, event, Date.now(), world);
+  }
   events.push(event);
   eventIds.add(event.id);
   let evicted = false;
@@ -967,6 +1115,7 @@ function handleMessage(message) {
         ? `${buildVersion}${typeof buildCommit === "string" ? ` (${buildCommit.slice(0, 8)})` : ""}`
         : "Unknown";
     state.worlds = Array.isArray(message.worlds) ? message.worlds : [];
+    state.effectDemos = validatedEffectDemos(message.effect_demos);
     for (const world of state.worlds) discardEventsBeforeSnapshotGap(world);
     if (!state.worlds.some((world) => world.world === state.selectedWorld)) {
       state.selectedWorld = state.worlds[0]?.world || null;
@@ -1489,6 +1638,39 @@ elements.motionPreference.addEventListener("change", () => {
   cancelComboVisuals();
   applyMotionPreference(elements.motionPreference.value);
   renderTranscript({ restorePosition: true });
+});
+elements.effectsLabButton.addEventListener("click", () => {
+  renderEffectsLabCatalog();
+  elements.settingsDialog.close();
+  elements.effectsLab.showModal();
+});
+elements.effectsLabClose.addEventListener("click", () => {
+  cancelComboVisuals();
+  elements.effectsLabForceMotion.checked = false;
+  elements.effectsLab.close();
+});
+elements.effectsLabCommand.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const value = elements.effectsLabCommandInput.value.trim();
+  const command = parseEffectsLabCommand(value);
+  if (command?.action === "streak") {
+    if (command.target === "all") {
+      let count = 3;
+      const next = () => {
+        if (!elements.effectsLab.open || count > 8) return;
+        previewLabCombo(count);
+        count += 1;
+        scheduleCombo(next, 4000);
+      };
+      next();
+    } else {
+      previewLabCombo(Number(command.target));
+    }
+  } else if (command?.action === "speaker") {
+    const demo = state.effectDemos.find((item) => item.label.toLocaleLowerCase() === command.target.toLocaleLowerCase());
+    if (demo) previewLabSpeaker(demo);
+  }
+  elements.effectsLabCommandInput.value = "";
 });
 elements.lineWrap.addEventListener("change", () => {
   applyLineWrap(elements.lineWrap.checked);

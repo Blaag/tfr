@@ -849,6 +849,14 @@ than five minutes of inactivity resets the streak. Bare-world pose attribution
 uses the same presentation-only first-word fallback as speaker effects. Combo
 state continues counting while `/animations off`, `/lowbw`, or reduced motion is
 active, but those modes suppress every combo visual and never replay it later.
+Use `/effects` (or `/demoeffects`) to open the local Effects Lab. `/teststreak all`
+plays the complete combo sequence, `/teststreak 3` through `8` previews one tier,
+and `/testspeaker NAME` renders the actual configured speaker decorator and
+portable presentation program. Effects Lab is isolated: its input is never sent
+to a world, logged as a canonical event, or provided to an agent. Real worlds
+remain connected and continue buffering while it is open. The paired web client
+offers the same lab from Settings, whether running as an installed PWA or an
+ordinary browser tab.
 The active world's recently sent commands remain directly above the editor.
 These lines are separate from server output, so server speech echoes are not
 duplicated. Configure their number with `ui.recent_input_lines` (default `3`, or
@@ -876,6 +884,10 @@ The loaded object can implement `register(registrar, config)` and set
 enrichers, display transforms, structured display decorators, border effects,
 screen-clear effects, boss views, status segments, key bindings, and lifecycle
 handlers.
+Plugins can register bounded `EffectDemo`/`EffectDemoSample` descriptors with
+`register_effect_demo()`. Effects Lab renders those samples through the same
+decorators and presentation programs used by live events; configured
+`speaker_effects` rules receive compatible fallback demos automatically.
 
 The display-decorator API remains terminal-local. The additive
 `register_presentation_decorator()` API keeps plugins as the policy layer while

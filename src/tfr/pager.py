@@ -438,6 +438,7 @@ class DisplayBuffer:
             TextEffectKind.COMBO_PULSE,
             TextEffectKind.COMBO_FLASH_UPPER,
             TextEffectKind.COMBO_CYLON,
+            TextEffectKind.COMBO_GODLIKE,
         }
         self._entry_decorations = [
             tuple(item for item in decorations if item.effect not in combo_effects)

@@ -19,6 +19,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 import tfr.gateway_web as gateway_web
 from tfr.adapters import TinyMushAdapter
+from tfr.combo import Combo
 from tfr.core import CommandBus, EventBus, UnknownSessionError
 from tfr.events import (
     Actor,
@@ -48,6 +49,23 @@ NAVIGATION_HEADERS = {
     "Host": "gateway.example.ts.net",
     "Tailscale-User-Login": "black@example.com",
 }
+
+
+def test_browser_event_serializes_bounded_semantic_combo_cue() -> None:
+    event = make_event(text='Alice says, "hello"', kind=EventKind.SAY)
+    combo = Combo(3, "Alice", 13, 18)
+
+    message = browser_event(1, event, combo=combo)
+
+    assert message is not None
+    assert message["event"]["combo"] == {
+        "count": 3,
+        "speaker": "Alice",
+        "body_start": 13,
+        "body_end": 18,
+        "notice": "> Speaking Spree! <",
+        "color": "#ffffff",
+    }
 
 
 def test_all_pwa_assets_are_in_the_python_package() -> None:

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { COMBO_TIMEOUT_MS, observeCombo } from "../src/tfr/web/combo.mjs";
+import {
+  COMBO_TIMEOUT_MS,
+  fireworkParticleBudget,
+  observeCombo,
+  validatedComboCue,
+} from "../src/tfr/web/combo.mjs";
 
 function say(speaker, text) {
   return {
@@ -87,4 +92,24 @@ test("combo body offsets use Unicode scalar positions", () => {
   observeCombo(streaks, event, 2);
   const combo = observeCombo(streaks, event, 3);
   assert.equal(Array.from(event.text).slice(combo.body_start, combo.body_end).join(""), "waves 👋");
+});
+
+test("firework particle budgets target twelve percent with bounded growth", () => {
+  assert.equal(fireworkParticleBudget(640, 240, 8, 16), 144);
+  assert.equal(fireworkParticleBudget(960, 384, 8, 16), 346);
+  assert.equal(fireworkParticleBudget(100_000, 100_000, 8, 16), 1024);
+  assert.equal(fireworkParticleBudget(1, 1, 8, 16), 1);
+});
+
+test("validates bounded Gateway combo cues", () => {
+  const value = {
+    count: 3,
+    speaker: "Alice",
+    body_start: 13,
+    body_end: 18,
+    notice: "> Speaking Spree! <",
+    color: "#ffffff",
+  };
+  assert.deepEqual(validatedComboCue(value, 'Alice says, "hello"'), value);
+  assert.equal(validatedComboCue({ ...value, body_end: 999 }, 'Alice says, "hello"'), null);
 });
