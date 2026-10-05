@@ -76,6 +76,7 @@ const elements = {
   textLarger: document.querySelector("#text-larger"),
   motionPreference: document.querySelector("#motion-preference"),
   lineWrap: document.querySelector("#line-wrap"),
+  spellingSuggestions: document.querySelector("#spelling-suggestions"),
   unpairDevice: document.querySelector("#unpair-device"),
   updateNotice: document.querySelector("#update-notice"),
   applyUpdate: document.querySelector("#apply-update"),
@@ -570,9 +571,25 @@ function applyLineWrap(enabled) {
   }
 }
 
+function spellingSuggestionsPreference() {
+  return readStorage("tfr.spellingSuggestions") !== "off";
+}
+
+function applySpellingSuggestions(enabled) {
+  elements.spellingSuggestions.checked = enabled;
+  elements.commandInput.spellcheck = enabled;
+  elements.commandInput.setAttribute("autocorrect", enabled ? "on" : "off");
+  if (enabled) {
+    safeRemove("tfr.spellingSuggestions");
+  } else {
+    safeStore("tfr.spellingSuggestions", "off");
+  }
+}
+
 applyTextSize(textSizePreference());
 applyMotionPreference(readStorage("tfr.motion") || "system");
 applyLineWrap(lineWrapPreference());
+applySpellingSuggestions(spellingSuggestionsPreference());
 
 function readSessionStorage(key) {
   try {
@@ -1674,6 +1691,9 @@ elements.effectsLabCommand.addEventListener("submit", (event) => {
 });
 elements.lineWrap.addEventListener("change", () => {
   applyLineWrap(elements.lineWrap.checked);
+});
+elements.spellingSuggestions.addEventListener("change", () => {
+  applySpellingSuggestions(elements.spellingSuggestions.checked);
 });
 elements.applyUpdate.addEventListener("click", () => {
   const worker = state.serviceWorkerRegistration?.waiting;

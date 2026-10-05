@@ -71,7 +71,7 @@
         <label class="command-field">
           <span class="sr-only">Command</span>
           <input id="command-input" type="text" enterkeyhint="send" autocomplete="off"
-                 autocapitalize="none" autocorrect="off" spellcheck="false"
+                 autocapitalize="none" autocorrect="on" spellcheck="true"
                  placeholder="Send to world…">
         </label>
         <button id="send-button" class="send-button" type="submit">Send</button>
@@ -110,6 +110,10 @@
           <label class="setting-row" for="line-wrap">
             <span>Line wrap</span>
             <input id="line-wrap" type="checkbox" role="switch" checked>
+          </label>
+          <label class="setting-row" for="spelling-suggestions">
+            <span>Native spelling suggestions</span>
+            <input id="spelling-suggestions" type="checkbox" role="switch" checked>
           </label>
           <button id="effects-lab-button" type="button">Open Effects Lab</button>
         </fieldset>
@@ -151,7 +155,9 @@
           <div id="effects-lab-fireworks" class="combo-fireworks"></div>
         </div>
         <form id="effects-lab-command" class="effects-lab-command">
-          <input id="effects-lab-command-input" type="text" autocomplete="off" placeholder="/teststreak all or /testspeaker Bob">
+          <input id="effects-lab-command-input" type="text" autocomplete="off"
+                 autocapitalize="none" autocorrect="off" spellcheck="false"
+                 placeholder="/teststreak all or /testspeaker Bob">
           <button type="submit">Run</button>
         </form>
       </section>

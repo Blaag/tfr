@@ -2182,7 +2182,6 @@ def test_godlike_starts_bounded_fireworks_once_and_higher_counts_only_update_not
     )
     assert particle_count == expected_particles
     assert tui._combo_notices["alpha"].text == "> GODLIKE! <"
-    assert len(fragment_list_to_text(tui._firework_layer_text())) >= 80 * 24
     now = time.monotonic()
     tui._firework_particles = [
         replace(particle, started_at=now - 2) for particle in tui._firework_particles
@@ -2198,6 +2197,18 @@ def test_godlike_starts_bounded_fireworks_once_and_higher_counts_only_update_not
     assert len(tui._firework_particles) == particle_count
     assert tui._combo_notices["alpha"].text == "> GODLIKE x2 <"
     assert not tui.active_view.display._entry_decorations[-1]
+
+
+async def test_empty_particle_layer_never_masks_output_or_help() -> None:
+    tui = make_tui()
+    tui.active_view.display.append("visible world output")
+    tui._position_firework_particles(80, 24)
+
+    assert "visible world output" in fragment_list_to_text(tui.active_view.output_text())
+
+    await tui._handle_client_command("alpha", "/help")
+
+    assert "TFR commands" in fragment_list_to_text(tui.active_view.output_text())
 
 
 async def test_speaker_effects_keep_static_color_when_animations_are_off() -> None:

@@ -33,7 +33,7 @@ from prompt_toolkit.input import Input
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import BufferControl, DynamicContainer, FormattedTextControl, HSplit
-from prompt_toolkit.layout.containers import Float, FloatContainer, VSplit, Window
+from prompt_toolkit.layout.containers import VSplit, Window
 from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.layout.processors import Processor, Transformation, TransformationInput
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
@@ -520,6 +520,7 @@ class WorldView:
         typing_glow_end_color: str,
         typing_glow_bold: bool,
         open_url_handler: Callable[[str], None],
+        output_overlay: Callable[[str, tuple[FormattedRow, ...]], tuple[FormattedRow, ...]],
     ) -> None:
         self.session = session
         self.display = display
@@ -532,6 +533,7 @@ class WorldView:
         self._invalidate_handler = invalidate_handler
         self._animation_state = animation_state
         self._open_url_handler = open_url_handler
+        self._output_overlay = output_overlay
         self._selection_anchor: tuple[int, int] | None = None
         self._selection_head: tuple[int, int] | None = None
         self._selection_dragged = False
@@ -625,6 +627,7 @@ class WorldView:
             animations_enabled=animations_enabled,
             now_seconds=time.monotonic(),
         )
+        rows = self._output_overlay(self.session.world, rows)
         # Selection anchor/head coordinates are content-relative (matching
         # _selection_point()), so the padding at the front of `rows` must be
         # skipped before checking the selection range against it.
@@ -974,6 +977,7 @@ class TfrTui:
                 typing_glow_end_color=self.theme.palette.text,
                 typing_glow_bold=self.typing_glow.bold,
                 open_url_handler=self._open_url,
+                output_overlay=self._overlay_firework_rows,
             )
 
         self.output_panels = {
@@ -1099,19 +1103,7 @@ class TfrTui:
         )
         self._firework_width = 1
         self._firework_height = 1
-        self._firework_float = Float(
-            content=Window(
-                content=FormattedTextControl(self._firework_layer_text),
-                width=lambda: self._firework_width,
-                height=lambda: self._firework_height,
-                always_hide_cursor=True,
-            ),
-            top=2,
-            left=1,
-            transparent=True,
-            z_index=20,
-        )
-        root = FloatContainer(content=normal_content, floats=[self._firework_float])
+        root = normal_content
         self.application: Application[int] = Application(
             layout=Layout(root, focused_element=self.active_view.input_buffer),
             key_bindings=bindings,
@@ -2175,17 +2167,17 @@ class TfrTui:
                 )
         self._firework_particles = self._firework_particles[-1_024:]
 
-    def _firework_layer_text(self) -> StyleAndTextTuples:
+    def _firework_cells(self, world: str) -> dict[tuple[int, int], tuple[str, str]]:
         if not (self.animations_enabled and not self.low_bandwidth) and not (
             self.effects_lab_open and self.effects_lab_force_motion
         ):
-            return []
+            return {}
         now = time.monotonic()
         cells: dict[tuple[int, int], tuple[str, str]] = {}
         maximum_cells = max(1, int(self._firework_width * self._firework_height * 0.15))
         for particle in self._firework_particles:
             age = now - particle.started_at
-            if particle.world != self.active_alias or not 0 <= age < 2.2:
+            if particle.world != world or not 0 <= age < 2.2:
                 continue
             x = particle.origin_x + particle.velocity_x * age
             y = particle.origin_y + particle.velocity_y * age + 0.28 * age * age
@@ -2194,12 +2186,53 @@ class TfrTui:
             cells.setdefault((row, column), (f"fg:{particle.color} bold", particle.glyph))
             if len(cells) >= maximum_cells:
                 break
+        return cells
+
+    @staticmethod
+    def _overlay_firework_cell(
+        row: FormattedRow,
+        column: int,
+        particle: tuple[str, str],
+    ) -> FormattedRow:
+        output: list[tuple[str, str]] = []
+        current_column = 0
+        inserted = False
+        for style, text in row:
+            for character in text:
+                width = max(0, get_cwidth(character))
+                if not inserted and width == 1 and current_column == column:
+                    output.append(particle)
+                    inserted = True
+                else:
+                    output.append((style, character))
+                current_column += width
+        if not inserted and current_column <= column:
+            if current_column < column:
+                output.append(("", " " * (column - current_column)))
+            output.append(particle)
+        return tuple(output)
+
+    def _overlay_firework_rows(
+        self,
+        world: str,
+        rows: tuple[FormattedRow, ...],
+    ) -> tuple[FormattedRow, ...]:
+        cells = self._firework_cells(world)
+        if not cells:
+            return rows
+        output = list(rows)
+        for (row, column), particle in cells.items():
+            if 0 <= row < len(output):
+                output[row] = self._overlay_firework_cell(output[row], column, particle)
+        return tuple(output)
+
+    def _firework_layer_text(self) -> StyleAndTextTuples:
+        rows: tuple[FormattedRow, ...] = ((),) * self._firework_height
+        overlaid = self._overlay_firework_rows(self.active_alias, rows)
         output: StyleAndTextTuples = []
-        for row in range(self._firework_height):
-            for column in range(self._firework_width):
-                style, glyph = cells.get((row, column), ("", " "))
-                output.append((style, glyph))
-            if row + 1 < self._firework_height:
+        for row, fragments in enumerate(overlaid):
+            output.extend(fragments)
+            if row + 1 < len(overlaid):
                 output.append(("", "\n"))
         return output
 

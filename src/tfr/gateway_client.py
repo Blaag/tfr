@@ -39,7 +39,7 @@ from tfr.gateway_transport import (
     validate_gateway_token,
     validate_tcp_endpoint,
 )
-from tfr.installations import managed_restart_command
+from tfr.installations import InstallationError, managed_restart_command
 from tfr.managed_updates import (
     StagedManagedUpdate,
     activate_managed_update,
@@ -966,9 +966,12 @@ class GatewayUiRuntime:
         self.notify(
             f"Preparing UI update {manifest.version}. {manifest.release_url}"
         )
-        self._staged_update = await stage_managed_update(
-            self.update_config, expected_manifest=manifest
-        )
+        try:
+            self._staged_update = await stage_managed_update(
+                self.update_config, expected_manifest=manifest
+            )
+        except InstallationError as exc:
+            raise ValueError(f"This UI host update staging failed: {exc}") from exc
         return {
             "version": self._staged_update.version,
             "commit": self._staged_update.commit,

@@ -28,6 +28,26 @@ from tfr.installations import (
 from tfr.updates import ReleaseArtifact, ReleaseManifest, UpdateError
 
 
+def test_run_resolves_uv_from_shared_user_install_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    uv = tmp_path / "uv"
+    uv.write_text("#!/bin/sh\n", encoding="utf-8")
+    uv.chmod(0o700)
+    calls: list[list[str]] = []
+
+    def execute(arguments: list[str], **_values: object) -> subprocess.CompletedProcess[str]:
+        calls.append(arguments)
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    monkeypatch.setattr("tfr.install_checkout.require_uv", lambda: uv)
+    monkeypatch.setattr("tfr.install_checkout.subprocess.run", execute)
+
+    _run(["uv", "--version"], capture=True)
+
+    assert calls == [[str(uv), "--version"]]
+
+
 def create_repository(path: Path) -> None:
     path.mkdir()
     (path / "pyproject.toml").write_text(

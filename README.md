@@ -256,6 +256,11 @@ the transaction began must update after reconnecting. Protocol-changing releases
 remain manual coordinated deployments because the running protocol requires an
 exact version match.
 
+Each participant invokes `uv` on its own host. Lookup checks that process's
+`PATH`, then `~/.local/bin/uv` and `~/.cargo/bin/uv`. Errors identify whether
+staging failed on the Gateway host or a native UI host; installing `uv` only on
+the Gateway does not satisfy a separately hosted UI.
+
 Browser clients do not install native code and do not participate in the
 all-ready barrier. They receive a maintenance notice, reconnect after the
 Gateway restarts, and use the existing service-worker update prompt for changed
@@ -442,7 +447,11 @@ Pair again after adding a world that the phone should access.
 The PWA provides retained and live world output, validated ANSI-derived colors
 and emphasis, world switching, unread counts, per-world drafts and bounded
 command history, command submission, safe links, and reconnect/backfill. It
-supports the first bounded portable plugin effects: foreground-color timelines
+uses native iOS/browser spelling suggestions in the world composer by default;
+the device-local Settings toggle controls browser `spellcheck`/`autocorrect` and
+does not run or synchronize TFR's Python spellchecker. Effects Lab command input
+keeps native spelling disabled. The PWA supports the first bounded portable
+plugin effects: foreground-color timelines
 with static and reduced-motion fallbacks. It intentionally does not yet provide
 agent controls, world connection controls, local shell access, transform-rich
 plugin effects, arbitrary plugin-provided browser UI, or offline command queues.
