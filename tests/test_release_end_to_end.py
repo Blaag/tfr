@@ -176,11 +176,18 @@ elif args[:2] == ["pr", "view"]:
         })
     elif fields == "headRefOid":
         if os.environ.get("TFR_FAKE_RESUME") == "1":
-            output(
-                subprocess.check_output(
-                    ["git", "rev-parse", "origin/release/v0.1.1"], text=True
-                ).strip()
-            )
+            calls = state / "resume-head-calls"
+            count = int(calls.read_text() or "0") if calls.exists() else 0
+            calls.write_text(str(count + 1), encoding="utf-8")
+            original = (state / "resume-original-head").read_text(encoding="utf-8")
+            if count < 2:
+                output(original)
+            else:
+                output(
+                    subprocess.check_output(
+                        ["git", "rev-parse", "origin/release/v0.1.1"], text=True
+                    ).strip()
+                )
         else:
             output(subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip())
     elif fields == "files":
@@ -471,6 +478,9 @@ def prepare_resume_fixture(repository: Path, environment: dict[str, str]) -> Non
     git(repository, "add", "pyproject.toml", "uv.lock")
     git(repository, "commit", "--quiet", "-m", "release: v0.1.1")
     git(repository, "push", "--quiet", "--set-upstream", "origin", "release/v0.1.1")
+    (Path(environment["TFR_FAKE_STATE"]) / "resume-original-head").write_text(
+        git(repository, "rev-parse", "HEAD"), encoding="utf-8"
+    )
     git(repository, "switch", "--quiet", "main")
     environment["TFR_FAKE_RESUME"] = "1"
 
