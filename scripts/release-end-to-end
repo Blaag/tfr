@@ -383,11 +383,17 @@ if [ "$resume" = true ]; then
     remote_release_head=$(printf '%s' "$remote_release_branch" | cut -f1)
     release_pr=$(pr_for_branch "$release_branch")
     [ -n "$release_pr" ] || fail "no open release PR exists for $release_branch"
+    release_pr_metadata="$temporary_directory/release-pr.json"
     gh pr view "$release_pr" --repo "$EXPECTED_REPOSITORY" \
         --json baseRefName,headRefName,isDraft,state \
-        --jq --arg head "$release_branch" \
-        '.baseRefName == "main" and .headRefName == $head and .isDraft == false and .state == "OPEN"' |
-        grep -qx true || fail "release PR is not an open, non-draft PR to main"
+        >"$release_pr_metadata"
+    jq -e --arg head "$release_branch" '
+        .baseRefName == "main" and
+        .headRefName == $head and
+        .isDraft == false and
+        .state == "OPEN"
+    ' "$release_pr_metadata" >/dev/null || \
+        fail "release PR is not an open, non-draft PR to main"
     actual_release_head=$(gh pr view "$release_pr" --repo "$EXPECTED_REPOSITORY" \
         --json headRefOid --jq .headRefOid)
     [ "$actual_release_head" = "$remote_release_head" ] || fail "release PR head differs from remote branch"

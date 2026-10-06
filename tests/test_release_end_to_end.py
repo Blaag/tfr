@@ -144,6 +144,9 @@ def output(value):
         value = json.dumps(value)
     print(value)
 
+if args[:2] == ["pr", "view"] and "--arg" in args:
+    raise SystemExit("gh pr view does not accept jq --arg options")
+
 if args[:2] == ["auth", "status"]:
     raise SystemExit(0)
 if args[:2] == ["repo", "view"]:
@@ -165,7 +168,12 @@ elif args[:2] == ["pr", "view"]:
     elif fields == "baseRefName,isDraft,state":
         print("true")
     elif fields == "baseRefName,headRefName,isDraft,state":
-        print("true")
+        output({
+            "baseRefName": "main",
+            "headRefName": "release/v0.1.1",
+            "isDraft": False,
+            "state": "OPEN",
+        })
     elif fields == "headRefOid":
         if os.environ.get("TFR_FAKE_RESUME") == "1":
             output(
@@ -549,6 +557,7 @@ def test_release_end_to_end_resumes_existing_version_only_pr(tmp_path: Path) -> 
     assert returncode == 0, output
     log = Path(environment["TFR_FAKE_LOG"]).read_text(encoding="utf-8")
     assert "gh pr create" not in log
+    assert "--jq --arg" not in log
     assert "gh pr merge 2" in log
     assert "publish --push\n" in log
     assert "release: retrigger checks for v0.1.1" in git(
