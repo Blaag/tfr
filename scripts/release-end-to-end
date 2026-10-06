@@ -143,10 +143,20 @@ wait_for_pr_checks() {
     pr=$1
     expected_head=$2
     label=$3
+    previous_head=${4:-$expected_head}
     deadline=$(($(date +%s) + TIMEOUT_SECONDS))
     checks_file="$temporary_directory/pr-$pr-checks.json"
 
     printf '\n==> Waiting for %s PR checks on %s\n' "$label" "$expected_head"
+    while :; do
+        actual_head=$(gh pr view "$pr" --repo "$EXPECTED_REPOSITORY" \
+            --json headRefOid --jq .headRefOid)
+        [ "$actual_head" = "$expected_head" ] && break
+        [ "$actual_head" = "$previous_head" ] || \
+            fail "$label PR changed to unexpected head $actual_head"
+        [ "$(date +%s)" -lt "$deadline" ] || fail "timed out waiting for PR head to update"
+        sleep "$POLL_SECONDS"
+    done
     while :; do
         actual_head=$(gh pr view "$pr" --repo "$EXPECTED_REPOSITORY" \
             --json headRefOid --jq .headRefOid)
@@ -431,7 +441,7 @@ uv.lock" ] || fail "resumed release differs from main outside release metadata"
     assert_clean_checkout
     release_head=$(git rev-parse HEAD)
     git push origin "$release_branch"
-    wait_for_pr_checks "$release_pr" "$release_head" release
+    wait_for_pr_checks "$release_pr" "$release_head" release "$remote_release_head"
     merge_pr "$release_pr" release
 else
     git show-ref --verify --quiet "refs/heads/$release_branch" && \
