@@ -14,13 +14,16 @@ CONFIRM_TIMEOUT_SECONDS=${TFR_RELEASE_CONFIRM_TIMEOUT_SECONDS:-300}
 
 usage() {
     cat <<'EOF'
-Usage: ./scripts/release-end-to-end VERSION
+Usage: ./scripts/release-end-to-end [--resume] VERSION
 
 Run the complete stable release process for VERSION (for example, 0.1.24):
 validate locally, merge the current feature branch through a protected PR,
 create and merge the release-version PR, wait for CI and CodeQL on main,
 push the protected tag, approve the release environment, and verify the
 immutable GitHub Release.
+
+--resume continues an existing release/VERSION branch and open version-only
+release PR after revalidating and retriggering every protected check.
 
 The checkout must be clean. The script never uses administrator bypasses,
 force-pushes, deletes tags, or dismisses failed checks. It requires typed
@@ -308,6 +311,11 @@ EOF
     done
 }
 
+resume=false
+if [ "$#" -eq 2 ] && [ "$1" = --resume ]; then
+    resume=true
+    shift
+fi
 [ "$#" -eq 1 ] || {
     usage >&2
     exit 2
@@ -354,21 +362,79 @@ assert_no_preloaded_input
 
 current_branch=$(git branch --show-current)
 [ -n "$current_branch" ] || fail "detached HEAD cannot be released"
-[ "$current_branch" != "$release_branch" ] || \
-    fail "start from a feature branch or main, not $release_branch"
 git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+if [ "$resume" = true ]; then
+    [ "$current_branch" = main ] || fail "resume mode must start from main"
+    [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || \
+        fail "local main must exactly match origin/main"
+else
+    [ "$current_branch" != "$release_branch" ] || \
+        fail "start from a feature branch or main, not $release_branch"
+fi
 if [ "$current_branch" = main ]; then
     [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || \
         fail "local main must exactly match origin/main"
 fi
-git show-ref --verify --quiet "refs/heads/$release_branch" && \
-    fail "local branch already exists: $release_branch"
 remote_release_branch=$(git ls-remote --heads origin "refs/heads/$release_branch") || \
     fail "cannot inspect remote release branch"
-[ -z "$remote_release_branch" ] || fail "remote branch already exists: $release_branch"
 
-run_local_checks
-assert_clean_checkout
+if [ "$resume" = true ]; then
+    [ -n "$remote_release_branch" ] || fail "remote release branch does not exist: $release_branch"
+    remote_release_head=$(printf '%s' "$remote_release_branch" | cut -f1)
+    release_pr=$(pr_for_branch "$release_branch")
+    [ -n "$release_pr" ] || fail "no open release PR exists for $release_branch"
+    release_pr_metadata="$temporary_directory/release-pr.json"
+    gh pr view "$release_pr" --repo "$EXPECTED_REPOSITORY" \
+        --json baseRefName,headRefName,isDraft,state \
+        >"$release_pr_metadata"
+    jq -e --arg head "$release_branch" '
+        .baseRefName == "main" and
+        .headRefName == $head and
+        .isDraft == false and
+        .state == "OPEN"
+    ' "$release_pr_metadata" >/dev/null || \
+        fail "release PR is not an open, non-draft PR to main"
+    actual_release_head=$(gh pr view "$release_pr" --repo "$EXPECTED_REPOSITORY" \
+        --json headRefOid --jq .headRefOid)
+    [ "$actual_release_head" = "$remote_release_head" ] || fail "release PR head differs from remote branch"
+    release_files=$(gh pr view "$release_pr" --repo "$EXPECTED_REPOSITORY" \
+        --json files --jq '[.files[].path] | sort | join("\n")')
+    [ "$release_files" = "pyproject.toml
+uv.lock" ] || fail "release PR must change only pyproject.toml and uv.lock"
+    git ls-remote --exit-code origin "refs/tags/$tag" >/dev/null 2>&1 && \
+        fail "remote tag already exists: $tag"
+    gh release view "$tag" --repo "$EXPECTED_REPOSITORY" >/dev/null 2>&1 && \
+        fail "GitHub Release already exists: $tag"
+    if git show-ref --verify --quiet "refs/heads/$release_branch"; then
+        [ "$(git rev-parse "$release_branch")" = "$remote_release_head" ] || \
+            fail "local release branch differs from remote release branch"
+        git switch "$release_branch"
+    else
+        git switch --create "$release_branch" --track "origin/$release_branch"
+    fi
+    project_version=$(uv version --short)
+    [ "$project_version" = "$version" ] || \
+        fail "release branch version is $project_version, expected $version"
+    git merge --no-edit origin/main
+    if [ "$(git rev-parse HEAD)" = "$remote_release_head" ]; then
+        git commit --allow-empty -m "release: retrigger checks for $tag"
+    fi
+    changed=$(git diff --name-only origin/main...HEAD)
+    [ "$changed" = "pyproject.toml
+uv.lock" ] || fail "resumed release differs from main outside release metadata"
+    run_local_checks
+    assert_clean_checkout
+    release_head=$(git rev-parse HEAD)
+    git push origin "$release_branch"
+    wait_for_pr_checks "$release_pr" release
+    merge_pr "$release_pr" release
+else
+    git show-ref --verify --quiet "refs/heads/$release_branch" && \
+        fail "local branch already exists: $release_branch"
+    [ -z "$remote_release_branch" ] || fail "remote branch already exists: $release_branch"
+
+    run_local_checks
+    assert_clean_checkout
 
 if [ "$current_branch" != main ]; then
     printf '\n==> Publishing feature branch %s\n' "$current_branch"
@@ -420,6 +486,7 @@ release_pr=$(gh pr view "$release_pr_url" --repo "$EXPECTED_REPOSITORY" \
     --json number --jq .number)
 wait_for_pr_checks "$release_pr" release
 merge_pr "$release_pr" release
+fi
 
 git switch main
 git pull --ff-only origin main
