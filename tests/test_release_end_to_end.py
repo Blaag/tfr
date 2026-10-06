@@ -149,7 +149,10 @@ if args[:2] == ["auth", "status"]:
 if args[:2] == ["repo", "view"]:
     output("Blaag/tfr")
 elif args[:2] == ["pr", "list"]:
-    output([])
+    if os.environ.get("TFR_FAKE_RESUME") == "1" and value("--head").startswith("release/"):
+        output([{"number": 2}])
+    else:
+        output([])
 elif args[:2] == ["pr", "create"]:
     number = "2" if value("--head").startswith("release/") else "1"
     output(f"https://github.invalid/Blaag/tfr/pull/{number}")
@@ -161,8 +164,25 @@ elif args[:2] == ["pr", "view"]:
         output(number)
     elif fields == "baseRefName,isDraft,state":
         print("true")
+    elif fields == "baseRefName,headRefName,isDraft,state":
+        print("true")
     elif fields == "headRefOid":
-        output(subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip())
+        if os.environ.get("TFR_FAKE_RESUME") == "1":
+            output(
+                subprocess.check_output(
+                    ["git", "rev-parse", "origin/release/v0.1.1"], text=True
+                ).strip()
+            )
+        else:
+            output(subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip())
+    elif fields == "files":
+        files = [{"path": "pyproject.toml"}, {"path": "uv.lock"}]
+        if os.environ.get("TFR_FAKE_UNEXPECTED_RELEASE_FILE") == "1":
+            files.append({"path": "unexpected.txt"})
+        if "--jq" in args:
+            print("\n".join(sorted(item["path"] for item in files)))
+        else:
+            output({"files": files})
     elif fields == "mergedAt":
         print("true" if (state / f"merged-{number}").exists() else "false")
     else:
@@ -359,12 +379,17 @@ else:
 
 
 def run_with_confirmations(
-    repository: Path, environment: dict[str, str], confirmations: list[str]
+    repository: Path,
+    environment: dict[str, str],
+    confirmations: list[str],
+    *,
+    resume: bool = False,
 ) -> tuple[int, str]:
     terminal, slave = pty.openpty()
     process = subprocess.Popen(
         [
             str(repository / "scripts" / "release-end-to-end"),
+            *(["--resume"] if resume else []),
             "0.1.1",
         ],
         cwd=repository,
@@ -400,6 +425,23 @@ def run_with_confirmations(
         raise AssertionError(f"release script timed out:\n{output.decode(errors='replace')}")
     finally:
         os.close(terminal)
+
+
+def prepare_resume_fixture(repository: Path, environment: dict[str, str]) -> None:
+    feature = git(repository, "rev-parse", "feature")
+    git(repository, "switch", "--quiet", "main")
+    git(repository, "cherry-pick", "--quiet", feature)
+    git(repository, "push", "--quiet", "origin", "main")
+    git(repository, "switch", "--quiet", "-c", "release/v0.1.1")
+    (repository / "pyproject.toml").write_text(
+        '[project]\nname = "tfr"\nversion = "0.1.1"\n', encoding="utf-8"
+    )
+    (repository / "uv.lock").write_text('version = "0.1.1"\n', encoding="utf-8")
+    git(repository, "add", "pyproject.toml", "uv.lock")
+    git(repository, "commit", "--quiet", "-m", "release: v0.1.1")
+    git(repository, "push", "--quiet", "--set-upstream", "origin", "release/v0.1.1")
+    git(repository, "switch", "--quiet", "main")
+    environment["TFR_FAKE_RESUME"] = "1"
 
 
 def test_release_end_to_end_runs_protected_pipeline(tmp_path: Path) -> None:
@@ -491,6 +533,49 @@ def test_agent_release_driver_answers_only_observed_prompts(tmp_path: Path) -> N
     log = Path(environment["TFR_FAKE_LOG"]).read_text(encoding="utf-8")
     assert "publish --push\n" in log
     assert (Path(environment["TFR_FAKE_STATE"]) / "approved").exists()
+
+
+def test_release_end_to_end_resumes_existing_version_only_pr(tmp_path: Path) -> None:
+    repository, environment = create_fixture(tmp_path)
+    prepare_resume_fixture(repository, environment)
+
+    returncode, output = run_with_confirmations(
+        repository,
+        environment,
+        ["v0.1.1", "v0.1.1"],
+        resume=True,
+    )
+
+    assert returncode == 0, output
+    log = Path(environment["TFR_FAKE_LOG"]).read_text(encoding="utf-8")
+    assert "gh pr create" not in log
+    assert "gh pr merge 2" in log
+    assert "publish --push\n" in log
+    assert "release: retrigger checks for v0.1.1" in git(
+        repository, "log", "origin/release/v0.1.1", "-1", "--format=%s"
+    )
+
+
+def test_release_resume_rejects_unexpected_release_pr_files(tmp_path: Path) -> None:
+    repository, environment = create_fixture(tmp_path)
+    prepare_resume_fixture(repository, environment)
+    environment["TFR_FAKE_UNEXPECTED_RELEASE_FILE"] = "1"
+
+    result = subprocess.run(
+        [str(repository / "scripts" / "release-end-to-end"), "--resume", "0.1.1"],
+        cwd=repository,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "release PR must change only pyproject.toml and uv.lock" in result.stderr
+    log = Path(environment["TFR_FAKE_LOG"]).read_text(encoding="utf-8")
+    assert "gh pr merge" not in log
+    assert "publish" not in log
 
 
 def test_release_end_to_end_stops_on_security_failure(tmp_path: Path) -> None:

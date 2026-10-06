@@ -71,6 +71,15 @@ piping confirmations. The driver mirrors output, waits for each exact version-sp
 prompt, responds once in the required order, enforces its own one-hour overall timeout,
 and requires the orchestrator's final immutable-release verification before succeeding.
 
+If a guarded release created a version-only release PR but stopped before merging it,
+resume from clean, synchronized `main` with
+`./scripts/release-end-to-end-agent --resume VERSION`. Resume mode requires the exact
+remote release branch and one open non-draft PR, rejects changes outside
+`pyproject.toml` and `uv.lock`, rejects an existing tag or Release, merges current
+protected `main` into the release branch, reruns local checks, and pushes a new commit
+to trigger a complete fresh protected check set before continuing through the same
+canonical publish and approval path.
+
 After the stable tag is pushed, rerun the script only after understanding the failure.
 The tag and release are intentionally immutable; use the failure-recovery guidance
 below rather than deleting or replacing them.
