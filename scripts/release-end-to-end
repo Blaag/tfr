@@ -141,31 +141,23 @@ pr_for_branch() {
 
 wait_for_pr_checks() {
     pr=$1
-    label=$2
+    expected_head=$2
+    label=$3
     deadline=$(($(date +%s) + TIMEOUT_SECONDS))
     checks_file="$temporary_directory/pr-$pr-checks.json"
-    checks_error="$temporary_directory/pr-$pr-checks.error"
 
-    printf '\n==> Waiting for %s PR checks\n' "$label"
+    printf '\n==> Waiting for %s PR checks on %s\n' "$label" "$expected_head"
     while :; do
-        set +e
-        gh pr checks "$pr" --repo "$EXPECTED_REPOSITORY" \
-            --json name,workflow,bucket,state >"$checks_file" 2>"$checks_error"
-        check_status=$?
-        set -e
-        if [ "$check_status" -eq 1 ] && grep -q '^no checks reported on ' "$checks_error"; then
-            printf '[]\n' >"$checks_file"
-        elif [ "$check_status" -ne 0 ] && [ "$check_status" -ne 8 ]; then
-            cat "$checks_error" >&2
-            fail "cannot inspect checks for PR #$pr"
-        fi
+        actual_head=$(gh pr view "$pr" --repo "$EXPECTED_REPOSITORY" \
+            --json headRefOid --jq .headRefOid)
+        [ "$actual_head" = "$expected_head" ] || fail "$label PR head changed while waiting"
+        gh api "repos/$EXPECTED_REPOSITORY/commits/$expected_head/check-runs?per_page=100" \
+            >"$checks_file"
         if jq -e '
-            any(.[]; .name == "test") and
-            any(.[]; .name == "dependency-review") and
-            any(.[]; .name == "CodeQL") and
-            any(.[]; .name == "Analyze (actions)") and
-            any(.[]; .name == "Analyze (javascript-typescript)") and
-            any(.[]; .name == "Analyze (python)")
+            [.check_runs[]] as $runs |
+            ["test", "dependency-review", "CodeQL", "Analyze (actions)",
+             "Analyze (javascript-typescript)", "Analyze (python)"] as $required |
+            all($required[]; . as $name | any($runs[]; .name == $name))
         ' "$checks_file" >/dev/null; then
             break
         fi
@@ -173,19 +165,32 @@ wait_for_pr_checks() {
         sleep "$POLL_SECONDS"
     done
 
-    gh pr checks "$pr" --repo "$EXPECTED_REPOSITORY" --watch --fail-fast
-    gh pr checks "$pr" --repo "$EXPECTED_REPOSITORY" \
-        --json name,workflow,bucket,state >"$checks_file"
-    jq -e '
-        length > 0 and
-        all(.[]; .bucket == "pass") and
-        any(.[]; .name == "test" and .bucket == "pass") and
-        any(.[]; .name == "dependency-review" and .bucket == "pass") and
-        any(.[]; .name == "CodeQL" and .bucket == "pass") and
-        any(.[]; .name == "Analyze (actions)" and .bucket == "pass") and
-        any(.[]; .name == "Analyze (javascript-typescript)" and .bucket == "pass") and
-        any(.[]; .name == "Analyze (python)" and .bucket == "pass")
-    ' "$checks_file" >/dev/null || fail "PR #$pr does not have a complete passing check set"
+    while :; do
+        actual_head=$(gh pr view "$pr" --repo "$EXPECTED_REPOSITORY" \
+            --json headRefOid --jq .headRefOid)
+        [ "$actual_head" = "$expected_head" ] || fail "$label PR head changed while waiting"
+        gh api "repos/$EXPECTED_REPOSITORY/commits/$expected_head/check-runs?per_page=100" \
+            >"$checks_file"
+        result=$(jq -r '
+            [.check_runs[]] as $runs |
+            ["test", "dependency-review", "CodeQL", "Analyze (actions)",
+             "Analyze (javascript-typescript)", "Analyze (python)"] as $required |
+            [$required[] | . as $name |
+             [$runs[] | select(.name == $name)] |
+             sort_by(.started_at // .created_at // "") | last] as $latest |
+            if any($latest[]; .status == "completed" and .conclusion != "success") then "fail"
+            elif all($latest[]; .status == "completed" and .conclusion == "success") then "pass"
+            else "pending" end
+        ' "$checks_file")
+        case $result in
+            pass) break ;;
+            fail) fail "PR #$pr has a failed or cancelled check on $expected_head" ;;
+            pending) ;;
+            *) fail "cannot interpret checks for PR #$pr" ;;
+        esac
+        [ "$(date +%s)" -lt "$deadline" ] || fail "timed out waiting for PR checks"
+        sleep "$POLL_SECONDS"
+    done
 }
 
 merge_pr() {
@@ -426,7 +431,7 @@ uv.lock" ] || fail "resumed release differs from main outside release metadata"
     assert_clean_checkout
     release_head=$(git rev-parse HEAD)
     git push origin "$release_branch"
-    wait_for_pr_checks "$release_pr" release
+    wait_for_pr_checks "$release_pr" "$release_head" release
     merge_pr "$release_pr" release
 else
     git show-ref --verify --quiet "refs/heads/$release_branch" && \
@@ -450,7 +455,8 @@ if [ "$current_branch" != main ]; then
         --json baseRefName,isDraft,state \
         --jq '.baseRefName == "main" and .isDraft == false and .state == "OPEN"' |
         grep -qx true || fail "feature PR is not an open, non-draft PR to main"
-    wait_for_pr_checks "$feature_pr" feature
+    feature_head=$(git rev-parse HEAD)
+    wait_for_pr_checks "$feature_pr" "$feature_head" feature
     merge_pr "$feature_pr" feature
     git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
 fi
@@ -484,7 +490,7 @@ release_pr_url=$(gh pr create --repo "$EXPECTED_REPOSITORY" --base main \
     --body "Prepare stable release $tag.")
 release_pr=$(gh pr view "$release_pr_url" --repo "$EXPECTED_REPOSITORY" \
     --json number --jq .number)
-wait_for_pr_checks "$release_pr" release
+wait_for_pr_checks "$release_pr" "$release_head" release
 merge_pr "$release_pr" release
 fi
 

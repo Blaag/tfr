@@ -340,6 +340,29 @@ elif args[0] == "api":
         })
     elif endpoint.endswith("/immutable-releases"):
         output({"enabled": True})
+    elif "/check-runs?" in endpoint:
+        names = [
+            "CodeQL",
+            "Analyze (actions)",
+            "Analyze (javascript-typescript)",
+            "Analyze (python)",
+            "test",
+            "dependency-review",
+        ]
+        runs = [
+            {
+                "name": name,
+                "status": "completed",
+                "conclusion": (
+                    "failure"
+                    if codeql_failure and name == "Analyze (python)"
+                    else "success"
+                ),
+                "started_at": "2026-01-01T00:00:00Z",
+            }
+            for name in names
+        ]
+        output({"check_runs": runs})
     elif endpoint.endswith("/pending_deployments") and "--method" not in args:
         output([{
             "environment": {"id": 99, "name": "release"},
@@ -622,7 +645,7 @@ def test_release_end_to_end_stops_on_codeql_failure(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     log = Path(environment["TFR_FAKE_LOG"]).read_text(encoding="utf-8")
-    assert "gh pr checks 1" in log
+    assert "/check-runs?per_page=100" in log
     assert "gh pr merge" not in log
     assert "publish" not in log
     assert "pending_deployments" not in log
