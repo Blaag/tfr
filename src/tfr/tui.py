@@ -100,6 +100,7 @@ _MULTILINE_PASTE_DELAY_SECONDS = 0.5
 _MULTILINE_PASTE_MAXIMUM_BYTES = 1_048_576
 _MULTILINE_PASTE_MAXIMUM_LINES = 10_000
 _MULTILINE_PASTE_MAXIMUM_COMMAND_BYTES = 7_000
+_EFFECTS_LAB_ALIAS = "effects-lab"
 _CORE_CLIENT_COMMANDS = frozenset(
     {
         "agent",
@@ -1012,6 +1013,143 @@ class TfrTui:
             for alias, view in self.views.items()
         }
         bindings = self._create_bindings()
+        self.effects_input_buffer = Buffer(
+            accept_handler=self._accept_effects_input,
+            history=InMemoryHistory(),
+            multiline=False,
+        )
+        self.effects_input_window = VSplit(
+            [
+                Window(
+                    content=FormattedTextControl(
+                        [("class:input.prompt", "[Effects Lab]> ")]
+                    ),
+                    dont_extend_width=True,
+                ),
+                Window(
+                    content=BufferControl(buffer=self.effects_input_buffer),
+                    height=1,
+                ),
+            ],
+            height=1,
+        )
+        def effects_output_height() -> int:
+            return self.effects_display.pager.height + 1
+
+        self.effects_output_panel = HSplit(
+            [
+                Window(
+                    content=FormattedTextControl(
+                        lambda: self._effects_border_text(
+                            "output", BorderEdge.TOP, effects_output_height()
+                        )
+                    ),
+                    height=1,
+                ),
+                VSplit(
+                    [
+                        Window(
+                            content=FormattedTextControl(
+                                lambda: self._effects_border_text(
+                                    "output", BorderEdge.LEFT, effects_output_height()
+                                )
+                            ),
+                            width=1,
+                            dont_extend_width=True,
+                        ),
+                        HSplit(
+                            [
+                                Window(
+                                    content=FormattedTextControl(
+                                        lambda: [
+                                            (
+                                                "class:notice.warning",
+                                                " LOCAL EFFECTS LAB — NOTHING HERE IS SENT "
+                                                "TO A WORLD ",
+                                            )
+                                        ]
+                                    ),
+                                    height=1,
+                                ),
+                                Window(
+                                    content=FormattedTextControl(self._effects_lab_text),
+                                    wrap_lines=False,
+                                ),
+                            ]
+                        ),
+                        Window(
+                            content=FormattedTextControl(
+                                lambda: self._effects_border_text(
+                                    "output", BorderEdge.RIGHT, effects_output_height()
+                                )
+                            ),
+                            width=1,
+                            dont_extend_width=True,
+                        ),
+                    ]
+                ),
+                Window(
+                    content=FormattedTextControl(
+                        lambda: self._effects_border_text(
+                            "output", BorderEdge.BOTTOM, effects_output_height()
+                        )
+                    ),
+                    height=1,
+                ),
+            ]
+        )
+        effects_input_height = recent_input_lines + 1
+        self.effects_input_panel = HSplit(
+            [
+                Window(
+                    content=FormattedTextControl(
+                        lambda: self._effects_border_text(
+                            "input", BorderEdge.TOP, effects_input_height
+                        )
+                    ),
+                    height=1,
+                ),
+                VSplit(
+                    [
+                        Window(
+                            content=FormattedTextControl(
+                                lambda: self._effects_border_text(
+                                    "input", BorderEdge.LEFT, effects_input_height
+                                )
+                            ),
+                            width=1,
+                            dont_extend_width=True,
+                        ),
+                        HSplit(
+                            [
+                                Window(height=recent_input_lines),
+                                self.effects_input_window,
+                            ],
+                            height=effects_input_height,
+                        ),
+                        Window(
+                            content=FormattedTextControl(
+                                lambda: self._effects_border_text(
+                                    "input", BorderEdge.RIGHT, effects_input_height
+                                )
+                            ),
+                            width=1,
+                            dont_extend_width=True,
+                        ),
+                    ],
+                    height=effects_input_height,
+                ),
+                Window(
+                    content=FormattedTextControl(
+                        lambda: self._effects_border_text(
+                            "input", BorderEdge.BOTTOM, effects_input_height
+                        )
+                    ),
+                    height=1,
+                ),
+            ],
+            height=effects_input_height + 2,
+        )
         self.inspector_window = Window(
             content=FormattedTextControl(self.agent_inspector_text),
             wrap_lines=True,
@@ -1033,34 +1171,9 @@ class TfrTui:
         )
         self.effects_lab_root = HSplit(
             [
-                Window(
-                    content=FormattedTextControl(
-                        lambda: [
-                            (
-                                "class:notice.warning",
-                                " LOCAL EFFECTS LAB — NOTHING HERE IS SENT TO A WORLD ",
-                            )
-                        ]
-                    ),
-                    height=1,
-                ),
-                Window(
-                    content=FormattedTextControl(self._effects_lab_text),
-                    wrap_lines=False,
-                ),
-                Window(content=FormattedTextControl(self._effects_notice_text), height=1),
-                DynamicContainer(lambda: self.input_panels[self.active_alias]),
-                Window(
-                    content=FormattedTextControl(
-                        lambda: [
-                            (
-                                "class:status",
-                                "/teststreak all|3..7  /testspeaker NAME  /effects close",
-                            )
-                        ]
-                    ),
-                    height=1,
-                ),
+                Window(content=FormattedTextControl(self.world_bar), height=1),
+                self.effects_output_panel,
+                self.effects_input_panel,
             ],
             style="class:application",
         )
@@ -1795,14 +1908,6 @@ class TfrTui:
                 (self.animations_enabled and not self.low_bandwidth) or force_animation
             ) and self.plugins is not None:
                 fragment = self.plugins.transform_border(context, fragment)
-            if notice is not None and notice_start >= 0 and notice.count >= 3:
-                distance = min(
-                    abs(index - notice_start),
-                    abs(index - (notice_start + len(notice_text))),
-                )
-                wave = int(notice_age * 16) % max(1, length // 2)
-                if abs(distance - wave) <= 1:
-                    fragment = replace(fragment, style=f"fg:{notice.color} bold reverse")
             if more_start <= index < more_start + len(more):
                 fragment = replace(
                     fragment,
@@ -1825,6 +1930,14 @@ class TfrTui:
                     character=notice_text[index - notice_start],
                     style=notice_style,
                 )
+            if notice is not None and notice_start >= 0 and notice.count >= 3:
+                distance = min(
+                    abs(index - notice_start),
+                    abs(index - (notice_start + len(notice_text))),
+                )
+                wave = int(notice_age * 16) % max(1, length // 2)
+                if abs(distance - wave) <= 1:
+                    fragment = replace(fragment, style=f"fg:{notice.color} bold reverse")
             output.append((fragment.style, fragment.character, mouse_handler))
             if edge in {BorderEdge.LEFT, BorderEdge.RIGHT} and index + 1 < length:
                 output.append(("", "\n"))
@@ -1891,10 +2004,18 @@ class TfrTui:
             )
 
     def switch_relative(self, amount: int) -> None:
-        self.switch_world(self.aliases[(self.active_index + amount) % len(self.aliases)])
+        position = len(self.aliases) if self.effects_lab_open else self.active_index
+        destination = (position + amount) % (len(self.aliases) + 1)
+        if destination == len(self.aliases):
+            self._open_effects_lab()
+        else:
+            self.switch_world(self.aliases[destination])
 
     def switch_world(self, alias: str) -> None:
         if self.image_preview is not None:
+            return
+        if alias.casefold() == _EFFECTS_LAB_ALIAS:
+            self._open_effects_lab()
             return
         if alias not in self.views:
             self.add_notice(self.active_alias, f"Unknown world: {alias}")
@@ -1902,8 +2023,39 @@ class TfrTui:
         if alias != self.active_alias and self._screen_clear_world is not None:
             self._stop_screen_clear()
         self.active_index = self.aliases.index(alias)
+        self.effects_lab_open = False
         self.inspector_agent = None
         self.active_view.unread_events = 0
+        self.application.layout.focus(self.active_view.input_buffer)
+        self._sync_animation_task(restart=True)
+        self.application.invalidate()
+
+    def _accept_effects_input(self, buffer: Buffer) -> bool:
+        text = buffer.text
+        if text:
+            self._spawn(self.submit_text(self.active_alias, text))
+        else:
+            buffer.history_forward(count=1_000_000)
+            buffer.document = Document()
+            self.application.invalidate()
+            return True
+        return False
+
+    def _open_effects_lab(self) -> None:
+        self.effects_lab_open = True
+        self.inspector_agent = None
+        self.application.layout.focus(self.effects_input_buffer)
+        self._sync_animation_task(restart=True)
+        self.application.invalidate()
+
+    def _close_effects_lab(self) -> None:
+        self.effects_lab_open = False
+        self.effects_lab_force_motion = False
+        if self._effects_task is not None:
+            self._effects_task.cancel()
+            self._effects_task = None
+        self._effects_notice = None
+        self._firework_particles.clear()
         self.application.layout.focus(self.active_view.input_buffer)
         self._sync_animation_task(restart=True)
         self.application.invalidate()
@@ -2181,8 +2333,10 @@ class TfrTui:
                 continue
             x = particle.origin_x + particle.velocity_x * age
             y = particle.origin_y + particle.velocity_y * age + 0.28 * age * age
-            column = min(self._firework_width - 1, max(0, int(x * self._firework_width)))
-            row = min(self._firework_height - 1, max(0, int(y * self._firework_height)))
+            if not 0 <= x < 1 or not 0 <= y < 1:
+                continue
+            column = int(x * self._firework_width)
+            row = int(y * self._firework_height)
             cells.setdefault((row, column), (f"fg:{particle.color} bold", particle.glyph))
             if len(cells) >= maximum_cells:
                 break
@@ -2505,7 +2659,7 @@ class TfrTui:
                     )
                 )
                 should_count = True
-        if should_count and event.world != self.active_alias:
+        if should_count and (self.effects_lab_open or event.world != self.active_alias):
             view.unread_events += 1
         self._sync_animation_task(restart=event.world == self.active_alias)
         self.application.invalidate()
@@ -2523,7 +2677,9 @@ class TfrTui:
                     self.switch_world(world)
 
             classes = [
-                "class:world.active" if alias == self.active_alias else "class:world.inactive"
+                "class:world.active"
+                if alias == self.active_alias and not self.effects_lab_open
+                else "class:world.inactive"
             ]
             if view.is_agent:
                 classes.append("class:world.agent")
@@ -2539,6 +2695,21 @@ class TfrTui:
             output.append(
                 (" ".join(classes), f" [{marker}] {alias}{activity}{unread} ", select_world)
             )
+
+        def select_effects_lab(mouse_event: MouseEvent) -> None:
+            if (
+                mouse_event.event_type is MouseEventType.MOUSE_UP
+                and mouse_event.button is MouseButton.LEFT
+            ):
+                self._open_effects_lab()
+
+        output.append(
+            (
+                "class:world.active" if self.effects_lab_open else "class:world.inactive",
+                " [L] Effects Lab ",
+                select_effects_lab,
+            )
+        )
         return output
 
     def status_bar(self) -> StyleAndTextTuples:
@@ -2620,12 +2791,7 @@ class TfrTui:
             return
 
         if self.effects_lab_open:
-            self.effects_display.append(
-                self.theme.ansi_text(
-                    "warning", "-- Effects Lab accepts local /test commands only --"
-                )
-            )
-            self.application.invalidate()
+            self._show_effects_lab_command_usage()
             return
 
         view = self.views[alias]
@@ -2899,6 +3065,25 @@ class TfrTui:
             return
         command, *parameters = arguments
         command = command.casefold()
+        lab_commands = {
+            "demoeffects",
+            "effects",
+            "n",
+            "next",
+            "p",
+            "prev",
+            "previous",
+            "testspeaker",
+            "teststreak",
+            "world",
+        }
+        if (
+            self.effects_lab_open
+            and command not in lab_commands
+            and command not in self.world_switch_aliases
+        ):
+            self._show_effects_lab_command_usage()
+            return
         if command == "help":
             if parameters:
                 self.add_notice(alias, "Usage: /help")
@@ -2951,7 +3136,11 @@ class TfrTui:
             if parameters:
                 self.switch_world(parameters[0])
             else:
-                self.add_notice(alias, "Worlds: " + ", ".join(self.aliases))
+                worlds = ", ".join((*self.aliases, _EFFECTS_LAB_ALIAS))
+                if self.effects_lab_open:
+                    self.effects_display.append(f"Worlds: {worlds}", recallable=False)
+                else:
+                    self.add_notice(alias, f"Worlds: {worlds}")
         elif command in {"next", "n"}:
             self.switch_relative(1)
         elif command in {"previous", "prev", "p"}:
@@ -3070,21 +3259,23 @@ class TfrTui:
                 lines.append(f"  /{command} ({plugin}) - {description}")
         return "\n".join(lines)
 
-    def _effects_notice_text(self) -> StyleAndTextTuples:
-        if not self._effects_motion_enabled():
-            return [("class:notice.warning", " Effects suppressed; use /effects force on ")]
+    def _effects_border_text(
+        self,
+        panel: str,
+        edge: BorderEdge,
+        inner_height: int,
+    ) -> StyleAndTextTuples:
         notice = self._effects_notice
-        if notice is None:
-            return [("class:border", "─" * max(1, self.effects_display.width))]
         alias = self.active_alias
         previous = self._combo_notices.get(alias)
-        self._combo_notices[alias] = notice
+        if notice is not None:
+            self._combo_notices[alias] = notice
         try:
             fragments = self._border_text(
                 self.active_view,
-                "output",
-                BorderEdge.BOTTOM,
-                self.effects_display.pager.height,
+                panel,
+                edge,
+                inner_height,
                 force_animation=self.effects_lab_force_motion,
             )
         finally:
@@ -3092,9 +3283,9 @@ class TfrTui:
                 self._combo_notices.pop(alias, None)
             else:
                 self._combo_notices[alias] = previous
-        if time.monotonic() - notice.started_at >= 3.6:
+        if notice is not None and time.monotonic() - notice.started_at >= 3.6:
             self._effects_notice = None
-        return fragments[1:-1]
+        return fragments
 
     def _effects_lab_text(self) -> StyleAndTextTuples:
         rows = self.effects_display.padded_visible_rows(
@@ -3104,44 +3295,53 @@ class TfrTui:
         )
         return rows_to_formatted_text(rows)
 
+    def _show_effects_lab_command_usage(self) -> None:
+        self.effects_display.append(
+            self.theme.ansi_text(
+                "warning",
+                "-- Effects Lab only accepts valid lab commands --",
+            ),
+            recallable=False,
+        )
+        self.effects_display.append(self._effects_lab_help_text(), recallable=False)
+        self.application.invalidate()
+
+    def _effects_lab_help_text(self) -> str:
+        speakers = tuple(
+            demo.label for demo in self.plugins.effect_demos() if demo.category == "speaker"
+        )
+        return "\n".join(
+            (
+                "Effects Lab",
+                "  /teststreak all        play every combo tier",
+                "  /teststreak 3..7       preview one tier immediately",
+                "  /testspeaker NAME      preview the real configured rule",
+                "  /effects effect NAME   preview a built-in text effect",
+                "  /effects effect all    preview every built-in text effect",
+                "  /effects force on|off  override motion only inside this lab",
+                "  /effects close         return to the active world",
+                "",
+                "Configured speakers: "
+                + (", ".join(speakers) if speakers else "none registered"),
+            )
+        )
+
     async def _handle_effects_command(self, parameters: list[str]) -> None:
         operation = parameters[0].casefold() if parameters else "open"
         if operation in {"close", "off", "stop"}:
-            self.effects_lab_open = False
-            self.effects_lab_force_motion = False
-            if self._effects_task is not None:
-                self._effects_task.cancel()
-                self._effects_task = None
-            self._effects_notice = None
-            self._firework_particles.clear()
-            self.application.invalidate()
+            self._close_effects_lab()
             return
+        self._open_effects_lab()
         if operation == "force":
             if len(parameters) != 2 or parameters[1].casefold() not in {"on", "off"}:
                 self.effects_display.append("Usage: /effects force on|off", recallable=False)
                 return
-            self.effects_lab_open = True
             self.effects_lab_force_motion = parameters[1].casefold() == "on"
             self._sync_animation_task(restart=True)
             self.application.invalidate()
             return
-        self.effects_lab_open = True
         if operation in {"open", "list"}:
-            speakers = tuple(
-                demo.label for demo in self.plugins.effect_demos() if demo.category == "speaker"
-            )
-            lines = [
-                "Effects Lab",
-                "  /teststreak all       play every combo tier",
-                "  /teststreak 3..7      preview one tier immediately",
-                "  /testspeaker NAME     preview the real configured rule",
-                "  /effects effect NAME preview a built-in text effect",
-                "  /effects force on     override motion only inside this lab",
-                "  /effects close        return to the active world",
-                "",
-                "Configured speakers: " + (", ".join(speakers) if speakers else "none registered"),
-            ]
-            self.effects_display.append("\n".join(lines), recallable=False)
+            self.effects_display.append(self._effects_lab_help_text(), recallable=False)
         elif operation == "combos":
             await self._handle_teststreak(["all"])
         elif operation == "speakers":
@@ -3156,7 +3356,11 @@ class TfrTui:
                 self._handle_testspeaker([speaker])
             await self._handle_teststreak(["all"])
         elif operation == "effect" and len(parameters) == 2:
-            self._show_text_effect_demo(parameters[1])
+            if parameters[1].casefold() == "all":
+                for effect in TextEffectKind:
+                    self._show_text_effect_demo(effect.value, speaker="WilfordBrimley")
+            else:
+                self._show_text_effect_demo(parameters[1])
         else:
             names = ", ".join(effect.value for effect in TextEffectKind)
             self.effects_display.append(f"Built-in effects: {names}", recallable=False)
@@ -3219,7 +3423,7 @@ class TfrTui:
         self.application.invalidate()
 
     def _handle_testspeaker(self, parameters: list[str]) -> None:
-        self.effects_lab_open = True
+        self._open_effects_lab()
         if not parameters:
             speakers = tuple(
                 demo.label for demo in self.plugins.effect_demos() if demo.category == "speaker"
@@ -3257,14 +3461,15 @@ class TfrTui:
                 )
             )
 
-    def _show_text_effect_demo(self, name: str) -> None:
+    def _show_text_effect_demo(self, name: str, *, speaker: str | None = None) -> None:
         try:
             effect = TextEffectKind(name.casefold())
         except ValueError:
             self.effects_display.append(f"Unknown effect: {name}", recallable=False)
             return
-        text = f"{effect.value}: The quick brown fox previews this effect."
-        start = text.index(":") + 2
+        sample = f"{effect.value}: The quick brown fox previews this effect."
+        text = f'{speaker} says, "{sample}"' if speaker is not None else sample
+        start = text.index(sample)
         interval = (
             0.05
             if effect is TextEffectKind.TERMINAL_REVEAL
@@ -3274,7 +3479,7 @@ class TfrTui:
         )
         decoration = TextDecoration(
             start=start,
-            end=len(text),
+            end=start + len(sample),
             effect=effect,
             base_color=self.theme.output_color,
             accent_color="#ffffff",
@@ -3291,7 +3496,7 @@ class TfrTui:
         self.application.invalidate()
 
     async def _handle_teststreak(self, parameters: list[str]) -> None:
-        self.effects_lab_open = True
+        self._open_effects_lab()
         value = parameters[0].casefold() if parameters else "all"
         if value == "all":
             if self._effects_task is not None:

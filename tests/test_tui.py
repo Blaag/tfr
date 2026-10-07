@@ -1981,6 +1981,23 @@ def test_combo_notice_is_confined_to_output_bottom_border() -> None:
                 assert "Spree" not in rendered
 
 
+def test_combo_notice_sweep_renders_above_activity_and_more_labels() -> None:
+    tui = make_tui()
+    tui.active_view.display.resize(width=80, height=1)
+    tui.views["beta"].unread_events = 4
+    for index in range(4):
+        tui.active_view.display.append(f"line {index}")
+    for sequence in range(1, 7):
+        tui.handle_event(combo_say(tui, sequence))
+    notice = tui._combo_notices["alpha"]
+    tui._combo_notices["alpha"] = replace(notice, started_at=time.monotonic() - 1.2)
+
+    border = tui._border_text(tui.active_view, "output", BorderEdge.BOTTOM, 1)
+
+    assert border[13][1] == " "
+    assert "reverse" in border[13][0]
+
+
 def test_combo_streak_counts_silently_while_low_bandwidth() -> None:
     tui = make_tui()
     tui.low_bandwidth = True
@@ -2116,6 +2133,56 @@ async def test_effects_lab_commands_are_local_and_use_real_renderers() -> None:
     assert tui.effects_lab_open is False
 
 
+async def test_effects_lab_is_a_local_navigable_world_with_its_own_input() -> None:
+    tui = make_tui()
+    await tui.submit_text("alpha", "/effects")
+    tui.effects_input_buffer.text = "lab draft"
+
+    assert tui.effects_lab_open is True
+    assert tui.application.layout.current_buffer is tui.effects_input_buffer
+    assert "[L] Effects Lab" in fragment_list_to_text(tui.world_bar())
+    tui.handle_event(combo_say(tui, 1))
+    assert tui.views["alpha"].unread_events == 1
+
+    await tui.submit_text("alpha", "/next")
+
+    assert tui.effects_lab_open is False
+    assert tui.active_alias == "alpha"
+    assert tui.application.layout.current_buffer is tui.views["alpha"].input_buffer
+
+    tui.switch_relative(-1)
+
+    assert tui.effects_lab_open is True
+    assert tui.effects_input_buffer.text == "lab draft"
+
+
+async def test_effects_lab_rejects_non_lab_commands_with_command_list() -> None:
+    tui = make_tui()
+    await tui.submit_text("alpha", "/effects")
+
+    await tui.submit_text("alpha", "/connect")
+    await tui.submit_text("alpha", "not a command")
+
+    rendered = fragment_list_to_text(tui.effects_display.formatted_text())
+    assert "Effects Lab only accepts valid lab commands" in rendered
+    assert "/effects effect NAME" in rendered
+    assert "/effects effect all" in rendered
+    assert "/teststreak all" in rendered
+    assert "/teststreak 3..7" in rendered
+
+
+async def test_effects_lab_effect_all_previews_every_effect_as_wilford_brimley() -> None:
+    tui = make_tui()
+    tui.effects_display.resize(width=200, height=100)
+
+    await tui.submit_text("alpha", "/effects effect all")
+
+    rendered = fragment_list_to_text(tui.effects_display.formatted_text())
+    assert rendered.count('WilfordBrimley says, "') == len(TextEffectKind)
+    for effect in TextEffectKind:
+        assert f"{effect.value}: The quick brown fox previews this effect." in rendered
+
+
 async def test_effects_lab_full_streak_playback_is_cancellable() -> None:
     tui = make_tui()
     await tui.submit_text("alpha", "/teststreak all")
@@ -2197,6 +2264,26 @@ def test_godlike_starts_bounded_fireworks_once_and_higher_counts_only_update_not
     assert len(tui._firework_particles) == particle_count
     assert tui._combo_notices["alpha"].text == "> GODLIKE x2 <"
     assert not tui.active_view.display._entry_decorations[-1]
+
+
+def test_fireworks_discard_particles_outside_viewport_instead_of_clamping_to_edges() -> None:
+    tui = make_tui()
+    tui._position_firework_particles(80, 24)
+    for sequence in range(1, 8):
+        tui.handle_event(combo_say(tui, sequence))
+    particle = tui._firework_particles[0]
+    tui._firework_particles = [
+        replace(
+            particle,
+            started_at=time.monotonic() - 1,
+            origin_x=-0.5,
+            origin_y=-0.5,
+            velocity_x=0,
+            velocity_y=0,
+        )
+    ]
+
+    assert tui._firework_cells("alpha") == {}
 
 
 async def test_empty_particle_layer_never_masks_output_or_help() -> None:
