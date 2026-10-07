@@ -348,6 +348,10 @@ elif args[0] == "api":
     elif endpoint.endswith("/immutable-releases"):
         output({"enabled": True})
     elif "/check-runs?" in endpoint:
+        check_calls = state / "check-run-calls"
+        check_count = int(check_calls.read_text() or "0") if check_calls.exists() else 0
+        check_calls.write_text(str(check_count + 1), encoding="utf-8")
+        transient = os.environ.get("TFR_FAKE_TRANSIENT_NEUTRAL") == "1" and check_count == 0
         names = [
             "CodeQL",
             "Analyze (actions)",
@@ -363,6 +367,8 @@ elif args[0] == "api":
                 "conclusion": (
                     "failure"
                     if codeql_failure and name == "Analyze (python)"
+                    else "neutral"
+                    if transient and name == "CodeQL"
                     else "success"
                 ),
                 "started_at": "2026-01-01T00:00:00Z",
@@ -618,6 +624,24 @@ def test_release_resume_rejects_unexpected_release_pr_files(tmp_path: Path) -> N
     log = Path(environment["TFR_FAKE_LOG"]).read_text(encoding="utf-8")
     assert "gh pr merge" not in log
     assert "publish" not in log
+
+
+def test_release_resume_waits_through_transient_neutral_codeql_gate(tmp_path: Path) -> None:
+    repository, environment = create_fixture(tmp_path)
+    prepare_resume_fixture(repository, environment)
+    environment["TFR_FAKE_TRANSIENT_NEUTRAL"] = "1"
+
+    returncode, output = run_with_confirmations(
+        repository,
+        environment,
+        ["v0.1.1", "v0.1.1"],
+        resume=True,
+    )
+
+    assert returncode == 0, output
+    assert int(
+        (Path(environment["TFR_FAKE_STATE"]) / "check-run-calls").read_text()
+    ) >= 2
 
 
 def test_release_end_to_end_stops_on_security_failure(tmp_path: Path) -> None:

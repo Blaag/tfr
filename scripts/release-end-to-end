@@ -188,7 +188,11 @@ wait_for_pr_checks() {
             [$required[] | . as $name |
              [$runs[] | select(.name == $name)] |
              sort_by(.started_at // .created_at // "") | last] as $latest |
-            if any($latest[]; .status == "completed" and .conclusion != "success") then "fail"
+            if any($latest[];
+                .status == "completed" and
+                (.conclusion | IN("failure", "cancelled", "timed_out",
+                                  "action_required", "startup_failure"))
+            ) then "fail"
             elif all($latest[]; .status == "completed" and .conclusion == "success") then "pass"
             else "pending" end
         ' "$checks_file")
