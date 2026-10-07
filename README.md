@@ -861,11 +861,14 @@ active, but those modes suppress every combo visual and never replay it later.
 Use `/effects` (or `/demoeffects`) to open the local Effects Lab. `/teststreak all`
 plays the complete combo sequence, `/teststreak 3` through `8` previews one tier,
 and `/testspeaker NAME` renders the actual configured speaker decorator and
-portable presentation program. Effects Lab is isolated: its input is never sent
-to a world, logged as a canonical event, or provided to an agent. Real worlds
-remain connected and continue buffering while it is open. The paired web client
-offers the same lab from Settings, whether running as an installed PWA or an
-ordinary browser tab.
+portable presentation program. `/effects effect NAME` previews one built-in text
+effect; `/effects effect all` previews every effect as fictional speaker
+`WilfordBrimley`. Effects Lab is a local entry in normal world navigation, with
+its own preserved input and output. Switching to another world leaves the lab;
+returning restores it. Lab input is never sent to a world, logged as a canonical
+event, or provided to an agent. Real worlds remain connected and continue
+buffering while it is open. The paired web client offers the same lab from
+Settings, whether running as an installed PWA or an ordinary browser tab.
 The active world's recently sent commands remain directly above the editor.
 These lines are separate from server output, so server speech echoes are not
 duplicated. Configure their number with `ui.recent_input_lines` (default `3`, or

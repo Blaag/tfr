@@ -2116,6 +2116,54 @@ async def test_effects_lab_commands_are_local_and_use_real_renderers() -> None:
     assert tui.effects_lab_open is False
 
 
+async def test_effects_lab_is_a_local_navigable_world_with_its_own_input() -> None:
+    tui = make_tui()
+    await tui.submit_text("alpha", "/effects")
+    tui.effects_input_buffer.text = "lab draft"
+
+    assert tui.effects_lab_open is True
+    assert tui.application.layout.current_buffer is tui.effects_input_buffer
+    assert "[L] Effects Lab" in fragment_list_to_text(tui.world_bar())
+    tui.handle_event(combo_say(tui, 1))
+    assert tui.views["alpha"].unread_events == 1
+
+    await tui.submit_text("alpha", "/next")
+
+    assert tui.effects_lab_open is False
+    assert tui.active_alias == "alpha"
+    assert tui.application.layout.current_buffer is tui.views["alpha"].input_buffer
+
+    tui.switch_relative(-1)
+
+    assert tui.effects_lab_open is True
+    assert tui.effects_input_buffer.text == "lab draft"
+
+
+async def test_effects_lab_rejects_non_lab_commands_with_command_list() -> None:
+    tui = make_tui()
+    await tui.submit_text("alpha", "/effects")
+
+    await tui.submit_text("alpha", "/connect")
+    await tui.submit_text("alpha", "not a command")
+
+    rendered = fragment_list_to_text(tui.effects_display.formatted_text())
+    assert rendered.count("Effects Lab only accepts valid lab commands") == 2
+    assert "/effects effect NAME|all" in rendered
+    assert "/teststreak all|3..7" in rendered
+
+
+async def test_effects_lab_effect_all_previews_every_effect_as_wilford_brimley() -> None:
+    tui = make_tui()
+    tui.effects_display.resize(width=200, height=100)
+
+    await tui.submit_text("alpha", "/effects effect all")
+
+    rendered = fragment_list_to_text(tui.effects_display.formatted_text())
+    assert rendered.count('WilfordBrimley says, "') == len(TextEffectKind)
+    for effect in TextEffectKind:
+        assert f"{effect.value}: The quick brown fox previews this effect." in rendered
+
+
 async def test_effects_lab_full_streak_playback_is_cancellable() -> None:
     tui = make_tui()
     await tui.submit_text("alpha", "/teststreak all")
