@@ -410,6 +410,7 @@ elif args[:2] == ["release", "view"]:
         "assets": [
             {"name": f"tfr-{version}-py3-none-any.whl"},
             {"name": f"tfr-{version}.tar.gz"},
+            {"name": f"tfr-{version}-release.zip"},
             {"name": "update-manifest.json"},
         ],
         "url": f"https://github.invalid/Blaag/tfr/releases/tag/{tag}",

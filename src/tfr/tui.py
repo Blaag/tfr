@@ -3232,8 +3232,6 @@ class TfrTui:
             "  /animations [on|off|status] - enable continuous UI effects",
             "  /spellcheck on|off|status|undo - correct explicit speech and poses locally",
             "  /effects - open the local Effects Lab; /demoeffects is an alias",
-            "  /teststreak [all|3..7] - preview combo effects without sending anything",
-            "  /testspeaker NAME - preview configured speaker decorators locally",
             "  /update - update TFR and stable-auto plugins on the Gateway and all connected UIs",
             "  /update status|check - inspect stable TFR and plugin releases",
             "  /plugins - show configured, loaded, and failed plugins",

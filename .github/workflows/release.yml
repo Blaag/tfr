@@ -50,7 +50,21 @@ jobs:
         run: printf 'BUILD_COMMIT = "%s"\n' "$GITHUB_SHA" > src/tfr/_build.py
       - name: Build candidate artifacts
         if: steps.release.outputs.channel == 'candidate'
-        run: uv build
+        run: |
+          uv build
+          mkdir -p release-bundle
+          uv export --locked --no-default-groups --no-emit-project --no-config --quiet \
+            --output-file release-bundle/requirements.txt
+          wheels=(dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          version="${GITHUB_REF_NAME#v}"
+          version="${version%%-candidate.*}"
+          uv run python scripts/build_release_bundle.py \
+            --wheel "${wheels[0]}" \
+            --requirements release-bundle/requirements.txt \
+            --version "$version" \
+            --commit "$GITHUB_SHA" \
+            --output "dist/tfr-$version-release.zip"
       - name: Download exact candidate artifacts for stable promotion
         if: steps.release.outputs.channel == 'stable'
         env:
@@ -74,7 +88,7 @@ jobs:
             if test "$object_type" = commit && test "$object_sha" = "$GITHUB_SHA"; then
               mkdir -p dist
               gh release download "$candidate" --repo "$GITHUB_REPOSITORY" \
-                --pattern '*.whl' --pattern '*.tar.gz' --dir dist
+                --pattern '*.whl' --pattern '*.tar.gz' --pattern '*-release.zip' --dir dist
               promoted="$candidate"
               break
             fi
@@ -87,9 +101,19 @@ jobs:
           }
           wheels=(dist/*.whl)
           sdists=(dist/*.tar.gz)
+          bundles=(dist/*-release.zip)
           test "${#wheels[@]}" -eq 1
           test "${#sdists[@]}" -eq 1
+          test "${#bundles[@]}" -eq 1
           echo "Promoting exact artifacts from $promoted"
+      - name: Verify release bundle
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          version="${version%%-candidate.*}"
+          bundles=(dist/*-release.zip)
+          test "${#bundles[@]}" -eq 1
+          uv run python scripts/verify_release_bundle.py "${bundles[0]}" \
+            --version "$version" --commit "$GITHUB_SHA"
       - name: Verify packaged web modules
         run: |
           wheels=(dist/*.whl)

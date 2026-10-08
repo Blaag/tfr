@@ -611,6 +611,7 @@ jq -e --arg tag "$tag" --arg version "$version" \
     .isImmutable == true and
     ([.assets[].name] | index("tfr-" + $version + "-py3-none-any.whl") != null) and
     ([.assets[].name] | index("tfr-" + $version + ".tar.gz") != null) and
+    ([.assets[].name] | index("tfr-" + $version + "-release.zip") != null) and
     ([.assets[].name] | index("update-manifest.json") != null)
 ' "$release_file" >/dev/null || fail "published release is not immutable and complete"
 
