@@ -15,6 +15,8 @@ building, publishing, and installing them.
 | `./scripts/install-from-checkout` | Operator or developer | Build the current clean checkout into an isolated local release and optionally activate it. It does not publish anything. |
 | `./scripts/install-from-checkout --latest-stable` | Operator | Fetch the live official manifest, verify its exact annotated tag and commit, then build and activate that tagged source. It never installs `main`. |
 | `scripts/build_update_manifest.py` | GitHub Actions | Generate `update-manifest.json` for an already-built wheel. It is a release-workflow helper and is not normally run manually. |
+| `scripts/build_release_bundle.py` | GitHub Actions | Deterministically package the commit-bearing wheel and hash-locked runtime requirements into `tfr-VERSION-release.zip`. |
+| `scripts/verify_release_bundle.py BUNDLE` | Maintainer/operator | Strictly verify bundle structure, member hashes, wheel version/commit identity, and optional expected outer size/SHA-256. |
 
 The actual package build and GitHub Release publication are performed by
 `.github/workflows/release.yml`. Keeping publication in GitHub Actions separates
@@ -53,7 +55,7 @@ The script is pinned to the official `Blaag/tfr` repository and fails closed. It
    approves the protected `release` environment through GitHub, and waits for
    publication.
 9. Verifies that the GitHub Release is immutable and contains the wheel, source
-   distribution, and `update-manifest.json`.
+   distribution, deterministic release bundle, and `update-manifest.json`.
 
 The script never uses `--admin`, force-pushes, deletes tags, dismisses failures, or
 approves publication before the protected build passes. Any command or check failure

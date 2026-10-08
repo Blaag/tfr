@@ -318,7 +318,11 @@ committing and pushing that change, previewing `./scripts/publish-release`, then
 running `./scripts/publish-release --push`. The script validates a clean,
 synchronized `main` and pushes only the matching immutable tag. The release
 workflow tests the tag, embeds its exact commit in the wheel, and publishes the
-wheel, source distribution, and checksummed `update-manifest.json` together.
+wheel, source distribution, deterministic `tfr-VERSION-release.zip` bundle, and
+checksummed `update-manifest.json` together. The bundle contains the wheel plus
+hash-locked runtime requirements and strict identity/integrity metadata. Direct
+bundle installation is not enabled yet; this release asset is published for
+manual verification before `/update` switches away from tagged-source builds.
 Configure the `release` GitHub environment to require maintainer approval, and
 enable immutable releases plus protected release tags in the repository ruleset;
 the workflow also rejects commits that are not on `main`. See

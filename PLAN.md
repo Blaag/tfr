@@ -978,6 +978,12 @@ Acceptance criteria:
 
 ## Test Strategy
 
+- Use test-driven development as the default implementation workflow: add a
+  focused failing contract or regression test first, implement the smallest
+  behavior that passes it, and refactor only while that focused suite remains
+  green. Run the complete deterministic suite at integration boundaries rather
+  than substituting broad after-the-fact tests for the initial executable
+  specification.
 - Pure unit tests for Telnet state, decoding, redaction, parser grammars,
   classification, pager state, rate limits, and context selection.
 - Golden JSONL fixtures for event compatibility.
