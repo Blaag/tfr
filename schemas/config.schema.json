@@ -644,6 +644,15 @@
     "UpdateConfig": {
       "additionalProperties": false,
       "properties": {
+        "channel": {
+          "default": "stable",
+          "enum": [
+            "stable",
+            "candidate"
+          ],
+          "title": "Channel",
+          "type": "string"
+        },
         "check_interval_seconds": {
           "default": 21600.0,
           "minimum": 300,

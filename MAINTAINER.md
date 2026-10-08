@@ -11,6 +11,7 @@ building, publishing, and installing them.
 | `./scripts/release-end-to-end-agent VERSION` | OpenCode release agent | Run the same protected end-to-end release while answering each exact-tag confirmation only after its prompt is observed. Requires prior `/release` authorization. |
 | `./scripts/publish-release` | Maintainer | Validate that the current `main` commit is ready for the version in `pyproject.toml`. It makes no release change without `--push`. |
 | `./scripts/publish-release --push` | Maintainer | Create and push the matching annotated `vX.Y.Z` tag, triggering the protected release workflow. |
+| `./scripts/publish-release --candidate N --push` | Maintainer | Create and push immutable candidate tag `vX.Y.Z-candidate.N` for testing before stable promotion. |
 | `./scripts/install-from-checkout` | Operator or developer | Build the current clean checkout into an isolated local release and optionally activate it. It does not publish anything. |
 | `./scripts/install-from-checkout --latest-stable` | Operator | Fetch the live official manifest, verify its exact annotated tag and commit, then build and activate that tagged source. It never installs `main`. |
 | `scripts/build_update_manifest.py` | GitHub Actions | Generate `update-manifest.json` for an already-built wheel. It is a release-workflow helper and is not normally run manually. |
@@ -43,12 +44,15 @@ The script is pinned to the official `Blaag/tfr` repository and fails closed. It
 4. Creates `release/vVERSION`, updates `pyproject.toml` and `uv.lock`, reruns all local
    checks, commits the version, and merges its protected PR after the same checks pass.
 5. Waits for CI and CodeQL to pass on the exact merged `main` commit.
-6. Previews `./scripts/publish-release`, requires you to type the exact tag, and pushes
-   the immutable tag.
-7. Waits for the release build to pass, requires you to type the exact tag again,
+6. Publishes an immutable numbered candidate first and stops so it can be tested
+   through the candidate update channel.
+7. When rerun from clean synchronized `main` after candidate acceptance, promotes
+   the exact candidate wheel and source archive under the stable tag; no package
+   rebuild occurs.
+8. Waits for the release build to pass, requires you to type the exact tag again,
    approves the protected `release` environment through GitHub, and waits for
    publication.
-8. Verifies that the GitHub Release is immutable and contains the wheel, source
+9. Verifies that the GitHub Release is immutable and contains the wheel, source
    distribution, and `update-manifest.json`.
 
 The script never uses `--admin`, force-pushes, deletes tags, dismisses failures, or

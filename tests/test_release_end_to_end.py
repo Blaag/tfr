@@ -386,15 +386,26 @@ elif args[0] == "api":
         output([])
     else:
         raise SystemExit(f"unsupported api endpoint: {endpoint}")
+elif args[:2] == ["release", "list"]:
+    if os.environ.get("TFR_FAKE_NO_CANDIDATE") == "1":
+        output([])
+    else:
+        tag = "v0.1.1-candidate.1"
+        if subprocess.run(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/tags/{tag}"]
+        ).returncode != 0:
+            subprocess.run(["git", "tag", "-a", tag, "-m", f"Release {tag}"], check=True)
+            subprocess.run(["git", "push", "--quiet", "origin", f"refs/tags/{tag}"], check=True)
+        output([{"tagName": tag, "isDraft": False, "isPrerelease": True}])
 elif args[:2] == ["release", "view"]:
     if "--json" not in args:
         raise SystemExit(1)
     tag = args[2]
-    version = tag[1:]
+    version = tag[1:].split("-candidate.", 1)[0]
     output({
         "tagName": tag,
         "isDraft": False,
-        "isPrerelease": False,
+        "isPrerelease": "-candidate." in tag,
         "isImmutable": True,
         "assets": [
             {"name": f"tfr-{version}-py3-none-any.whl"},
@@ -511,6 +522,50 @@ def test_release_end_to_end_runs_protected_pipeline(tmp_path: Path) -> None:
     assert git(repository, "show", "origin/main:feature.txt") == "feature"
 
 
+def test_release_end_to_end_publishes_candidate_before_stable_promotion(
+    tmp_path: Path,
+) -> None:
+    repository, environment = create_fixture(tmp_path)
+    environment["TFR_FAKE_NO_CANDIDATE"] = "1"
+
+    returncode, output = run_with_confirmations(
+        repository,
+        environment,
+        ["v0.1.1-candidate.1", "v0.1.1-candidate.1"],
+    )
+
+    assert returncode == 0, output
+    assert "Test this candidate in the candidate channel" in output
+    log = Path(environment["TFR_FAKE_LOG"]).read_text(encoding="utf-8")
+    assert "publish --candidate 1\n" in log
+    assert "publish --candidate 1 --push\n" in log
+    assert "publish --push\n" not in log
+
+
+def test_release_end_to_end_promotes_tested_candidate_from_clean_main(tmp_path: Path) -> None:
+    repository, environment = create_fixture(tmp_path)
+    environment["TFR_FAKE_NO_CANDIDATE"] = "1"
+    first_code, first_output = run_with_confirmations(
+        repository,
+        environment,
+        ["v0.1.1-candidate.1", "v0.1.1-candidate.1"],
+    )
+    assert first_code == 0, first_output
+    environment.pop("TFR_FAKE_NO_CANDIDATE")
+
+    returncode, output = run_with_confirmations(
+        repository,
+        environment,
+        ["v0.1.1", "v0.1.1"],
+    )
+
+    assert returncode == 0, output
+    assert "Release published and verified" in output
+    log = Path(environment["TFR_FAKE_LOG"]).read_text(encoding="utf-8")
+    assert log.count("gh pr merge") == 2
+    assert "publish --push\n" in log
+
+
 def test_release_end_to_end_times_out_unanswered_confirmation(tmp_path: Path) -> None:
     repository, environment = create_fixture(tmp_path)
 
@@ -580,6 +635,26 @@ def test_agent_release_driver_answers_only_observed_prompts(tmp_path: Path) -> N
     log = Path(environment["TFR_FAKE_LOG"]).read_text(encoding="utf-8")
     assert "publish --push\n" in log
     assert (Path(environment["TFR_FAKE_STATE"]) / "approved").exists()
+
+
+def test_agent_release_driver_handles_candidate_prompts(tmp_path: Path) -> None:
+    repository, environment = create_fixture(tmp_path)
+    environment["TFR_FAKE_NO_CANDIDATE"] = "1"
+    environment["TFR_RELEASE_DRIVER_TIMEOUT_SECONDS"] = "30"
+
+    result = subprocess.run(
+        [str(repository / "scripts" / "release-end-to-end-agent"), "0.1.1"],
+        cwd=repository,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.count("Type v0.1.1-candidate.1") == 2
+    assert "Test this candidate in the candidate channel" in result.stdout
 
 
 def test_release_end_to_end_resumes_existing_version_only_pr(tmp_path: Path) -> None:

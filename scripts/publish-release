@@ -6,9 +6,9 @@ export GIT_NO_REPLACE_OBJECTS
 
 usage() {
     cat <<'EOF'
-Usage: ./scripts/publish-release [--push]
+Usage: ./scripts/publish-release [--candidate NUMBER] [--push]
 
-Validate that the current main commit is ready for a stable release.
+Validate that the current main commit is ready for a stable or candidate release.
 By default, no tag is created. Pass --push to create and push the tag that
 triggers the protected GitHub release workflow.
 EOF
@@ -20,25 +20,36 @@ fail() {
 }
 
 push=false
-case "${1-}" in
-    "") ;;
-    --push) push=true ;;
-    -h|--help)
-        usage
-        exit 0
-        ;;
-    *)
-        usage >&2
-        exit 2
-        ;;
-esac
-if [ "$#" -gt 1 ]; then
-    usage >&2
-    exit 2
+candidate=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --push) push=true ;;
+        --candidate)
+            [ -z "$candidate" ] || fail "--candidate may be specified only once"
+            shift
+            [ "$#" -gt 0 ] || fail "--candidate requires a positive number"
+            candidate=$1
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+if [ -n "$candidate" ]; then
+    printf '%s' "$candidate" | grep -Eq '^[1-9][0-9]*$' || \
+        fail "candidate number must be a positive integer"
 fi
 
 command -v git >/dev/null 2>&1 || fail "git is required"
 command -v uv >/dev/null 2>&1 || fail "uv is required"
+command -v gh >/dev/null 2>&1 || fail "gh is required"
+command -v jq >/dev/null 2>&1 || fail "jq is required"
 
 repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 git_root=$(git -C "$repository" rev-parse --show-toplevel 2>/dev/null) || \
@@ -146,6 +157,38 @@ if versions and candidate <= max(versions):
 ' "$version" "$remote_tags" || fail "release version must advance the stable channel"
 }
 
+assert_promotable_candidate() {
+    [ "$channel" = stable ] || return 0
+    case "$remote_url" in
+        git@github.com:Blaag/tfr.git|https://github.com/Blaag/tfr.git) ;;
+        *) return 0 ;;
+    esac
+    candidate_refs=$(git -C "$repository" ls-remote --tags "$remote_url" \
+        "refs/tags/v$version-candidate.*^{}") || \
+        fail "cannot inspect candidate tags"
+    candidate_tag=
+    while read -r commit ref; do
+        [ -n "${commit:-}" ] || continue
+        [ "$commit" = "$head_commit" ] || continue
+        candidate_tag=${ref#refs/tags/}
+        candidate_tag=${candidate_tag%\^\{\}}
+        metadata=$(gh release view "$candidate_tag" \
+            --json isDraft,isPrerelease,assets 2>/dev/null) || continue
+        if printf '%s' "$metadata" | jq -e --arg version "$version" '
+            .isDraft == false and
+            .isPrerelease == true and
+            ([.assets[].name] | index("tfr-" + $version + "-py3-none-any.whl") != null) and
+            ([.assets[].name] | index("tfr-" + $version + ".tar.gz") != null) and
+            ([.assets[].name] | index("update-manifest.json") != null)
+        ' >/dev/null; then
+            return
+        fi
+    done <<EOF
+$candidate_refs
+EOF
+    fail "no published candidate release for v$version points to the current commit"
+}
+
 assert_clean_main
 fetch_main
 
@@ -168,6 +211,11 @@ PY
 ) || fail "cannot read the release version"
 
 tag="v$version"
+channel=stable
+if [ -n "$candidate" ]; then
+    tag="$tag-candidate.$candidate"
+    channel=candidate
+fi
 head_commit=$(git -C "$repository" rev-parse HEAD)
 inspect_local_tag
 inspect_remote_tag
@@ -176,11 +224,20 @@ if [ "$remote_tag_state" = matching ]; then
     exit 0
 fi
 assert_newer_than_remote_tags
+assert_promotable_candidate
 validated_tag_object=$tag_object
 
-printf 'Release check passed: %s at %s\n' "$tag" "$head_commit"
+if [ "$channel" = stable ]; then
+    printf 'Release check passed: %s at %s\n' "$tag" "$head_commit"
+else
+    printf 'Candidate release check passed: %s at %s\n' "$tag" "$head_commit"
+fi
 if [ "$push" = false ]; then
-    printf 'No remote tag was created. Run ./scripts/publish-release --push to publish it.\n'
+    if [ "$channel" = candidate ]; then
+        printf 'No remote tag was created. Run ./scripts/publish-release --candidate %s --push to publish it.\n' "$candidate"
+    else
+        printf 'No remote tag was created. Run ./scripts/publish-release --push to publish it.\n'
+    fi
     exit 0
 fi
 
@@ -198,6 +255,7 @@ if [ "$remote_tag_state" = matching ]; then
     printf 'Release tag already exists on the verified remote: %s at %s\n' "$tag" "$head_commit"
     exit 0
 fi
+assert_promotable_candidate
 
 if [ "$local_tag" = false ]; then
     git -C "$repository" tag -a "$tag" -m "Release $tag" "$head_commit" || \

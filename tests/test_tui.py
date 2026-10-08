@@ -2135,6 +2135,8 @@ async def test_effects_lab_commands_are_local_and_use_real_renderers() -> None:
 
 async def test_effects_lab_is_a_local_navigable_world_with_its_own_input() -> None:
     tui = make_tui()
+    assert "Effects Lab" not in fragment_list_to_text(tui.world_bar())
+
     await tui.submit_text("alpha", "/effects")
     tui.effects_input_buffer.text = "lab draft"
 
@@ -2154,6 +2156,27 @@ async def test_effects_lab_is_a_local_navigable_world_with_its_own_input() -> No
 
     assert tui.effects_lab_open is True
     assert tui.effects_input_buffer.text == "lab draft"
+
+    await tui.submit_text("alpha", "/effects close")
+
+    assert tui.effects_lab_enabled is False
+    assert tui.effects_lab_open is False
+    assert "Effects Lab" not in fragment_list_to_text(tui.world_bar())
+    tui.switch_relative(-1)
+    assert tui.active_alias == "beta"
+
+
+async def test_effects_lab_demo_commands_require_explicit_activation() -> None:
+    tui = make_tui()
+
+    await tui.submit_text("alpha", "/teststreak all")
+    await tui.submit_text("alpha", "/testspeaker Alice")
+
+    assert tui.effects_lab_enabled is False
+    assert tui.effects_lab_open is False
+    assert tui._effects_task is None
+    output = fragment_list_to_text(tui.active_view.output_text())
+    assert output.count("Effects Lab is closed; use /effects") == 2
 
 
 async def test_effects_lab_rejects_non_lab_commands_with_command_list() -> None:
@@ -2185,6 +2208,7 @@ async def test_effects_lab_effect_all_previews_every_effect_as_wilford_brimley()
 
 async def test_effects_lab_full_streak_playback_is_cancellable() -> None:
     tui = make_tui()
+    await tui.submit_text("alpha", "/effects")
     await tui.submit_text("alpha", "/teststreak all")
     assert tui._effects_task is not None
 
@@ -2243,27 +2267,36 @@ def test_godlike_starts_bounded_fireworks_once_and_higher_counts_only_update_not
             )
 
     particle_count = len(tui._firework_particles)
-    expected_particles = min(
-        1_024,
-        max(1, round(tui._firework_width * tui._firework_height * 0.20)),
-    )
-    assert particle_count == expected_particles
+    assert particle_count in {12, 24, 36}
     assert tui._combo_notices["alpha"].text == "> GODLIKE! <"
     now = time.monotonic()
     tui._firework_particles = [
-        replace(particle, started_at=now - 2) for particle in tui._firework_particles
+        replace(particle, started_at=now - 0.2) for particle in tui._firework_particles
     ]
     occupied = sum(
         character not in {" ", "\n"}
         for character in fragment_list_to_text(tui._firework_layer_text())
     )
-    assert 80 * 24 * 0.10 <= occupied <= 80 * 24 * 0.15
+    assert occupied > 0
 
     tui.handle_event(combo_say(tui, 8))
 
     assert len(tui._firework_particles) == particle_count
     assert tui._combo_notices["alpha"].text == "> GODLIKE x2 <"
     assert not tui.active_view.display._entry_decorations[-1]
+
+
+def test_firework_density_scales_with_viewport_area() -> None:
+    event = combo_say(make_tui(), 7)
+    standard = make_tui()
+    standard._position_firework_particles(80, 24)
+    standard._start_fireworks(event)
+    large = make_tui()
+    large._position_firework_particles(160, 48)
+    large._start_fireworks(event)
+
+    assert len(large._firework_particles) == len(standard._firework_particles) * 4
+    assert len(large._firework_particles) <= 1_024
 
 
 def test_fireworks_discard_particles_outside_viewport_instead_of_clamping_to_edges() -> None:

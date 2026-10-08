@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -108,6 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run(argv: Sequence[str] | None = None) -> int:
+    original_arguments = list(argv) if argv is not None else sys.argv[1:]
     parser = build_parser()
     args = parser.parse_args(argv)
     network_arguments = (
@@ -402,6 +404,19 @@ def run(argv: Sequence[str] | None = None) -> int:
             return 2
         except KeyboardInterrupt:
             return 130
+
+    if (
+        args.mode == "gateway"
+        and not args.check_config
+        and os.environ.get("TFR_GATEWAY_APP") != "1"
+    ):
+        from tfr.gateway import default_gateway_socket
+        from tfr.world_connector import launch_gateway_supervisor
+
+        gateway_path = args.socket or default_gateway_socket()
+        connector_path = gateway_path.with_name(f"{gateway_path.name}.worlds")
+        launch_gateway_supervisor(connector_path, original_arguments)
+        raise RuntimeError("gateway supervisor exec unexpectedly returned")
 
     try:
         bundle = load_configuration(args.config)

@@ -330,6 +330,29 @@ EOF
     done
 }
 
+find_candidate_for_commit() {
+    expected_commit=$1
+    candidate_tag=
+    candidate_number=
+    releases=$(gh release list --repo "$EXPECTED_REPOSITORY" --limit 100 \
+        --json tagName,isDraft,isPrerelease)
+    for possible_tag in $(printf '%s' "$releases" | jq -r \
+        '.[] | select(.isDraft == false and .isPrerelease == true) | .tagName'); do
+        case $possible_tag in
+            "$tag-candidate."*) ;;
+            *) continue ;;
+        esac
+        possible_number=${possible_tag#"$tag-candidate."}
+        printf '%s' "$possible_number" | grep -Eq '^[1-9][0-9]*$' || continue
+        peeled=$(git ls-remote origin "refs/tags/$possible_tag^{}" | cut -f1)
+        [ "$peeled" = "$expected_commit" ] || continue
+        candidate_tag=$possible_tag
+        candidate_number=$possible_number
+        return 0
+    done
+    return 1
+}
+
 resume=false
 if [ "$#" -eq 2 ] && [ "$1" = --resume ]; then
     resume=true
@@ -351,7 +374,7 @@ printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0
 tag="v$version"
 release_branch="release/$tag"
 
-for command in git gh uv node npm jq unzip date mktemp grep cut python3; do
+for command in git gh uv node npm jq unzip date mktemp grep cut sed sort tail python3; do
     require_command "$command"
 done
 
@@ -396,8 +419,16 @@ if [ "$current_branch" = main ]; then
 fi
 remote_release_branch=$(git ls-remote --heads origin "refs/heads/$release_branch") || \
     fail "cannot inspect remote release branch"
+promote=false
+if [ "$resume" = false ] && [ "$current_branch" = main ] && \
+    [ "$(uv version --short)" = "$version" ] && \
+    find_candidate_for_commit "$(git rev-parse HEAD)"; then
+    promote=true
+fi
 
-if [ "$resume" = true ]; then
+if [ "$promote" = true ]; then
+    release_head=
+elif [ "$resume" = true ]; then
     [ -n "$remote_release_branch" ] || fail "remote release branch does not exist: $release_branch"
     remote_release_head=$(printf '%s' "$remote_release_branch" | cut -f1)
     release_pr=$(pr_for_branch "$release_branch")
@@ -512,17 +543,34 @@ git switch main
 git pull --ff-only origin main
 assert_clean_checkout
 release_commit=$(git rev-parse HEAD)
-[ "$release_commit" != "$release_head" ] || \
-    fail "release PR was not squash-merged as expected"
+if [ "$promote" = false ]; then
+    [ "$release_commit" != "$release_head" ] || \
+        fail "release PR was not squash-merged as expected"
+fi
 remote_main=$(git ls-remote origin refs/heads/main | cut -f1)
 [ "$release_commit" = "$remote_main" ] || fail "local main does not match origin/main"
 
 wait_for_workflow CI "$release_commit" >/dev/null
 wait_for_workflow CodeQL "$release_commit" >/dev/null
 
-./scripts/publish-release
-confirm_exact "$tag" "Type $tag to create and push the protected release tag: "
-./scripts/publish-release --push
+candidate_release=false
+if ! find_candidate_for_commit "$release_commit"; then
+    candidate_release=true
+    highest_candidate=$(git ls-remote --tags origin "refs/tags/$tag-candidate.*" | \
+        cut -f2 | sed -n "s#refs/tags/$tag-candidate\.##p" | \
+        grep -E '^[1-9][0-9]*$' | sort -n | tail -1)
+    candidate_number=$((${highest_candidate:-0} + 1))
+    candidate_tag="$tag-candidate.$candidate_number"
+    ./scripts/publish-release --candidate "$candidate_number"
+    confirm_exact "$candidate_tag" \
+        "Type $candidate_tag to create and push the protected candidate tag: "
+    ./scripts/publish-release --candidate "$candidate_number" --push
+    tag=$candidate_tag
+else
+    ./scripts/publish-release
+    confirm_exact "$tag" "Type $tag to create and push the protected release tag: "
+    ./scripts/publish-release --push
+fi
 
 release_run=
 deadline=$(($(date +%s) + TIMEOUT_SECONDS))
@@ -555,10 +603,11 @@ gh run watch "$release_run" --repo "$EXPECTED_REPOSITORY" --exit-status --compac
 release_file="$temporary_directory/release.json"
 gh release view "$tag" --repo "$EXPECTED_REPOSITORY" \
     --json tagName,isDraft,isPrerelease,isImmutable,assets,url >"$release_file"
-jq -e --arg tag "$tag" --arg version "$version" '
+jq -e --arg tag "$tag" --arg version "$version" \
+    --argjson prerelease "$candidate_release" '
     .tagName == $tag and
     .isDraft == false and
-    .isPrerelease == false and
+    .isPrerelease == $prerelease and
     .isImmutable == true and
     ([.assets[].name] | index("tfr-" + $version + "-py3-none-any.whl") != null) and
     ([.assets[].name] | index("tfr-" + $version + ".tar.gz") != null) and
@@ -567,3 +616,7 @@ jq -e --arg tag "$tag" --arg version "$version" '
 
 printf '\nRelease published and verified: %s\n' \
     "$(jq -r .url "$release_file")"
+if [ "$candidate_release" = true ]; then
+    printf 'Test this candidate in the candidate channel. After acceptance, rerun:\n'
+    printf '  ./scripts/release-end-to-end %s\n' "$version"
+fi

@@ -54,14 +54,15 @@ def main() -> int:
         fail("usage: ./scripts/release-end-to-end-agent [--resume] VERSION")
     if re.fullmatch(version_pattern, version) is None:
         fail("usage: ./scripts/release-end-to-end-agent [--resume] VERSION")
-    tag = f"v{version}"
     script = Path(__file__).resolve().with_name("release-end-to-end")
     if not script.is_file() or not os.access(script, os.X_OK):
         fail(f"release orchestrator is not executable: {script}")
 
-    prompts = (
-        f"Type {tag} to create and push the protected release tag: ".encode(),
-        f"Type {tag} to approve publication to the release environment: ".encode(),
+    first_prompt = re.compile(
+        rb"Type (v"
+        + re.escape(version.encode())
+        + rb"(?:-candidate\.[1-9][0-9]*)?) to create and push the protected "
+        rb"(?:candidate|release) tag: "
     )
     timeout = configured_timeout()
     terminal, slave = pty.openpty()
@@ -75,6 +76,7 @@ def main() -> int:
     os.close(slave)
     transcript = bytearray()
     prompt_index = 0
+    selected_tag: bytes | None = None
     verified = False
     deadline = time.monotonic() + timeout
     try:
@@ -90,8 +92,20 @@ def main() -> int:
                     transcript.extend(chunk)
                     if len(transcript) > 65_536:
                         del transcript[:-65_536]
-                    if prompt_index < len(prompts) and prompts[prompt_index] in transcript:
-                        os.write(terminal, tag.encode() + b"\n")
+                    if prompt_index == 0 and (match := first_prompt.search(transcript)):
+                        selected_tag = match.group(1)
+                        os.write(terminal, selected_tag + b"\n")
+                        prompt_index += 1
+                        transcript.clear()
+                    elif (
+                        prompt_index == 1
+                        and selected_tag is not None
+                        and b"Type "
+                        + selected_tag
+                        + b" to approve publication to the release environment: "
+                        in transcript
+                    ):
+                        os.write(terminal, selected_tag + b"\n")
                         prompt_index += 1
                         transcript.clear()
                     if b"Release published and verified:" in transcript:
@@ -100,7 +114,7 @@ def main() -> int:
             if returncode is not None:
                 if returncode != 0:
                     return returncode
-                if prompt_index != len(prompts) or not verified:
+                if prompt_index != 2 or not verified:
                     fail("orchestrator exited without both prompts and final verification")
                 return 0
         fail(f"orchestrator exceeded the {timeout}s driver timeout")
