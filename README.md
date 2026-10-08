@@ -1,11 +1,19 @@
 # TFR
 
 TFR is a Python terminal client for concurrent MUD and MUSH world sessions.
-It provides typed JSONC configuration, canonical event models, secret
-redaction, append-only JSONL event logging, incremental Telnet parsing,
-concurrent TCP or verified TLS world sessions, ANSI-safe RhostMUSH and TinyMUX
-NOSPOOF provenance parsing, a persistent multi-client gateway, and a full-screen
-multi-world terminal UI.
+Why use it? It has a bunch of features:
+* Support for TCP or verified TLS world sessions
+* Automatic spoof detection
+* A persistent multi-client gateway
+* Full-screen multi-world terminal UI - run multiples against the same gateway!
+* Loads of animations for screen clearing and customized speaker effects
+* Cut/paste support that preserves formatting automatically
+* Pasting images by automatically converting to ASCII
+* Update notifications and coordinated updates across the gateway and all connected UI clients
+* A progressive web app (PWA)
+* Activity tracking in non-foregrounded worlds
+* Typed JSONC configuration
+* JSONL event logging with secret redaction
 
 The complete design and implementation sequence are in [PLAN.md](PLAN.md).
 
@@ -30,8 +38,8 @@ plugin catalog, generates profile launchers, and provides `tfr-doctor` checks.
 Rerun it later to change profiles; it backs up files before approved replacement
 and does not start TFR or install a background service.
 
-If `uv` is missing, the assistant offers to run Astral's official installer,
-wait while you install it yourself and re-check, or exit cleanly. Remote setup
+If `uv` is missing, the assistant offers to run Astral's official installer or
+waits while you install it yourself and re-checks, or exit cleanly. Remote setup
 explains which token and public CA files a UI needs and which Gateway secrets
 must never be copied. Public plugin options are documented at
 <https://github.com/Blaag/tfr-plugins-public>.
@@ -1120,6 +1128,7 @@ in both the terminal UI and PWA, independent of normal text effects.
 See [PRESENTATION.md](PRESENTATION.md) for the portable presentation direction,
 [PWA-TESTING.md](PWA-TESTING.md) for the reproducible development Gateway,
 mock-world, Playwright, and physical-device test workflow, [SECURITY.md](SECURITY.md)
+
 for credential, TLS, logging, plugin, and agent security boundaries, and
 [LICENSES.md](LICENSES.md) for the reviewed runtime dependency licenses. TFR is
 distributed under the [MIT License](LICENSE).
