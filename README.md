@@ -139,6 +139,15 @@ when `XDG_RUNTIME_DIR` is set. Pass the same `--socket PATH` to both commands to
 override it. Closing an attached UI does not disconnect worlds or stop agents.
 The gateway retains configured per-world scrollback and sends it to newly
 attached or reconnecting UIs before switching atomically to live events.
+
+`tfr gateway` remains one command and one systemd service. Internally, its
+long-lived, lightweight supervisor owns world sockets while a replaceable
+Gateway application process owns plugins, agents, UI clients, and web access.
+Normal updates replace only the application process, so worlds stay connected.
+The connector survives a failed application restart for 30 minutes and buffers
+bounded replay data (1 MiB per world, 16 MiB globally). If either limit is
+exceeded, the replacement Gateway and its UIs receive an explicit history-gap
+warning. A clean service stop closes everything immediately.
 Within an attached UI, `/reload` (or `/restart`) replaces only the UI process
 and reloads retained Gateway history to rebuild the display; the gateway and
 world sessions continue running.
@@ -275,6 +284,12 @@ failures do not interrupt startup or active sessions. Set `updates.enabled` to
 manifest URL, and state directory under the top-level `updates` object. Only
 stable `vMAJOR.MINOR.PATCH` releases participate; prereleases and moving Git tags
 are not used.
+
+Set `updates.channel` to `"candidate"` to opt into immutable candidate releases.
+Candidate discovery uses GitHub prereleases named
+`vMAJOR.MINOR.PATCH-candidate.N`; its cache is isolated from the stable channel.
+The default remains `"stable"`. Stable publication promotes the exact wheel and
+source archive previously exercised as a candidate rather than rebuilding them.
 
 Bare `/update` and `./scripts/install-from-checkout --latest-stable` rebuild and
 activate the exact tagged source release. Both validate the manifest-to-tag
@@ -864,11 +879,13 @@ and `/testspeaker NAME` renders the actual configured speaker decorator and
 portable presentation program. `/effects effect NAME` previews one built-in text
 effect; `/effects effect all` previews every effect as fictional speaker
 `WilfordBrimley`. Effects Lab is a local entry in normal world navigation, with
-its own preserved input and output. Switching to another world leaves the lab;
-returning restores it. Lab input is never sent to a world, logged as a canonical
-event, or provided to an agent. Real worlds remain connected and continue
-buffering while it is open. The paired web client offers the same lab from
-Settings, whether running as an installed PWA or an ordinary browser tab.
+its own preserved input and output. It appears in navigation only after
+`/effects` explicitly opens it; `/effects close` removes it again. Switching to
+another world leaves the lab, and returning restores it while it remains open.
+Lab input is never sent to a world, logged as a canonical event, or provided to
+an agent. Real worlds remain connected and continue buffering while it is open.
+The paired web client offers the same lab from Settings, whether running as an
+installed PWA or an ordinary browser tab.
 The active world's recently sent commands remain directly above the editor.
 These lines are separate from server output, so server speech echoes are not
 duplicated. Configure their number with `ui.recent_input_lines` (default `3`, or

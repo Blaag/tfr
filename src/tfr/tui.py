@@ -101,6 +101,9 @@ _MULTILINE_PASTE_MAXIMUM_BYTES = 1_048_576
 _MULTILINE_PASTE_MAXIMUM_LINES = 10_000
 _MULTILINE_PASTE_MAXIMUM_COMMAND_BYTES = 7_000
 _EFFECTS_LAB_ALIAS = "effects-lab"
+_FIREWORK_REFERENCE_AREA = 80 * 24
+_FIREWORK_REFERENCE_PARTICLES_PER_BURST = 12
+_MAXIMUM_FIREWORK_PARTICLES = 1_024
 _CORE_CLIENT_COMMANDS = frozenset(
     {
         "agent",
@@ -870,6 +873,7 @@ class TfrTui:
         self._accept_combo_events = True
         self._combo_notices: dict[str, ComboNotice] = {}
         self._firework_particles: list[FireworkParticle] = []
+        self.effects_lab_enabled = False
         self.effects_lab_open = False
         self.effects_lab_force_motion = False
         self.effects_display = DisplayBuffer(max_rows=2_000, width=80, height=20)
@@ -2004,9 +2008,10 @@ class TfrTui:
             )
 
     def switch_relative(self, amount: int) -> None:
+        destination_count = len(self.aliases) + int(self.effects_lab_enabled)
         position = len(self.aliases) if self.effects_lab_open else self.active_index
-        destination = (position + amount) % (len(self.aliases) + 1)
-        if destination == len(self.aliases):
+        destination = (position + amount) % destination_count
+        if self.effects_lab_enabled and destination == len(self.aliases):
             self._open_effects_lab()
         else:
             self.switch_world(self.aliases[destination])
@@ -2015,7 +2020,10 @@ class TfrTui:
         if self.image_preview is not None:
             return
         if alias.casefold() == _EFFECTS_LAB_ALIAS:
-            self._open_effects_lab()
+            if self.effects_lab_enabled:
+                self._open_effects_lab()
+            else:
+                self.add_notice(self.active_alias, "Effects Lab is closed; use /effects")
             return
         if alias not in self.views:
             self.add_notice(self.active_alias, f"Unknown world: {alias}")
@@ -2042,6 +2050,7 @@ class TfrTui:
         return False
 
     def _open_effects_lab(self) -> None:
+        self.effects_lab_enabled = True
         self.effects_lab_open = True
         self.inspector_agent = None
         self.application.layout.focus(self.effects_input_buffer)
@@ -2049,6 +2058,7 @@ class TfrTui:
         self.application.invalidate()
 
     def _close_effects_lab(self) -> None:
+        self.effects_lab_enabled = False
         self.effects_lab_open = False
         self.effects_lab_force_motion = False
         if self._effects_task is not None:
@@ -2294,17 +2304,24 @@ class TfrTui:
         glyphs = ("*", "+", "·")
         now = time.monotonic()
         bursts = 1 + int(random_value() * 3)
-        particle_budget = min(
-            1_024,
-            max(1, round(self._firework_width * self._firework_height * 0.20)),
+        viewport_area = self._firework_width * self._firework_height
+        particles_per_burst = min(
+            _MAXIMUM_FIREWORK_PARTICLES // bursts,
+            max(
+                _FIREWORK_REFERENCE_PARTICLES_PER_BURST,
+                round(
+                    _FIREWORK_REFERENCE_PARTICLES_PER_BURST
+                    * viewport_area
+                    / _FIREWORK_REFERENCE_AREA
+                ),
+            ),
         )
-        per_burst, remainder = divmod(particle_budget, bursts)
-        for burst in range(bursts):
-            delay = random_value() * 0.3
+        for _burst in range(bursts):
+            delay = random_value() * 2
             origin_x = 0.12 + random_value() * 0.76
             origin_y = 0.12 + random_value() * 0.45
             color = colors[int(random_value() * len(colors))]
-            for _particle in range(per_burst + (1 if burst < remainder else 0)):
+            for _particle in range(particles_per_burst):
                 self._firework_particles.append(
                     FireworkParticle(
                         world=event.world,
@@ -2317,7 +2334,7 @@ class TfrTui:
                         glyph=glyphs[int(random_value() * len(glyphs))],
                     )
                 )
-        self._firework_particles = self._firework_particles[-1_024:]
+        self._firework_particles = self._firework_particles[-_MAXIMUM_FIREWORK_PARTICLES:]
 
     def _firework_cells(self, world: str) -> dict[tuple[int, int], tuple[str, str]]:
         if not (self.animations_enabled and not self.low_bandwidth) and not (
@@ -2703,13 +2720,14 @@ class TfrTui:
             ):
                 self._open_effects_lab()
 
-        output.append(
-            (
-                "class:world.active" if self.effects_lab_open else "class:world.inactive",
-                " [L] Effects Lab ",
-                select_effects_lab,
+        if self.effects_lab_enabled:
+            output.append(
+                (
+                    "class:world.active" if self.effects_lab_open else "class:world.inactive",
+                    " [L] Effects Lab ",
+                    select_effects_lab,
+                )
             )
-        )
         return output
 
     def status_bar(self) -> StyleAndTextTuples:
@@ -3423,6 +3441,9 @@ class TfrTui:
         self.application.invalidate()
 
     def _handle_testspeaker(self, parameters: list[str]) -> None:
+        if not self.effects_lab_enabled:
+            self.add_notice(self.active_alias, "Effects Lab is closed; use /effects")
+            return
         self._open_effects_lab()
         if not parameters:
             speakers = tuple(
@@ -3496,6 +3517,9 @@ class TfrTui:
         self.application.invalidate()
 
     async def _handle_teststreak(self, parameters: list[str]) -> None:
+        if not self.effects_lab_enabled:
+            self.add_notice(self.active_alias, "Effects Lab is closed; use /effects")
+            return
         self._open_effects_lab()
         value = parameters[0].casefold() if parameters else "all"
         if value == "all":

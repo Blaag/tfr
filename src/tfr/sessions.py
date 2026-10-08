@@ -28,6 +28,7 @@ from tfr.events import (
 )
 from tfr.spoofing import assess_spoofing
 from tfr.telnet import TelnetCodec, TelnetEvent, escape_iac
+from tfr.world_connector import WorldConnectorClient
 
 
 class SessionState(StrEnum):
@@ -534,6 +535,196 @@ class WorldSession:
             await self.event_bus.publish(event)
 
 
+class ConnectorSessionBridge:
+    def __init__(self, client: WorldConnectorClient) -> None:
+        self.client = client
+        self.sessions: dict[str, ConnectorWorldSession] = {}
+        self._reader: asyncio.Task[None] | None = None
+
+    def register(self, session: ConnectorWorldSession) -> None:
+        if session.world in self.sessions:
+            raise ValueError(f"duplicate connector world: {session.world}")
+        self.sessions[session.world] = session
+
+    def start(self) -> None:
+        if self._reader is None or self._reader.done():
+            self._reader = asyncio.create_task(
+                self._read_loop(), name="tfr-world-connector-events"
+            )
+
+    async def wait_closed(self) -> None:
+        if self._reader is None:
+            raise RuntimeError("connector bridge is not started")
+        await asyncio.shield(self._reader)
+        raise ConnectionError("world connector disconnected")
+
+    async def close(self, *, preserve_worlds: bool) -> None:
+        if not preserve_worlds:
+            with contextlib.suppress(ConnectionError, OSError, RuntimeError):
+                await self.client.shutdown()
+        if self._reader is not None:
+            self._reader.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._reader
+            self._reader = None
+        await self.client.close()
+
+    async def _read_loop(self) -> None:
+        while True:
+            message = await self.client.receive()
+            message_type = message.get("type")
+            if message_type == "world_event":
+                world = message.get("world")
+                sequence = message.get("sequence")
+                if not isinstance(world, str) or not isinstance(sequence, int):
+                    raise ValueError("connector returned an invalid world event")
+                session = self.sessions.get(world)
+                if session is not None:
+                    await session.handle_connector_event(message)
+                await self.client.acknowledge(world, sequence)
+            elif message_type == "overflow":
+                world = message.get("world")
+                notice_id = message.get("notice_id")
+                if not isinstance(world, str) or not isinstance(notice_id, int):
+                    raise ValueError("connector returned an invalid overflow notice")
+                session = self.sessions.get(world)
+                if session is not None:
+                    await session.handle_connector_overflow(message)
+                await self.client.acknowledge_overflow(notice_id)
+            else:
+                raise ValueError("connector returned an unknown message")
+
+
+class ConnectorWorldSession(WorldSession):
+    def __init__(self, *, bridge: ConnectorSessionBridge, **values: Any) -> None:
+        super().__init__(**values)
+        self.bridge = bridge
+        self.bridge.register(self)
+
+    async def start(self) -> None:
+        if self._runner is not None and not self._runner.done():
+            raise RuntimeError(f"world {self.world!r} is already running")
+        self._stop_event.clear()
+        self._command_queue = self.command_bus.register(
+            self.session_id,
+            maxsize=self.command_queue_size,
+        )
+        self._runner = asyncio.create_task(
+            self._connector_write_loop(), name=f"tfr-world-{self.world}"
+        )
+        await self.bridge.client.start_world(self.world)
+
+    async def stop(self) -> None:
+        await self._detach(stop_world=True)
+
+    async def detach(self) -> None:
+        await self._detach(stop_world=False)
+
+    async def _detach(self, *, stop_world: bool) -> None:
+        self._stop_event.set()
+        if stop_world:
+            with contextlib.suppress(ConnectionError, OSError):
+                await self.bridge.client.stop_world(self.world)
+        if self._runner is not None:
+            self._runner.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._runner
+            self._runner = None
+        self.command_bus.unregister(self.session_id)
+        self._connected_event.clear()
+        self.state = SessionState.STOPPED
+
+    async def _connector_write_loop(self) -> None:
+        assert self._command_queue is not None
+        while True:
+            request = await self._command_queue.get()
+            if (
+                request.expected_connection_generation is not None
+                and request.expected_connection_generation != self.connection_generation
+            ):
+                continue
+            async with self._event_lock:
+                event = outbound_audit_event(
+                    request,
+                    connection_generation=self.connection_generation,
+                    sequence=self._sequence,
+                    monotonic_ns=time.monotonic_ns(),
+                )
+                self._sequence += 1
+                await self.event_bus.publish(event)
+            encoded = request.text.encode(self.encoding, errors="strict")
+            await self.bridge.client.send_world(
+                self.world,
+                encoded,
+                quit=request.actor.type is ActorType.HUMAN
+                and request.text.strip().casefold() == "quit",
+            )
+
+    async def handle_connector_event(self, message: dict[str, Any]) -> None:
+        generation = message.get("generation")
+        if not isinstance(generation, int) or generation < 0:
+            raise ValueError("connector event generation is invalid")
+        self.connection_generation = generation
+        kind = message.get("kind")
+        if kind == "data":
+            text = message.get("text")
+            if not isinstance(text, str):
+                raise ValueError("connector text event is invalid")
+            await self._publish_inbound(text)
+        elif kind == "state":
+            try:
+                state = SessionState(message.get("state"))
+            except ValueError:
+                raise ValueError("connector state event is invalid") from None
+            metadata = {
+                key: value
+                for key, value in message.items()
+                if key not in {"type", "world", "sequence", "kind", "generation", "state"}
+            }
+            if state is SessionState.CONNECTED:
+                self._connected_event.set()
+            else:
+                self._connected_event.clear()
+            await self._set_state(state, **metadata)
+        elif kind == "telnet":
+            await self._publish(
+                direction=Direction.INTERNAL,
+                kind=EventKind.TELNET,
+                metadata={
+                    key: message.get(key)
+                    for key in ("telnet_kind", "command", "option", "payload_hex")
+                },
+            )
+        else:
+            raise ValueError("connector world event kind is invalid")
+
+    async def handle_connector_overflow(self, message: dict[str, Any]) -> None:
+        dropped_frames = message.get("dropped_frames")
+        dropped_bytes = message.get("dropped_bytes")
+        text = (
+            f"-- World connector replay overflow: lost {dropped_frames} frame(s) "
+            f"and {dropped_bytes} byte(s) while the Gateway was unavailable --"
+        )
+        await self._publish(
+            direction=Direction.INBOUND,
+            kind=EventKind.SYSTEM,
+            canonical_text=text,
+            plain_text=text,
+            display_text=text,
+            actor=Actor(ActorType.SYSTEM, "world-connector"),
+            metadata={
+                key: message.get(key)
+                for key in (
+                    "notice_id",
+                    "first_dropped_sequence",
+                    "last_dropped_sequence",
+                    "dropped_frames",
+                    "dropped_bytes",
+                )
+            },
+        )
+
+
 class SessionManager:
     def __init__(self, sessions: Sequence[WorldSession]) -> None:
         aliases = [session.world for session in sessions]
@@ -548,3 +739,11 @@ class SessionManager:
 
     async def stop_all(self) -> None:
         await asyncio.gather(*(session.stop() for session in self.sessions.values()))
+
+    async def detach_all(self) -> None:
+        await asyncio.gather(
+            *(
+                session.detach() if isinstance(session, ConnectorWorldSession) else session.stop()
+                for session in self.sessions.values()
+            )
+        )

@@ -37,15 +37,18 @@ def _stage_managed_update(
         )
     layout, current = managed
     manifest = fetch_release_manifest(
-        str(config.manifest_url), timeout=config.timeout_seconds
+        str(config.manifest_url),
+        timeout=config.timeout_seconds,
+        expected_channel=config.channel,
     )
     if expected_manifest is not None and manifest.as_dict() != expected_manifest.as_dict():
         raise InstallationError(
-            "this host's configured stable manifest does not match the Gateway release"
+            f"this host's configured {config.channel} manifest does not match "
+            "the Gateway release"
         )
     if not manifest.supports(current_build()):
         raise InstallationError(
-            f"stable release {manifest.version} requires a manual protocol upgrade"
+            f"{config.channel} release {manifest.version} requires a manual protocol upgrade"
         )
     metadata = install_stable_manifest(
         layout,

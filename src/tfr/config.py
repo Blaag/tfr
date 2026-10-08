@@ -203,12 +203,19 @@ class LoggingConfig(StrictModel):
     directory: Path = Path("~/.local/state/tfr/logs")
 
 
+_STABLE_UPDATE_MANIFEST_URL = (
+    "https://github.com/Blaag/tfr/releases/latest/download/update-manifest.json"
+)
+_CANDIDATE_UPDATE_MANIFEST_URL = (
+    "https://api.github.com/repos/Blaag/tfr/releases?per_page=20"
+)
+
+
 class UpdateConfig(StrictModel):
     enabled: bool = True
+    channel: Literal["stable", "candidate"] = "stable"
     manifest_url: AnyHttpUrl = Field(
-        default=AnyHttpUrl(
-            "https://github.com/Blaag/tfr/releases/latest/download/update-manifest.json"
-        ),
+        default=AnyHttpUrl(_STABLE_UPDATE_MANIFEST_URL),
         json_schema_extra={"pattern": "^https://"},
     )
     check_interval_seconds: float = Field(default=21_600.0, ge=300)
@@ -216,6 +223,17 @@ class UpdateConfig(StrictModel):
     jitter_seconds: float = Field(default=900.0, ge=0)
     timeout_seconds: float = Field(default=10.0, gt=0, le=60)
     state_directory: Path = Path("~/.local/state/tfr/updates")
+
+    @model_validator(mode="before")
+    @classmethod
+    def channel_manifest_default(cls, value: Any) -> Any:
+        if (
+            isinstance(value, dict)
+            and value.get("channel") == "candidate"
+            and "manifest_url" not in value
+        ):
+            value = {**value, "manifest_url": _CANDIDATE_UPDATE_MANIFEST_URL}
+        return value
 
     @field_validator("manifest_url")
     @classmethod

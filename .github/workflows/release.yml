@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-candidate.[0-9]+"
 
 permissions:
   contents: read
@@ -11,6 +12,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.release.outputs.channel }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -18,6 +21,17 @@ jobs:
           persist-credentials: false
       - name: Verify release commit is on main
         run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Identify release channel
+        id: release
+        run: |
+          if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo 'channel=stable' >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-candidate\.[1-9][0-9]*$ ]]; then
+            echo 'channel=candidate' >> "$GITHUB_OUTPUT"
+          else
+            echo 'unsupported release tag' >&2
+            exit 1
+          fi
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
@@ -34,7 +48,48 @@ jobs:
           -k 'not test_two_worlds_exchange_traffic_without_leakage'
       - name: Embed immutable build identity
         run: printf 'BUILD_COMMIT = "%s"\n' "$GITHUB_SHA" > src/tfr/_build.py
-      - run: uv build
+      - name: Build candidate artifacts
+        if: steps.release.outputs.channel == 'candidate'
+        run: uv build
+      - name: Download exact candidate artifacts for stable promotion
+        if: steps.release.outputs.channel == 'stable'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          promoted=
+          while IFS= read -r candidate; do
+            case "$candidate" in
+              "v$version-candidate."*) ;;
+              *) continue ;;
+            esac
+            object="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$candidate")"
+            object_type="$(jq -r .object.type <<<"$object")"
+            object_sha="$(jq -r .object.sha <<<"$object")"
+            if test "$object_type" = tag; then
+              object="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha")"
+              object_type="$(jq -r .object.type <<<"$object")"
+              object_sha="$(jq -r .object.sha <<<"$object")"
+            fi
+            if test "$object_type" = commit && test "$object_sha" = "$GITHUB_SHA"; then
+              mkdir -p dist
+              gh release download "$candidate" --repo "$GITHUB_REPOSITORY" \
+                --pattern '*.whl' --pattern '*.tar.gz' --dir dist
+              promoted="$candidate"
+              break
+            fi
+          done <<EOF
+          $(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name')
+          EOF
+          test -n "$promoted" || {
+            echo 'no immutable candidate release exists for this exact commit' >&2
+            exit 1
+          }
+          wheels=(dist/*.whl)
+          sdists=(dist/*.tar.gz)
+          test "${#wheels[@]}" -eq 1
+          test "${#sdists[@]}" -eq 1
+          echo "Promoting exact artifacts from $promoted"
       - name: Verify packaged web modules
         run: |
           wheels=(dist/*.whl)
@@ -59,7 +114,8 @@ jobs:
             --repository "$GITHUB_REPOSITORY" \
             --tag "$GITHUB_REF_NAME" \
             --commit "$GITHUB_SHA" \
-            --artifact "${wheels[0]}"
+            --artifact "${wheels[0]}" \
+            --channel "${{ steps.release.outputs.channel }}"
       - name: Transfer release assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -75,7 +131,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     concurrency:
-      group: stable-release-publish
+      group: ${{ needs.build.outputs.channel }}-release-publish
       cancel-in-progress: false
     permissions:
       contents: write
@@ -108,6 +164,7 @@ jobs:
             --jq .status)"
           test "$status" = ahead || test "$status" = identical
       - name: Verify stable version is newest
+        if: needs.build.outputs.channel == 'stable'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -134,7 +191,11 @@ jobs:
       - name: Publish immutable release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "$GITHUB_REF_NAME"
-          release-assets/dist/* release-assets/update-manifest.json
-          --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+        run: |
+          arguments=
+          if test "${{ needs.build.outputs.channel }}" = candidate; then
+            arguments='--prerelease'
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            release-assets/dist/* release-assets/update-manifest.json \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes $arguments

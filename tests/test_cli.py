@@ -72,6 +72,7 @@ def test_start_runs_the_terminal_client(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_gateway_mode_runs_the_gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TFR_GATEWAY_APP", "1")
     config = write_configuration(tmp_path, with_world=True)
     socket_path = tmp_path / "gateway.sock"
     called_with: Path | None = None
@@ -153,6 +154,7 @@ def test_gateway_mode_passes_authenticated_tls_listener_options(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("TFR_GATEWAY_APP", "1")
     config = write_configuration(tmp_path, with_world=True)
     values: dict[str, object] = {}
 

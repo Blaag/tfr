@@ -35,6 +35,7 @@ _BUILD_RELEASE = re.compile(
 )
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _MAX_MANIFEST_BYTES = 128 * 1024
+_MAX_RELEASE_FEED_BYTES = 1024 * 1024
 
 
 class UpdateError(ValueError):
@@ -137,9 +138,15 @@ class ReleaseManifest:
     protocol_maximum: int
     release_url: str
     artifact: ReleaseArtifact
+    channel: str = "stable"
 
     @classmethod
-    def from_json(cls, content: bytes) -> ReleaseManifest:
+    def from_json(
+        cls,
+        content: bytes,
+        *,
+        expected_channel: str = "stable",
+    ) -> ReleaseManifest:
         try:
             value = json.loads(content)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -166,12 +173,17 @@ class ReleaseManifest:
             or data["schema_version"] != 1
         ):
             raise UpdateError("unsupported release manifest schema")
-        if data["project"] != "tfr" or data["channel"] != "stable":
-            raise UpdateError("release manifest is not for TFR's stable channel")
+        if expected_channel not in {"stable", "candidate"}:
+            raise UpdateError("expected release channel is invalid")
+        if data["project"] != "tfr" or data["channel"] != expected_channel:
+            raise UpdateError(f"release manifest is not for TFR's {expected_channel} channel")
         semantic_version = data["version"]
         _semver(semantic_version, "manifest.version")
-        if data["tag"] != f"v{semantic_version}":
-            raise UpdateError("manifest.tag must match manifest.version")
+        expected_tag = rf"v{re.escape(semantic_version)}"
+        if expected_channel == "candidate":
+            expected_tag += r"-candidate\.[1-9][0-9]*"
+        if not isinstance(data["tag"], str) or re.fullmatch(expected_tag, data["tag"]) is None:
+            raise UpdateError("manifest.tag must match manifest.version and channel")
         commit = data["commit"]
         if not isinstance(commit, str) or _COMMIT.fullmatch(commit) is None:
             raise UpdateError("manifest.commit must be a full lowercase hexadecimal commit")
@@ -197,6 +209,7 @@ class ReleaseManifest:
         if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
             raise UpdateError("manifest.artifact.sha256 must be a lowercase SHA-256 digest")
         return cls(
+            channel=expected_channel,
             version=semantic_version,
             tag=data["tag"],
             commit=commit,
@@ -214,7 +227,7 @@ class ReleaseManifest:
         return {
             "schema_version": 1,
             "project": "tfr",
-            "channel": "stable",
+            "channel": self.channel,
             "version": self.version,
             "tag": self.tag,
             "commit": self.commit,
@@ -328,17 +341,94 @@ def _fetch_manifest(url: str, etag: str | None, timeout: float) -> _FetchResult:
         return _FetchResult(content=content, etag=response.headers.get("ETag"))
 
 
-def fetch_release_manifest(url: str, *, timeout: float = 10.0) -> ReleaseManifest:
+def _fetch_candidate_manifest(url: str, etag: str | None, timeout: float) -> _FetchResult:
+    _https_url(url, "candidate release feed URL")
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Cache-Control": "no-cache",
+        "User-Agent": "tfr-update-checker",
+    }
+    if etag is not None:
+        headers["If-None-Match"] = etag
+    request = urllib.request.Request(url, headers=headers)
+    opener = urllib.request.build_opener(_HttpsRedirectHandler())
+    try:
+        response = opener.open(request, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 304:
+            return _FetchResult(content=None, etag=etag)
+        raise UpdateError(f"candidate release server returned HTTP {exc.code}") from exc
+    except (OSError, urllib.error.URLError) as exc:
+        raise UpdateError(f"cannot reach candidate release server: {exc}") from exc
+    with response:
+        _https_url(response.geturl(), "candidate release response URL")
+        content = response.read(_MAX_RELEASE_FEED_BYTES + 1)
+        if len(content) > _MAX_RELEASE_FEED_BYTES:
+            raise UpdateError("candidate release feed exceeds the size limit")
+        feed_etag = response.headers.get("ETag")
+    try:
+        releases = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UpdateError("candidate release feed is not valid UTF-8 JSON") from exc
+    if not isinstance(releases, list):
+        raise UpdateError("candidate release feed must be an array")
+    for release in releases:
+        if not isinstance(release, Mapping):
+            continue
+        tag = release.get("tag_name")
+        if (
+            release.get("draft") is not False
+            or release.get("prerelease") is not True
+            or not isinstance(tag, str)
+            or re.fullmatch(
+                r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+                r"-candidate\.[1-9][0-9]*",
+                tag,
+            )
+            is None
+        ):
+            continue
+        assets = release.get("assets")
+        if not isinstance(assets, list):
+            continue
+        manifest_urls = [
+            asset.get("browser_download_url")
+            for asset in assets
+            if isinstance(asset, Mapping) and asset.get("name") == "update-manifest.json"
+        ]
+        if len(manifest_urls) != 1:
+            continue
+        manifest_url = _https_url(manifest_urls[0], "candidate manifest asset URL")
+        fetched = _fetch_manifest(manifest_url, None, timeout)
+        if fetched.content is None:  # pragma: no cover - no conditional request was sent
+            raise UpdateError("candidate manifest asset returned no content")
+        manifest = ReleaseManifest.from_json(
+            fetched.content,
+            expected_channel="candidate",
+        )
+        if manifest.tag != tag:
+            raise UpdateError("candidate manifest tag does not match its GitHub Release")
+        return _FetchResult(content=fetched.content, etag=feed_etag)
+    raise UpdateError("candidate release feed contains no usable candidate release")
+
+
+def fetch_release_manifest(
+    url: str,
+    *,
+    timeout: float = 10.0,
+    expected_channel: str = "stable",
+) -> ReleaseManifest:
     """Fetch and validate a live release manifest without using the notification cache."""
     _https_url(url, "release manifest URL")
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
         raise UpdateError("release manifest timeout must be a number")
     if not math.isfinite(timeout) or timeout <= 0 or timeout > 60:
         raise UpdateError("release manifest timeout must be greater than zero and at most 60")
-    fetched = _fetch_manifest(url, None, float(timeout))
+    fetcher = _fetch_candidate_manifest if expected_channel == "candidate" else _fetch_manifest
+    fetched = fetcher(url, None, float(timeout))
     if fetched.content is None:
         raise UpdateError("release server returned no manifest")
-    return ReleaseManifest.from_json(fetched.content)
+    return ReleaseManifest.from_json(fetched.content, expected_channel=expected_channel)
 
 
 class UpdateChecker:
@@ -351,7 +441,11 @@ class UpdateChecker:
     ) -> None:
         self.config = config
         self.build = build or current_build()
-        self._fetch = fetch
+        self._fetch = (
+            _fetch_candidate_manifest
+            if config.channel == "candidate" and fetch is _fetch_manifest
+            else fetch
+        )
         self._lock = asyncio.Lock()
         self._etag: str | None = None
         self._result = UpdateResult(checked_at=None, manifest=None)
@@ -363,7 +457,7 @@ class UpdateChecker:
 
     @property
     def cache_path(self) -> Path:
-        return self.config.state_directory / "stable.json"
+        return self.config.state_directory / f"{self.config.channel}.json"
 
     async def check(self) -> UpdateResult:
         if not self.config.enabled:
@@ -384,7 +478,10 @@ class UpdateChecker:
                 manifest = (
                     self._result.manifest
                     if fetched.content is None
-                    else ReleaseManifest.from_json(fetched.content)
+                    else ReleaseManifest.from_json(
+                        fetched.content,
+                        expected_channel=self.config.channel,
+                    )
                 )
                 if manifest is None:
                     raise UpdateError(
@@ -423,7 +520,8 @@ class UpdateChecker:
             if cache.get("manifest_url") != str(self.config.manifest_url):
                 return
             manifest = ReleaseManifest.from_json(
-                json.dumps(cache["manifest"], separators=(",", ":")).encode()
+                json.dumps(cache["manifest"], separators=(",", ":")).encode(),
+                expected_channel=self.config.channel,
             )
             checked_at = datetime.fromisoformat(str(cache["checked_at"]))
             if checked_at.tzinfo is None:

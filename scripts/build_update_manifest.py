@@ -17,6 +17,7 @@ def build_manifest(
     tag: str,
     commit: str,
     artifact: Path,
+    channel: str = "stable",
 ) -> dict[str, object]:
     project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
     version = project["version"]
@@ -25,7 +26,12 @@ def build_manifest(
         or re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version) is None
     ):
         raise ValueError("pyproject.toml must contain a stable semantic version")
-    if tag != f"v{version}":
+    expected_tag = rf"v{re.escape(version)}"
+    if channel == "candidate":
+        expected_tag += r"-candidate\.[1-9][0-9]*"
+    elif channel != "stable":
+        raise ValueError("channel must be stable or candidate")
+    if re.fullmatch(expected_tag, tag) is None:
         raise ValueError(f"tag {tag!r} does not match project version {version!r}")
     commit = commit.casefold()
     if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
@@ -40,7 +46,7 @@ def build_manifest(
     return {
         "schema_version": 1,
         "project": "tfr",
-        "channel": "stable",
+        "channel": channel,
         "version": version,
         "tag": tag,
         "commit": commit,
@@ -57,11 +63,12 @@ def build_manifest(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build the stable TFR update manifest.")
+    parser = argparse.ArgumentParser(description="Build a TFR update manifest.")
     parser.add_argument("--repository", required=True)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--artifact", type=Path, required=True)
+    parser.add_argument("--channel", choices=("stable", "candidate"), default="stable")
     parser.add_argument("--output", type=Path, default=Path("update-manifest.json"))
     args = parser.parse_args()
     try:
@@ -70,6 +77,7 @@ def main() -> None:
             tag=args.tag,
             commit=args.commit,
             artifact=args.artifact,
+            channel=args.channel,
         )
     except ValueError as exc:
         parser.error(str(exc))

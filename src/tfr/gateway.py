@@ -49,7 +49,13 @@ from tfr.managed_updates import (
 )
 from tfr.plugin_sources import PluginSourceNotice, PluginUpdateChecker, load_plugin_sources
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
-from tfr.sessions import SessionManager, SessionState, WorldSession
+from tfr.sessions import (
+    ConnectorSessionBridge,
+    ConnectorWorldSession,
+    SessionManager,
+    SessionState,
+    WorldSession,
+)
 from tfr.updates import (
     BuildIdentity,
     UpdateChecker,
@@ -58,6 +64,7 @@ from tfr.updates import (
     current_build,
     format_update_status,
 )
+from tfr.world_connector import connect_or_spawn_connector, connector_worlds
 
 MAX_COMMAND_CHARACTERS = 65_536
 MAX_ACTOR_ID_CHARACTERS = 256
@@ -467,6 +474,7 @@ class GatewayRuntime:
         plugin_update_checker: PluginUpdateChecker | None = None,
         plugin_source_messages: tuple[str, ...] = (),
         plugin_source_notices: tuple[PluginSourceNotice, ...] = (),
+        connector_bridge: ConnectorSessionBridge | None = None,
     ) -> None:
         self.event_bus = event_bus
         self.command_bus = command_bus
@@ -480,6 +488,7 @@ class GatewayRuntime:
         self.plugin_update_checker = plugin_update_checker
         self.plugin_source_messages = plugin_source_messages
         self.plugin_source_notices = plugin_source_notices
+        self.connector_bridge = connector_bridge
         self.gateway_id = uuid4()
         self._started = False
         self._update_task: asyncio.Task[None] | None = None
@@ -492,20 +501,23 @@ class GatewayRuntime:
         bundle: ConfigurationBundle,
         *,
         plugin_scope: Literal["all", "gateway"] = "gateway",
+        connector_bridge: ConnectorSessionBridge | None = None,
     ) -> GatewayRuntime:
         sinks: list[EventSink] = []
         if bundle.main.logging.enabled:
             sinks.append(JsonlEventSink(_event_log_path(bundle.main.logging.directory)))
         event_bus = EventBus(sinks)
         command_bus = CommandBus()
+        session_type = ConnectorWorldSession if connector_bridge is not None else WorldSession
         sessions = [
-            WorldSession(
+            session_type(
                 world=alias,
                 config=config,
                 defaults=bundle.worlds.defaults,
                 event_bus=event_bus,
                 command_bus=command_bus,
                 show_nospoof_prefix=bundle.main.ui.show_nospoof_prefix,
+                **({"bridge": connector_bridge} if connector_bridge is not None else {}),
             )
             for alias, config in bundle.worlds.worlds.items()
         ]
@@ -577,12 +589,15 @@ class GatewayRuntime:
             ),
             plugin_source_messages=plugin_source_messages,
             plugin_source_notices=plugin_source_notices,
+            connector_bridge=connector_bridge,
         )
 
     async def start(self) -> None:
         if self._started:
             return
         self.history.start()
+        if self.connector_bridge is not None:
+            self.connector_bridge.start()
         try:
             await self.plugins.lifecycle(PluginLifecycleEvent(kind="application_start"))
             self.agents.start()
@@ -597,8 +612,10 @@ class GatewayRuntime:
                 name="tfr-gateway-updates",
             )
 
-    async def stop(self) -> None:
+    async def stop(self, *, preserve_worlds: bool = False) -> None:
         if not self._started and self.history._pump is None:
+            if self.connector_bridge is not None:
+                await self.connector_bridge.close(preserve_worlds=preserve_worlds)
             await self.event_bus.close()
             return
         self._started = False
@@ -608,7 +625,12 @@ class GatewayRuntime:
                 await self._update_task
             self._update_task = None
         await self.agents.stop()
-        await self.manager.stop_all()
+        if preserve_worlds:
+            await self.manager.detach_all()
+        else:
+            await self.manager.stop_all()
+        if self.connector_bridge is not None:
+            await self.connector_bridge.close(preserve_worlds=preserve_worlds)
         await self.plugins.drain()
         await self.plugins.lifecycle(PluginLifecycleEvent(kind="application_stop"))
         await self.plugins.drain()
@@ -1676,7 +1698,21 @@ async def run_gateway(
     tls_certificate: Path | str | None = None,
     tls_private_key: Path | str | None = None,
 ) -> int:
-    runtime = await GatewayRuntime.from_configuration(bundle)
+    gateway_path = Path(path).expanduser() if path is not None else default_gateway_socket()
+    connector_path = gateway_path.with_name(f"{gateway_path.name}.worlds")
+    connector_client = await connect_or_spawn_connector(
+        connector_path,
+        connector_worlds(bundle),
+    )
+    connector_bridge = ConnectorSessionBridge(connector_client)
+    try:
+        runtime = await GatewayRuntime.from_configuration(
+            bundle,
+            connector_bridge=connector_bridge,
+        )
+    except BaseException:
+        await connector_client.close()
+        raise
     tcp_auth_token: str | None = None
     tcp_ssl_context: ssl.SSLContext | None = None
     if listen_host is not None:
@@ -1700,7 +1736,7 @@ async def run_gateway(
         )
     server = GatewayServer(
         runtime,
-        path or default_gateway_socket(),
+        gateway_path,
         tcp_host=listen_host,
         tcp_port=listen_port,
         tcp_auth_token=tcp_auth_token,
@@ -1740,8 +1776,12 @@ async def run_gateway(
         update_stop = asyncio.create_task(
             server.wait_update_restart(), name="tfr-gateway-update-stop"
         )
+        connector_stop = asyncio.create_task(
+            connector_bridge.wait_closed(), name="tfr-gateway-connector-stop"
+        )
         done, pending = await asyncio.wait(
-            {signal_stop, update_stop}, return_when=asyncio.FIRST_COMPLETED
+            {signal_stop, update_stop, connector_stop},
+            return_when=asyncio.FIRST_COMPLETED,
         )
         for task in pending:
             task.cancel()
@@ -1755,7 +1795,7 @@ async def run_gateway(
         if web_server is not None:
             await web_server.stop()
         await server.stop()
-        await runtime.stop()
+        await runtime.stop(preserve_worlds=restart_requested)
     if restart_requested:
         restart = managed_restart_command(sys.argv[1:])
         if restart is None:

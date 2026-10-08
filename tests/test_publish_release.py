@@ -98,6 +98,33 @@ def test_push_creates_annotated_local_and_remote_tag(tmp_path: Path) -> None:
     )
 
 
+def test_candidate_push_creates_numbered_prerelease_tag(tmp_path: Path) -> None:
+    repository, remote = create_repository(tmp_path)
+
+    result = publish(repository, "--candidate", "2", "--push")
+
+    assert result.returncode == 0
+    assert "Candidate release check passed: v0.1.0-candidate.2" in result.stdout
+    assert (
+        git(repository, "cat-file", "-t", "refs/tags/v0.1.0-candidate.2").stdout.strip()
+        == "tag"
+    )
+    assert (
+        git(remote, "show-ref", "--verify", "refs/tags/v0.1.0-candidate.2").returncode
+        == 0
+    )
+
+
+def test_candidate_number_must_be_positive_integer(tmp_path: Path) -> None:
+    repository, remote = create_repository(tmp_path)
+
+    result = publish(repository, "--candidate", "0", "--push")
+
+    assert result.returncode == 2
+    assert "positive integer" in result.stderr
+    assert git(remote, "tag", "--list").stdout == ""
+
+
 def test_rejects_dirty_checkout(tmp_path: Path) -> None:
     repository, _remote = create_repository(tmp_path)
     (repository / "untracked.txt").write_text("dirty\n", encoding="utf-8")

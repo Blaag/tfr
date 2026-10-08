@@ -30,7 +30,7 @@ from tfr.events import (
     SpoofReason,
     SpoofStatus,
 )
-from tfr.sessions import SessionState, TextFramer, WorldSession
+from tfr.sessions import ConnectorWorldSession, SessionState, TextFramer, WorldSession
 from tfr.telnet import Command, Option
 
 
@@ -87,6 +87,41 @@ def test_text_framer_preserves_line_endings_and_prompts() -> None:
     assert framer.feed("\ntwo\nPrompt>") == ("one\r\n", "two\n")
     assert framer.flush() == "Prompt>"
     assert framer.flush() is None
+
+
+async def test_connector_overflow_is_published_as_visible_inbound_warning() -> None:
+    sink = MemorySink()
+    event_bus = EventBus([sink])
+    command_bus = CommandBus()
+
+    class Bridge:
+        client = AsyncMock()
+
+        def register(self, _session: ConnectorWorldSession) -> None:
+            pass
+
+    session = ConnectorWorldSession(
+        bridge=Bridge(),  # type: ignore[arg-type]
+        world="alpha",
+        config=WorldConfig(host="localhost", port=4201),
+        defaults=WorldDefaults(),
+        event_bus=event_bus,
+        command_bus=command_bus,
+    )
+
+    await session.handle_connector_overflow(
+        {
+            "notice_id": 1,
+            "first_dropped_sequence": 2,
+            "last_dropped_sequence": 4,
+            "dropped_frames": 3,
+            "dropped_bytes": 99,
+        }
+    )
+
+    assert sink.events[-1].direction is Direction.INBOUND
+    assert sink.events[-1].kind is EventKind.SYSTEM
+    assert "lost 3 frame(s) and 99 byte(s)" in (sink.events[-1].display_text or "")
 
 
 def test_text_framer_splits_oversized_lines() -> None:
