@@ -2179,6 +2179,19 @@ async def test_effects_lab_demo_commands_require_explicit_activation() -> None:
     assert output.count("Effects Lab is closed; use /effects") == 2
 
 
+def test_general_help_hides_effects_lab_only_commands() -> None:
+    tui = make_tui()
+
+    help_text = tui.help_text()
+
+    assert "/effects - open the local Effects Lab" in help_text
+    assert "/teststreak" not in help_text
+    assert "/testspeaker" not in help_text
+    assert "/effects effect" not in help_text
+    assert "/effects force" not in help_text
+    assert "/effects close" not in help_text
+
+
 async def test_effects_lab_rejects_non_lab_commands_with_command_list() -> None:
     tui = make_tui()
     await tui.submit_text("alpha", "/effects")

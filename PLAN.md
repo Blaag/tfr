@@ -15,6 +15,9 @@ The installed command is `tfr`.
 - Use `prompt_toolkit` for the terminal UI.
 - Keep networking and sessions independent from the TUI.
 - Support multiple active worlds in one process.
+- Keep the operator-facing `tfr gateway` command and systemd service stable
+  while an internal lightweight supervisor/connector owns world transports and
+  restarts the full Gateway application independently.
 - Log the complete session by default, not only conversation.
 - Preserve canonical inbound text separately from its display projection.
 - Enable and parse server NOSPOOF provenance where supported.
@@ -113,57 +116,65 @@ write directly to sockets or mutate canonical events.
 
 ## Architecture
 
-The TUI is one consumer and producer around an application core. It does not
-own sockets, connection tasks, event history, or model calls.
+The TUI and PWA are consumers and producers around the Gateway application
+core. They do not own world sockets, connection tasks, event history, or model
+calls. In split Gateway deployments, a lightweight supervisor/connector owns
+all world sockets while the replaceable Gateway application owns protocol
+projection, plugins, agents, UI clients, and web access.
 
 ```text
-                         +-------------------+
-                         | prompt_toolkit UI |
-                         +---------+---------+
-                                   |
-                         commands  |  events
-                                   |
-                         +---------v---------+
-                         |  application core |
-                         +----+----------+----+
-                              |          |
-                    command bus          event bus
-                              |          |
-             +----------------+          +----------------+
-             |                                            |
-     +-------v-------+                            +-------v-------+
-     | world sessions|                            | event sinks   |
-     +-------+-------+                            | JSONL/plugins |
-             |                                    +---------------+
-       TCP/TLS/Telnet
-             |
-       remote worlds
+ systemd: tfr gateway
+          |
+ +--------v--------------------------+
+ | lightweight supervisor/connector  |
+ | TCP/TLS/Telnet, idle, replay      |
+ +--------+--------------------------+
+          | private owner-only Unix socket
+ +--------v--------------------------+       +-------------------+
+ | replaceable Gateway application   |<----->| native UIs / PWA  |
+ | command bus, event bus, plugins,  |       +-------------------+
+ | agents, history, web gateway      |
+ +--------+--------------------------+
+          |
+          +-------------------------------> JSONL/plugin sinks
 
-     +---------------+
-     | agent runtime |
-     +-------+-------+
-             | subscribes to its world's events
-             | submits validated conversation actions
-             +------------------------------------------> command bus
+ connector TCP/TLS sockets
+          |
+     remote worlds
 ```
+
+The connector is one stdlib-focused process for all worlds, not one process per
+world and not a separately installed service. It stays in the existing systemd
+control group, survives Gateway application replacement for up to 30 minutes,
+and exits immediately on a clean service shutdown. Its exact implementation
+hash is the compatibility boundary: matching hashes preserve connections;
+different hashes trigger one controlled connector replacement rather than a
+version-compatibility matrix.
 
 ### Inbound Flow
 
-1. A world session reads bytes from TCP or TLS.
-2. The Telnet codec consumes negotiation bytes and emits application bytes.
-3. An incremental decoder produces canonical text without losing partial
+1. The world connector reads bytes from TCP or TLS.
+2. Its Telnet codec consumes negotiation bytes and emits application bytes.
+3. Its incremental decoder produces framed canonical text without losing partial
    multibyte characters.
-4. The selected server adapter parses NOSPOOF and other server-specific
+4. Connector frames receive per-world transport sequence numbers and remain in
+   bounded replay storage until acknowledged by the Gateway application.
+5. The selected server adapter parses NOSPOOF and other server-specific
    provenance.
-5. Semantic classifiers add event type and confidence without overwriting
+6. Semantic classifiers add event type and confidence without overwriting
    source data.
-6. The canonical event is assigned a per-session sequence number and
+7. The canonical event is assigned a per-session sequence number and
    published to the event bus.
-7. Event sinks append the canonical event to JSONL.
-8. A display projector optionally removes a successfully parsed NOSPOOF
+8. Event sinks append the canonical event to JSONL.
+9. A display projector optionally removes a successfully parsed NOSPOOF
    prefix and produces styled output for the TUI.
-9. Agent context builders receive selected, sanitized events from only their
+10. Agent context builders receive selected, sanitized events from only their
    configured world session.
+
+If bounded replay overflows while the Gateway is unavailable or slow, the
+connector drops only complete oldest frames and sends a persistent structured
+gap notice containing world, sequence range, frame count, and byte count. The
+Gateway logs and visibly displays that notice before acknowledging it.
 
 ### Outbound Flow
 
@@ -172,7 +183,8 @@ own sockets, connection tasks, event history, or model calls.
 2. The command request identifies its source actor and target session.
 3. Agent policy validates agent actions before command rendering.
 4. A redacted audit projection is written to JSONL.
-5. The world session serializes the real command to its socket.
+5. The Gateway session sends the validated command over the private connector
+   protocol, and the connector serializes it to the world socket.
 6. Correlation metadata links the request, outbound event, model decision,
    and resulting inbound traffic where possible.
 
@@ -822,6 +834,25 @@ Acceptance criteria:
   activates each UI and the Gateway, and re-execs every participating process.
   Preserve browser service-worker updates and require manual deployment for
   protocol-changing releases.
+- [x] Add stable and candidate update channels. Publish immutable numbered
+  `vMAJOR.MINOR.PATCH-candidate.N` prereleases for opt-in testing, isolate
+  candidate and stable caches, and require stable publication to promote the
+  exact candidate wheel and source archive from the same commit without
+  rebuilding either artifact.
+- [x] Keep world connections alive across normal Gateway updates and failed
+  Gateway application restarts. Run one lightweight internal connector beneath
+  the unchanged `tfr gateway` service; retain it for 30 minutes after an
+  unexpected application loss; preserve TCP/TLS/Telnet state, reconnect policy,
+  login/startup and idle behavior; and replay acknowledged, per-world sequenced
+  frames through bounded 1 MiB-per-world and 16 MiB-global buffers. Surface any
+  dropped range as a visible, logged overflow warning.
+- [x] Use an exact connector implementation fingerprint rather than a release
+  compatibility matrix. Reuse the connector only when the new Gateway expects
+  the same connector/Telnet implementation hash; otherwise perform one explicit
+  controlled connector replacement and world reconnect.
+- [x] Improve coordinated-update diagnostics by resolving `uv` independently
+  on each participating host, identifying Gateway-versus-UI staging failures,
+  and keeping PWA/native UI update and spelling behavior distinct.
 - [ ] Add direct stable-release artifact installation that verifies artifact
   size and SHA-256 before activating, without rebuilding the verified tag.
 - [x] Include stable Git-sourced plugin releases in `/update status|check` and
@@ -853,11 +884,23 @@ Acceptance criteria:
   display without removing the canonical event from logging or replay. Bound
   expression count and length, and time-limit matching so expensive expressions
   fail open instead of stalling display processing.
-- [ ] Add a configurable speaker combo-streak plugin for consecutive speech or
-  poses from the same person. Show a short-lived animated progression such as
-  `x2!`, `x3!`, `SUPER!`, `DOMINATING!`, and `UNSTOPPABLE!`; evaluate an
-  end-of-line indicator after the speaker's text as the initial placement and
-  extend the display-decoration API if animating appended text requires it.
+- [x] Add bounded speaker combo streaks for consecutive attributed speech or
+  poses from the same person. Progress through `Speaking Spree`, `Rampage`,
+  `Dominating`, `Unstoppable`, and `GODLIKE`; animate the message body and a
+  short-lived bottom-border HUD, add viewport-scaled Godlike fireworks, continue
+  counting while motion is suppressed without replaying missed visuals, and
+  avoid repeating effects for higher Godlike multipliers.
+- [x] Add a cross-client local Effects Lab. Let terminal users explicitly open
+  it with `/effects` as an opt-in navigable pseudo-world with isolated preserved
+  input/output, real-world unread tracking, local-only command validation,
+  configured speaker previews, complete combo playback, reduced-motion override,
+  and `/effects effect all` samples from fictional speaker `WilfordBrimley`.
+  Provide the corresponding safe PWA lab through Settings and remove the Lab
+  from normal navigation again on `/effects close`.
+- [x] Separate recent human command feedback from world output, keep drafts and
+  command history per world, render fixed-width `More` and cross-world activity
+  summaries in the output border, and ensure short-lived combo sweeps render
+  above those persistent labels.
 - [x] Detect bracketed multiline text pasted into the active world's input and
   automatically send it as paced `@emit` commands, using the same server-aware
   escaping and preflight validation as `/cat` so spaces, tabs, blank lines, and
@@ -928,6 +971,10 @@ Acceptance criteria:
   and retain terminal-only behavior only where the shared language cannot
   represent it without weakening its bounds.
 - [x] Fix speaker effects not working on poses.
+- [x] Harden protected release orchestration with prompt-aware exact-tag
+  confirmations, guarded resume of version-only release PRs, exact-head check
+  registration/completion, stale GitHub head-propagation tolerance, transient
+  neutral/skipped CodeQL handling, and immutable final asset verification.
 
 ## Test Strategy
 
@@ -937,10 +984,20 @@ Acceptance criteria:
 - Transcript fixtures containing ANSI, Unicode, malformed data, and NOSPOOF
   variants.
 - Async integration tests with local fake TCP and TLS servers.
+- Connector state-machine tests for leases, exact build identity, framing,
+  sequence acknowledgements, bounded replay, overflow persistence, and
+  configuration mismatch; real Unix-socket/subprocess tests for attachment,
+  replacement, crash recovery, clean shutdown, idle traffic, and preserving a
+  fake world's single TCP connection while the Gateway application is killed
+  and restarted.
 - Fake OpenAI-compatible HTTP responses for deterministic agent tests.
 - TUI tests over pure viewport and action state where possible, keeping
   terminal integration tests focused.
 - Memory tests that feed large transcripts and assert bounded retained state.
+- Release-orchestration fixtures that model candidate publication, exact-byte
+  stable promotion, protected check registration, head propagation, deployment
+  approval, confirmation timeouts, and safe resume failures without creating
+  real tags or releases.
 
 ## Reference Sources
 
