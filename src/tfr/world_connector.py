@@ -1249,18 +1249,27 @@ async def supervise_gateway(
         while not stop.is_set() and not server.expired:
             environment = dict(os.environ)
             environment["TFR_GATEWAY_APP"] = "1"
-            process = subprocess.Popen(
-                [
-                    _current_python(initial_python),
-                    "-I",
-                    "-m",
-                    "tfr",
-                    *gateway_arguments,
-                ],
-                env=environment,
-                stdin=None,
-                close_fds=True,
-            )
+            command = [
+                _current_python(initial_python),
+                "-I",
+                "-m",
+                "tfr",
+                *gateway_arguments,
+            ]
+            try:
+                process = subprocess.Popen(
+                    command,
+                    env=environment,
+                    stdin=None,
+                    close_fds=True,
+                )
+            except OSError as exc:
+                print(
+                    f"tfr: cannot start Gateway application: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                raise
             child_done = asyncio.create_task(
                 asyncio.to_thread(process.wait), name="tfr-gateway-app-wait"
             )
@@ -1277,6 +1286,11 @@ async def supervise_gateway(
             )
             if restart_wait in done:
                 server.clear_gateway_restart()
+                print(
+                    "tfr: Gateway application restart requested; preserving world connections",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 if child_done not in done:
                     if not hasattr(signal, "SIGUSR1"):
                         process.kill()
@@ -1307,6 +1321,12 @@ async def supervise_gateway(
                 socket_stat = gateway_socket.stat(follow_symlinks=False)
                 if socket_stat.st_uid == os.geteuid() and stat.S_ISSOCK(socket_stat.st_mode):
                     gateway_socket.unlink()
+            print(
+                f"tfr: Gateway application exited with status {child_done.result()}; "
+                "restarting in 2 seconds",
+                file=sys.stderr,
+                flush=True,
+            )
             await asyncio.sleep(2)
         return 75 if server.expired else 0
     finally:

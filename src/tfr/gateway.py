@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import heapq
 import hmac
 import os
@@ -448,6 +449,38 @@ def default_gateway_socket() -> Path:
     return Path.home() / ".local" / "state" / "tfr" / "run" / "gateway.sock"
 
 
+def remove_stale_gateway_socket(path: Path) -> bool:
+    """Remove an owner-controlled dead Unix socket, refusing active or unsafe paths."""
+    if not os.path.lexists(path):
+        return False
+    current = path.stat(follow_symlinks=False)
+    if not stat.S_ISSOCK(current.st_mode):
+        raise RuntimeError(f"gateway socket path is not a socket: {path}")
+    if os.name == "posix" and current.st_uid != os.geteuid():
+        raise RuntimeError(f"gateway socket is not owned by this user: {path}")
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(0.2)
+    try:
+        probe.connect(str(path))
+    except OSError as exc:
+        if exc.errno not in {errno.ECONNREFUSED, errno.ENOENT}:
+            raise RuntimeError(
+                f"cannot validate existing gateway socket: {path}: {exc}"
+            ) from exc
+    else:
+        raise RuntimeError(f"an active Gateway already owns socket: {path}")
+    finally:
+        probe.close()
+    if not os.path.lexists(path):
+        return False
+    confirmed = path.stat(follow_symlinks=False)
+    if (confirmed.st_dev, confirmed.st_ino) != (current.st_dev, current.st_ino):
+        raise RuntimeError(f"gateway socket changed during stale validation: {path}")
+    path.unlink()
+    print(f"tfr: removed stale Gateway socket: {path}", file=sys.stderr, flush=True)
+    return True
+
+
 def _event_log_path(directory: Path) -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     return directory.expanduser() / f"tfr-{timestamp}-{os.getpid()}.jsonl"
@@ -883,8 +916,7 @@ class GatewayServer:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._validate_socket_parent()
-        if os.path.lexists(self.path):
-            raise RuntimeError(f"gateway socket already exists: {self.path}")
+        remove_stale_gateway_socket(self.path)
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             listener.bind(str(self.path))

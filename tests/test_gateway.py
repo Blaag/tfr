@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import os
+import socket
 import stat
 from collections import Counter
 from pathlib import Path
@@ -13,7 +15,12 @@ import pytest
 
 from tfr.core import EventBus
 from tfr.events import Actor, ActorType, Direction, Event, EventKind, SpoofAssessment, SpoofStatus
-from tfr.gateway import EventHistory, GatewayRuntime, GatewayServer
+from tfr.gateway import (
+    EventHistory,
+    GatewayRuntime,
+    GatewayServer,
+    remove_stale_gateway_socket,
+)
 from tfr.gateway_protocol import MAX_MESSAGE_BYTES, encode_message, event_message, read_message
 from tfr.sessions import SessionState
 from tfr.updates import current_build
@@ -37,6 +44,30 @@ def make_event(
         canonical_text=f"{world} {sequence}",
         actor=actor,
     )
+
+
+def test_stale_gateway_socket_cleanup_refuses_active_socket(tmp_path: Path) -> None:
+    path = tmp_path.parents[1] / f"gw-{hashlib.sha256(str(tmp_path).encode()).hexdigest()[:8]}"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(path))
+    listener.listen(1)
+    try:
+        with pytest.raises(RuntimeError, match="active Gateway"):
+            remove_stale_gateway_socket(path)
+        assert path.exists()
+    finally:
+        listener.close()
+        path.unlink()
+
+
+def test_stale_gateway_socket_cleanup_refuses_non_socket_path(tmp_path: Path) -> None:
+    path = tmp_path / "gateway.sock"
+    path.write_text("do not delete", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="not a socket"):
+        remove_stale_gateway_socket(path)
+
+    assert path.read_text(encoding="utf-8") == "do not delete"
 
 
 async def test_history_assigns_global_cursors_and_reports_truncation() -> None:
