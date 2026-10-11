@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ssl
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -814,6 +815,39 @@ async def test_gateway_ui_runtime_clears_update_transaction_without_local_restar
 
     assert result == {"updated": True, "restart_required": False}
     assert runtime._update_transaction_active is False
+
+
+async def test_gateway_ui_runtime_accepts_candidate_update_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = update_manifest()
+    candidate = replace(
+        candidate,
+        tag=f"v{candidate.version}-candidate.1",
+        channel="candidate",
+    )
+    staged = StagedManagedUpdate(
+        release_id=f"{candidate.version}+stable.{candidate.commit}",
+        version=candidate.version,
+        commit=candidate.commit,
+        release_url=candidate.release_url,
+        manifest=candidate,
+    )
+    stage = AsyncMock(return_value=staged)
+    monkeypatch.setattr("tfr.gateway_client.stage_managed_update", stage)
+    client = SimpleNamespace(
+        event_bus=SimpleNamespace(add_processor=lambda _processor: None),
+    )
+    runtime = GatewayUiRuntime(
+        client,  # type: ignore[arg-type]
+        SimpleNamespace(process_event=Mock()),  # type: ignore[arg-type]
+        update_config=UpdateConfig(channel="candidate"),
+    )
+
+    result = await runtime._prepare_update(candidate.as_dict())
+
+    assert result["version"] == candidate.version
+    stage.assert_awaited_once()
 
 
 async def test_gateway_ui_runtime_publishes_gateway_world_and_activity_events() -> None:
