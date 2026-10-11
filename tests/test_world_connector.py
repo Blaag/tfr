@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import socket
 import stat
 import subprocess
 import sys
@@ -944,8 +945,14 @@ async def test_tfr_gateway_supervisor_restarts_app_without_world_reconnect(
         ),
         encoding="utf-8",
     )
-    gateway_socket = _socket_path(tmp_path).with_name("gw.sock")
-    connector_socket = gateway_socket.with_name("gw.sock.worlds")
+    gateway_socket = _socket_path(tmp_path).with_name(
+        f"g-{hashlib.sha256(str(tmp_path).encode()).hexdigest()[:6]}"
+    )
+    connector_socket = gateway_socket.with_name(f"{gateway_socket.name}.worlds")
+    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale.bind(str(gateway_socket))
+    stale.close()
+    assert gateway_socket.exists()
     process = subprocess.Popen(
         [
             sys.executable,
@@ -959,7 +966,7 @@ async def test_tfr_gateway_supervisor_restarts_app_without_world_reconnect(
             str(gateway_socket),
         ],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         text=True,
     )
 
@@ -983,7 +990,8 @@ async def test_tfr_gateway_supervisor_restarts_app_without_world_reconnect(
             if connected.is_set():
                 break
             if process.poll() is not None:
-                raise AssertionError("gateway supervisor exited early")
+                error = process.stderr.read() if process.stderr is not None else ""
+                raise AssertionError(f"gateway supervisor exited early: {error}")
             await asyncio.sleep(0.05)
         else:
             raise AssertionError("gateway supervisor did not connect its world")
@@ -1014,6 +1022,10 @@ async def test_tfr_gateway_supervisor_restarts_app_without_world_reconnect(
         if process.poll() is None:
             process.terminate()
             await asyncio.to_thread(process.wait, 10)
+        error = process.stderr.read() if process.stderr is not None else ""
         world_server.close()
         await asyncio.wait_for(world_server.wait_closed(), timeout=2)
         assert process.returncode == 0
+    assert "removed stale Gateway socket" in error
+    assert "Gateway application restart requested" in error
+    assert "exited with status 75; restarting" in error
