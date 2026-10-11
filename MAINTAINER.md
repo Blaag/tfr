@@ -13,7 +13,7 @@ building, publishing, and installing them.
 | `./scripts/publish-release --push` | Maintainer | Create and push the matching annotated `vX.Y.Z` tag, triggering the protected release workflow. |
 | `./scripts/publish-release --candidate N --push` | Maintainer | Create and push immutable candidate tag `vX.Y.Z-candidate.N` for testing before stable promotion. |
 | `./scripts/install-from-checkout` | Operator or developer | Build the current clean checkout into an isolated local release and optionally activate it. It does not publish anything. |
-| `./scripts/install-from-checkout --latest-stable` | Operator | Fetch the live official manifest, verify its exact annotated tag and commit, then build and activate that tagged source. It never installs `main`. |
+| `./scripts/install-from-checkout --latest-stable` | Operator | Fetch the live official manifest, verify its exact annotated tag and commit, then download, verify, and activate the exact published release bundle without rebuilding source. |
 | `scripts/build_update_manifest.py` | GitHub Actions | Generate `update-manifest.json` for an already-built wheel. It is a release-workflow helper and is not normally run manually. |
 | `scripts/build_release_bundle.py` | GitHub Actions | Deterministically package the commit-bearing wheel and hash-locked runtime requirements into `tfr-VERSION-release.zip`. |
 | `scripts/verify_release_bundle.py BUNDLE` | Maintainer/operator | Strictly verify bundle structure, member hashes, wheel version/commit identity, and optional expected outer size/SHA-256. |

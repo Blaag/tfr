@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -36,6 +37,7 @@ _BUILD_RELEASE = re.compile(
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _MAX_MANIFEST_BYTES = 128 * 1024
 _MAX_RELEASE_FEED_BYTES = 1024 * 1024
+_MAX_RELEASE_ARTIFACT_BYTES = 256 * 1024 * 1024
 
 
 class UpdateError(ValueError):
@@ -429,6 +431,70 @@ def fetch_release_manifest(
     if fetched.content is None:
         raise UpdateError("release server returned no manifest")
     return ReleaseManifest.from_json(fetched.content, expected_channel=expected_channel)
+
+
+def download_release_artifact(
+    manifest: ReleaseManifest,
+    destination: Path,
+    *,
+    timeout: float = 10.0,
+) -> None:
+    artifact = manifest.artifact
+    if artifact.size > _MAX_RELEASE_ARTIFACT_BYTES:
+        raise UpdateError("release artifact exceeds the size limit")
+    _https_url(artifact.url, "release artifact URL")
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
+        raise UpdateError("release artifact timeout must be a number")
+    if not math.isfinite(timeout) or timeout <= 0 or timeout > 60:
+        raise UpdateError("release artifact timeout must be greater than zero and at most 60")
+    if destination.exists():
+        raise UpdateError("release artifact destination already exists")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}-",
+        dir=destination.parent,
+    )
+    temporary = Path(temporary_name)
+    digest = hashlib.sha256()
+    received = 0
+    request = urllib.request.Request(
+        artifact.url,
+        headers={
+            "Accept": "application/octet-stream",
+            "Cache-Control": "no-cache",
+            "User-Agent": "tfr-update-installer",
+        },
+    )
+    opener = urllib.request.build_opener(_HttpsRedirectHandler())
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            descriptor = -1
+            try:
+                response = opener.open(request, timeout=float(timeout))
+            except urllib.error.HTTPError as exc:
+                raise UpdateError(f"release artifact server returned HTTP {exc.code}") from exc
+            except (OSError, urllib.error.URLError) as exc:
+                raise UpdateError(f"cannot reach release artifact server: {exc}") from exc
+            with response:
+                _https_url(response.geturl(), "release artifact response URL")
+                while chunk := response.read(64 * 1024):
+                    received += len(chunk)
+                    if received > artifact.size:
+                        raise UpdateError("release artifact size does not match the manifest")
+                    digest.update(chunk)
+                    output.write(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+        if received != artifact.size:
+            raise UpdateError("release artifact size does not match the manifest")
+        if digest.hexdigest() != artifact.sha256:
+            raise UpdateError("release artifact digest does not match the manifest")
+        os.replace(temporary, destination)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
 
 
 class UpdateChecker:

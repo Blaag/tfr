@@ -215,9 +215,12 @@ The checkout script also manages installed releases:
 fetches the live official release manifest without using the notification
 cache, fetches only its fully qualified annotated Git tag from the official
 repository, and requires the tag's direct commit and tagged project version to
-match the manifest. It builds that temporary detached checkout with its
-committed lock file; it never installs `main` or modifies the bootstrap
-checkout. Verified stable releases use `VERSION+stable.COMMIT` IDs so their
+match the manifest. It downloads the manifest-authenticated release bundle,
+verifies its outer size and SHA-256 plus strict internal member hashes and
+wheel identity, installs hash-locked binary dependencies, and installs the
+exact commit-bearing wheel without rebuilding it. It never installs `main` or
+modifies the bootstrap checkout. Verified stable releases use
+`VERSION+stable.COMMIT` IDs so their
 provenance remains distinct from local checkout builds. A lower version than an
 already installed stable release, or the same version with a different commit,
 is rejected. Use `--no-activate` to stage the verified release without changing
@@ -291,10 +294,12 @@ Candidate discovery uses GitHub prereleases named
 The default remains `"stable"`. Stable publication promotes the exact wheel and
 source archive previously exercised as a candidate rather than rebuilding them.
 
-Bare `/update` and `./scripts/install-from-checkout --latest-stable` rebuild and
-activate the exact tagged source release. Both validate the manifest-to-tag
-trust chain; background checks never start installation. Direct verified
-installation of the advertised wheel remains future work.
+Bare `/update` and `./scripts/install-from-checkout --latest-stable` download,
+verify, and activate the exact published release bundle. Both retain the
+manifest-to-annotated-tag trust check, enforce bundle and member hashes, require
+hash-locked binary dependencies, verify the installed version and embedded
+commit, and activate only after staging succeeds. Background checks never start
+installation.
 
 Before staging, bare `/update` checks the Gateway and every connected native UI.
 If their TFR builds and configured `stable-auto` plugins are current, it reports
@@ -320,9 +325,8 @@ synchronized `main` and pushes only the matching immutable tag. The release
 workflow tests the tag, embeds its exact commit in the wheel, and publishes the
 wheel, source distribution, deterministic `tfr-VERSION-release.zip` bundle, and
 checksummed `update-manifest.json` together. The bundle contains the wheel plus
-hash-locked runtime requirements and strict identity/integrity metadata. Direct
-bundle installation is not enabled yet; this release asset is published for
-manual verification before `/update` switches away from tagged-source builds.
+hash-locked runtime requirements and strict identity/integrity metadata. Managed
+updates install this bundle directly without rebuilding tagged source.
 Configure the `release` GitHub environment to require maintainer approval, and
 enable immutable releases plus protected release tags in the repository ruleset;
 the workflow also rejects commits that are not on `main`. See

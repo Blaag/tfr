@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +19,7 @@ from tfr.updates import (
     ReleaseManifest,
     UpdateChecker,
     UpdateError,
+    download_release_artifact,
     fetch_release_manifest,
     format_update_status,
     update_available,
@@ -122,6 +124,110 @@ def test_live_manifest_fetch_rejects_no_content(
 
     with pytest.raises(UpdateError, match="returned no manifest"):
         fetch_release_manifest("https://updates.example.com/stable.json")
+
+
+@pytest.mark.parametrize(
+    ("content", "size", "digest", "message"),
+    (
+        (b"short", 6, hashlib.sha256(b"short!").hexdigest(), "size"),
+        (b"too-long", 3, hashlib.sha256(b"too").hexdigest(), "size"),
+        (b"content", 7, "0" * 64, "digest"),
+    ),
+)
+def test_release_artifact_download_fails_closed_on_integrity_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    content: bytes,
+    size: int,
+    digest: str,
+    message: str,
+) -> None:
+    manifest = ReleaseManifest.from_json(manifest_bytes())
+    manifest = replace(
+        manifest,
+        artifact=tfr.updates.ReleaseArtifact(
+            url=manifest.artifact.url,
+            size=size,
+            sha256=digest,
+        ),
+    )
+
+    class Response:
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def geturl(self) -> str:
+            return manifest.artifact.url
+
+        def read(self, maximum: int = -1) -> bytes:
+            nonlocal content
+            if not content:
+                return b""
+            amount = len(content) if maximum < 0 else min(maximum, len(content))
+            chunk, content = content[:amount], content[amount:]
+            return chunk
+
+    class Opener:
+        def open(self, _request: object, *, timeout: float) -> Response:
+            assert timeout == 7
+            return Response()
+
+    monkeypatch.setattr(tfr.updates.urllib.request, "build_opener", lambda *_args: Opener())
+    destination = tmp_path / "artifact.zip"
+
+    with pytest.raises(UpdateError, match=message):
+        download_release_artifact(manifest, destination, timeout=7)
+
+    assert not destination.exists()
+
+
+def test_release_artifact_download_streams_verified_content_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content = b"verified bundle"
+    remaining = content
+    manifest = ReleaseManifest.from_json(manifest_bytes())
+    manifest = replace(
+        manifest,
+        artifact=tfr.updates.ReleaseArtifact(
+            url=manifest.artifact.url,
+            size=len(content),
+            sha256=hashlib.sha256(content).hexdigest(),
+        ),
+    )
+
+    class Response:
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def geturl(self) -> str:
+            return manifest.artifact.url
+
+        def read(self, maximum: int = -1) -> bytes:
+            nonlocal remaining
+            if not remaining:
+                return b""
+            amount = min(maximum, 3, len(remaining))
+            chunk, remaining = remaining[:amount], remaining[amount:]
+            return chunk
+
+    class Opener:
+        def open(self, _request: object, *, timeout: float) -> Response:
+            return Response()
+
+    monkeypatch.setattr(tfr.updates.urllib.request, "build_opener", lambda *_args: Opener())
+    destination = tmp_path / "artifact.zip"
+
+    download_release_artifact(manifest, destination)
+
+    assert destination.read_bytes() == content
+    assert destination.stat().st_mode & 0o777 == 0o600
 
 
 def test_live_candidate_fetch_uses_release_discovery(
@@ -353,8 +459,8 @@ def test_release_manifest_builder_uses_protocol_and_artifact_digest(tmp_path: Pa
     version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"][
         "version"
     ]
-    artifact = tmp_path / f"tfr-{version}-py3-none-any.whl"
-    artifact.write_bytes(b"wheel")
+    artifact = tmp_path / f"tfr-{version}-release.zip"
+    artifact.write_bytes(b"bundle")
     output = tmp_path / "manifest.json"
 
     subprocess.run(
@@ -378,15 +484,45 @@ def test_release_manifest_builder_uses_protocol_and_artifact_digest(tmp_path: Pa
 
     assert manifest.protocol_minimum == 2
     assert manifest.protocol_maximum == 2
-    assert manifest.artifact.size == 5
-    assert manifest.artifact.sha256 == hashlib.sha256(b"wheel").hexdigest()
+    assert manifest.artifact.url.endswith(f"/tfr-{version}-release.zip")
+    assert manifest.artifact.size == 6
+    assert manifest.artifact.sha256 == hashlib.sha256(b"bundle").hexdigest()
+
+
+def test_release_manifest_builder_rejects_non_bundle_artifact(tmp_path: Path) -> None:
+    version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"][
+        "version"
+    ]
+    artifact = tmp_path / f"tfr-{version}-py3-none-any.whl"
+    artifact.write_bytes(b"wheel")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/build_update_manifest.py",
+            "--repository",
+            "Blaag/tfr",
+            "--tag",
+            f"v{version}",
+            "--commit",
+            "a" * 40,
+            "--artifact",
+            str(artifact),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "release.zip" in result.stderr
 
 
 def test_release_manifest_builder_supports_candidate_channel(tmp_path: Path) -> None:
     version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"][
         "version"
     ]
-    artifact = tmp_path / f"tfr-{version}-py3-none-any.whl"
+    artifact = tmp_path / f"tfr-{version}-release.zip"
     artifact.write_bytes(b"candidate-wheel")
     output = tmp_path / "candidate.json"
 

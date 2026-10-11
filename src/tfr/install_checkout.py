@@ -27,7 +27,13 @@ from tfr.installations import (
     release_python,
     stable_release_id,
 )
-from tfr.updates import ReleaseManifest, UpdateError, fetch_release_manifest
+from tfr.release_bundle import extract_release_bundle
+from tfr.updates import (
+    ReleaseManifest,
+    UpdateError,
+    download_release_artifact,
+    fetch_release_manifest,
+)
 
 _OFFICIAL_MANIFEST_URL = (
     "https://github.com/Blaag/tfr/releases/latest/download/update-manifest.json"
@@ -417,6 +423,14 @@ def install_latest_stable(
         manifest = fetch_manifest(manifest_url, timeout=10.0)
     except (OSError, UpdateError, ValueError) as exc:
         raise InstallationError(f"cannot resolve the latest stable release: {exc}") from exc
+    if manifest.artifact.url.endswith(f"/tfr-{manifest.version}-release.zip"):
+        return install_release_bundle(
+            layout,
+            manifest,
+            python=python,
+            activate=activate,
+            source_url=source_url,
+        )
     with stable_release_checkout(manifest, source_url=source_url) as identity:
         return install_checkout(
             identity.root,
@@ -444,6 +458,130 @@ def install_stable_manifest(
             activate=activate,
             provenance="stable-release",
         )
+
+
+def install_release_bundle(
+    layout: InstallationLayout,
+    manifest: ReleaseManifest,
+    *,
+    python: str,
+    activate: bool = False,
+    source_url: str = _OFFICIAL_REPOSITORY_URL,
+    timeout: float = 10.0,
+) -> ReleaseMetadata:
+    """Install a verified release bundle without rebuilding the tagged project."""
+    with stable_release_checkout(manifest, source_url=source_url) as identity:
+        release_id = stable_release_id(identity.version, identity.commit)
+        layout.prepare()
+        with layout.lock():
+            _reject_stable_downgrade_locked(layout, identity.version, identity.commit)
+            if os.path.lexists(layout.releases / release_id):
+                existing = layout.validate_release(release_id)
+                _verify_installed_release(existing.path, existing.metadata)
+                if not _python_request_matches(python, existing.metadata.python_version):
+                    raise InstallationError(
+                        f"release already uses Python {existing.metadata.python_version}, "
+                        f"which does not match --python {python}"
+                    )
+                if activate:
+                    layout._activate_locked(release_id)
+                return existing.metadata
+
+        staging: Path | None = None
+        with tempfile.TemporaryDirectory(prefix="tfr-release-bundle-") as temporary:
+            work = Path(temporary)
+            bundle_path = work / f"tfr-{manifest.version}-release.zip"
+            try:
+                download_release_artifact(manifest, bundle_path, timeout=timeout)
+                extracted = work / "payload"
+                bundle = extract_release_bundle(
+                    bundle_path,
+                    extracted,
+                    expected_version=manifest.version,
+                    expected_commit=manifest.commit,
+                    expected_size=manifest.artifact.size,
+                    expected_sha256=manifest.artifact.sha256,
+                )
+            except (OSError, UpdateError, ValueError) as exc:
+                raise InstallationError(f"release bundle verification failed: {exc}") from exc
+            wheel = extracted / bundle.wheel.name
+            requirements = extracted / bundle.requirements.name
+            staging = layout.create_staging_directory(release_id)
+            try:
+                _run(
+                    [
+                        "uv",
+                        "venv",
+                        "--no-config",
+                        "--python",
+                        python,
+                        "--relocatable",
+                        "--no-project",
+                        str(staging),
+                    ]
+                )
+                interpreter = release_python(staging)
+                _run(
+                    [
+                        "uv",
+                        "pip",
+                        "install",
+                        "--no-config",
+                        "--python",
+                        str(interpreter),
+                        "--require-hashes",
+                        "--only-binary",
+                        ":all:",
+                        "--link-mode",
+                        "copy",
+                        "--requirements",
+                        str(requirements),
+                    ]
+                )
+                _run(
+                    [
+                        "uv",
+                        "pip",
+                        "install",
+                        "--no-config",
+                        "--python",
+                        str(interpreter),
+                        "--no-cache",
+                        "--no-deps",
+                        "--link-mode",
+                        "copy",
+                        str(wheel),
+                    ]
+                )
+                build = _installed_build(interpreter)
+                if build["version"] != manifest.version or build["commit"] != manifest.commit:
+                    raise InstallationError(
+                        "installed release bundle identity does not match its manifest"
+                    )
+                metadata = ReleaseMetadata(
+                    release_id=release_id,
+                    version=manifest.version,
+                    commit=manifest.commit,
+                    source="stable-release",
+                    installed_at=datetime.now(UTC).isoformat(),
+                    python_version=str(build["python_version"]),
+                    wheel_sha256=bundle.wheel.sha256,
+                    lock_sha256=bundle.requirements.sha256,
+                )
+                with layout.lock():
+                    _reject_stable_downgrade_locked(
+                        layout, manifest.version, manifest.commit
+                    )
+                    installed_path = layout.commit_staged_release(staging, metadata)
+                    staging = None
+                    installed = layout.validate_release(release_id)
+                    _verify_installed_release(installed_path, installed.metadata)
+                    if activate:
+                        layout._activate_locked(release_id)
+                return metadata
+            finally:
+                if staging is not None:
+                    shutil.rmtree(staging, ignore_errors=True)
 
 
 def _parse_tag_object(content: str) -> dict[str, str]:
