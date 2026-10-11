@@ -88,6 +88,26 @@ def test_gateway_mode_runs_the_gateway(tmp_path: Path, monkeypatch: pytest.Monke
     assert called_with == socket_path
 
 
+def test_admin_restart_gateway_requests_application_only_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    socket_path = tmp_path / "gateway.sock"
+    called: list[Path] = []
+
+    async def restart(path: Path) -> None:
+        called.append(path)
+
+    monkeypatch.setattr("tfr.world_connector.request_gateway_restart", restart)
+
+    result = run(["admin", "restart-gateway", "--socket", str(socket_path)])
+
+    assert result == 0
+    assert called == [socket_path.with_name("gateway.sock.worlds")]
+    assert "Gateway application restart requested" in capsys.readouterr().out
+
+
 def test_ui_mode_attaches_to_the_gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config = write_configuration(tmp_path, with_world=True)
     (tmp_path / "worlds.jsonc").unlink()

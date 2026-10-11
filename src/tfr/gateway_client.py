@@ -69,7 +69,9 @@ class GatewayDisconnectedError(ConnectionError):
 ReconnectFactory = Callable[[UUID, int], Awaitable["GatewayClient"]]
 ConnectHandler = Callable[[], Awaitable[None]]
 DisconnectHandler = Callable[[Exception], None]
-UpdatePrepareHandler = Callable[[Mapping[str, Any]], Awaitable[dict[str, Any]]]
+UpdatePrepareHandler = Callable[
+    [Mapping[str, Any] | None, bool], Awaitable[dict[str, Any]]
+]
 UpdateCommitHandler = Callable[[str], Awaitable[None]]
 UpdateCheckHandler = Callable[[], Awaitable[dict[str, Any]]]
 
@@ -630,10 +632,13 @@ class GatewayClient:
         request_id = uuid4()
         await self._request({"type": "ping", "request_id": str(request_id)}, request_id)
 
-    async def update(self) -> dict[str, Any]:
+    async def update(self, *, force: bool = False) -> dict[str, Any]:
         request_id = uuid4()
+        message: dict[str, Any] = {"type": "update", "request_id": str(request_id)}
+        if force:
+            message["force"] = True
         result = await self._request(
-            {"type": "update", "request_id": str(request_id)}, request_id
+            message, request_id
         )
         if result is None:
             raise GatewayProtocolError("Gateway returned no update result")
@@ -776,10 +781,16 @@ class GatewayClient:
             if prepare:
                 if self.update_prepare_handler is None:
                     raise ValueError("this UI cannot stage managed updates")
+                force = message.get("force", False)
+                if not isinstance(force, bool):
+                    raise ValueError("Gateway update force marker is invalid")
                 manifest = message.get("manifest")
-                if not isinstance(manifest, dict):
+                if not force and not isinstance(manifest, dict):
                     raise ValueError("Gateway update manifest is invalid")
-                result = await self.update_prepare_handler(manifest)
+                result = await self.update_prepare_handler(
+                    manifest if isinstance(manifest, dict) else None,
+                    force,
+                )
             else:
                 if self.update_commit_handler is None:
                     raise ValueError("this UI cannot activate managed updates")
@@ -934,10 +945,10 @@ class GatewayUiRuntime:
             await self._reconcile_world_states()
             return self._format_reconnect_message(restored)
 
-    async def request_update(self) -> dict[str, Any]:
+    async def request_update(self, *, force: bool = False) -> dict[str, Any]:
         self._update_transaction_active = True
         try:
-            result = await self.client.update()
+            result = await self.client.update(force=force)
             if result.get("updated") is False or result.get("restart_required") is False:
                 self._update_transaction_active = False
             return result
@@ -953,20 +964,32 @@ class GatewayUiRuntime:
         )
         return {"available": available}
 
-    async def _prepare_update(self, manifest_value: Mapping[str, Any]) -> dict[str, Any]:
+    async def _prepare_update(
+        self,
+        manifest_value: Mapping[str, Any] | None,
+        force: bool = False,
+    ) -> dict[str, Any]:
         if self.update_config is None:
             raise ValueError("stable updates are unavailable")
         self._update_transaction_active = True
-        try:
-            manifest = ReleaseManifest.from_json(
-                json.dumps(dict(manifest_value), separators=(",", ":")).encode(),
-                expected_channel=self.update_config.channel,
+        if force and self.update_config.channel != "candidate":
+            raise ValueError("forced updates are available only on the candidate channel")
+        manifest: ReleaseManifest | None = None
+        if not force:
+            try:
+                if manifest_value is None:
+                    raise ValueError("manifest is missing")
+                manifest = ReleaseManifest.from_json(
+                    json.dumps(dict(manifest_value), separators=(",", ":")).encode(),
+                    expected_channel=self.update_config.channel,
+                )
+            except (TypeError, ValueError, UpdateError) as exc:
+                raise ValueError(f"Gateway update manifest is invalid: {exc}") from exc
+            self.notify(
+                f"Preparing UI update {manifest.version}. {manifest.release_url}"
             )
-        except (TypeError, ValueError, UpdateError) as exc:
-            raise ValueError(f"Gateway update manifest is invalid: {exc}") from exc
-        self.notify(
-            f"Preparing UI update {manifest.version}. {manifest.release_url}"
-        )
+        else:
+            self.notify("Force-preparing the locally configured candidate update.")
         try:
             self._staged_update = await stage_managed_update(
                 self.update_config, expected_manifest=manifest

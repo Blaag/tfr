@@ -185,9 +185,13 @@ async def test_coordinated_update_prepares_and_commits_every_connected_ui(
     ]
     events: list[tuple[int, str]] = []
     for index, client in enumerate(clients):
-        async def prepare(_manifest: object, client_index: int = index) -> dict[str, object]:
+        async def prepare(
+            _manifest: object,
+            _force: bool,
+            client_index: int = index,
+        ) -> dict[str, object]:
             events.append((client_index, "prepare"))
-            return {"version": manifest.version}
+            return {"version": manifest.version, "commit": manifest.commit}
 
         async def commit(_release_id: str, client_index: int = index) -> None:
             events.append((client_index, "commit"))
@@ -216,6 +220,97 @@ async def test_coordinated_update_prepares_and_commits_every_connected_ui(
         activate.assert_called_once_with(staged.release_id)
     finally:
         await asyncio.gather(*(client.stop() for client in clients))
+        await server.stop()
+        await history.stop()
+        await bus.close()
+
+
+async def test_candidate_force_update_stages_every_host_from_local_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    manifest = replace(
+        update_manifest(),
+        tag="v1.2.3-candidate.1",
+        channel="candidate",
+    )
+    runtime.build = type(current_build())(
+        manifest.version, manifest.commit, manifest.protocol_minimum
+    )
+    runtime.update_checker = SimpleNamespace(
+        config=UpdateConfig(channel="candidate"),
+        check=AsyncMock(return_value=UpdateResult(checked_at=None, manifest=manifest)),
+    )
+    staged = StagedManagedUpdate(
+        release_id=f"1.2.3+stable.{manifest.commit}",
+        version=manifest.version,
+        commit=manifest.commit,
+        release_url=manifest.release_url,
+        manifest=manifest,
+    )
+    stage = AsyncMock(return_value=staged)
+    monkeypatch.setattr("tfr.gateway.stage_managed_update", stage)
+    monkeypatch.setattr("tfr.gateway.activate_managed_update", Mock())
+    monkeypatch.setattr("tfr.gateway_client.managed_restart_command", lambda _args: ["tfr"])
+    socket_path = Path("/tmp") / f"tfr-force-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    prepared: list[tuple[object, bool]] = []
+
+    async def prepare(value: object, force: bool) -> dict[str, object]:
+        prepared.append((value, force))
+        return {"version": manifest.version, "commit": manifest.commit}
+
+    client.update_prepare_handler = prepare
+    client.update_commit_handler = AsyncMock()
+    client.start()
+    try:
+        result = await client.update(force=True)
+        await asyncio.wait_for(server.wait_update_restart(), timeout=1)
+
+        assert result["updated"] is True
+        assert prepared == [(None, True)]
+        stage.assert_awaited_once_with(
+            runtime.update_checker.config,
+            expected_manifest=None,
+        )
+    finally:
+        await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+
+
+async def test_gateway_rejects_force_update_on_stable_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    runtime.update_checker = SimpleNamespace(
+        config=UpdateConfig(),
+        check=AsyncMock(
+            return_value=UpdateResult(checked_at=None, manifest=update_manifest())
+        ),
+    )
+    stage = AsyncMock()
+    monkeypatch.setattr("tfr.gateway.stage_managed_update", stage)
+    socket_path = Path("/tmp") / f"tfr-force-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    client.start()
+    try:
+        with pytest.raises(ValueError, match="candidate channel"):
+            await client.update(force=True)
+        stage.assert_not_awaited()
+    finally:
+        await client.stop()
         await server.stop()
         await history.stop()
         await bus.close()
@@ -444,7 +539,9 @@ async def test_reconnected_outdated_ui_updates_without_restarting_current_hosts(
     outdated_client = await GatewayClient.connect(socket_path)
     current_prepare = AsyncMock()
     current_commit = AsyncMock()
-    outdated_prepare = AsyncMock(return_value={"version": manifest.version})
+    outdated_prepare = AsyncMock(
+        return_value={"version": manifest.version, "commit": manifest.commit}
+    )
     committed = asyncio.Event()
 
     async def commit_outdated(_release_id: str) -> None:
@@ -592,7 +689,9 @@ async def test_coordinated_update_runs_for_a_stable_auto_plugin_update(
     await server.start()
     client = await GatewayClient.connect(socket_path)
     client.update_check_handler = AsyncMock(return_value={"available": True})
-    client.update_prepare_handler = AsyncMock(return_value={"version": manifest.version})
+    client.update_prepare_handler = AsyncMock(
+        return_value={"version": manifest.version, "commit": manifest.commit}
+    )
     client.update_commit_handler = AsyncMock()
     client.start()
     try:

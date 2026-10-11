@@ -768,7 +768,8 @@ async def test_bare_update_reports_the_coordinated_release_link(tmp_path: Path) 
     checker = UpdateChecker(UpdateConfig(state_directory=tmp_path))
 
     class UpdateRuntime:
-        async def request_update(self) -> dict[str, str]:
+        async def request_update(self, *, force: bool = False) -> dict[str, str]:
+            assert force is False
             return {
                 "version": "1.2.3",
                 "release_url": "https://example.invalid/tfr/v1.2.3",
@@ -791,7 +792,8 @@ async def test_bare_update_reports_when_everything_is_current(tmp_path: Path) ->
     checker = UpdateChecker(UpdateConfig(state_directory=tmp_path))
 
     class UpdateRuntime:
-        async def request_update(self) -> dict[str, object]:
+        async def request_update(self, *, force: bool = False) -> dict[str, object]:
+            assert force is False
             return {"updated": False}
 
     tui = make_tui(update_checker=checker)
@@ -804,6 +806,40 @@ async def test_bare_update_reports_when_everything_is_current(tmp_path: Path) ->
     assert "Checking for stable updates on the Gateway and all connected UIs" in text
     assert "TFR and stable-auto plugins are up to date" in text
     assert "transaction started" not in text
+
+
+async def test_force_update_is_candidate_only_and_passes_force_to_gateway(
+    tmp_path: Path,
+) -> None:
+    calls: list[bool] = []
+
+    class UpdateRuntime:
+        async def request_update(self, *, force: bool = False) -> dict[str, object]:
+            calls.append(force)
+            return {"updated": False}
+
+    candidate = make_tui(
+        update_checker=UpdateChecker(
+            UpdateConfig(channel="candidate", state_directory=tmp_path / "candidate")
+        )
+    )
+    candidate.service_runtime = UpdateRuntime()  # type: ignore[assignment]
+
+    await candidate._handle_client_command("alpha", "/update force")
+
+    assert calls == [True]
+
+    stable = make_tui(
+        update_checker=UpdateChecker(UpdateConfig(state_directory=tmp_path / "stable"))
+    )
+    stable.service_runtime = UpdateRuntime()  # type: ignore[assignment]
+    stable.active_view.display.resize(width=100, height=20)
+
+    await stable._handle_client_command("alpha", "/update force")
+
+    assert calls == [True]
+    text = fragment_list_to_text(stable.active_view.display.formatted_text())
+    assert "available only on the candidate channel" in text
 
 
 async def test_restart_is_available_only_for_gateway_attached_ui() -> None:

@@ -30,8 +30,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "mode",
         nargs="?",
-        choices=("ui", "gateway", "doctor", "pair", "devices", "revoke-device"),
+        choices=("ui", "gateway", "doctor", "admin", "pair", "devices", "revoke-device"),
         help="run a client, the Gateway, setup diagnostics, or web-device administration",
+    )
+    parser.add_argument(
+        "admin_action",
+        nargs="?",
+        choices=("restart-gateway",),
+        help="admin mode operation",
     )
     parser.add_argument(
         "--config",
@@ -131,6 +137,30 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     if args.profile is not None and args.mode != "doctor":
         print("tfr: --profile requires doctor mode", file=sys.stderr)
+        return 2
+
+    if args.mode == "admin":
+        if args.admin_action != "restart-gateway":
+            print("tfr: admin mode requires restart-gateway", file=sys.stderr)
+            return 2
+        if args.check_config or args.replay is not None or network_arguments:
+            print("tfr: admin restart-gateway accepts only --socket", file=sys.stderr)
+            return 2
+        from tfr.gateway import default_gateway_socket
+        from tfr.world_connector import request_gateway_restart
+
+        gateway_path = args.socket or default_gateway_socket()
+        connector_path = gateway_path.with_name(f"{gateway_path.name}.worlds")
+        try:
+            asyncio.run(request_gateway_restart(connector_path))
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            print(f"tfr: Gateway application restart failed: {exc}", file=sys.stderr)
+            return 2
+        print("Gateway application restart requested; world connections remain active.")
+        return 0
+
+    if args.admin_action is not None:
+        print("tfr: restart-gateway requires admin mode", file=sys.stderr)
         return 2
 
     if args.rollback_plugin is not None:
