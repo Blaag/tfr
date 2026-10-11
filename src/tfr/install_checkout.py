@@ -474,7 +474,12 @@ def install_release_bundle(
         release_id = stable_release_id(identity.version, identity.commit)
         layout.prepare()
         with layout.lock():
-            _reject_stable_downgrade_locked(layout, identity.version, identity.commit)
+            _reject_stable_downgrade_locked(
+                layout,
+                identity.version,
+                identity.commit,
+                allow_same_version=manifest.channel == "candidate",
+            )
             if os.path.lexists(layout.releases / release_id):
                 existing = layout.validate_release(release_id)
                 _verify_installed_release(existing.path, existing.metadata)
@@ -570,7 +575,10 @@ def install_release_bundle(
                 )
                 with layout.lock():
                     _reject_stable_downgrade_locked(
-                        layout, manifest.version, manifest.commit
+                        layout,
+                        manifest.version,
+                        manifest.commit,
+                        allow_same_version=manifest.channel == "candidate",
                     )
                     installed_path = layout.commit_staged_release(staging, metadata)
                     staging = None
@@ -600,6 +608,8 @@ def _reject_stable_downgrade_locked(
     layout: InstallationLayout,
     version: str,
     commit: str,
+    *,
+    allow_same_version: bool = False,
 ) -> None:
     stable_releases = tuple(
         release
@@ -616,7 +626,11 @@ def _reject_stable_downgrade_locked(
             raise InstallationError("installed stable release has an invalid version")
         installed = tuple(int(part) for part in installed_match.groups())
         installed_versions.append(installed)
-        if candidate == installed and commit != release.metadata.commit:
+        if (
+            candidate == installed
+            and commit != release.metadata.commit
+            and not allow_same_version
+        ):
             raise InstallationError(
                 "latest stable release reuses an installed version with a different commit"
             )

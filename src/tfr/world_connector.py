@@ -26,6 +26,7 @@ CONNECTOR_GRACE_SECONDS = 30 * 60
 DEFAULT_PER_WORLD_BUFFER_BYTES = 1024 * 1024
 DEFAULT_GLOBAL_BUFFER_BYTES = 16 * 1024 * 1024
 MAXIMUM_MESSAGE_BYTES = 1024 * 1024
+GATEWAY_APPLICATION_RESTART_EXIT = 75
 
 
 class ProtocolError(ValueError):
@@ -548,6 +549,7 @@ class WorldConnectorServer:
         self._detached = asyncio.Event()
         self._detached.set()
         self._expired = asyncio.Event()
+        self._gateway_restart = asyncio.Event()
         self._expiry_task: asyncio.Task[None] | None = None
         self._acknowledgements: dict[str, int] = {}
         self._ack_changed = asyncio.Condition()
@@ -558,6 +560,10 @@ class WorldConnectorServer:
     @property
     def expired(self) -> bool:
         return self._expired.is_set()
+
+    @property
+    def gateway_attached(self) -> bool:
+        return self._gateway_writer is not None
 
     async def start(self) -> None:
         if self._server is not None:
@@ -646,6 +652,12 @@ class WorldConnectorServer:
     async def wait_expired(self) -> None:
         await self._expired.wait()
 
+    async def wait_gateway_restart(self) -> None:
+        await self._gateway_restart.wait()
+
+    def clear_gateway_restart(self) -> None:
+        self._gateway_restart.clear()
+
     async def wait_for_ack(self, world: str, sequence: int) -> None:
         async with self._ack_changed:
             await self._ack_changed.wait_for(
@@ -664,6 +676,21 @@ class WorldConnectorServer:
         try:
             message = await self._read(reader)
             if message.get("type") != "attach":
+                if message.get("type") == "restart_gateway":
+                    if message.get("protocol") != CONNECTOR_PROTOCOL_VERSION:
+                        await self._write(
+                            writer,
+                            {"type": "rejected", "reason": "protocol"},
+                        )
+                    elif self._gateway_writer is None:
+                        await self._write(
+                            writer,
+                            {"type": "rejected", "reason": "gateway_not_attached"},
+                        )
+                    else:
+                        self._gateway_restart.set()
+                        await self._write(writer, {"type": "gateway_restart_requested"})
+                    return
                 if message.get("type") == "replace":
                     if (
                         message.get("protocol") == CONNECTOR_PROTOCOL_VERSION
@@ -1090,6 +1117,31 @@ def connector_worlds(bundle: Any) -> dict[str, Any]:
     return worlds
 
 
+async def request_gateway_restart(path: Path) -> None:
+    reader, writer = await asyncio.open_unix_connection(path, limit=MAXIMUM_MESSAGE_BYTES)
+    try:
+        writer.write(
+            encode_message(
+                {
+                    "type": "restart_gateway",
+                    "protocol": CONNECTOR_PROTOCOL_VERSION,
+                }
+            )
+        )
+        await writer.drain()
+        content = await reader.readline()
+        if not content:
+            raise ConnectionError("world connector disconnected")
+        messages = FrameDecoder(maximum_bytes=MAXIMUM_MESSAGE_BYTES).feed(content)
+        if messages != ({"type": "gateway_restart_requested"},):
+            reason = messages[0].get("reason") if len(messages) == 1 else "invalid response"
+            raise ProtocolError(f"Gateway application restart rejected: {reason}")
+    finally:
+        writer.close()
+        with contextlib.suppress(ConnectionError, OSError):
+            await writer.wait_closed()
+
+
 async def connect_or_spawn_connector(
     path: Path,
     worlds: dict[str, Any],
@@ -1216,14 +1268,29 @@ async def supervise_gateway(
             expiry_wait = asyncio.create_task(
                 server.wait_expired(), name="tfr-gateway-connector-expiry"
             )
+            restart_wait = asyncio.create_task(
+                server.wait_gateway_restart(), name="tfr-gateway-application-restart"
+            )
             done, pending = await asyncio.wait(
-                {child_done, stop_wait, expiry_wait},
+                {child_done, stop_wait, expiry_wait, restart_wait},
                 return_when=asyncio.FIRST_COMPLETED,
             )
+            if restart_wait in done:
+                server.clear_gateway_restart()
+                if child_done not in done:
+                    if not hasattr(signal, "SIGUSR1"):
+                        process.kill()
+                    else:
+                        process.send_signal(signal.SIGUSR1)
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(asyncio.shield(child_done), timeout=5)
+                    if process.poll() is None:
+                        process.kill()
+                        await asyncio.shield(child_done)
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
-            if child_done not in done:
+            if child_done not in done and process.poll() is None:
                 process.terminate()
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=5)

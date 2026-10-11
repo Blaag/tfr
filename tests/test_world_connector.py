@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
-import signal
 import stat
 import subprocess
 import sys
@@ -26,6 +26,7 @@ from tfr.world_connector import (
     connect_or_spawn_connector,
     connector_build_id,
     encode_message,
+    request_gateway_restart,
 )
 
 
@@ -269,6 +270,25 @@ async def test_connector_server_rejects_second_gateway(tmp_path: Path) -> None:
         first_writer.close()
         await second_writer.wait_closed()
         await first_writer.wait_closed()
+    finally:
+        await server.stop()
+
+
+async def test_owner_control_request_notifies_supervisor_without_detaching_gateway(
+    tmp_path: Path,
+) -> None:
+    path = _socket_path(tmp_path)
+    server = WorldConnectorServer(path, build_id="a" * 64, grace_seconds=1)
+    await server.start()
+    try:
+        _reader, writer, _welcome = await _attach(path, build_id="a" * 64)
+
+        await request_gateway_restart(path)
+
+        await asyncio.wait_for(server.wait_gateway_restart(), timeout=1)
+        assert server.gateway_attached is True
+        writer.close()
+        await writer.wait_closed()
     finally:
         await server.stop()
 
@@ -976,7 +996,7 @@ async def test_tfr_gateway_supervisor_restarts_app_without_world_reconnect(
             raise AssertionError("gateway supervisor did not start its application")
         original_child = original_children[0]
 
-        os.kill(original_child, signal.SIGKILL)
+        await request_gateway_restart(connector_socket)
 
         for _attempt in range(300):
             replacement_children = children(process.pid)

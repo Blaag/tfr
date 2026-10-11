@@ -151,7 +151,7 @@ class ServiceRuntime(Protocol):
 
     async def stop(self) -> None: ...
 
-    async def request_update(self) -> dict[str, Any]: ...
+    async def request_update(self, *, force: bool = False) -> dict[str, Any]: ...
 
 
 @dataclass(slots=True)
@@ -3234,6 +3234,7 @@ class TfrTui:
             "  /effects - open the local Effects Lab; /demoeffects is an alias",
             "  /update - update TFR and stable-auto plugins on the Gateway and all connected UIs",
             "  /update status|check - inspect stable TFR and plugin releases",
+            "  /update force - candidate channel only; force every host to stage locally",
             "  /plugins - show configured, loaded, and failed plugins",
             "  /agent status|inspect|pause|resume|trigger|close - manage agents",
             "  /quit - exit TFR; //TEXT sends a literal leading slash",
@@ -3597,8 +3598,8 @@ class TfrTui:
         return "\n".join(lines)
 
     async def _handle_update_command(self, alias: str, parameters: list[str]) -> None:
-        if parameters not in ([], ["status"], ["check"]):
-            self.add_notice(alias, "Usage: /update [status|check]")
+        if parameters not in ([], ["status"], ["check"], ["force"]):
+            self.add_notice(alias, "Usage: /update [status|check|force]")
             return
         core_enabled = self.update_checker is not None and self.update_checker.config.enabled
         plugins_enabled = (
@@ -3607,7 +3608,14 @@ class TfrTui:
         if not core_enabled and not plugins_enabled:
             self.add_notice(alias, "Stable update checks are disabled")
             return
-        if not parameters:
+        force = parameters == ["force"]
+        if force and (
+            self.update_checker is None
+            or self.update_checker.config.channel != "candidate"
+        ):
+            self.add_notice(alias, "/update force is available only on the candidate channel")
+            return
+        if not parameters or force:
             if not core_enabled:
                 self.add_notice(alias, "Stable TFR updates are disabled")
                 return
@@ -3619,7 +3627,7 @@ class TfrTui:
                 if self.service_runtime is not None and hasattr(
                     self.service_runtime, "request_update"
                 ):
-                    result = await self.service_runtime.request_update()
+                    result = await self.service_runtime.request_update(force=force)
                 else:
                     core_result = await self.update_checker.check()
                     if core_result.error is not None:
@@ -3632,7 +3640,7 @@ class TfrTui:
                         if self.plugin_update_checker is not None
                         else False
                     )
-                    if not core_available and not plugin_available:
+                    if not force and not core_available and not plugin_available:
                         result = {"updated": False}
                     else:
                         staged = await stage_managed_update(self.update_checker.config)

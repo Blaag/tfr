@@ -570,6 +570,22 @@ def test_stable_install_rejects_downgrade_from_inactive_release(tmp_path: Path) 
         _reject_stable_downgrade_locked(layout, "1.9.9", "b" * 40)
 
 
+def test_candidate_install_allows_same_version_with_new_commit(tmp_path: Path) -> None:
+    layout = InstallationLayout.defaults(
+        root=tmp_path / "managed",
+        bin_directory=tmp_path / "bin",
+    )
+    stage_stable_release(layout, "2.0.0", "a" * 40)
+
+    with layout.lock():
+        _reject_stable_downgrade_locked(
+            layout,
+            "2.0.0",
+            "b" * 40,
+            allow_same_version=True,
+        )
+
+
 def test_stable_install_rejects_same_version_with_different_commit(tmp_path: Path) -> None:
     layout = InstallationLayout.defaults(
         root=tmp_path / "managed",

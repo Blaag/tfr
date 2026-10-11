@@ -853,6 +853,11 @@ Acceptance criteria:
 - [x] Improve coordinated-update diagnostics by resolving `uv` independently
   on each participating host, identifying Gateway-versus-UI staging failures,
   and keeping PWA/native UI update and spelling behavior distinct.
+- [x] Add candidate-only `/update force` recovery that makes every managed host
+  resolve and verify its own configured candidate manifest, requires all hosts
+  to stage the same version and commit, and remains unavailable on stable.
+- [x] Add `tfr admin restart-gateway` to gracefully replace only the Gateway
+  application under its supervisor while preserving connector/world sockets.
 - [x] Add direct release-bundle installation that verifies outer size and
   SHA-256, strict archive structure and member hashes, hash-locked binary
   dependencies, annotated-tag identity, and the installed wheel's embedded

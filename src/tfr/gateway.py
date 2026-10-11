@@ -64,7 +64,11 @@ from tfr.updates import (
     current_build,
     format_update_status,
 )
-from tfr.world_connector import connect_or_spawn_connector, connector_worlds
+from tfr.world_connector import (
+    GATEWAY_APPLICATION_RESTART_EXIT,
+    connect_or_spawn_connector,
+    connector_worlds,
+)
 
 MAX_COMMAND_CHARACTERS = 65_536
 MAX_ACTOR_ID_CHARACTERS = 256
@@ -870,6 +874,7 @@ class GatewayServer:
         self._staged_update: StagedManagedUpdate | None = None
         self._update_transaction_participants: tuple[_GatewayUpdateParticipant, ...] = ()
         self._update_gateway_restart = False
+        self._update_force = False
         self._update_task: asyncio.Task[None] | None = None
         self._update_restart = asyncio.Event()
 
@@ -1315,9 +1320,15 @@ class GatewayServer:
             elif message_type == "ping":
                 pass
             elif message_type == "update":
-                if set(message) != {"type", "protocol", "request_id"}:
+                if set(message) not in (
+                    {"type", "protocol", "request_id"},
+                    {"type", "protocol", "request_id", "force"},
+                ):
                     raise ValueError("update has invalid fields")
-                staged = await self._stage_gateway_update()
+                force = message.get("force", False)
+                if not isinstance(force, bool):
+                    raise ValueError("update force marker must be a boolean")
+                staged = await self._stage_gateway_update(force=force)
                 if staged is None:
                     result = {"updated": False}
                 else:
@@ -1386,15 +1397,18 @@ class GatewayServer:
                 self._coordinate_update(), name="tfr-gateway-coordinated-update"
             )
 
-    async def _stage_gateway_update(self) -> StagedManagedUpdate | None:
+    async def _stage_gateway_update(self, *, force: bool = False) -> StagedManagedUpdate | None:
         async with self._update_lock:
             if self._staged_update is not None or (
                 self._update_task is not None and not self._update_task.done()
             ):
                 raise ValueError("a coordinated update is already in progress")
             self._update_gateway_restart = False
+            self._update_force = force
             if self.runtime.update_checker is None:
                 raise ValueError("stable updates are unavailable")
+            if force and self.runtime.update_checker.config.channel != "candidate":
+                raise ValueError("forced updates are available only on the candidate channel")
             async with self._update_participants_lock:
                 self._accepting_update_participants = False
                 participants = tuple(self._update_participants.values())
@@ -1418,9 +1432,10 @@ class GatewayServer:
                 if manifest is None:
                     raise ValueError("stable TFR update check returned no release manifest")
                 gateway_build = getattr(self.runtime, "build", current_build())
-                gateway_core_update = update_result.available_for(gateway_build)
+                gateway_core_update = force or update_result.available_for(gateway_build)
                 participant_core_updates = {
-                    participant.connection_id: update_result.available_for(participant.build)
+                    participant.connection_id: force
+                    or update_result.available_for(participant.build)
                     for participant in participants
                     if participant.build is not None
                 }
@@ -1496,11 +1511,12 @@ class GatewayServer:
                         self._accepting_update_participants = True
                         self._update_transaction_participants = ()
                     self._update_gateway_restart = False
+                    self._update_force = False
                     return None
                 try:
                     staged = await stage_managed_update(
                         self.runtime.update_checker.config,
-                        expected_manifest=manifest,
+                        expected_manifest=None if force else manifest,
                     )
                 except InstallationError as exc:
                     raise ValueError(f"Gateway host update staging failed: {exc}") from exc
@@ -1538,17 +1554,31 @@ class GatewayServer:
                 f"Gateway update {staged.version} is being prepared. {staged.release_url}"
             )
         try:
-            await asyncio.gather(
+            prepare_results = await asyncio.gather(
                 *(
                     self._request_update_participant(
                         participant,
                         "update_prepare",
                         timeout=UPDATE_PREPARE_TIMEOUT_SECONDS,
-                        manifest=staged.manifest.as_dict(),
+                        manifest=(
+                            None if self._update_force else staged.manifest.as_dict()
+                        ),
+                        force=self._update_force,
                     )
                     for participant in participants
                 )
             )
+            mismatched = [
+                result
+                for result in prepare_results
+                if not isinstance(result, dict)
+                or result.get("version") != staged.version
+                or result.get("commit") != staged.commit
+            ]
+            if mismatched:
+                raise ValueError(
+                    "one or more UI hosts staged a different candidate release"
+                )
         except (ConnectionError, OSError, RuntimeError, TimeoutError, ValueError) as exc:
             await self._broadcast_update_message(
                 participants, "update_abort", error=f"Update aborted: {exc}"
@@ -1558,6 +1588,7 @@ class GatewayServer:
             print(f"tfr: coordinated update aborted: {exc}", file=sys.stderr, flush=True)
             self._staged_update = None
             self._update_gateway_restart = False
+            self._update_force = False
             async with self._update_participants_lock:
                 self._accepting_update_participants = True
                 self._update_transaction_participants = ()
@@ -1603,6 +1634,7 @@ class GatewayServer:
 
         self._staged_update = None
         self._update_gateway_restart = False
+        self._update_force = False
         async with self._update_participants_lock:
             self._accepting_update_participants = True
             self._update_transaction_participants = ()
@@ -1747,6 +1779,7 @@ async def run_gateway(
         update_notice=(web_server.notify_update if web_server is not None else None),
     )
     stop = asyncio.Event()
+    application_restart = asyncio.Event()
     loop = asyncio.get_running_loop()
     installed_signals: list[signal.Signals] = []
     restart_requested = False
@@ -1772,6 +1805,12 @@ async def run_gateway(
                 installed_signals.append(handled_signal)
             except (NotImplementedError, RuntimeError, ValueError):
                 pass
+        if hasattr(signal, "SIGUSR1"):
+            try:
+                loop.add_signal_handler(signal.SIGUSR1, application_restart.set)
+                installed_signals.append(signal.SIGUSR1)
+            except (NotImplementedError, RuntimeError, ValueError):
+                pass
         signal_stop = asyncio.create_task(stop.wait(), name="tfr-gateway-signal-stop")
         update_stop = asyncio.create_task(
             server.wait_update_restart(), name="tfr-gateway-update-stop"
@@ -1779,8 +1818,11 @@ async def run_gateway(
         connector_stop = asyncio.create_task(
             connector_bridge.wait_closed(), name="tfr-gateway-connector-stop"
         )
+        application_restart_stop = asyncio.create_task(
+            application_restart.wait(), name="tfr-gateway-application-restart-stop"
+        )
         done, pending = await asyncio.wait(
-            {signal_stop, update_stop, connector_stop},
+            {signal_stop, update_stop, connector_stop, application_restart_stop},
             return_when=asyncio.FIRST_COMPLETED,
         )
         for task in pending:
@@ -1795,7 +1837,11 @@ async def run_gateway(
         if web_server is not None:
             await web_server.stop()
         await server.stop()
-        await runtime.stop(preserve_worlds=restart_requested)
+        await runtime.stop(
+            preserve_worlds=restart_requested or application_restart.is_set()
+        )
+    if application_restart.is_set():
+        return GATEWAY_APPLICATION_RESTART_EXIT
     if restart_requested:
         restart = managed_restart_command(sys.argv[1:])
         if restart is None:

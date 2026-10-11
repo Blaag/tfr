@@ -294,6 +294,13 @@ Candidate discovery uses GitHub prereleases named
 The default remains `"stable"`. Stable publication promotes the exact wheel and
 source archive previously exercised as a candidate rather than rebuilding them.
 
+Candidate hosts can use `/update force` as a recovery path when ordinary update
+coordination is blocked by forwarded-manifest or same-version candidate quirks.
+Stable-channel processes reject this command. In forced mode, the Gateway and
+every connected managed native UI independently fetch and verify their locally
+configured candidate manifest, stage the exact same version and commit, and
+abort unless all hosts agree before activation.
+
 Bare `/update` and `./scripts/install-from-checkout --latest-stable` download,
 verify, and activate the exact published release bundle. Both retain the
 manifest-to-annotated-tag trust check, enforce bundle and member hashes, require
@@ -305,6 +312,17 @@ Before staging, bare `/update` checks the Gateway and every connected native UI.
 If their TFR builds and configured `stable-auto` plugins are current, it reports
 that no update is available and leaves every process and world connection
 running.
+
+To replace only the Gateway application while preserving the supervisor,
+connector, and world sockets, run on the Gateway host:
+
+```console
+tfr admin restart-gateway
+```
+
+Pass `--socket PATH` when the service uses a nondefault Gateway socket. Do not
+use `systemctl restart` when preserving world connections matters; restarting
+the systemd service stops the complete cgroup, including the connector.
 
 From the bootstrap checkout, a normal update is:
 
