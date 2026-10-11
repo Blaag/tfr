@@ -959,7 +959,8 @@ class GatewayUiRuntime:
         self._update_transaction_active = True
         try:
             manifest = ReleaseManifest.from_json(
-                json.dumps(dict(manifest_value), separators=(",", ":")).encode()
+                json.dumps(dict(manifest_value), separators=(",", ":")).encode(),
+                expected_channel=self.update_config.channel,
             )
         except (TypeError, ValueError, UpdateError) as exc:
             raise ValueError(f"Gateway update manifest is invalid: {exc}") from exc
