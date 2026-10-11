@@ -3,6 +3,9 @@ from __future__ import annotations
 import subprocess
 import sys
 import tomllib
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,11 +13,13 @@ import pytest
 
 import tfr.install_checkout
 from tfr.install_checkout import (
+    RepositoryIdentity,
     _installed_build,
     _python_request_matches,
     _reject_stable_downgrade_locked,
     _run,
     install_latest_stable,
+    install_release_bundle,
     repository_identity,
     run,
     stable_release_checkout,
@@ -25,6 +30,7 @@ from tfr.installations import (
     ReleaseMetadata,
     stable_release_id,
 )
+from tfr.release_bundle import BundleMember, VerifiedReleaseBundle
 from tfr.updates import ReleaseArtifact, ReleaseManifest, UpdateError
 
 
@@ -230,42 +236,52 @@ def test_stable_checkout_rejects_tagged_project_version_mismatch(tmp_path: Path)
         pass
 
 
-def test_latest_stable_installs_verified_checkout_with_stable_provenance(
+def test_latest_stable_installs_verified_release_bundle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository, released_commit, _main_commit = create_released_repository(tmp_path)
     manifest = release_manifest("1.2.3", released_commit)
+    manifest = replace(
+        manifest,
+        artifact=ReleaseArtifact(
+            url="https://github.com/Blaag/tfr/releases/download/v1.2.3/"
+            "tfr-1.2.3-release.zip",
+            size=123,
+            sha256="b" * 64,
+        ),
+    )
     installed: dict[str, object] = {}
 
-    def fake_install(
-        source_repository: Path,
+    def fake_install_bundle(
         _layout: InstallationLayout,
+        received_manifest: ReleaseManifest,
         *,
         python: str,
         activate: bool,
-        provenance: str,
+        source_url: str,
     ) -> ReleaseMetadata:
-        identity = repository_identity(source_repository)
         installed.update(
-            commit=identity.commit,
-            version=identity.version,
+            commit=received_manifest.commit,
+            version=received_manifest.version,
             python=python,
             activate=activate,
-            source=provenance,
+            source_url=source_url,
         )
         return ReleaseMetadata(
-            release_id=stable_release_id(identity.version, identity.commit),
-            version=identity.version,
-            commit=identity.commit,
-            source=provenance,
+            release_id=stable_release_id(received_manifest.version, received_manifest.commit),
+            version=received_manifest.version,
+            commit=received_manifest.commit,
+            source="stable-release",
             installed_at=datetime.now(UTC).isoformat(),
             python_version="3.12.13",
             wheel_sha256="b" * 64,
             lock_sha256="c" * 64,
         )
 
-    monkeypatch.setattr(tfr.install_checkout, "install_checkout", fake_install)
+    monkeypatch.setattr(
+        tfr.install_checkout, "install_release_bundle", fake_install_bundle
+    )
     layout = InstallationLayout.defaults(
         root=tmp_path / "managed",
         bin_directory=tmp_path / "bin",
@@ -285,7 +301,7 @@ def test_latest_stable_installs_verified_checkout_with_stable_provenance(
         "version": "1.2.3",
         "python": "3.12.13",
         "activate": False,
-        "source": "stable-release",
+        "source_url": str(repository),
     }
 
 
@@ -300,6 +316,221 @@ def test_latest_stable_fails_closed_when_manifest_fetch_fails(tmp_path: Path) ->
 
     with pytest.raises(InstallationError, match="cannot resolve.*offline"):
         install_latest_stable(layout, fetch_manifest=fail)
+
+
+def test_latest_stable_uses_tagged_source_for_legacy_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = release_manifest("1.2.3", "a" * 40)
+    expected = ReleaseMetadata(
+        release_id=stable_release_id("1.2.3", "a" * 40),
+        version="1.2.3",
+        commit="a" * 40,
+        source="stable-release",
+        installed_at=datetime.now(UTC).isoformat(),
+        python_version="3.12.13",
+        wheel_sha256="b" * 64,
+        lock_sha256="c" * 64,
+    )
+    calls: list[tuple[object, ...]] = []
+
+    @contextmanager
+    def checkout(
+        _manifest: ReleaseManifest, *, source_url: str
+    ) -> Iterator[RepositoryIdentity]:
+        yield RepositoryIdentity(tmp_path, "1.2.3", "a" * 40, "unused")
+
+    def install(*args: object, **kwargs: object) -> ReleaseMetadata:
+        calls.append((*args, kwargs))
+        return expected
+
+    monkeypatch.setattr(tfr.install_checkout, "stable_release_checkout", checkout)
+    monkeypatch.setattr(tfr.install_checkout, "install_checkout", install)
+    monkeypatch.setattr(
+        tfr.install_checkout,
+        "install_release_bundle",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("bundle installer must not run for legacy manifests")
+        ),
+    )
+    layout = InstallationLayout.defaults(root=tmp_path / "managed")
+
+    result = install_latest_stable(
+        layout,
+        fetch_manifest=lambda _url, *, timeout: manifest,
+    )
+
+    assert result == expected
+    assert len(calls) == 1
+
+
+def test_direct_bundle_install_stages_locked_dependencies_and_exact_wheel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commit = "a" * 40
+    manifest = release_manifest("1.2.3", commit)
+    manifest = replace(
+        manifest,
+        artifact=ReleaseArtifact(
+            url="https://github.com/Blaag/tfr/releases/download/v1.2.3/"
+            "tfr-1.2.3-release.zip",
+            size=100,
+            sha256="d" * 64,
+        ),
+    )
+    layout = InstallationLayout.defaults(
+        root=tmp_path / "managed",
+        bin_directory=tmp_path / "bin",
+    )
+    calls: list[list[str]] = []
+
+    @contextmanager
+    def verified_checkout(
+        _manifest: ReleaseManifest, *, source_url: str
+    ) -> Iterator[RepositoryIdentity]:
+        assert source_url == "https://github.com/Blaag/tfr.git"
+        yield RepositoryIdentity(tmp_path, "1.2.3", commit, "unused")
+
+    def download(_manifest: ReleaseManifest, destination: Path, *, timeout: float) -> None:
+        assert timeout == 10
+        destination.write_bytes(b"bundle")
+
+    verified = VerifiedReleaseBundle(
+        version="1.2.3",
+        commit=commit,
+        wheel=BundleMember("tfr-1.2.3-py3-none-any.whl", 5, "b" * 64),
+        requirements=BundleMember("requirements.txt", 6, "c" * 64),
+        bundle_size=100,
+        bundle_sha256="d" * 64,
+        wheel_content=b"wheel",
+        requirements_content=b"locked",
+    )
+
+    def extract(
+        _path: Path,
+        destination: Path,
+        **expected: object,
+    ) -> VerifiedReleaseBundle:
+        assert expected == {
+            "expected_version": "1.2.3",
+            "expected_commit": commit,
+            "expected_size": 100,
+            "expected_sha256": "d" * 64,
+        }
+        destination.mkdir()
+        (destination / verified.wheel.name).write_bytes(verified.wheel_content)
+        (destination / verified.requirements.name).write_bytes(
+            verified.requirements_content
+        )
+        return verified
+
+    def execute(arguments: list[str], **_values: object) -> subprocess.CompletedProcess[str]:
+        calls.append(arguments)
+        if arguments[:2] == ["uv", "venv"]:
+            interpreter = Path(arguments[-1]) / "bin" / "python"
+            interpreter.parent.mkdir(parents=True)
+            interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+            interpreter.chmod(0o755)
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    monkeypatch.setattr(tfr.install_checkout, "stable_release_checkout", verified_checkout)
+    monkeypatch.setattr(tfr.install_checkout, "download_release_artifact", download)
+    monkeypatch.setattr(tfr.install_checkout, "extract_release_bundle", extract)
+    monkeypatch.setattr(tfr.install_checkout, "_run", execute)
+    monkeypatch.setattr(
+        tfr.install_checkout,
+        "_installed_build",
+        lambda _python: {
+            "version": "1.2.3",
+            "commit": commit,
+            "python_version": "3.12.13",
+        },
+    )
+
+    metadata = install_release_bundle(
+        layout,
+        manifest,
+        python="3.12.13",
+        activate=False,
+    )
+
+    assert metadata.release_id == stable_release_id("1.2.3", commit)
+    assert metadata.wheel_sha256 == "b" * 64
+    assert metadata.lock_sha256 == "c" * 64
+    pip_calls = [call for call in calls if call[:3] == ["uv", "pip", "install"]]
+    assert len(pip_calls) == 2
+    assert "--require-hashes" in pip_calls[0]
+    assert "--only-binary" in pip_calls[0]
+    assert "--no-deps" in pip_calls[1]
+
+
+def test_direct_bundle_install_failure_removes_staging_without_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commit = "a" * 40
+    manifest = replace(
+        release_manifest("1.2.3", commit),
+        artifact=ReleaseArtifact(
+            url="https://github.com/Blaag/tfr/releases/download/v1.2.3/"
+            "tfr-1.2.3-release.zip",
+            size=100,
+            sha256="d" * 64,
+        ),
+    )
+    layout = InstallationLayout.defaults(
+        root=tmp_path / "managed",
+        bin_directory=tmp_path / "bin",
+    )
+
+    @contextmanager
+    def verified_checkout(
+        _manifest: ReleaseManifest, *, source_url: str
+    ) -> Iterator[RepositoryIdentity]:
+        yield RepositoryIdentity(tmp_path, "1.2.3", commit, "unused")
+
+    def download(_manifest: ReleaseManifest, destination: Path, *, timeout: float) -> None:
+        destination.write_bytes(b"bundle")
+
+    def extract(_path: Path, destination: Path, **_expected: object) -> VerifiedReleaseBundle:
+        destination.mkdir()
+        wheel = BundleMember("tfr-1.2.3-py3-none-any.whl", 5, "b" * 64)
+        requirements = BundleMember("requirements.txt", 6, "c" * 64)
+        (destination / wheel.name).write_bytes(b"wheel")
+        (destination / requirements.name).write_bytes(b"locked")
+        return VerifiedReleaseBundle(
+            version="1.2.3",
+            commit=commit,
+            wheel=wheel,
+            requirements=requirements,
+            bundle_size=100,
+            bundle_sha256="d" * 64,
+            wheel_content=b"wheel",
+            requirements_content=b"locked",
+        )
+
+    def execute(arguments: list[str], **_values: object) -> subprocess.CompletedProcess[str]:
+        if arguments[:2] == ["uv", "venv"]:
+            interpreter = Path(arguments[-1]) / "bin" / "python"
+            interpreter.parent.mkdir(parents=True)
+            interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+            return subprocess.CompletedProcess(arguments, 0, "", "")
+        raise subprocess.CalledProcessError(1, arguments)
+
+    monkeypatch.setattr(tfr.install_checkout, "stable_release_checkout", verified_checkout)
+    monkeypatch.setattr(tfr.install_checkout, "download_release_artifact", download)
+    monkeypatch.setattr(tfr.install_checkout, "extract_release_bundle", extract)
+    monkeypatch.setattr(tfr.install_checkout, "_run", execute)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        install_release_bundle(
+            layout,
+            manifest,
+            python="3.12.13",
+            activate=True,
+        )
+
+    assert not layout.current.exists()
+    assert not any(layout.releases.iterdir())
 
 
 def stage_stable_release(

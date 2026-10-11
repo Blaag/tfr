@@ -132,13 +132,13 @@ jobs:
           grep -Fxq 'tfr/web/text-runs.mjs' <<<"$assets"
       - name: Build update manifest
         run: |
-          wheels=(dist/*.whl)
-          test "${#wheels[@]}" -eq 1
+          bundles=(dist/*-release.zip)
+          test "${#bundles[@]}" -eq 1
           uv run python scripts/build_update_manifest.py \
             --repository "$GITHUB_REPOSITORY" \
             --tag "$GITHUB_REF_NAME" \
             --commit "$GITHUB_SHA" \
-            --artifact "${wheels[0]}" \
+            --artifact "${bundles[0]}" \
             --channel "${{ steps.release.outputs.channel }}"
       - name: Transfer release assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

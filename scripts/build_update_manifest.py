@@ -40,6 +40,9 @@ def build_manifest(
         raise ValueError("repository must be OWNER/REPOSITORY")
     if not artifact.is_file():
         raise ValueError(f"artifact does not exist: {artifact}")
+    expected_artifact = f"tfr-{version}-release.zip"
+    if artifact.name != expected_artifact:
+        raise ValueError(f"artifact must be named {expected_artifact}")
 
     artifact_content = artifact.read_bytes()
     release_base = f"https://github.com/{repository}/releases"

@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 
 from tfr.config import UpdateConfig
-from tfr.install_checkout import install_stable_manifest
+from tfr.install_checkout import install_release_bundle, install_stable_manifest
 from tfr.installations import InstallationError, managed_installation
 from tfr.updates import (
     ReleaseManifest,
@@ -50,7 +50,12 @@ def _stage_managed_update(
         raise InstallationError(
             f"{config.channel} release {manifest.version} requires a manual protocol upgrade"
         )
-    metadata = install_stable_manifest(
+    installer = (
+        install_release_bundle
+        if manifest.artifact.url.endswith(f"/tfr-{manifest.version}-release.zip")
+        else install_stable_manifest
+    )
+    metadata = installer(
         layout,
         manifest,
         python=current.metadata.python_version,

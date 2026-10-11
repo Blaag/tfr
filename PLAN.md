@@ -853,8 +853,10 @@ Acceptance criteria:
 - [x] Improve coordinated-update diagnostics by resolving `uv` independently
   on each participating host, identifying Gateway-versus-UI staging failures,
   and keeping PWA/native UI update and spelling behavior distinct.
-- [ ] Add direct stable-release artifact installation that verifies artifact
-  size and SHA-256 before activating, without rebuilding the verified tag.
+- [x] Add direct release-bundle installation that verifies outer size and
+  SHA-256, strict archive structure and member hashes, hash-locked binary
+  dependencies, annotated-tag identity, and the installed wheel's embedded
+  version/commit before atomic activation, without rebuilding the verified tag.
 - [x] Include stable Git-sourced plugin releases in `/update status|check` and
   the UI's periodic update schedule without applying code while the UI is
   running. Report successful `stable-auto` startup upgrades, preserve

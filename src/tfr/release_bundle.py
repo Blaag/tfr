@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import re
 import stat
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from email.parser import BytesParser
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,8 @@ class VerifiedReleaseBundle:
     requirements: BundleMember
     bundle_size: int
     bundle_sha256: str
+    wheel_content: bytes = field(repr=False)
+    requirements_content: bytes = field(repr=False)
 
 
 def _sha256(content: bytes) -> str:
@@ -291,4 +294,46 @@ def verify_release_bundle(
         requirements=requirements,
         bundle_size=len(bundle_content),
         bundle_sha256=bundle_digest,
+        wheel_content=wheel_content,
+        requirements_content=requirements_content,
     )
+
+
+def extract_release_bundle(
+    path: Path,
+    destination: Path,
+    *,
+    expected_version: str | None = None,
+    expected_commit: str | None = None,
+    expected_size: int | None = None,
+    expected_sha256: str | None = None,
+) -> VerifiedReleaseBundle:
+    if destination.exists():
+        raise ReleaseBundleError("release bundle destination already exists")
+    bundle = verify_release_bundle(
+        path,
+        expected_version=expected_version,
+        expected_commit=expected_commit,
+        expected_size=expected_size,
+        expected_sha256=expected_sha256,
+    )
+    try:
+        destination.mkdir(mode=0o700)
+        destination.chmod(0o700)
+        for member, content in (
+            (bundle.wheel, bundle.wheel_content),
+            (bundle.requirements, bundle.requirements_content),
+        ):
+            target = destination / member.name
+            with target.open("xb") as output:
+                output.write(content)
+                output.flush()
+                os.fsync(output.fileno())
+            target.chmod(0o600)
+    except BaseException:
+        for target in destination.iterdir() if destination.exists() else ():
+            target.unlink()
+        if destination.exists():
+            destination.rmdir()
+        raise
+    return bundle

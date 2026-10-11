@@ -14,6 +14,7 @@ import pytest
 from tfr.release_bundle import (
     ReleaseBundleError,
     build_release_bundle,
+    extract_release_bundle,
     verify_release_bundle,
 )
 
@@ -319,3 +320,48 @@ def test_bundle_verifier_script_reports_verified_identity(tmp_path: Path) -> Non
     assert report["version"] == VERSION
     assert report["commit"] == COMMIT
     assert report["sha256"] == hashlib.sha256(bundle.read_bytes()).hexdigest()
+
+
+def test_extract_release_bundle_writes_only_verified_payloads(tmp_path: Path) -> None:
+    bundle = build(tmp_path)
+    destination = tmp_path / "extracted"
+
+    verified = extract_release_bundle(
+        bundle,
+        destination,
+        expected_version=VERSION,
+        expected_commit=COMMIT,
+        expected_size=bundle.stat().st_size,
+        expected_sha256=hashlib.sha256(bundle.read_bytes()).hexdigest(),
+    )
+
+    assert sorted(path.name for path in destination.iterdir()) == [
+        "requirements.txt",
+        verified.wheel.name,
+    ]
+    assert (destination / verified.wheel.name).read_bytes() == wheel_bytes()
+    assert destination.stat().st_mode & 0o777 == 0o700
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in destination.iterdir())
+
+
+def test_extract_release_bundle_leaves_no_destination_on_failure(tmp_path: Path) -> None:
+    bundle = build(tmp_path)
+    destination = tmp_path / "extracted"
+
+    with pytest.raises(ReleaseBundleError, match="digest does not match"):
+        extract_release_bundle(
+            bundle,
+            destination,
+            expected_sha256="0" * 64,
+        )
+
+    assert not destination.exists()
+
+
+def test_extract_release_bundle_rejects_existing_destination(tmp_path: Path) -> None:
+    bundle = build(tmp_path)
+    destination = tmp_path / "extracted"
+    destination.mkdir()
+
+    with pytest.raises(ReleaseBundleError, match="already exists"):
+        extract_release_bundle(bundle, destination)
