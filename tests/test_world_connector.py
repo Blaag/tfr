@@ -635,6 +635,11 @@ async def test_gateway_session_objects_can_be_replaced_without_world_reconnect(
             await gateway_session()
         )
         try:
+            for _attempt in range(100):
+                if second_session.state is SessionState.CONNECTED:
+                    break
+                await asyncio.sleep(0.01)
+            assert second_session.state is SessionState.CONNECTED
             await second_bus.submit(
                 CommandRequest(
                     session_id=second_session.session_id,
@@ -801,6 +806,66 @@ async def test_idle_command_continues_while_gateway_is_detached(tmp_path: Path) 
         await server.wait_detached()
 
         assert await asyncio.wait_for(received.get(), timeout=1) == b"IDLE\r\n"
+    finally:
+        await client.close()
+        await server.stop()
+        world_server.close()
+        await asyncio.wait_for(world_server.wait_closed(), timeout=1)
+
+
+async def test_connector_reconnect_replays_configured_login_and_startup_commands(
+    tmp_path: Path,
+) -> None:
+    received: asyncio.Queue[bytes] = asyncio.Queue()
+    connections = 0
+
+    async def accept_world(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        nonlocal connections
+        connections += 1
+        try:
+            await received.put(await reader.readline())
+            await received.put(await reader.readline())
+            await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    world_server = await asyncio.start_server(accept_world, "127.0.0.1", 0)
+    port = world_server.sockets[0].getsockname()[1]
+    path = _socket_path(tmp_path)
+    server = WorldConnectorServer(path, build_id="a" * 64, grace_seconds=1)
+    await server.start()
+    worlds = {
+        "alpha": {
+            "host": "127.0.0.1",
+            "port": port,
+            "encoding": "utf-8",
+            "reconnect": False,
+            "tls": {"enabled": False},
+            "startup_commands": ["OUTPUTPREFIX ##"],
+            "login": {"character": "Test User", "password": "secret"},
+            "idle": None,
+        }
+    }
+    client = WorldConnectorClient(path, build_id="a" * 64, worlds=worlds)
+    try:
+        await client.connect()
+        await client.start_world("alpha")
+        assert await asyncio.wait_for(received.get(), timeout=1) == (
+            b'connect "Test User" secret\r\n'
+        )
+        assert await asyncio.wait_for(received.get(), timeout=1) == b"OUTPUTPREFIX ##\r\n"
+
+        await client.stop_world("alpha")
+        await client.start_world("alpha")
+
+        assert await asyncio.wait_for(received.get(), timeout=1) == (
+            b'connect "Test User" secret\r\n'
+        )
+        assert await asyncio.wait_for(received.get(), timeout=1) == b"OUTPUTPREFIX ##\r\n"
+        assert connections == 2
     finally:
         await client.close()
         await server.stop()
