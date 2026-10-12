@@ -898,6 +898,7 @@ async def paired_client(
     runtime: FakeRuntime,
     *,
     snapshot_events: int = 20,
+    speaking_streaks_enabled: bool = True,
 ) -> tuple[WebGatewayServer, TestClient, str]:
     gateway = WebGatewayServer(
         runtime,  # type: ignore[arg-type]
@@ -906,6 +907,7 @@ async def paired_client(
         port=7348,
         state_directory=tmp_path / "web",
         snapshot_events=snapshot_events,
+        speaking_streaks_enabled=speaking_streaks_enabled,
     )
     client = TestClient(TestServer(gateway.application()))
     await client.start_server()
@@ -1267,6 +1269,7 @@ async def test_websocket_snapshot_commands_and_idempotency(tmp_path: Path) -> No
         snapshot = await socket.receive_json()
         ready = await socket.receive_json()
         assert hello["type"] == "hello"
+        assert hello["speaking_streaks_enabled"] is True
         assert hello["build"] == {
             "version": "1.2.3",
             "commit": "a" * 40,
@@ -1344,6 +1347,32 @@ async def test_websocket_snapshot_commands_and_idempotency(tmp_path: Path) -> No
         assert "not authorized" in unauthorized["error"]
         await socket.close()
     finally:
+        await client.close()
+        await history.stop()
+        await bus.close()
+
+
+async def test_websocket_disables_speaking_streaks_from_gateway_config(
+    tmp_path: Path,
+) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 5})
+    history.start()
+    runtime = FakeRuntime(history)
+    gateway, client, token = await paired_client(
+        tmp_path,
+        runtime,
+        speaking_streaks_enabled=False,
+    )
+    socket = await client.ws_connect(
+        "/ws",
+        headers={**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    try:
+        hello = await socket.receive_json()
+        assert hello["speaking_streaks_enabled"] is False
+    finally:
+        await socket.close()
         await client.close()
         await history.stop()
         await bus.close()

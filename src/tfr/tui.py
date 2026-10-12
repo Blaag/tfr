@@ -134,6 +134,7 @@ _CORE_CLIENT_COMMANDS = frozenset(
         "restart",
         "sh",
         "spellcheck",
+        "streaks",
         "testspeaker",
         "teststreak",
         "update",
@@ -821,6 +822,7 @@ class TfrTui:
         replay_mode: bool = False,
         spellcheck: SpellcheckConfig | None = None,
         typing_glow: TypingGlowConfig | None = None,
+        speaking_streaks_enabled: bool = True,
         input: Input | None = None,
         output: Output | None = None,
     ) -> None:
@@ -865,6 +867,7 @@ class TfrTui:
         self.low_bandwidth = low_bandwidth
         self.theme: ResolvedTheme = resolve_theme(theme, output_color=output_color)
         self.typing_glow = typing_glow or TypingGlowConfig()
+        self.speaking_streaks_enabled = speaking_streaks_enabled
         resolved_output_color = self.theme.output_color if theme is not None else output_color
         self._animation_epoch = time.monotonic()
         self._animation_paused_at = self._animation_epoch if low_bandwidth else None
@@ -2520,7 +2523,7 @@ class TfrTui:
                 )
                 elapsed_seconds = self._animation_elapsed_seconds()
                 combo = None
-                if self._accept_combo_events:
+                if self._accept_combo_events and self.speaking_streaks_enabled:
                     combo = self._combo_tracker.observe(
                         effect_event,
                         display_text,
@@ -3187,6 +3190,8 @@ class TfrTui:
             self._handle_animations_command(alias, parameters)
         elif command == "spellcheck":
             self._handle_spellcheck_command(alias, parameters)
+        elif command == "streaks":
+            self._handle_speaking_streaks_command(alias, parameters)
         elif command in {"effects", "demoeffects"}:
             await self._handle_effects_command(parameters)
         elif command == "teststreak":
@@ -3231,6 +3236,7 @@ class TfrTui:
             "  /mouse auto|terminal|tfr|status - choose who handles mouse input",
             "  /animations [on|off|status] - enable continuous UI effects",
             "  /spellcheck on|off|status|undo - correct explicit speech and poses locally",
+            "  /streaks on|off|status - control speaking streak effects",
             "  /effects - open the local Effects Lab; /demoeffects is an alias",
             "  /update - update TFR and stable-auto plugins on the Gateway and all connected UIs",
             "  /update status|check - inspect stable TFR and plugin releases",
@@ -3879,6 +3885,21 @@ class TfrTui:
         for view in self.views.values():
             view.display.clear_combo_effects()
 
+    def _handle_speaking_streaks_command(
+        self, alias: str, parameters: list[str]
+    ) -> None:
+        operation = parameters[0].casefold() if len(parameters) == 1 else ""
+        if operation in {"on", "off"}:
+            self.speaking_streaks_enabled = operation == "on"
+            self._combo_tracker = ComboTracker()
+            self._clear_combo_visuals()
+            self._sync_animation_task(restart=True)
+        elif operation not in {"", "status"} or len(parameters) > 1:
+            self.add_notice(alias, "Usage: /streaks on|off|status")
+            return
+        state = "on" if self.speaking_streaks_enabled else "off"
+        self.add_notice(alias, f"Speaking streak effects are {state}")
+
     def _handle_spellcheck_command(self, alias: str, parameters: list[str]) -> None:
         operation = parameters[0].casefold() if len(parameters) == 1 else ""
         if operation == "on":
@@ -4225,6 +4246,7 @@ async def run_client(bundle: ConfigurationBundle) -> int:
             typing_glow=getattr(bundle.main.ui, "typing_glow", TypingGlowConfig()),
             animations_enabled=bundle.main.ui.animations_enabled,
             low_bandwidth=bundle.main.ui.low_bandwidth,
+            speaking_streaks_enabled=bundle.main.ui.speaking_streaks.enabled,
             output_color=bundle.main.ui.output_color,
             theme=bundle.main.ui.theme,
             screen_clear_mode=bundle.main.ui.screen_clear.mode,

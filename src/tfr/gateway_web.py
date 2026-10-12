@@ -327,6 +327,7 @@ class WebGatewayServer:
         port: int,
         state_directory: Any,
         snapshot_events: int,
+        speaking_streaks_enabled: bool = True,
     ) -> None:
         if host not in {"127.0.0.1", "::1"}:
             raise ValueError("web gateway must listen only on loopback")
@@ -342,6 +343,7 @@ class WebGatewayServer:
         self.host = host
         self.port = port
         self.snapshot_events = snapshot_events
+        self.speaking_streaks_enabled = speaking_streaks_enabled
         self.devices = DeviceStore(state_directory, self.origin)
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -943,6 +945,7 @@ class WebGatewayServer:
                     if descriptor["world"] in self._authorized_worlds(device)
                 ],
                 "effect_demos": self._effect_demos(device),
+                "speaking_streaks_enabled": self.speaking_streaks_enabled,
                 "snapshot_count": len(visible),
             },
         ):

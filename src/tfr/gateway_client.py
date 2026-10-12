@@ -1277,6 +1277,7 @@ async def run_gateway_ui(
         typing_glow=getattr(configuration.main.ui, "typing_glow", None),
         animations_enabled=configuration.main.ui.animations_enabled,
         low_bandwidth=configuration.main.ui.low_bandwidth,
+        speaking_streaks_enabled=configuration.main.ui.speaking_streaks.enabled,
         output_color=configuration.main.ui.output_color,
         theme=configuration.main.ui.theme,
         screen_clear_mode=configuration.main.ui.screen_clear.mode,

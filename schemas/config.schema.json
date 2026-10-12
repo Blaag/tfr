@@ -295,6 +295,18 @@
       "title": "ScreenClearConfig",
       "type": "object"
     },
+    "SpeakingStreaksConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "SpeakingStreaksConfig",
+      "type": "object"
+    },
     "SpellcheckConfig": {
       "additionalProperties": false,
       "properties": {
@@ -627,6 +639,9 @@
           "default": false,
           "title": "Show Nospoof Prefix",
           "type": "boolean"
+        },
+        "speaking_streaks": {
+          "$ref": "#/$defs/SpeakingStreaksConfig"
         },
         "spellcheck": {
           "$ref": "#/$defs/SpellcheckConfig"
