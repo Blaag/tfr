@@ -303,6 +303,7 @@ class _WorldConnection:
         self.tls = tls
         self.publish = publish
         self.generation = 0
+        self.state = "stopped"
         self._runner: asyncio.Task[None] | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._write_lock = asyncio.Lock()
@@ -313,6 +314,7 @@ class _WorldConnection:
 
     async def start(self) -> None:
         if self._runner is not None and not self._runner.done():
+            await self._state(self.state, resumed=True)
             return
         self._stop.clear()
         self._quit_requested = False
@@ -382,6 +384,7 @@ class _WorldConnection:
         decoder = codecs.getincrementaldecoder(self.encoding)(errors="replace")
         framer = _TextFramer()
         codec = TelnetCodec(encoding=self.encoding)
+        tasks: set[asyncio.Task[None]] = set()
         try:
             await self._send_startup()
             tasks = {
@@ -410,6 +413,11 @@ class _WorldConnection:
                 if exception is not None:
                     raise exception
         finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
             self._writer = None
             writer.close()
             with contextlib.suppress(ConnectionError, OSError):
@@ -513,6 +521,7 @@ class _WorldConnection:
         )
 
     async def _state(self, state: str, **values: Any) -> None:
+        self.state = state
         await self.publish(
             self.world,
             {"kind": "state", "generation": self.generation, "state": state, **values},
