@@ -1,11 +1,20 @@
 # TFR
 
 TFR is a Python terminal client for concurrent MUD and MUSH world sessions.
-It provides typed JSONC configuration, canonical event models, secret
-redaction, append-only JSONL event logging, incremental Telnet parsing,
-concurrent TCP or verified TLS world sessions, ANSI-safe RhostMUSH and TinyMUX
-NOSPOOF provenance parsing, a persistent multi-client gateway, and a full-screen
-multi-world terminal UI.
+Why use it? It has a bunch of features:
+
+* Support for TCP or verified TLS world sessions
+* Automatic spoof detection
+* A persistent multi-client gateway
+* Full-screen multi-world terminal UI - run multiples against the same gateway!
+* Loads of animations for screen clearing and customized speaker effects
+* Cut/paste support that preserves formatting automatically
+* Pasting images by automatically converting to ASCII
+* Update notifications and coordinated updates across the gateway and all connected UI clients
+* A progressive web app (PWA)
+* Activity tracking in non-foregrounded worlds
+* Typed JSONC configuration
+* JSONL event logging with secret redaction
 
 The complete design and implementation sequence are in [PLAN.md](PLAN.md).
 
@@ -30,8 +39,8 @@ plugin catalog, generates profile launchers, and provides `tfr-doctor` checks.
 Rerun it later to change profiles; it backs up files before approved replacement
 and does not start TFR or install a background service.
 
-If `uv` is missing, the assistant offers to run Astral's official installer,
-wait while you install it yourself and re-check, or exit cleanly. Remote setup
+If `uv` is missing, the assistant offers to run Astral's official installer or
+waits while you install it yourself and re-checks, or exit cleanly. Remote setup
 explains which token and public CA files a UI needs and which Gateway secrets
 must never be copied. Public plugin options are documented at
 <https://github.com/Blaag/tfr-plugins-public>.
@@ -899,6 +908,11 @@ than five minutes of inactivity resets the streak. Bare-world pose attribution
 uses the same presentation-only first-word fallback as speaker effects. Combo
 state continues counting while `/animations off`, `/lowbw`, or reduced motion is
 active, but those modes suppress every combo visual and never replay it later.
+Speaking streaks are enabled by default. Set `ui.speaking_streaks.enabled` to
+`false` to disable tracking and visuals in native UIs and the Gateway-served
+PWA, or use `/streaks on|off|status` to control the current native UI process.
+Disabling or re-enabling clears existing streak state so a later streak always
+starts fresh.
 Use `/effects` (or `/demoeffects`) to open the local Effects Lab. `/teststreak all`
 plays the complete combo sequence, `/teststreak 3` through `8` previews one tier,
 and `/testspeaker NAME` renders the actual configured speaker decorator and

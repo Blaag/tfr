@@ -1797,6 +1797,7 @@ async def run_gateway(
             port=bundle.main.web_gateway.listen_port,
             state_directory=bundle.main.web_gateway.state_directory,
             snapshot_events=bundle.main.web_gateway.snapshot_events,
+            speaking_streaks_enabled=bundle.main.ui.speaking_streaks.enabled,
         )
     server = GatewayServer(
         runtime,

@@ -180,6 +180,10 @@ class TypingGlowConfig(StrictModel):
     bold: bool = True
 
 
+class SpeakingStreaksConfig(StrictModel):
+    enabled: bool = True
+
+
 class UiConfig(StrictModel):
     scrollback_lines: PositiveInt = 20_000
     recent_input_lines: int = Field(default=3, ge=0, le=20)
@@ -188,6 +192,9 @@ class UiConfig(StrictModel):
     theme: ThemeConfig = Field(default_factory=ThemeConfig)
     spellcheck: SpellcheckConfig = Field(default_factory=SpellcheckConfig)
     typing_glow: TypingGlowConfig = Field(default_factory=TypingGlowConfig)
+    speaking_streaks: SpeakingStreaksConfig = Field(
+        default_factory=SpeakingStreaksConfig
+    )
     show_nospoof_prefix: bool = False
     animations_enabled: bool = True
     low_bandwidth: bool = False

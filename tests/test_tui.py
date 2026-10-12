@@ -91,6 +91,7 @@ def make_tui(
     spellcheck: SpellcheckConfig | None = None,
     typing_glow: TypingGlowConfig | None = None,
     character: str | None = None,
+    speaking_streaks_enabled: bool = True,
 ) -> TfrTui:
     event_bus = EventBus()
     command_bus = CommandBus()
@@ -134,6 +135,7 @@ def make_tui(
         mouse_mode=mouse_mode,
         spellcheck=spellcheck,
         typing_glow=typing_glow,
+        speaking_streaks_enabled=speaking_streaks_enabled,
         input=input or DummyInput(),
         output=DummyOutput(),
     )
@@ -1829,6 +1831,7 @@ async def test_standalone_client_loads_all_plugin_capabilities(
         spellcheck=SpellcheckConfig(),
         animations_enabled=True,
         low_bandwidth=False,
+        speaking_streaks=SimpleNamespace(enabled=True),
         output_color="#d7d7d7",
         theme=ThemeConfig(),
         screen_clear=screen_clear,
@@ -2333,6 +2336,37 @@ def test_godlike_starts_bounded_fireworks_once_and_higher_counts_only_update_not
     assert len(tui._firework_particles) == particle_count
     assert tui._combo_notices["alpha"].text == "> GODLIKE x2 <"
     assert not tui.active_view.display._entry_decorations[-1]
+
+
+async def test_speaking_streak_command_disables_tracking_and_restarts_fresh() -> None:
+    tui = make_tui()
+    for sequence in range(1, 3):
+        tui.handle_event(combo_say(tui, sequence))
+
+    await tui.submit_text("alpha", "/streaks off")
+    tui.handle_event(combo_say(tui, 3))
+
+    assert tui.speaking_streaks_enabled is False
+    assert not tui._combo_notices
+    assert not tui._firework_particles
+
+    await tui.submit_text("alpha", "/streaks on")
+    for sequence in range(4, 6):
+        tui.handle_event(combo_say(tui, sequence))
+    assert not tui._combo_notices
+    tui.handle_event(combo_say(tui, 6))
+    assert tui._combo_notices["alpha"].text == "> Speaking Spree! <"
+
+
+async def test_speaking_streak_status_and_usage() -> None:
+    tui = make_tui(speaking_streaks_enabled=False)
+
+    await tui.submit_text("alpha", "/streaks status")
+    await tui.submit_text("alpha", "/streaks invalid")
+
+    rendered = fragment_list_to_text(tui.active_view.output_text())
+    assert "Speaking streak effects are off" in rendered
+    assert "Usage: /streaks on|off|status" in rendered
 
 
 def test_firework_density_scales_with_viewport_area() -> None:

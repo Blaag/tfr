@@ -119,6 +119,7 @@ const state = {
   reloadingForUpdate: false,
   shownHistoryNotices: new Map(),
   comboStreaks: new Map(),
+  speakingStreaksEnabled: true,
   effectDemos: [],
 };
 const pairingSubmission = createPairingSubmission(
@@ -1048,9 +1049,11 @@ function addEvent(message) {
     if (event.world === state.selectedWorld && !state.historyReset) showHistoryNotice("");
   }
   if (connection.ready) recordLiveHistoryEvent(world, event);
-  if (connection.ready) {
+  if (connection.ready && state.speakingStreaksEnabled) {
     event.combo = validatedComboCue(event.combo, event.text)
       || observeCombo(state.comboStreaks, event, Date.now(), world);
+  } else {
+    event.combo = null;
   }
   events.push(event);
   eventIds.add(event.id);
@@ -1133,6 +1136,11 @@ function handleMessage(message) {
         : "Unknown";
     state.worlds = Array.isArray(message.worlds) ? message.worlds : [];
     state.effectDemos = validatedEffectDemos(message.effect_demos);
+    state.speakingStreaksEnabled = message.speaking_streaks_enabled !== false;
+    if (!state.speakingStreaksEnabled) {
+      state.comboStreaks.clear();
+      cancelComboVisuals();
+    }
     for (const world of state.worlds) discardEventsBeforeSnapshotGap(world);
     if (!state.worlds.some((world) => world.world === state.selectedWorld)) {
       state.selectedWorld = state.worlds[0]?.world || null;

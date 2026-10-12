@@ -8,6 +8,7 @@ import pytest
 from tfr.config import (
     ConfigurationError,
     TypingGlowConfig,
+    UiConfig,
     WorldConfig,
     WorldsConfig,
     credential_permission_warning,
@@ -25,6 +26,11 @@ def test_typing_glow_duration_is_positive_and_bounded() -> None:
         TypingGlowConfig(duration_seconds=61)
     with pytest.raises(ValueError):
         TypingGlowConfig(highlight_color="white")
+
+
+def test_speaking_streaks_are_enabled_by_default_and_can_be_disabled() -> None:
+    assert UiConfig().speaking_streaks.enabled is True
+    assert UiConfig(speaking_streaks={"enabled": False}).speaking_streaks.enabled is False
 
 MAIN = """
 {
@@ -117,6 +123,7 @@ def test_loads_jsonc_and_resolves_references(tmp_path: Path) -> None:
     assert bundle.main.ui.typing_glow.duration_seconds == 0.5
     assert bundle.main.ui.typing_glow.highlight_color == "#ffffff"
     assert bundle.main.ui.typing_glow.bold is True
+    assert bundle.main.ui.speaking_streaks.enabled is True
     assert bundle.main.ui.screen_clear.mode == "cycle"
     assert bundle.main.ui.screen_clear.effect is None
     assert bundle.main.ui.boss.mode == "cycle"
