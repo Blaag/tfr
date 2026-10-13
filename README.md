@@ -360,6 +360,11 @@ the workflow also rejects commits that are not on `main`. See
 [MAINTAINER.md](MAINTAINER.md) for script responsibilities, release verification,
 and failure recovery.
 
+If release work or an exact-tag confirmation is interrupted, rerun the same
+`./scripts/release-end-to-end VERSION` command. It detects the protected PR, tag,
+workflow, approval, candidate, and stable-release state automatically; no separate
+resume command or direct `publish-release` invocation is required.
+
 ## Remote Gateway
 
 The Gateway can keep its private Unix socket while also listening for remote UIs

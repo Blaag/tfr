@@ -152,7 +152,17 @@ if args[:2] == ["auth", "status"]:
 if args[:2] == ["repo", "view"]:
     output("Blaag/tfr")
 elif args[:2] == ["pr", "list"]:
-    if os.environ.get("TFR_FAKE_RESUME") == "1" and value("--head").startswith("release/"):
+    if (
+        value("--head").startswith("release/")
+        and (
+            os.environ.get("TFR_FAKE_RESUME") == "1"
+            or (
+                "--state" in args
+                and value("--state") == "merged"
+                and (state / "merged-2").exists()
+            )
+        )
+    ):
         output([{"number": 2}])
     else:
         output([])
@@ -260,6 +270,7 @@ elif args[:2] == ["run", "list"]:
     workflow = value("--workflow")
     commit = value("--commit") if "--commit" in args else ""
     if workflow == "Release":
+        (state / "approved").unlink(missing_ok=True)
         commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
         output([{"databaseId": 30, "headSha": commit, "status": "in_progress", "conclusion": None}])
     else:
@@ -274,9 +285,10 @@ elif args[:2] == ["run", "watch"]:
     raise SystemExit(0)
 elif args[:2] == ["run", "view"]:
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    completed = args[2] != "30" or (state / "approved").exists()
     output({
-        "status": "in_progress",
-        "conclusion": None,
+        "status": "completed" if completed else "in_progress",
+        "conclusion": "success" if completed else None,
         "headSha": commit,
         "jobs": [{"name": "build", "status": "completed", "conclusion": "success"}],
     })
@@ -401,6 +413,12 @@ elif args[:2] == ["release", "view"]:
     if "--json" not in args:
         raise SystemExit(1)
     tag = args[2]
+    if (
+        os.environ.get("TFR_FAKE_CANDIDATE_TAG_ONLY") == "1"
+        and "-candidate." in tag
+        and not (state / "approved").exists()
+    ):
+        raise SystemExit(1)
     version = tag[1:].split("-candidate.", 1)[0]
     output({
         "tagName": tag,
@@ -517,6 +535,7 @@ def test_release_end_to_end_runs_protected_pipeline(tmp_path: Path) -> None:
     assert "gh pr merge 2" in log
     assert "publish \n" in log
     assert "publish --push\n" in log
+    assert "gh run watch" not in log
     assert "--method POST" in log
     assert (Path(environment["TFR_FAKE_STATE"]) / "approved").exists()
     assert "Release published and verified" in output
@@ -578,6 +597,67 @@ def test_release_end_to_end_times_out_unanswered_confirmation(tmp_path: Path) ->
     assert "publish \n" in log
     assert "publish --push\n" not in log
     assert "pending_deployments" not in log
+
+
+def test_release_end_to_end_rerun_continues_after_merged_pr_and_missed_tag_prompt(
+    tmp_path: Path,
+) -> None:
+    repository, environment = create_fixture(tmp_path)
+    environment["TFR_FAKE_NO_CANDIDATE"] = "1"
+    first_code, first_output = run_with_confirmations(repository, environment, [])
+    assert first_code != 0
+    assert "confirmation timed out" in first_output
+
+    returncode, output = run_with_confirmations(
+        repository,
+        environment,
+        ["v0.1.1-candidate.1", "v0.1.1-candidate.1"],
+    )
+
+    assert returncode == 0, output
+    assert "Detected: version PR merged; candidate tag absent" in output
+    assert "Test this candidate in the candidate channel" in output
+
+
+def test_release_end_to_end_rerun_continues_after_candidate_tag_push(
+    tmp_path: Path,
+) -> None:
+    repository, environment = create_fixture(tmp_path)
+    environment["TFR_FAKE_NO_CANDIDATE"] = "1"
+    environment["TFR_FAKE_CANDIDATE_TAG_ONLY"] = "1"
+    first_code, _first_output = run_with_confirmations(repository, environment, [])
+    assert first_code != 0
+    tag = "v0.1.1-candidate.1"
+    git(repository, "tag", "-a", tag, "-m", f"Release {tag}")
+    git(repository, "push", "--quiet", "origin", f"refs/tags/{tag}")
+
+    returncode, output = run_with_confirmations(
+        repository,
+        environment,
+        [tag],
+    )
+
+    assert returncode == 0, output
+    assert "Detected: candidate tag exists; resuming its protected workflow" in output
+    log = Path(environment["TFR_FAKE_LOG"]).read_text(encoding="utf-8")
+    assert log.count("publish --candidate 1 --push\n") == 0
+
+
+def test_release_end_to_end_rerun_reports_completed_stable_release(
+    tmp_path: Path,
+) -> None:
+    repository, environment = create_fixture(tmp_path)
+    environment["TFR_FAKE_NO_CANDIDATE"] = "1"
+    first_code, _first_output = run_with_confirmations(repository, environment, [])
+    assert first_code != 0
+    tag = "v0.1.1"
+    git(repository, "tag", "-a", tag, "-m", f"Release {tag}")
+    git(repository, "push", "--quiet", "origin", f"refs/tags/{tag}")
+
+    returncode, output = run_with_confirmations(repository, environment, [])
+
+    assert returncode == 0, output
+    assert "Detected: stable release already published and verified" in output
 
 
 def test_release_end_to_end_rejects_preloaded_confirmations(tmp_path: Path) -> None:
@@ -658,6 +738,32 @@ def test_agent_release_driver_handles_candidate_prompts(tmp_path: Path) -> None:
     assert "Test this candidate in the candidate channel" in result.stdout
 
 
+def test_agent_release_driver_handles_approval_only_retry(tmp_path: Path) -> None:
+    repository, environment = create_fixture(tmp_path)
+    environment["TFR_FAKE_NO_CANDIDATE"] = "1"
+    first_code, _first_output = run_with_confirmations(repository, environment, [])
+    assert first_code != 0
+    tag = "v0.1.1-candidate.1"
+    git(repository, "tag", "-a", tag, "-m", f"Release {tag}")
+    git(repository, "push", "--quiet", "origin", f"refs/tags/{tag}")
+    environment["TFR_FAKE_CANDIDATE_TAG_ONLY"] = "1"
+    environment["TFR_RELEASE_DRIVER_TIMEOUT_SECONDS"] = "30"
+
+    result = subprocess.run(
+        [str(repository / "scripts" / "release-end-to-end-agent"), "0.1.1"],
+        cwd=repository,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "create and push" not in result.stdout
+    assert result.stdout.count("approve publication") == 1
+
+
 def test_release_end_to_end_resumes_existing_version_only_pr(tmp_path: Path) -> None:
     repository, environment = create_fixture(tmp_path)
     prepare_resume_fixture(repository, environment)
@@ -678,6 +784,22 @@ def test_release_end_to_end_resumes_existing_version_only_pr(tmp_path: Path) -> 
     assert "release: retrigger checks for v0.1.1" in git(
         repository, "log", "origin/release/v0.1.1", "-1", "--format=%s"
     )
+
+
+def test_release_end_to_end_automatically_resumes_open_version_pr(tmp_path: Path) -> None:
+    repository, environment = create_fixture(tmp_path)
+    prepare_resume_fixture(repository, environment)
+
+    returncode, output = run_with_confirmations(
+        repository,
+        environment,
+        ["v0.1.1", "v0.1.1"],
+    )
+
+    assert returncode == 0, output
+    assert "Detected: open version PR; resuming automatically" in output
+    log = Path(environment["TFR_FAKE_LOG"]).read_text(encoding="utf-8")
+    assert "gh pr create" not in log
 
 
 def test_release_resume_rejects_unexpected_release_pr_files(tmp_path: Path) -> None:

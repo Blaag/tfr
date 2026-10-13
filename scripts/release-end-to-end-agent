@@ -58,11 +58,12 @@ def main() -> int:
     if not script.is_file() or not os.access(script, os.X_OK):
         fail(f"release orchestrator is not executable: {script}")
 
-    first_prompt = re.compile(
+    prompt_pattern = re.compile(
         rb"Type (v"
         + re.escape(version.encode())
-        + rb"(?:-candidate\.[1-9][0-9]*)?) to create and push the protected "
-        rb"(?:candidate|release) tag: "
+        + rb"(?:-candidate\.[1-9][0-9]*)?) to "
+        rb"(create and push the protected (?:candidate|release) tag|"
+        rb"approve publication to the release environment): "
     )
     timeout = configured_timeout()
     terminal, slave = pty.openpty()
@@ -75,8 +76,7 @@ def main() -> int:
     )
     os.close(slave)
     transcript = bytearray()
-    prompt_index = 0
-    selected_tag: bytes | None = None
+    answered_prompts: set[tuple[bytes, bytes]] = set()
     verified = False
     deadline = time.monotonic() + timeout
     try:
@@ -92,30 +92,24 @@ def main() -> int:
                     transcript.extend(chunk)
                     if len(transcript) > 65_536:
                         del transcript[:-65_536]
-                    if prompt_index == 0 and (match := first_prompt.search(transcript)):
-                        selected_tag = match.group(1)
-                        os.write(terminal, selected_tag + b"\n")
-                        prompt_index += 1
+                    if match := prompt_pattern.search(transcript):
+                        prompt = match.group(1), match.group(2)
+                        if prompt in answered_prompts:
+                            fail("orchestrator repeated an already answered release prompt")
+                        answered_prompts.add(prompt)
+                        os.write(terminal, match.group(1) + b"\n")
                         transcript.clear()
-                    elif (
-                        prompt_index == 1
-                        and selected_tag is not None
-                        and b"Type "
-                        + selected_tag
-                        + b" to approve publication to the release environment: "
-                        in transcript
+                    if (
+                        b"Release published and verified:" in transcript
+                        or b"stable release already published and verified:" in transcript
                     ):
-                        os.write(terminal, selected_tag + b"\n")
-                        prompt_index += 1
-                        transcript.clear()
-                    if b"Release published and verified:" in transcript:
                         verified = True
             returncode = process.poll()
             if returncode is not None:
                 if returncode != 0:
                     return returncode
-                if prompt_index != 2 or not verified:
-                    fail("orchestrator exited without both prompts and final verification")
+                if not verified:
+                    fail("orchestrator exited without final immutable-release verification")
                 return 0
         fail(f"orchestrator exceeded the {timeout}s driver timeout")
     finally:
