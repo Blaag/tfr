@@ -14,16 +14,17 @@ CONFIRM_TIMEOUT_SECONDS=${TFR_RELEASE_CONFIRM_TIMEOUT_SECONDS:-300}
 
 usage() {
     cat <<'EOF'
-Usage: ./scripts/release-end-to-end [--resume] VERSION
+Usage: ./scripts/release-end-to-end VERSION
 
 Run the complete stable release process for VERSION (for example, 0.1.24):
 validate locally, merge the current feature branch through a protected PR,
 create and merge the release-version PR, wait for CI and CodeQL on main,
-push the protected tag, approve the release environment, and verify the
-immutable GitHub Release.
+publish and verify the protected candidate, then promote and verify its exact
+artifacts as the immutable stable GitHub Release on the next invocation.
 
---resume continues an existing release/VERSION branch and open version-only
-release PR after revalidating and retriggering every protected check.
+Rerun the same command after any interruption. It detects open or merged PRs,
+pushed tags, workflow and approval state, published candidates, and completed
+stable releases. --resume remains accepted as a deprecated compatibility alias.
 
 The checkout must be clean. The script never uses administrator bypasses,
 force-pushes, deletes tags, or dismisses failed checks. It requires typed
@@ -139,6 +140,12 @@ pr_for_branch() {
     fi
 }
 
+merged_pr_for_branch() {
+    branch=$1
+    gh pr list --repo "$EXPECTED_REPOSITORY" --state merged --head "$branch" \
+        --json number --jq 'if length == 1 then .[0].number else empty end'
+}
+
 wait_for_pr_checks() {
     pr=$1
     expected_head=$2
@@ -243,8 +250,31 @@ wait_for_workflow() {
     done
 
     printf '\n==> Waiting for %s run %s\n' "$workflow" "$run_id" >&2
-    gh run watch "$run_id" --repo "$EXPECTED_REPOSITORY" --exit-status --compact >&2
+    wait_for_run_completion "$run_id" "$workflow"
     printf '%s\n' "$run_id"
+}
+
+wait_for_run_completion() {
+    run_id=$1
+    label=$2
+    deadline=$(($(date +%s) + TIMEOUT_SECONDS))
+    while :; do
+        run=$(gh run view "$run_id" --repo "$EXPECTED_REPOSITORY" \
+            --json status,conclusion)
+        status=$(printf '%s' "$run" | jq -r .status)
+        conclusion=$(printf '%s' "$run" | jq -r '.conclusion // ""')
+        if [ "$status" = completed ]; then
+            [ "$conclusion" = success ] || \
+                fail "$label run $run_id completed with ${conclusion:-unknown}"
+            return
+        fi
+        case $status in
+            queued|in_progress|pending|waiting|requested) ;;
+            *) fail "$label run $run_id has unexpected status: $status" ;;
+        esac
+        [ "$(date +%s)" -lt "$deadline" ] || fail "timed out waiting for $label run $run_id"
+        sleep "$POLL_SECONDS"
+    done
 }
 
 confirm_exact() {
@@ -302,7 +332,8 @@ wait_for_release_approval() {
         conclusion=$(printf '%s' "$run" | jq -r '.conclusion // ""')
         if [ "$status" = completed ]; then
             [ "$conclusion" = success ] || fail "release workflow completed with $conclusion"
-            fail "release workflow completed before an approval was requested"
+            printf 'already-approved\n'
+            return
         fi
         gh api "repos/$EXPECTED_REPOSITORY/actions/runs/$run_id/pending_deployments" \
             >"$pending_file"
@@ -323,6 +354,12 @@ $run
 EOF
             jq -r '.[] | select(.environment.name == "release") | .environment.id' \
                 "$pending_file"
+            return
+        fi
+        if printf '%s' "$run" | jq -e '
+            any(.jobs[]; .name == "publish" and (.status == "in_progress" or .status == "completed"))
+        ' >/dev/null; then
+            printf 'already-approved\n'
             return
         fi
         [ "$(date +%s)" -lt "$deadline" ] || fail "timed out waiting for release approval"
@@ -350,12 +387,60 @@ find_candidate_for_commit() {
         candidate_number=$possible_number
         return 0
     done
+    if find_candidate_tag_for_commit "$expected_commit" && \
+        verify_published_release "$candidate_tag" true; then
+        return 0
+    fi
     return 1
 }
 
+find_candidate_tag_for_commit() {
+    expected_commit=$1
+    candidate_tag=
+    candidate_number=0
+    candidate_refs=$(git ls-remote --tags origin "refs/tags/$tag-candidate.*^{}") || \
+        fail "cannot inspect candidate tags"
+    while read -r possible_commit possible_ref; do
+        [ -n "${possible_commit:-}" ] || continue
+        [ "$possible_commit" = "$expected_commit" ] || continue
+        possible_tag=${possible_ref#refs/tags/}
+        possible_tag=${possible_tag%\^\{\}}
+        possible_number=${possible_tag#"$tag-candidate."}
+        printf '%s' "$possible_number" | grep -Eq '^[1-9][0-9]*$' || continue
+        if [ "$possible_number" -gt "$candidate_number" ]; then
+            candidate_tag=$possible_tag
+            candidate_number=$possible_number
+        fi
+    done <<EOF
+$candidate_refs
+EOF
+    [ -n "$candidate_tag" ]
+}
+
+verify_published_release() {
+    release_tag=$1
+    prerelease=$2
+    release_file="$temporary_directory/published-release.json"
+    gh release view "$release_tag" --repo "$EXPECTED_REPOSITORY" \
+        --json tagName,isDraft,isPrerelease,isImmutable,assets,url >"$release_file" 2>/dev/null || \
+        return 1
+    jq -e --arg tag "$release_tag" --arg version "$version" \
+        --argjson prerelease "$prerelease" '
+        .tagName == $tag and
+        .isDraft == false and
+        .isPrerelease == $prerelease and
+        .isImmutable == true and
+        ([.assets[].name] | index("tfr-" + $version + "-py3-none-any.whl") != null) and
+        ([.assets[].name] | index("tfr-" + $version + ".tar.gz") != null) and
+        ([.assets[].name] | index("tfr-" + $version + "-release.zip") != null) and
+        ([.assets[].name] | index("update-manifest.json") != null)
+    ' "$release_file" >/dev/null
+}
+
 resume=false
+resume_requested=false
 if [ "$#" -eq 2 ] && [ "$1" = --resume ]; then
-    resume=true
+    resume_requested=true
     shift
 fi
 [ "$#" -eq 1 ] || {
@@ -401,10 +486,17 @@ actual_repository=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 verify_github_protections
 uv lock --check
 assert_no_preloaded_input
+if [ "$resume_requested" = true ]; then
+    printf 'Note: --resume is deprecated; release state is detected automatically.\n' >&2
+fi
 
 current_branch=$(git branch --show-current)
 [ -n "$current_branch" ] || fail "detached HEAD cannot be released"
 git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+if [ "$current_branch" = "$release_branch" ]; then
+    git switch main
+    current_branch=main
+fi
 if [ "$resume" = true ]; then
     [ "$current_branch" = main ] || fail "resume mode must start from main"
     [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || \
@@ -419,14 +511,33 @@ if [ "$current_branch" = main ]; then
 fi
 remote_release_branch=$(git ls-remote --heads origin "refs/heads/$release_branch") || \
     fail "cannot inspect remote release branch"
+if [ "$resume" = false ] && [ -n "$remote_release_branch" ]; then
+    release_pr=$(pr_for_branch "$release_branch")
+    if [ -n "$release_pr" ]; then
+        resume=true
+        printf '\nDetected: open version PR; resuming automatically.\n'
+    elif [ -z "$(merged_pr_for_branch "$release_branch")" ]; then
+        fail "remote release branch exists without an open release PR: $release_branch"
+    fi
+fi
 promote=false
+continue_publishing=false
 if [ "$resume" = false ] && [ "$current_branch" = main ] && \
-    [ "$(uv version --short)" = "$version" ] && \
-    find_candidate_for_commit "$(git rev-parse HEAD)"; then
-    promote=true
+    [ "$(uv version --short)" = "$version" ]; then
+    continue_publishing=true
+    current_commit=$(git rev-parse HEAD)
+    stable_commit=$(git ls-remote origin "refs/tags/$tag^{}" | cut -f1)
+    if [ "$stable_commit" = "$current_commit" ] && verify_published_release "$tag" false; then
+        printf '\nDetected: stable release already published and verified: %s\n' \
+            "$(jq -r .url "$temporary_directory/published-release.json")"
+        exit 0
+    fi
+    if find_candidate_for_commit "$(git rev-parse HEAD)"; then
+        promote=true
+    fi
 fi
 
-if [ "$promote" = true ]; then
+if [ "$promote" = true ] || [ "$continue_publishing" = true ]; then
     release_head=
 elif [ "$resume" = true ]; then
     [ -n "$remote_release_branch" ] || fail "remote release branch does not exist: $release_branch"
@@ -543,7 +654,7 @@ git switch main
 git pull --ff-only origin main
 assert_clean_checkout
 release_commit=$(git rev-parse HEAD)
-if [ "$promote" = false ]; then
+if [ "$promote" = false ] && [ "$continue_publishing" = false ]; then
     [ "$release_commit" != "$release_head" ] || \
         fail "release PR was not squash-merged as expected"
 fi
@@ -554,8 +665,29 @@ wait_for_workflow CI "$release_commit" >/dev/null
 wait_for_workflow CodeQL "$release_commit" >/dev/null
 
 candidate_release=false
-if ! find_candidate_for_commit "$release_commit"; then
+if find_candidate_for_commit "$release_commit"; then
+    printf '\nDetected: published candidate; continuing with stable promotion.\n'
+    stable_commit=$(git ls-remote origin "refs/tags/$tag^{}" | cut -f1)
+    if [ "$stable_commit" = "$release_commit" ]; then
+        if ! git show-ref --verify --quiet "refs/tags/$tag"; then
+            git fetch --quiet origin "refs/tags/$tag:refs/tags/$tag"
+        fi
+        printf 'Detected: stable tag exists; resuming its protected workflow.\n'
+    else
+        [ -z "$stable_commit" ] || fail "stable tag points to another commit: $tag"
+        ./scripts/publish-release
+        confirm_exact "$tag" "Type $tag to create and push the protected release tag: "
+        ./scripts/publish-release --push
+    fi
+elif find_candidate_tag_for_commit "$release_commit"; then
     candidate_release=true
+    tag=$candidate_tag
+    printf '\nDetected: candidate tag exists; resuming its protected workflow.\n'
+else
+    candidate_release=true
+    if [ "$continue_publishing" = true ]; then
+        printf '\nDetected: version PR merged; candidate tag absent.\n'
+    fi
     highest_candidate=$(git ls-remote --tags origin "refs/tags/$tag-candidate.*" | \
         cut -f2 | sed -n "s#refs/tags/$tag-candidate\.##p" | \
         grep -E '^[1-9][0-9]*$' | sort -n | tail -1)
@@ -566,10 +698,6 @@ if ! find_candidate_for_commit "$release_commit"; then
         "Type $candidate_tag to create and push the protected candidate tag: "
     ./scripts/publish-release --candidate "$candidate_number" --push
     tag=$candidate_tag
-else
-    ./scripts/publish-release
-    confirm_exact "$tag" "Type $tag to create and push the protected release tag: "
-    ./scripts/publish-release --push
 fi
 
 release_run=
@@ -590,16 +718,20 @@ while [ -z "${release_run:-}" ]; do
 done
 
 environment_id=$(wait_for_release_approval "$release_run" "$release_commit")
-confirm_exact "$tag" "Type $tag to approve publication to the release environment: "
-jq -n --argjson environment_id "$environment_id" --arg tag "$tag" '{
-    environment_ids: [$environment_id],
-    state: "approved",
-    comment: ("Approved publication of " + $tag)
-}' | gh api --method POST \
-    "repos/$EXPECTED_REPOSITORY/actions/runs/$release_run/pending_deployments" --input - \
-    >/dev/null
+if [ "$environment_id" != already-approved ]; then
+    confirm_exact "$tag" "Type $tag to approve publication to the release environment: "
+    jq -n --argjson environment_id "$environment_id" --arg tag "$tag" '{
+        environment_ids: [$environment_id],
+        state: "approved",
+        comment: ("Approved publication of " + $tag)
+    }' | gh api --method POST \
+        "repos/$EXPECTED_REPOSITORY/actions/runs/$release_run/pending_deployments" --input - \
+        >/dev/null
+else
+    printf 'Detected: release environment already approved; waiting for completion.\n'
+fi
 
-gh run watch "$release_run" --repo "$EXPECTED_REPOSITORY" --exit-status --compact
+wait_for_run_completion "$release_run" Release
 release_file="$temporary_directory/release.json"
 gh release view "$tag" --repo "$EXPECTED_REPOSITORY" \
     --json tagName,isDraft,isPrerelease,isImmutable,assets,url >"$release_file"
