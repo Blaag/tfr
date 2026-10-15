@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import colorsys
 import math
 from dataclasses import dataclass
 from enum import StrEnum
@@ -29,6 +30,12 @@ class PresentationCapability(StrEnum):
     TIMELINE = "timeline"
     CHARACTER_FOREGROUND = "character_foreground"
     CHARACTER_CASE = "character_case"
+
+
+class SweepTrailMode(StrEnum):
+    SYMMETRIC = "symmetric"
+    BEHIND = "behind"
+    AHEAD = "ahead"
 
 
 TUI_PRESENTATION_CAPABILITIES = frozenset(PresentationCapability)
@@ -107,8 +114,11 @@ class CharacterSweepTrack:
     positions: tuple[PositionKeyframe, ...]
     base_color: str
     head_color: str
-    trail_width: int = 2
+    trail_width: float = 2
     uppercase_head: bool = False
+    trail_mode: SweepTrailMode = SweepTrailMode.SYMMETRIC
+    start_padding: float = 0
+    end_padding: float = 0
 
     def __post_init__(self) -> None:
         if any(type(frame) is not PositionKeyframe for frame in self.positions):
@@ -122,14 +132,77 @@ class CharacterSweepTrack:
             raise ValueError("presentation character sweep positions must increase")
         object.__setattr__(self, "base_color", validate_color(self.base_color))
         object.__setattr__(self, "head_color", validate_color(self.head_color))
-        if (
-            isinstance(self.trail_width, bool)
-            or not isinstance(self.trail_width, int)
-            or not 1 <= self.trail_width <= MAX_PRESENTATION_TRAIL_WIDTH
+        for name, value in (
+            ("trail width", self.trail_width),
+            ("start padding", self.start_padding),
+            ("end padding", self.end_padding),
         ):
-            raise ValueError("presentation character sweep trail width must be between 1 and 8")
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or not 0 <= value <= MAX_PRESENTATION_TRAIL_WIDTH
+                or (name == "trail width" and value < 0.5)
+            ):
+                lower = 0.5 if name == "trail width" else 0
+                raise ValueError(
+                    f"presentation character sweep {name} must be between {lower:g} and 8"
+                )
+            object.__setattr__(self, name.replace(" ", "_"), float(value))
         if not isinstance(self.uppercase_head, bool):
             raise ValueError("presentation character sweep uppercase flag must be boolean")
+        if not isinstance(self.trail_mode, SweepTrailMode):
+            raise ValueError("presentation character sweep trail mode is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class CharacterHueWaveTrack:
+    base_color: str
+    saturation: float = 0.78
+    brightness: float = 1.0
+    spatial_cycles: float = 1.0
+    temporal_cycles: float = 1.0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "base_color", validate_color(self.base_color))
+        for name, value, lower, upper in (
+            ("saturation", self.saturation, 0.0, 1.0),
+            ("brightness", self.brightness, 0.1, 1.0),
+            ("spatial cycles", self.spatial_cycles, 0.1, 4.0),
+            ("temporal cycles", self.temporal_cycles, 0.1, 4.0),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or not lower <= value <= upper
+            ):
+                raise ValueError(
+                    f"presentation hue wave {name} must be between {lower:g} and {upper:g}"
+                )
+            object.__setattr__(self, name.replace(" ", "_"), float(value))
+
+
+@dataclass(frozen=True, slots=True)
+class CharacterPaletteFrontTrack:
+    colors: tuple[str, ...]
+    spread: float = 0.55
+    direction: str = "forward"
+
+    def __post_init__(self) -> None:
+        if not 2 <= len(self.colors) <= 8:
+            raise ValueError("presentation palette front must contain 2 to 8 colors")
+        object.__setattr__(self, "colors", tuple(validate_color(color) for color in self.colors))
+        if (
+            isinstance(self.spread, bool)
+            or not isinstance(self.spread, (int, float))
+            or not math.isfinite(self.spread)
+            or not 0 <= self.spread <= 1
+        ):
+            raise ValueError("presentation palette front spread must be between 0 and 1")
+        object.__setattr__(self, "spread", float(self.spread))
+        if self.direction not in {"forward", "backward"}:
+            raise ValueError("presentation palette front direction is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +211,8 @@ class PresentationVariant:
     style: PresentationStyle = PresentationStyle()
     foreground_keyframes: tuple[ForegroundKeyframe, ...] = ()
     character_sweep: CharacterSweepTrack | None = None
+    character_hue_wave: CharacterHueWaveTrack | None = None
+    character_palette_front: CharacterPaletteFrontTrack | None = None
 
     def __post_init__(self) -> None:
         if not self.requires or len(self.requires) > len(PresentationCapability):
@@ -181,7 +256,23 @@ class PresentationVariant:
             )
             if self.character_sweep.uppercase_head:
                 used.add(PresentationCapability.CHARACTER_CASE)
-        if self.foreground_keyframes and self.character_sweep is not None:
+        for track in (self.character_hue_wave, self.character_palette_front):
+            if track is not None:
+                used.update(
+                    {
+                        PresentationCapability.CHARACTER_FOREGROUND,
+                        PresentationCapability.TIMELINE,
+                    }
+                )
+        tracks = sum(
+            track is not None
+            for track in (
+                self.character_sweep,
+                self.character_hue_wave,
+                self.character_palette_front,
+            )
+        )
+        if bool(self.foreground_keyframes) + tracks > 1:
             raise ValueError("presentation variant supports only one timeline track")
         if not used:
             raise ValueError("presentation variant must apply a style or timeline")
@@ -413,8 +504,12 @@ def presentation_grapheme_at(
     variant = select_presentation_variant(program, capabilities)
     if variant is None:
         return program.fallback, grapheme
-    sweep = variant.character_sweep
-    if sweep is None:
+    character_track = (
+        variant.character_sweep
+        or variant.character_hue_wave
+        or variant.character_palette_front
+    )
+    if character_track is None:
         return presentation_style_at(
             program,
             elapsed_seconds,
@@ -425,26 +520,63 @@ def presentation_grapheme_at(
     cycle = int(elapsed // program.repeat_seconds)
     phase = elapsed % program.repeat_seconds
     if cycle >= program.repeat_count or phase >= program.duration_seconds:
-        return PresentationStyle(foreground=sweep.base_color), grapheme
+        return program.fallback, grapheme
     progress = phase / program.duration_seconds
-    position = _timeline_value(sweep.positions, progress, "position")
-    head = round(position * max(0, count - 1))
-    distance = abs(index - head)
-    intensity = max(0.0, 1.0 - distance / sweep.trail_width)
-    intensity = intensity * intensity * (3 - 2 * intensity)
-    rendered = grapheme
-    if sweep.uppercase_head and grapheme.isascii() and grapheme.isalpha():
-        candidate = grapheme.upper() if index == head else grapheme.lower()
-        rendered = candidate
+    if variant.character_sweep is not None:
+        sweep = variant.character_sweep
+        position = _timeline_value(sweep.positions, progress, "position")
+        head = -sweep.start_padding + position * (
+            max(0, count - 1) + sweep.start_padding + sweep.end_padding
+        )
+        active_head = round(head) if sweep.uppercase_head else head
+        delta = index - active_head
+        distance = (
+            abs(delta)
+            if sweep.trail_mode is SweepTrailMode.SYMMETRIC
+            else -delta if sweep.trail_mode is SweepTrailMode.BEHIND and delta <= 0
+            else delta if sweep.trail_mode is SweepTrailMode.AHEAD and delta >= 0
+            else math.inf
+        )
+        intensity = max(0.0, 1.0 - distance / sweep.trail_width)
+        intensity = intensity * intensity * (3 - 2 * intensity)
+        rendered = grapheme
+        if sweep.uppercase_head and grapheme.isascii() and grapheme.isalpha():
+            rendered = grapheme.upper() if index == active_head else grapheme.lower()
+        return PresentationStyle(
+            foreground=interpolate_color(sweep.base_color, sweep.head_color, intensity)
+        ), rendered
+    if variant.character_hue_wave is not None:
+        wave = variant.character_hue_wave
+        hue = (index / max(1, count) * wave.spatial_cycles + progress * wave.temporal_cycles) % 1
+        red, green, blue = colorsys.hsv_to_rgb(hue, wave.saturation, wave.brightness)
+        return PresentationStyle(
+            foreground=f"#{round(red * 255):02x}{round(green * 255):02x}{round(blue * 255):02x}"
+        ), grapheme
+    front = variant.character_palette_front
+    if front is None:
+        return program.fallback, grapheme
+    normalized = index / max(1, count - 1)
+    if front.direction == "backward":
+        normalized = 1 - normalized
+    local_progress = progress * (1 + front.spread) - normalized * front.spread
+    if not 0 <= local_progress < 1:
+        return PresentationStyle(foreground=front.colors[-1]), grapheme
+    scaled = local_progress * (len(front.colors) - 1)
+    section = min(len(front.colors) - 2, int(scaled))
     return PresentationStyle(
-        foreground=interpolate_color(sweep.base_color, sweep.head_color, intensity)
-    ), rendered
+        foreground=interpolate_color(
+            front.colors[section], front.colors[section + 1], scaled - section
+        )
+    ), grapheme
 
 
 def presentation_frame_delay(program: EffectProgram, elapsed_seconds: float) -> float | None:
     variant = select_presentation_variant(program, TUI_PRESENTATION_CAPABILITIES)
     if variant is None or (
-        not variant.foreground_keyframes and variant.character_sweep is None
+        not variant.foreground_keyframes
+        and variant.character_sweep is None
+        and variant.character_hue_wave is None
+        and variant.character_palette_front is None
     ):
         return None
     elapsed = max(0.0, elapsed_seconds)
@@ -489,9 +621,49 @@ def effect_programs_as_dict(programs: tuple[EffectProgram, ...]) -> dict[str, An
                                     "head_color": variant.character_sweep.head_color,
                                     "trail_width": variant.character_sweep.trail_width,
                                     "uppercase_head": variant.character_sweep.uppercase_head,
+                                    **(
+                                        {"trail_mode": variant.character_sweep.trail_mode.value}
+                                        if variant.character_sweep.trail_mode
+                                        is not SweepTrailMode.SYMMETRIC
+                                        else {}
+                                    ),
+                                    **(
+                                        {"start_padding": variant.character_sweep.start_padding}
+                                        if variant.character_sweep.start_padding
+                                        else {}
+                                    ),
+                                    **(
+                                        {"end_padding": variant.character_sweep.end_padding}
+                                        if variant.character_sweep.end_padding
+                                        else {}
+                                    ),
                                 }
                             }
                             if variant.character_sweep is not None
+                            else {}
+                        ),
+                        **(
+                            {
+                                "character_hue_wave": {
+                                    "base_color": variant.character_hue_wave.base_color,
+                                    "saturation": variant.character_hue_wave.saturation,
+                                    "brightness": variant.character_hue_wave.brightness,
+                                    "spatial_cycles": variant.character_hue_wave.spatial_cycles,
+                                    "temporal_cycles": variant.character_hue_wave.temporal_cycles,
+                                }
+                            }
+                            if variant.character_hue_wave is not None
+                            else {}
+                        ),
+                        **(
+                            {
+                                "character_palette_front": {
+                                    "colors": list(variant.character_palette_front.colors),
+                                    "spread": variant.character_palette_front.spread,
+                                    "direction": variant.character_palette_front.direction,
+                                }
+                            }
+                            if variant.character_palette_front is not None
                             else {}
                         ),
                     }
@@ -548,14 +720,20 @@ def character_sweep(
     *,
     base_color: str,
     head_color: str,
-    trail_width: int = 2,
+    trail_width: float = 2,
     uppercase_head: bool = False,
+    trail_mode: SweepTrailMode = SweepTrailMode.SYMMETRIC,
+    start_padding: float = 0,
+    end_padding: float = 0,
+    return_to_start: bool = True,
     duration_seconds: float = 2.0,
     repeat_seconds: float = 2.0,
     repeat_count: int = MAX_PRESENTATION_REPEAT_COUNT,
     frames_per_second: float = 20.0,
     reduced_motion: PresentationStyle | None = None,
 ) -> EffectProgram:
+    if not isinstance(return_to_start, bool):
+        raise ValueError("presentation character sweep return flag must be boolean")
     base = PresentationStyle(foreground=base_color)
     requires = [
         PresentationCapability.CHARACTER_FOREGROUND,
@@ -571,19 +749,85 @@ def character_sweep(
                 requires=tuple(requires),
                 character_sweep=CharacterSweepTrack(
                     positions=(
-                        PositionKeyframe(0, 0),
-                        PositionKeyframe(0.5, 1),
-                        PositionKeyframe(1, 0),
+                        (PositionKeyframe(0, 0), PositionKeyframe(0.5, 1), PositionKeyframe(1, 0))
+                        if return_to_start
+                        else (PositionKeyframe(0, 0), PositionKeyframe(1, 1))
                     ),
                     base_color=base_color,
                     head_color=head_color,
                     trail_width=trail_width,
                     uppercase_head=uppercase_head,
+                    trail_mode=trail_mode,
+                    start_padding=start_padding,
+                    end_padding=end_padding,
                 ),
             ),
         ),
         reduced_motion=reduced_motion or PresentationStyle(foreground=head_color, bold=True),
         fallback=base,
+        duration_seconds=duration_seconds,
+        repeat_seconds=repeat_seconds,
+        repeat_count=repeat_count,
+        frames_per_second=frames_per_second,
+    )
+
+
+def character_hue_wave(
+    start: int,
+    end: int,
+    *,
+    base_color: str,
+    duration_seconds: float = 1.8,
+    repeat_seconds: float = 10.0,
+    repeat_count: int = MAX_PRESENTATION_REPEAT_COUNT,
+    frames_per_second: float = 20.0,
+    saturation: float = 0.78,
+    brightness: float = 1.0,
+    spatial_cycles: float = 1.0,
+    temporal_cycles: float = 1.0,
+    reduced_motion: PresentationStyle | None = None,
+) -> EffectProgram:
+    return EffectProgram(
+        start=start,
+        end=end,
+        variants=(PresentationVariant(
+            requires=(PresentationCapability.CHARACTER_FOREGROUND, PresentationCapability.TIMELINE),
+            character_hue_wave=CharacterHueWaveTrack(
+                base_color, saturation, brightness, spatial_cycles, temporal_cycles
+            ),
+        ),),
+        reduced_motion=reduced_motion or PresentationStyle(foreground=base_color, bold=True),
+        fallback=PresentationStyle(foreground=base_color),
+        duration_seconds=duration_seconds,
+        repeat_seconds=repeat_seconds,
+        repeat_count=repeat_count,
+        frames_per_second=frames_per_second,
+    )
+
+
+def character_palette_front(
+    start: int,
+    end: int,
+    *,
+    colors: tuple[str, ...],
+    duration_seconds: float = 1.8,
+    repeat_seconds: float = 10.0,
+    repeat_count: int = MAX_PRESENTATION_REPEAT_COUNT,
+    frames_per_second: float = 20.0,
+    spread: float = 0.55,
+    direction: str = "forward",
+    reduced_motion: PresentationStyle | None = None,
+) -> EffectProgram:
+    track = CharacterPaletteFrontTrack(colors, spread, direction)
+    return EffectProgram(
+        start=start,
+        end=end,
+        variants=(PresentationVariant(
+            requires=(PresentationCapability.CHARACTER_FOREGROUND, PresentationCapability.TIMELINE),
+            character_palette_front=track,
+        ),),
+        reduced_motion=reduced_motion or PresentationStyle(foreground=track.colors[0], bold=True),
+        fallback=PresentationStyle(foreground=track.colors[-1]),
         duration_seconds=duration_seconds,
         repeat_seconds=repeat_seconds,
         repeat_count=repeat_count,

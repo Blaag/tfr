@@ -843,13 +843,18 @@ function appendEventText(
     }
     const styled = document.createElement("span");
     applyTextStyle(styled, run.style);
-    if (run.presentation?.characterSweep && run.presentation.characterIndex !== null) {
+    const hasCharacterTrack = run.presentation && (
+      run.presentation.characterSweep
+      || run.presentation.characterHueWave
+      || run.presentation.characterPaletteFront
+    );
+    if (hasCharacterTrack && run.presentation.characterIndex !== null) {
       styled.classList.add("presentation-character");
       styled.dataset.caseable = /^[A-Za-z]$/.test(run.text) ? "true" : "false";
     }
     if (
       run.presentation?.style.foreground &&
-      !run.presentation.characterSweep &&
+      !hasCharacterTrack &&
       !(run.role === "speaker" && event.spoof_status === "spoofed")
     ) {
       styled.classList.add("presentation-content");

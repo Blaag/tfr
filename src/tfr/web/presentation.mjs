@@ -13,6 +13,7 @@ const MAX_KEYFRAMES = 3;
 const MAX_TARGET_CHARACTERS = 2048;
 const MAX_SWEEP_GRAPHEMES = 64;
 const MAX_TRAIL_WIDTH = 8;
+const MAX_PALETTE_COLORS = 8;
 
 function exactKeys(value, allowed) {
   return Object.keys(value).every((key) => allowed.has(key));
@@ -37,7 +38,14 @@ function validatedStyle(value) {
 
 function validatedVariant(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  if (!exactKeys(value, new Set(["requires", "style", "foreground_keyframes", "character_sweep"]))) return null;
+  if (!exactKeys(value, new Set([
+    "requires",
+    "style",
+    "foreground_keyframes",
+    "character_sweep",
+    "character_hue_wave",
+    "character_palette_front",
+  ]))) return null;
   if (
     !Array.isArray(value.requires) ||
     value.requires.length === 0 ||
@@ -69,13 +77,25 @@ function validatedVariant(value) {
   let characterSweep = null;
   if (value.character_sweep !== undefined) {
     const sweep = value.character_sweep;
+    const trailMode = sweep?.trail_mode ?? "symmetric";
+    const startPadding = sweep?.start_padding ?? 0;
+    const endPadding = sweep?.end_padding ?? 0;
     if (
       !sweep ||
       typeof sweep !== "object" ||
       Array.isArray(sweep) ||
       !exactKeys(
         sweep,
-        new Set(["positions", "base_color", "head_color", "trail_width", "uppercase_head"]),
+        new Set([
+          "positions",
+          "base_color",
+          "head_color",
+          "trail_width",
+          "uppercase_head",
+          "trail_mode",
+          "start_padding",
+          "end_padding",
+        ]),
       ) ||
       !Array.isArray(sweep.positions) ||
       sweep.positions.length < 2 ||
@@ -84,10 +104,17 @@ function validatedVariant(value) {
       !COLOR.test(sweep.base_color) ||
       typeof sweep.head_color !== "string" ||
       !COLOR.test(sweep.head_color) ||
-      !Number.isInteger(sweep.trail_width) ||
-      sweep.trail_width < 1 ||
+      !Number.isFinite(sweep.trail_width) ||
+      sweep.trail_width < 0.5 ||
       sweep.trail_width > MAX_TRAIL_WIDTH ||
-      typeof sweep.uppercase_head !== "boolean"
+      typeof sweep.uppercase_head !== "boolean" ||
+      !["symmetric", "behind", "ahead"].includes(trailMode) ||
+      !Number.isFinite(startPadding) ||
+      startPadding < 0 ||
+      startPadding > MAX_TRAIL_WIDTH ||
+      !Number.isFinite(endPadding) ||
+      endPadding < 0 ||
+      endPadding > MAX_TRAIL_WIDTH
     ) {
       return null;
     }
@@ -119,7 +146,46 @@ function validatedVariant(value) {
     ) {
       return null;
     }
-    characterSweep = { ...sweep, positions };
+    characterSweep = {
+      ...sweep,
+      positions,
+      trail_mode: trailMode,
+      start_padding: startPadding,
+      end_padding: endPadding,
+    };
+  }
+  let characterHueWave = null;
+  if (value.character_hue_wave !== undefined) {
+    const wave = value.character_hue_wave;
+    if (
+      !wave ||
+      typeof wave !== "object" ||
+      Array.isArray(wave) ||
+      !exactKeys(wave, new Set(["base_color", "saturation", "brightness", "spatial_cycles", "temporal_cycles"])) ||
+      typeof wave.base_color !== "string" || !COLOR.test(wave.base_color) ||
+      !Number.isFinite(wave.saturation) || wave.saturation < 0 || wave.saturation > 1 ||
+      !Number.isFinite(wave.brightness) || wave.brightness < 0.1 || wave.brightness > 1 ||
+      !Number.isFinite(wave.spatial_cycles) || wave.spatial_cycles < 0.1 || wave.spatial_cycles > 4 ||
+      !Number.isFinite(wave.temporal_cycles) || wave.temporal_cycles < 0.1 || wave.temporal_cycles > 4
+    ) return null;
+    characterHueWave = { ...wave };
+  }
+  let characterPaletteFront = null;
+  if (value.character_palette_front !== undefined) {
+    const front = value.character_palette_front;
+    if (
+      !front ||
+      typeof front !== "object" ||
+      Array.isArray(front) ||
+      !exactKeys(front, new Set(["colors", "spread", "direction"])) ||
+      !Array.isArray(front.colors) ||
+      front.colors.length < 2 ||
+      front.colors.length > MAX_PALETTE_COLORS ||
+      !front.colors.every((color) => typeof color === "string" && COLOR.test(color)) ||
+      !Number.isFinite(front.spread) || front.spread < 0 || front.spread > 1 ||
+      !["forward", "backward"].includes(front.direction)
+    ) return null;
+    characterPaletteFront = { ...front, colors: [...front.colors] };
   }
   if (keyframes.length) {
     if (
@@ -135,8 +201,9 @@ function validatedVariant(value) {
     }
     if (!style.foreground) return null;
   }
-  if (keyframes.length && characterSweep) return null;
-  if (!Object.keys(style).length && !keyframes.length && !characterSweep) return null;
+  const characterTracks = [characterSweep, characterHueWave, characterPaletteFront].filter(Boolean);
+  if ((keyframes.length ? 1 : 0) + characterTracks.length > 1) return null;
+  if (!Object.keys(style).length && !keyframes.length && !characterTracks.length) return null;
   const used = new Set();
   if (style.foreground) used.add("foreground_color");
   if (style.bold) used.add("bold");
@@ -147,12 +214,18 @@ function validatedVariant(value) {
     used.add("timeline");
     if (characterSweep.uppercase_head) used.add("character_case");
   }
+  if (characterHueWave || characterPaletteFront) {
+    used.add("character_foreground");
+    used.add("timeline");
+  }
   if (![...used].every((capability) => value.requires.includes(capability))) return null;
   return {
     requires: value.requires,
     style,
     foreground_keyframes: keyframes,
     character_sweep: characterSweep,
+    character_hue_wave: characterHueWave,
+    character_palette_front: characterPaletteFront,
   };
 }
 
@@ -245,7 +318,9 @@ export function validatedPresentation(event) {
   }
   if (
     ordered.some((program) => {
-      if (!program.variants.some((variant) => variant.character_sweep)) return false;
+      if (!program.variants.some((variant) =>
+        variant.character_sweep || variant.character_hue_wave || variant.character_palette_front
+      )) return false;
       const target = Array.from(event.text || "").slice(program.start, program.end).join("");
       return [...segmenter.segment(target)].length > MAX_SWEEP_GRAPHEMES;
     })
@@ -264,9 +339,15 @@ export function selectPresentation(program, animationsEnabled) {
   return {
     style: variant.character_sweep
       ? { foreground: variant.character_sweep.base_color }
+      : variant.character_hue_wave
+        ? { foreground: variant.character_hue_wave.base_color }
+      : variant.character_palette_front
+        ? { foreground: variant.character_palette_front.colors.at(-1) }
       : variant.style,
     animation: variant.foreground_keyframes.length ? variant.foreground_keyframes : null,
     ...(variant.character_sweep ? { characterSweep: variant.character_sweep } : {}),
+    ...(variant.character_hue_wave ? { characterHueWave: variant.character_hue_wave } : {}),
+    ...(variant.character_palette_front ? { characterPaletteFront: variant.character_palette_front } : {}),
   };
 }
 
@@ -394,7 +475,7 @@ export function splitPresentationRuns(event, runs, animationsEnabled) {
     boundaries.add(program.start);
     boundaries.add(program.end);
     const selected = selectPresentation(program, animationsEnabled);
-    if (selected.characterSweep) {
+    if (selected.characterSweep || selected.characterHueWave || selected.characterPaletteFront) {
       let graphemeOffset = program.start;
       const target = characters.slice(program.start, program.end).join("");
       for (const segment of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(target)) {
@@ -410,7 +491,7 @@ export function splitPresentationRuns(event, runs, animationsEnabled) {
     const program = programs.find((candidate) => candidate.start <= start && end <= candidate.end);
     const selected = program ? selectPresentation(program, animationsEnabled) : null;
     const characterSegments =
-      program && selected?.characterSweep
+      program && (selected?.characterSweep || selected?.characterHueWave || selected?.characterPaletteFront)
         ? [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(
             characters.slice(program.start, program.end).join(""),
           )]
@@ -443,14 +524,56 @@ export function splitPresentationRuns(event, runs, animationsEnabled) {
                     characterCount: characterSegments.length,
                   }
                 : {}),
+              ...(selected.characterHueWave
+                ? {
+                    characterHueWave: selected.characterHueWave,
+                    characterIndex,
+                    characterCount: characterSegments.length,
+                  }
+                : {}),
+              ...(selected.characterPaletteFront
+                ? {
+                    characterPaletteFront: selected.characterPaletteFront,
+                    characterIndex,
+                    characterCount: characterSegments.length,
+                  }
+                : {}),
             }
           : null,
     };
   });
 }
 
+function hueWaveColor(wave, index, count, progress) {
+  const hue = ((index / Math.max(1, count)) * wave.spatial_cycles + progress * wave.temporal_cycles) % 1;
+  const section = hue * 6;
+  const chroma = wave.brightness * wave.saturation;
+  const intermediate = chroma * (1 - Math.abs((section % 2) - 1));
+  const [red, green, blue] = section < 1 ? [chroma, intermediate, 0]
+    : section < 2 ? [intermediate, chroma, 0]
+      : section < 3 ? [0, chroma, intermediate]
+        : section < 4 ? [0, intermediate, chroma]
+          : section < 5 ? [intermediate, 0, chroma]
+            : [chroma, 0, intermediate];
+  const match = wave.brightness - chroma;
+  return `#${[red, green, blue].map((channel) =>
+    Math.round((channel + match) * 255).toString(16).padStart(2, "0")
+  ).join("")}`;
+}
+
+function paletteFrontColor(front, index, count, progress) {
+  let normalized = index / Math.max(1, count - 1);
+  if (front.direction === "backward") normalized = 1 - normalized;
+  const local = progress * (1 + front.spread) - normalized * front.spread;
+  if (local < 0 || local >= 1) return front.colors.at(-1);
+  const scaled = local * (front.colors.length - 1);
+  const section = Math.min(front.colors.length - 2, Math.floor(scaled));
+  return interpolatePresentationColor(front.colors[section], front.colors[section + 1], scaled - section);
+}
+
 export function animatePresentationElement(element, presentation, eventTimestamp, now = Date.now()) {
-  if ((!presentation?.keyframes && !presentation?.characterSweep) || typeof element?.animate !== "function") return null;
+  const characterTrack = presentation?.characterSweep || presentation?.characterHueWave || presentation?.characterPaletteFront;
+  if ((!presentation?.keyframes && !characterTrack) || typeof element?.animate !== "function") return null;
   const age = Math.max(0, now - Date.parse(eventTimestamp));
   const total = presentation.program.repeat_ms * presentation.program.repeat_count;
   if (!Number.isFinite(age) || age >= total) return null;
@@ -469,8 +592,7 @@ export function animatePresentationElement(element, presentation, eventTimestamp
       fill: "none",
     },
   );
-  if (presentation.characterSweep) {
-    const sweep = presentation.characterSweep;
+  if (characterTrack) {
     let frame = null;
     const render = () => {
       const current = Number(animation.currentTime);
@@ -478,20 +600,39 @@ export function animatePresentationElement(element, presentation, eventTimestamp
       const phase = current % presentation.program.repeat_ms;
       const active = phase < presentation.program.duration_ms;
       const progress = active ? phase / presentation.program.duration_ms : 0;
-      const position = active ? timelineValue(sweep.positions, progress, "position") : 0;
       const characters = [...element.querySelectorAll(".presentation-character")];
-      const head = Math.round(position * Math.max(0, characters.length - 1));
+      const sweep = presentation.characterSweep;
+      const position = active && sweep ? timelineValue(sweep.positions, progress, "position") : 0;
+      const rawHead = sweep
+        ? -(sweep.start_padding ?? 0) + position * (
+          Math.max(0, characters.length - 1)
+          + (sweep.start_padding ?? 0)
+          + (sweep.end_padding ?? 0)
+        )
+        : 0;
+      const head = sweep?.uppercase_head ? Math.round(rawHead) : rawHead;
       for (const [index, character] of characters.entries()) {
-        const distance = Math.abs(index - head);
-        let intensity = active ? Math.max(0, 1 - distance / sweep.trail_width) : 0;
-        intensity = intensity * intensity * (3 - 2 * intensity);
-        character.style.color = interpolatePresentationColor(
-          sweep.base_color,
-          sweep.head_color,
-          intensity,
-        );
+        if (active && sweep) {
+          const delta = index - head;
+          const trailMode = sweep.trail_mode ?? "symmetric";
+          const distance = trailMode === "symmetric" ? Math.abs(delta)
+            : trailMode === "behind" && delta <= 0 ? -delta
+              : trailMode === "ahead" && delta >= 0 ? delta
+                : Infinity;
+          let intensity = Math.max(0, 1 - distance / sweep.trail_width);
+          intensity = intensity * intensity * (3 - 2 * intensity);
+          character.style.color = interpolatePresentationColor(sweep.base_color, sweep.head_color, intensity);
+        } else if (active && presentation.characterHueWave) {
+          character.style.color = hueWaveColor(presentation.characterHueWave, index, characters.length, progress);
+        } else if (active && presentation.characterPaletteFront) {
+          character.style.color = paletteFrontColor(presentation.characterPaletteFront, index, characters.length, progress);
+        } else {
+          character.style.color = sweep?.base_color
+            || presentation.characterHueWave?.base_color
+            || presentation.characterPaletteFront?.colors.at(-1);
+        }
         character.style.textTransform =
-          active && sweep.uppercase_head && character.dataset.caseable === "true"
+          active && sweep?.uppercase_head && character.dataset.caseable === "true"
             ? index === head
               ? "uppercase"
               : "lowercase"
@@ -503,7 +644,9 @@ export function animatePresentationElement(element, presentation, eventTimestamp
       if (frame !== null) cancelAnimationFrame(frame);
       frame = null;
       for (const character of element.querySelectorAll(".presentation-character")) {
-        character.style.color = sweep.base_color;
+        character.style.color = presentation.characterSweep?.base_color
+          || presentation.characterHueWave?.base_color
+          || presentation.characterPaletteFront?.colors.at(-1);
         character.style.textTransform = "none";
       }
     };

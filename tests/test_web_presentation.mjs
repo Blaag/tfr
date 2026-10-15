@@ -186,6 +186,37 @@ test("rejects oversized or malformed character sweeps", () => {
   assert.equal(validatedPresentation(event), null);
 });
 
+test("validates bounded hue-wave and palette-front character tracks", () => {
+  const hue = eventWithPresentation({ text: "Jarin" });
+  const hueVariant = hue.presentation.programs[0].variants[0];
+  hueVariant.requires = ["character_foreground", "timeline"];
+  hueVariant.style = {};
+  hueVariant.foreground_keyframes = [];
+  hueVariant.character_hue_wave = {
+    base_color: "#ffc9d7",
+    saturation: 0.78,
+    brightness: 1,
+    spatial_cycles: 1,
+    temporal_cycles: 1,
+  };
+  const selectedHue = selectPresentation(validatedPresentation(hue)[0], true);
+  assert.equal(selectedHue.characterHueWave.base_color, "#ffc9d7");
+  assert.equal(splitPresentationRuns(hue, null, true).length, 5);
+
+  const ember = structuredClone(hue);
+  delete ember.presentation.programs[0].variants[0].character_hue_wave;
+  ember.presentation.programs[0].variants[0].character_palette_front = {
+    colors: ["#ffff5f", "#ffaf00", "#d70000", "#a9914a"],
+    spread: 0.55,
+    direction: "forward",
+  };
+  const selectedEmber = selectPresentation(validatedPresentation(ember)[0], true);
+  assert.equal(selectedEmber.characterPaletteFront.colors.at(-1), "#a9914a");
+
+  ember.presentation.programs[0].variants[0].character_palette_front.colors = ["#ffffff"];
+  assert.equal(validatedPresentation(ember), null);
+});
+
 test("runs one bounded animation clock for a character sweep and cleans up", () => {
   const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
   const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
@@ -256,6 +287,55 @@ test("runs one bounded animation clock for a character sweep and cleans up", () 
     assert.deepEqual(characters.map((character) => character.textContent), [..."Alice"]);
     assert.ok(characters.every((character) => character.style.color === "#180000"));
     assert.ok(characters.every((character) => character.style.textTransform === "none"));
+  } finally {
+    globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+    globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
+  }
+});
+
+test("renders hue-wave and palette-front character colors", () => {
+  const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+  const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
+  let scheduled = null;
+  globalThis.requestAnimationFrame = (callback) => { scheduled = callback; return 1; };
+  globalThis.cancelAnimationFrame = () => {};
+  const characters = [..."Jarin"].map(() => ({ dataset: {}, style: {} }));
+  const animation = {
+    currentTime: 450,
+    addEventListener() {},
+  };
+  const element = {
+    animate() { return animation; },
+    querySelectorAll() { return characters; },
+  };
+  const base = {
+    program: { duration_ms: 1800, repeat_ms: 10000, repeat_count: 2 },
+    keyframes: null,
+  };
+  try {
+    animatePresentationElement(element, {
+      ...base,
+      characterHueWave: {
+        base_color: "#ffc9d7",
+        saturation: 0.78,
+        brightness: 1,
+        spatial_cycles: 1,
+        temporal_cycles: 1,
+      },
+    }, "2026-01-01T00:00:00Z", Date.parse("2026-01-01T00:00:00Z"));
+    scheduled();
+    assert.equal(new Set(characters.map((character) => character.style.color)).size, 5);
+
+    animatePresentationElement(element, {
+      ...base,
+      characterPaletteFront: {
+        colors: ["#ffff5f", "#ffaf00", "#d70000", "#a9914a"],
+        spread: 0.55,
+        direction: "forward",
+      },
+    }, "2026-01-01T00:00:00Z", Date.parse("2026-01-01T00:00:00Z"));
+    scheduled();
+    assert.notEqual(characters[0].style.color, characters.at(-1).style.color);
   } finally {
     globalThis.requestAnimationFrame = originalRequestAnimationFrame;
     globalThis.cancelAnimationFrame = originalCancelAnimationFrame;

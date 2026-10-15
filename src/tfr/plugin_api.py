@@ -25,6 +25,8 @@ from tfr.plugins import (
     PluginWorldInfo,
 )
 from tfr.presentation import (
+    CharacterHueWaveTrack,
+    CharacterPaletteFrontTrack,
     CharacterSweepTrack,
     EffectProgram,
     ForegroundKeyframe,
@@ -32,6 +34,9 @@ from tfr.presentation import (
     PresentationCapability,
     PresentationStyle,
     PresentationVariant,
+    SweepTrailMode,
+    character_hue_wave,
+    character_palette_front,
     character_sweep,
     color_pulse,
 )
@@ -53,6 +58,8 @@ __all__ = (
     "BossViewEvent",
     "BossViewHandle",
     "BossWorldStatus",
+    "CharacterHueWaveTrack",
+    "CharacterPaletteFrontTrack",
     "CharacterSweepTrack",
     "Direction",
     "DuplicatePluginRegistration",
@@ -76,6 +83,9 @@ __all__ = (
     "ScreenClearContext",
     "TextDecoration",
     "TextEffectKind",
+    "SweepTrailMode",
+    "character_hue_wave",
+    "character_palette_front",
     "derive_bright_color",
     "character_sweep",
     "color_pulse",
