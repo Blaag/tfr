@@ -277,6 +277,8 @@ The implemented first vertical slice supports:
 - Foreground-color keyframes.
 - A foreground-color timeline with two or three keyframes and Oklab
   interpolation.
+- Bounded per-character color tracks: directional highlight sweeps, cyclic HSV
+  hue waves, and two-to-eight-color traveling palette fronts.
 - Event-time phase, 1–3 second active duration, 1–60 second repeat interval,
   1–20 repetitions, at most 20 sampled frames per second, and at most five
   minutes total lifetime.
@@ -285,10 +287,13 @@ The implemented first vertical slice supports:
   retained and live events must agree.
 
 Version 1 accepts one grapheme-aligned target of at most 2,048 Unicode code
-points per event. Character sweeps target at most 64 graphemes and use a trail
-width of 1–8. It rejects overlapping or multiple programs. The PWA starts at
+points per event. Character tracks target at most 64 graphemes. Highlight
+sweeps use a width of 0.5–8, optional start/end padding of 0–8 graphemes, and an
+enumerated symmetric, behind, or ahead trail. Hue-wave saturation, brightness,
+and spatial/temporal cycles and palette-front spread/direction are independently
+bounded. It rejects overlapping or multiple programs. The PWA starts at
 most 64 presentation animation-budget units in a rendered transcript; character
-sweeps consume four units and simple timelines consume one. Older targets fall
+sweeps and color tracks consume four units and simple timelines consume one. Older targets fall
 back to the program's static style. Invalid or oversized presentation is omitted
 without dropping readable event text.
 

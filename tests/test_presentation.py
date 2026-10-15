@@ -10,6 +10,9 @@ from tfr.presentation import (
     PresentationCapability,
     PresentationStyle,
     PresentationVariant,
+    SweepTrailMode,
+    character_hue_wave,
+    character_palette_front,
     character_sweep,
     color_pulse,
     effect_programs_as_dict,
@@ -152,6 +155,13 @@ def test_character_sweep_moves_red_uppercase_head_out_and_back() -> None:
         {"at": 0.5, "position": 1.0},
         {"at": 1.0, "position": 0.0},
     ]
+    assert set(projected["character_sweep"]) == {
+        "positions",
+        "base_color",
+        "head_color",
+        "trail_width",
+        "uppercase_head",
+    }
 
 
 def test_character_sweep_has_bounded_target_and_static_reduced_motion() -> None:
@@ -189,6 +199,77 @@ def test_character_sweep_has_bounded_target_and_static_reduced_motion() -> None:
     too_long = character_sweep(0, 65, base_color="#180000", head_color="#ff0000")
     with pytest.raises(ValueError, match="sweep target is too large"):
         validate_effect_programs("a" * 65, (too_long,))
+
+
+def test_character_sweep_supports_one_way_padding_and_directional_trails() -> None:
+    program = character_sweep(
+        0,
+        5,
+        base_color="#000000",
+        head_color="#ffffff",
+        trail_width=1.5,
+        trail_mode=SweepTrailMode.BEHIND,
+        end_padding=3,
+        return_to_start=False,
+    )
+    variant = program.variants[0]
+    projected = effect_programs_as_dict((program,))["programs"][0]["variants"][0]["character_sweep"]
+
+    assert len(variant.character_sweep.positions) == 2  # type: ignore[union-attr]
+    assert projected["trail_mode"] == "behind"
+    assert projected["end_padding"] == 3.0
+    ahead, behind = (
+        presentation_grapheme_at(
+            program,
+            "x",
+            index,
+            5,
+            0.5,
+            animations_enabled=True,
+            capabilities=frozenset(PresentationCapability),
+        )[0].foreground
+        for index in (4, 1)
+    )
+    assert ahead == "#000000"
+    assert behind != "#000000"
+    with pytest.raises(ValueError, match="return flag must be boolean"):
+        character_sweep(  # type: ignore[arg-type]
+            0,
+            1,
+            base_color="#000000",
+            head_color="#ffffff",
+            return_to_start="yes",
+        )
+
+
+def test_character_hue_wave_and_palette_front_are_portable_and_bounded() -> None:
+    rainbow = character_hue_wave(0, 5, base_color="#ffc9d7", repeat_count=2)
+    ember = character_palette_front(
+        0,
+        5,
+        colors=("#ffff5f", "#ffaf00", "#ff5f00", "#d70000", "#a9914a"),
+        repeat_count=2,
+    )
+    capabilities = frozenset(PresentationCapability)
+
+    rainbow_colors = {
+        presentation_grapheme_at(
+            rainbow, "x", index, 5, 0, animations_enabled=True, capabilities=capabilities
+        )[0].foreground
+        for index in range(5)
+    }
+    ember_start = presentation_grapheme_at(
+        ember, "x", 0, 5, 0, animations_enabled=True, capabilities=capabilities
+    )[0].foreground
+    projected_rainbow = effect_programs_as_dict((rainbow,))["programs"][0]["variants"][0]
+    projected_ember = effect_programs_as_dict((ember,))["programs"][0]["variants"][0]
+
+    assert len(rainbow_colors) == 5
+    assert ember_start == "#ffff5f"
+    assert projected_rainbow["character_hue_wave"]["spatial_cycles"] == 1.0
+    assert projected_ember["character_palette_front"]["colors"][-1] == "#a9914a"
+    with pytest.raises(ValueError, match="2 to 8 colors"):
+        character_palette_front(0, 1, colors=("#ffffff",))
 
 
 def test_unsupported_variant_uses_fallback_without_partial_interpretation() -> None:
