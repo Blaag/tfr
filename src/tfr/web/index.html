@@ -13,9 +13,26 @@
     <link rel="icon" href="/icon.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png">
     <link rel="stylesheet" href="/styles.css">
-    <script type="module" src="/app.mjs"></script>
+    <script type="module" src="/bootstrap.mjs"></script>
   </head>
   <body>
+    <main id="startup" class="pairing startup">
+      <section class="pairing-panel" aria-labelledby="startup-title">
+        <div class="signal-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+        <p class="eyebrow">Private field console</p>
+        <h1 id="startup-title">Starting TFR</h1>
+        <p id="startup-status" role="status">Loading the local app and checking the Gateway…</p>
+        <div id="startup-actions" class="startup-actions" hidden>
+          <button id="startup-reload" type="button">Try again</button>
+          <button id="startup-repair" type="button">Repair app</button>
+          <p class="fine-print">
+            Repair removes only cached TFR app files and its service worker. Pairing and settings
+            are preserved.
+          </p>
+        </div>
+      </section>
+    </main>
+
     <main id="pairing" class="pairing" hidden>
       <section class="pairing-panel" aria-labelledby="pairing-title">
         <div class="signal-mark" aria-hidden="true"><span></span><span></span><span></span></div>
@@ -34,6 +51,14 @@
           <button type="submit">Pair this app</button>
         </form>
         <p class="fine-print">The link expires after ten minutes and creates one credential.</p>
+        <section id="ios-install-help" class="install-help" hidden aria-labelledby="install-title">
+          <h2 id="install-title">Install on this iPhone</h2>
+          <ol>
+            <li>Open this page in Safari.</li>
+            <li>Tap Share, then <strong>Add to Home Screen</strong>.</li>
+            <li>Open TFR from its new Home Screen icon and paste the pairing link.</li>
+          </ol>
+        </section>
       </section>
     </main>
 
@@ -198,6 +223,10 @@
     <aside id="update-notice" class="update-notice" role="status" hidden>
       <span>A TFR update is ready.</span>
       <button id="apply-update" type="button">Reload</button>
+    </aside>
+    <aside id="ios-install-notice" class="update-notice install-notice" role="status" hidden>
+      <span>Install TFR: tap Share, then <strong>Add to Home Screen</strong>.</span>
+      <button id="ios-install-dismiss" type="button">Got it</button>
     </aside>
     <div id="toast" class="toast" role="status" hidden></div>
   </body>

@@ -1834,4 +1834,4 @@ if ("serviceWorker" in navigator) {
   });
 }
 
-start();
+export const startup = start();

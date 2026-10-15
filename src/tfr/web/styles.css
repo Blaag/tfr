@@ -161,6 +161,53 @@ a:focus-visible {
   font-weight: 800;
 }
 
+.startup-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.65rem;
+  margin-top: 1.25rem;
+}
+
+.startup-actions[hidden] {
+  display: none;
+}
+
+.startup-actions button {
+  min-height: 2.8rem;
+  border: 1px solid var(--line-bright);
+  background: var(--panel);
+  color: var(--text);
+  font-weight: 700;
+}
+
+.startup-actions #startup-repair {
+  border-color: var(--signal-soft);
+  color: var(--signal);
+}
+
+.startup-actions .fine-print {
+  grid-column: 1 / -1;
+  margin-bottom: 0;
+}
+
+.install-help {
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--line);
+}
+
+.install-help h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.install-help ol {
+  margin: 0.8rem 0 0;
+  padding-left: 1.25rem;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
 .signal-mark {
   display: flex;
   align-items: end;
@@ -808,6 +855,11 @@ a:focus-visible {
   background: var(--panel-2);
   color: var(--text);
   font: inherit;
+}
+
+.install-notice {
+  top: auto;
+  bottom: calc(0.75rem + var(--safe-bottom));
 }
 
 .text-size-controls button {
