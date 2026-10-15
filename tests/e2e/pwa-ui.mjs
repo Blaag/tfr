@@ -305,6 +305,11 @@ try {
   await page.locator("#command-input").fill("“test");
   await page.locator("#command-input").press("Enter");
   assert.equal(await page.evaluate(() => window.__sentCommands.at(-1).text), '"test');
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator('#event-list .event:text-is("\\"test")').count(), 0);
+  await page.locator("#history-button").click();
+  assert.equal(await page.locator("#history-list button").getByText('"test', { exact: true }).count(), 1);
+  await page.keyboard.press("Escape");
 
   await page.locator("#command-input").fill("draft");
   await page.locator("#command-input").evaluate((input) => {
