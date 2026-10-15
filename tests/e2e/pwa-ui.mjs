@@ -342,6 +342,23 @@ try {
   assert.equal(pairingPost, "code=installed-app-secret");
   await unpairedContext.close();
 
+  const recoveryContext = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+    userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1",
+  });
+  const recoveryPage = await recoveryContext.newPage();
+  await recoveryPage.route("**/app.mjs", (route) =>
+    route.fulfill({ status: 503, contentType: "text/javascript", body: "unavailable" }),
+  );
+  await recoveryPage.goto(origin);
+  await recoveryPage.locator("#startup-actions:not([hidden])").waitFor();
+  assert.match(await recoveryPage.locator("#startup-status").innerText(), /could not load/);
+  assert.equal(await recoveryPage.locator("#ios-install-help").getAttribute("hidden"), null);
+  assert.equal(await recoveryPage.locator("#ios-install-notice").getAttribute("hidden"), null);
+  await recoveryContext.close();
+
   console.log("Playwright WebKit mobile UI checks passed");
 } finally {
   await browser.close();

@@ -1,7 +1,8 @@
-const CACHE_NAME = "tfr-shell-web1-v49";
+const CACHE_NAME = "tfr-shell-web1-v50";
 const SHELL = [
   "/",
   "/app.mjs",
+  "/bootstrap.mjs",
   "/command.mjs",
   "/combo.mjs",
   "/connection-lifecycle.mjs",
