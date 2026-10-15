@@ -24,8 +24,10 @@ import {
   animatePresentationElement,
   splitPresentationRuns,
 } from "./presentation.mjs";
+import { restoreTranscriptPosition } from "./scroll-restoration.mjs";
 import { swipeDirection } from "./swipe.mjs";
 import { installTextRunColors, textRunClassNames, validatedTextRuns } from "./text-runs.mjs";
+import { isTranscriptEvent } from "./transcript-events.mjs";
 
 const MAX_EVENTS_PER_WORLD = 2500;
 const MAX_RENDERED_EVENTS = 500;
@@ -942,7 +944,14 @@ function renderTranscript({ scrollToLive = false, smoothScroll = false, restoreP
   }
   elements.eventList.replaceChildren(...nodes);
   elements.emptyState.hidden = visible.length > 0;
-  if (scrollToLive || reading.atLive) {
+  if (restorePosition) {
+    restoreTranscriptPosition({
+      transcript: elements.transcript,
+      reading,
+      schedule: requestAnimationFrame,
+      onRestore: updateReturnLive,
+    });
+  } else if (scrollToLive || reading.atLive) {
     requestAnimationFrame(() => {
       elements.transcript.scrollTo({
         top: elements.transcript.scrollHeight,
@@ -959,11 +968,6 @@ function renderTranscript({ scrollToLive = false, smoothScroll = false, restoreP
       reading.atLive = true;
       reading.unseenLive = 0;
       reading.scrollTop = elements.transcript.scrollTop;
-      updateReturnLive();
-    });
-  } else if (restorePosition) {
-    requestAnimationFrame(() => {
-      elements.transcript.scrollTop = reading.scrollTop;
       updateReturnLive();
     });
   }
@@ -1029,13 +1033,8 @@ function addEvent(message) {
   const event = message.event;
   if (!event || typeof event.world !== "string") return;
   let events = state.events.get(event.world);
-  if (!events) {
-    events = [];
-    state.events.set(event.world, events);
-    state.eventIds.set(event.world, new Set());
-  }
-  const eventIds = state.eventIds.get(event.world);
-  if (eventIds.has(event.id)) return;
+  let eventIds = state.eventIds.get(event.world);
+  if (eventIds?.has(event.id)) return;
   const world = state.worlds.find((item) => item.world === event.world);
   if (world && generationIsNewer(event.connection_generation, world.connection_generation)) {
     world.connection_generation = event.connection_generation;
@@ -1049,6 +1048,14 @@ function addEvent(message) {
     if (event.world === state.selectedWorld && !state.historyReset) showHistoryNotice("");
   }
   if (connection.ready) recordLiveHistoryEvent(world, event);
+  if (connection.ready) state.cursor = message.cursor;
+  if (!isTranscriptEvent(event)) return;
+  if (!events) {
+    events = [];
+    eventIds = new Set();
+    state.events.set(event.world, events);
+    state.eventIds.set(event.world, eventIds);
+  }
   if (connection.ready && state.speakingStreaksEnabled) {
     event.combo = validatedComboCue(event.combo, event.text)
       || observeCombo(state.comboStreaks, event, Date.now(), world);
@@ -1068,11 +1075,7 @@ function addEvent(message) {
     if (world) world.state = event.connection_state;
   }
 
-  if (connection.ready) {
-    state.cursor = message.cursor;
-  } else {
-    return;
-  }
+  if (!connection.ready) return;
   const reading = readingState(event.world);
   if (event.combo && event.world !== state.selectedWorld) {
     event.combo.presented = true;
