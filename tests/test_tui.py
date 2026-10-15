@@ -761,8 +761,8 @@ async def test_update_check_reports_ui_and_gateway_versions(tmp_path: Path) -> N
 
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
     assert "Checking for stable TFR and plugin updates" in text
-    assert "UI update available: 1.2.3 (running 1.0.0" in text
-    assert "Gateway update available: 1.2.3 (running 1.1.0" in text
+    assert "UI update available [stable]: 1.2.3 (running 1.0.0" in text
+    assert "Gateway update available [stable]: 1.2.3 (running 1.1.0" in text
     assert "Plugin update available: owner/plugins 0.5.0 (current 0.4.0)" in text
 
 
@@ -790,16 +790,21 @@ async def test_update_check_reports_configured_candidate_channel(tmp_path: Path)
 
     checker = UpdateChecker(
         UpdateConfig(channel="candidate", state_directory=tmp_path),
-        build=BuildIdentity("1.0.0", "c" * 40),
+        build=BuildIdentity("1.2.3", "a" * 40),
         fetch=fetch,  # type: ignore[arg-type]
     )
-    tui = make_tui(update_checker=checker)
+    tui = make_tui(
+        update_checker=checker,
+        gateway_build=BuildIdentity("1.2.3", "a" * 40),
+    )
 
     await tui._handle_client_command("alpha", "/update check")
 
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
     assert "Checking for candidate TFR updates" in text
     assert "Checking for stable TFR updates" not in text
+    assert "UI 1.2.3 (aaaaaaaaaaaa) [candidate]: up to date" in text
+    assert "Gateway 1.2.3 (aaaaaaaaaaaa) [candidate]: up to date" in text
     assert "inspect candidate TFR and plugin releases" in tui.help_text()
 
 
