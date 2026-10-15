@@ -666,20 +666,31 @@ class UpdateChecker:
             raise UpdateError("update cache directory must be owner-controlled")
 
 
-def format_update_status(label: str, build: BuildIdentity, result: UpdateResult) -> str:
+def format_update_status(
+    label: str,
+    build: BuildIdentity,
+    result: UpdateResult,
+    *,
+    channel: str | None = None,
+) -> str:
     current = f"{build.version} ({build.commit[:12]})" if build.commit else build.version
+    channel_label = f" [{channel}]" if channel in {"stable", "candidate"} else ""
     if result.error is not None:
-        return f"{label} {current}: update check failed: {result.error}"
+        return f"{label} {current}{channel_label}: update check failed: {result.error}"
     if result.manifest is None:
-        return f"{label} {current}: not checked yet"
+        return f"{label} {current}{channel_label}: not checked yet"
     if result.available_for(build):
         compatibility = "" if result.manifest.supports(build) else "; protocol review required"
         return (
-            f"{label} update available: {result.manifest.version} (running {current})"
+            f"{label} update available{channel_label}: "
+            f"{result.manifest.version} (running {current})"
             f"{compatibility}. {result.manifest.release_url}"
         )
     if result.manifest.version == build.version and build.commit is None:
-        return f"{label} {current}: version is current; exact build identity is unavailable"
+        return (
+            f"{label} {current}{channel_label}: version is current; "
+            "exact build identity is unavailable"
+        )
     if _BUILD_RELEASE.fullmatch(build.version) is None:
-        return f"{label} {current}: stable version comparison is unavailable"
-    return f"{label} {current}: up to date"
+        return f"{label} {current}{channel_label}: stable version comparison is unavailable"
+    return f"{label} {current}{channel_label}: up to date"

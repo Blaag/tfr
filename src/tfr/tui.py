@@ -3725,7 +3725,15 @@ class TfrTui:
             builds.append(("Gateway", self.gateway_build))
         for label, build in builds:
             if not available_only or result.available_for(build):
-                self.add_notice(target, format_update_status(label, build, result))
+                channel = (
+                    self.update_checker.config.channel
+                    if self.update_checker is not None
+                    else None
+                )
+                self.add_notice(
+                    target,
+                    format_update_status(label, build, result, channel=channel),
+                )
 
     def _show_plugin_update_status(
         self,

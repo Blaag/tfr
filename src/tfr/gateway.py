@@ -675,7 +675,12 @@ class GatewayRuntime:
         await self.event_bus.close()
 
     def _notify_update(self, result: UpdateResult) -> None:
-        print(format_update_status("Gateway", self.build, result), file=sys.stderr, flush=True)
+        channel = self.update_checker.config.channel if self.update_checker is not None else None
+        print(
+            format_update_status("Gateway", self.build, result, channel=channel),
+            file=sys.stderr,
+            flush=True,
+        )
 
     def world_descriptors(self) -> list[dict[str, Any]]:
         agent_worlds = {controller.session.world for controller in self.agents.controllers.values()}
