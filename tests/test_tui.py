@@ -766,6 +766,43 @@ async def test_update_check_reports_ui_and_gateway_versions(tmp_path: Path) -> N
     assert "Plugin update available: owner/plugins 0.5.0 (current 0.4.0)" in text
 
 
+async def test_update_check_reports_configured_candidate_channel(tmp_path: Path) -> None:
+    manifest = {
+        "schema_version": 1,
+        "project": "tfr",
+        "channel": "candidate",
+        "version": "1.2.3",
+        "tag": "v1.2.3-candidate.1",
+        "commit": "a" * 40,
+        "protocol": {"minimum": 1, "maximum": 1},
+        "release_url": "https://github.com/Blaag/tfr/releases/tag/v1.2.3-candidate.1",
+        "artifact": {
+            "url": "https://example.invalid/tfr.whl",
+            "size": 10,
+            "sha256": "b" * 64,
+        },
+    }
+
+    def fetch(_url: str, _etag: str | None, _timeout: float) -> object:
+        import json
+
+        return SimpleNamespace(content=json.dumps(manifest).encode(), etag=None)
+
+    checker = UpdateChecker(
+        UpdateConfig(channel="candidate", state_directory=tmp_path),
+        build=BuildIdentity("1.0.0", "c" * 40),
+        fetch=fetch,  # type: ignore[arg-type]
+    )
+    tui = make_tui(update_checker=checker)
+
+    await tui._handle_client_command("alpha", "/update check")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Checking for candidate TFR updates" in text
+    assert "Checking for stable TFR updates" not in text
+    assert "inspect candidate TFR and plugin releases" in tui.help_text()
+
+
 async def test_bare_update_reports_the_coordinated_release_link(tmp_path: Path) -> None:
     checker = UpdateChecker(UpdateConfig(state_directory=tmp_path))
 
@@ -830,6 +867,8 @@ async def test_force_update_is_candidate_only_and_passes_force_to_gateway(
     await candidate._handle_client_command("alpha", "/update force")
 
     assert calls == [True]
+    candidate_text = fragment_list_to_text(candidate.active_view.display.formatted_text())
+    assert "Checking for candidate updates on the Gateway and all connected UIs" in candidate_text
 
     stable = make_tui(
         update_checker=UpdateChecker(UpdateConfig(state_directory=tmp_path / "stable"))

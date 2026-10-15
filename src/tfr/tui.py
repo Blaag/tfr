@@ -3220,6 +3220,11 @@ class TfrTui:
         return shadowed
 
     def help_text(self) -> str:
+        update_channel = (
+            self.update_checker.config.channel
+            if self.update_checker is not None
+            else "stable"
+        )
         lines = [
             "TFR commands",
             "  /help - show this help",
@@ -3239,7 +3244,7 @@ class TfrTui:
             "  /streaks on|off|status - control speaking streak effects",
             "  /effects - open the local Effects Lab; /demoeffects is an alias",
             "  /update - update TFR and stable-auto plugins on the Gateway and all connected UIs",
-            "  /update status|check - inspect stable TFR and plugin releases",
+            f"  /update status|check - inspect {update_channel} TFR and plugin releases",
             "  /update force - candidate channel only; force every host to stage locally",
             "  /plugins - show configured, loaded, and failed plugins",
             "  /agent status|inspect|pause|resume|trigger|close - manage agents",
@@ -3611,8 +3616,13 @@ class TfrTui:
         plugins_enabled = (
             self.plugin_update_checker is not None and self.plugin_update_checker.enabled
         )
+        channel = (
+            self.update_checker.config.channel
+            if self.update_checker is not None
+            else "stable"
+        )
         if not core_enabled and not plugins_enabled:
-            self.add_notice(alias, "Stable update checks are disabled")
+            self.add_notice(alias, f"{channel.title()} update checks are disabled")
             return
         force = parameters == ["force"]
         if force and (
@@ -3623,11 +3633,11 @@ class TfrTui:
             return
         if not parameters or force:
             if not core_enabled:
-                self.add_notice(alias, "Stable TFR updates are disabled")
+                self.add_notice(alias, f"{channel.title()} TFR updates are disabled")
                 return
             self.add_notice(
                 alias,
-                "Checking for stable updates on the Gateway and all connected UIs...",
+                f"Checking for {channel} updates on the Gateway and all connected UIs...",
             )
             try:
                 if self.service_runtime is not None and hasattr(
@@ -3638,7 +3648,7 @@ class TfrTui:
                     core_result = await self.update_checker.check()
                     if core_result.error is not None:
                         raise ValueError(
-                            f"cannot check stable TFR updates: {core_result.error}"
+                            f"cannot check {channel} TFR updates: {core_result.error}"
                         )
                     core_available = core_result.available_for(self.update_checker.build)
                     plugin_available = (
@@ -3677,7 +3687,7 @@ class TfrTui:
                 if core_enabled and plugins_enabled
                 else "plugin" if plugins_enabled else "TFR"
             )
-            self.add_notice(alias, f"Checking for stable {scope} updates...")
+            self.add_notice(alias, f"Checking for {channel} {scope} updates...")
             if core_enabled and plugins_enabled:
                 result, plugin_results = await asyncio.gather(
                     self.update_checker.check(),

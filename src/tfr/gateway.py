@@ -1438,7 +1438,8 @@ class GatewayServer:
             self._update_gateway_restart = False
             self._update_force = force
             if self.runtime.update_checker is None:
-                raise ValueError("stable updates are unavailable")
+                raise ValueError("TFR updates are unavailable")
+            channel = self.runtime.update_checker.config.channel
             if force and self.runtime.update_checker.config.channel != "candidate":
                 raise ValueError("forced updates are available only on the candidate channel")
             async with self._update_participants_lock:
@@ -1459,10 +1460,14 @@ class GatewayServer:
             try:
                 update_result = await self.runtime.update_checker.check()
                 if update_result.error is not None:
-                    raise ValueError(f"cannot check stable TFR updates: {update_result.error}")
+                    raise ValueError(
+                        f"cannot check {channel} TFR updates: {update_result.error}"
+                    )
                 manifest = update_result.manifest
                 if manifest is None:
-                    raise ValueError("stable TFR update check returned no release manifest")
+                    raise ValueError(
+                        f"{channel} TFR update check returned no release manifest"
+                    )
                 gateway_build = getattr(self.runtime, "build", current_build())
                 gateway_core_update = force or update_result.available_for(gateway_build)
                 participant_core_updates = {

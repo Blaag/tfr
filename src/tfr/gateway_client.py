@@ -970,7 +970,7 @@ class GatewayUiRuntime:
         force: bool = False,
     ) -> dict[str, Any]:
         if self.update_config is None:
-            raise ValueError("stable updates are unavailable")
+            raise ValueError("TFR updates are unavailable")
         self._update_transaction_active = True
         if force and self.update_config.channel != "candidate":
             raise ValueError("forced updates are available only on the candidate channel")
