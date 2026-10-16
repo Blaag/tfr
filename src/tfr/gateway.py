@@ -863,6 +863,8 @@ class GatewayServer:
         device_list_factory: Callable[[], list[dict[str, Any]]] | None = None,
         device_revoke_factory: Callable[[UUID], Awaitable[bool]] | None = None,
         web_origin: str | None = None,
+        diagnostic_list_factory: Callable[[str | None], list[dict[str, Any]]] | None = None,
+        diagnostic_clear_factory: Callable[[], None] | None = None,
         update_notice: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         if (
@@ -900,6 +902,8 @@ class GatewayServer:
         self.device_list_factory = device_list_factory
         self.device_revoke_factory = device_revoke_factory
         self.web_origin = web_origin
+        self.diagnostic_list_factory = diagnostic_list_factory
+        self.diagnostic_clear_factory = diagnostic_clear_factory
         self.update_notice = update_notice
         self._server: asyncio.Server | None = None
         self._tcp_server: asyncio.Server | None = None
@@ -1402,6 +1406,29 @@ class GatewayServer:
                     "origin": self.web_origin,
                     "device_count": len(devices),
                 }
+            elif message_type == "diagnostics":
+                if not allow_admin or self.diagnostic_list_factory is None:
+                    raise ValueError("diagnostics are unavailable")
+                if set(message) not in (
+                    {"type", "protocol", "request_id"},
+                    {"type", "protocol", "request_id", "category"},
+                ):
+                    raise ValueError("diagnostics has invalid fields")
+                category = message.get("category")
+                if category is not None and category not in {
+                    "web",
+                    "presentations",
+                    "plugins",
+                }:
+                    raise ValueError("diagnostic category is invalid")
+                result = {"entries": self.diagnostic_list_factory(category)}
+            elif message_type == "clear_diagnostics":
+                if not allow_admin or self.diagnostic_clear_factory is None:
+                    raise ValueError("diagnostics are unavailable")
+                if set(message) != {"type", "protocol", "request_id"}:
+                    raise ValueError("clear_diagnostics has invalid fields")
+                self.diagnostic_clear_factory()
+                result = {"cleared": True}
             elif message_type == "list_devices":
                 if not allow_admin or self.device_list_factory is None:
                     raise ValueError("web device administration is unavailable")
@@ -1833,6 +1860,8 @@ async def run_gateway(
         device_list_factory=(web_server.device_descriptors if web_server is not None else None),
         device_revoke_factory=(web_server.revoke_device if web_server is not None else None),
         web_origin=bundle.main.web_gateway.canonical_origin,
+        diagnostic_list_factory=(web_server.diagnostic_entries if web_server is not None else None),
+        diagnostic_clear_factory=(web_server.clear_diagnostics if web_server is not None else None),
         update_notice=(web_server.notify_update if web_server is not None else None),
     )
     stop = asyncio.Event()

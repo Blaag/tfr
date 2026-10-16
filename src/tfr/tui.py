@@ -190,6 +190,10 @@ class ServiceRuntime(Protocol):
 
     async def revoke_web_device(self, device_id: UUID) -> None: ...
 
+    async def diagnostics(self, category: str | None = None) -> list[dict[str, Any]]: ...
+
+    async def clear_diagnostics(self) -> None: ...
+
 
 @dataclass(slots=True)
 class ImagePreview:
@@ -3123,7 +3127,8 @@ class TfrTui:
         command, *parameters = arguments
         command = command.casefold()
         lab_commands = {
-            "demoeffects",
+        "demoeffects",
+        "diagnostics",
             "effects",
             "n",
             "next",
@@ -3184,6 +3189,8 @@ class TfrTui:
             await self._handle_update_command(alias, parameters)
         elif command == "web":
             await self._handle_web_command(alias, parameters)
+        elif command == "diagnostics":
+            await self._handle_diagnostics_command(alias, parameters)
         elif command == "plugins":
             if parameters:
                 self.add_notice(alias, "Usage: /plugins")
@@ -3285,6 +3292,7 @@ class TfrTui:
             f"  /update status|check - inspect {update_channel} TFR and plugin releases",
             "  /update force - candidate channel only; force every host to stage locally",
             "  /web status|repair|pair|devices|revoke - manage the private iPhone PWA",
+            "  /diagnostics [web|presentations|plugins|clear] - inspect runtime diagnostics",
             "  /plugins - show configured, loaded, and failed plugins",
             "  /agent status|inspect|pause|resume|trigger|close - manage agents",
             "  /quit - exit TFR; //TEXT sends a literal leading slash",
@@ -3725,6 +3733,49 @@ class TfrTui:
             self.add_notice(alias, f"Web administration failed: {exc}")
             return
         self.add_notice(alias, usage)
+
+    async def _handle_diagnostics_command(self, alias: str, parameters: list[str]) -> None:
+        usage = "Usage: /diagnostics [web|presentations|plugins|clear]"
+        if self.service_runtime is None:
+            self.add_notice(alias, "Diagnostics are available only in an attached UI")
+            return
+        if len(parameters) > 1:
+            self.add_notice(alias, usage)
+            return
+        category = parameters[0].casefold() if parameters else None
+        if category not in {None, "web", "presentations", "plugins", "clear"}:
+            self.add_notice(alias, usage)
+            return
+        try:
+            if category == "clear":
+                await self.service_runtime.clear_diagnostics()
+                self.add_notice(alias, "Cleared bounded runtime diagnostics")
+                return
+            entries = await self.service_runtime.diagnostics(category)
+            status = await self.service_runtime.web_status() if category is None else None
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            self.add_notice(alias, f"Diagnostics failed: {exc}")
+            return
+        if not entries and status is None:
+            self.add_notice(alias, "No matching runtime diagnostics")
+            return
+        lines = [f"Runtime diagnostics{f' — {category}' if category else ''}"]
+        if status is not None:
+            lines.append(
+                f"  Gateway connection: healthy; PWA: "
+                f"{'enabled' if status.get('enabled') else 'disabled'}; "
+                f"devices: {status.get('device_count', 'unknown')}"
+            )
+            if not entries:
+                lines.append("  No recent diagnostic entries")
+        for entry in entries[-25:]:
+            source = f"{entry.get('client', 'gateway')}/{entry.get('component', 'unknown')}"
+            lines.append(
+                f"  {entry.get('timestamp', 'unknown')}  {entry.get('severity', 'warning')}  "
+                f"{source}  {entry.get('code', 'unknown')}\n"
+                f"    {entry.get('message', 'No message')}"
+            )
+        self.add_notice(alias, "\n".join(lines))
 
     async def _handle_update_command(self, alias: str, parameters: list[str]) -> None:
         if parameters not in ([], ["status"], ["check"], ["force"]):

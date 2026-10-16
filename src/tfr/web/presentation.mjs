@@ -330,6 +330,41 @@ export function validatedPresentation(event) {
   return ordered;
 }
 
+export function presentationValidationResult(event) {
+  if (event?.presentation === undefined) {
+    return { value: null, error: { code: "presentation_missing", path: "presentation" } };
+  }
+  const value = validatedPresentation(event);
+  if (value) return { value, error: null };
+  const variants = Array.isArray(event?.presentation?.programs)
+    ? event.presentation.programs.flatMap((program) =>
+        Array.isArray(program?.variants) ? program.variants : []
+      )
+    : [];
+  if (variants.some((variant) => variant?.character_palette_front !== undefined)) {
+    return {
+      value: null,
+      error: {
+        code: "palette_front_rejected",
+        path: "presentation.programs[].variants[].character_palette_front",
+      },
+    };
+  }
+  if (variants.some((variant) => variant?.character_hue_wave !== undefined)) {
+    return {
+      value: null,
+      error: {
+        code: "hue_wave_rejected",
+        path: "presentation.programs[].variants[].character_hue_wave",
+      },
+    };
+  }
+  return {
+    value: null,
+    error: { code: "presentation_schema_rejected", path: "presentation.programs" },
+  };
+}
+
 export function selectPresentation(program, animationsEnabled) {
   if (!animationsEnabled) return { style: program.reduced_motion, animation: null };
   const variant = program.variants.find((candidate) =>

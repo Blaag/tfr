@@ -20,6 +20,7 @@ from aiohttp import WSMsgType, web
 from tfr.ansi import BrowserTextSpan, ansi_visible_text, browser_text_spans, terminal_plain_text
 from tfr.combo import Combo, ComboTracker
 from tfr.core import UnknownSessionError
+from tfr.diagnostics import DiagnosticBuffer
 from tfr.events import ActorType, Confidence, Direction, Event, EventKind, Provenance
 from tfr.gateway import GatewayRuntime, HistorySubscription, SequencedEvent
 from tfr.gateway_devices import DeviceRecord, DeviceStore
@@ -46,7 +47,18 @@ MAX_WEB_SNAPSHOT_BYTES = 2_097_152
 MAX_WEB_SNAPSHOT_SOURCE_BYTES = 8_388_608
 MAX_WEB_FRAMES_PER_MINUTE = 120
 MAX_WEB_CONNECTIONS_PER_MINUTE = 12
+MAX_WEB_DIAGNOSTICS_PER_MINUTE = 20
 WEB_WRITE_TIMEOUT_SECONDS = 5
+
+_PWA_DIAGNOSTIC_CODES = {
+    ("startup", "application_import_failed"): "The PWA application module failed to initialize",
+    ("connection", "ready_timeout"): "The PWA Gateway connection did not become ready",
+    ("connection", "websocket_closed"): "The PWA WebSocket closed unexpectedly",
+    ("presentation", "gateway_omitted"): "The Gateway omitted a configured presentation",
+    ("presentation", "palette_front_rejected"): "The PWA rejected a palette-front presentation",
+    ("presentation", "hue_wave_rejected"): "The PWA rejected a hue-wave presentation",
+    ("presentation", "presentation_schema_rejected"): "The PWA rejected a presentation schema",
+}
 
 _VISIBLE_EVENT_KINDS = {
     EventKind.RAW_OUTPUT,
@@ -72,6 +84,7 @@ _ASSETS = {
         "connection-lifecycle.mjs",
         "text/javascript; charset=utf-8",
     ),
+    "/diagnostics.mjs": ("diagnostics.mjs", "text/javascript; charset=utf-8"),
     "/event-details.mjs": ("event-details.mjs", "text/javascript; charset=utf-8"),
     "/effects-lab.mjs": ("effects-lab.mjs", "text/javascript; charset=utf-8"),
     "/history-notice.mjs": ("history-notice.mjs", "text/javascript; charset=utf-8"),
@@ -365,6 +378,8 @@ class WebGatewayServer:
         self._pairing_attempts: dict[str, deque[float]] = defaultdict(deque)
         self._global_pairing_attempts: deque[float] = deque()
         self._session_lock = asyncio.Lock()
+        self.diagnostics = DiagnosticBuffer()
+        self._diagnostic_times: dict[UUID, deque[float]] = defaultdict(deque)
 
     def create_pairing_url(self, label: str) -> str:
         allowed_worlds = tuple(self._non_agent_worlds())
@@ -399,6 +414,25 @@ class WebGatewayServer:
             key=lambda item: (bool(item["active"]), str(item.get("last_used_at", ""))),
             reverse=True,
         )
+
+    def diagnostic_entries(self, category: str | None = None) -> list[dict[str, Any]]:
+        entries = [*self.runtime.plugins.diagnostics.entries(), *self.diagnostics.entries()]
+        if category == "web":
+            entries = [
+                entry
+                for entry in entries
+                if entry.component in {"web", "startup", "connection"}
+            ]
+        elif category == "presentations":
+            entries = [entry for entry in entries if entry.component == "presentation"]
+        elif category == "plugins":
+            entries = [entry for entry in entries if entry.component == "plugin"]
+        ordered = sorted(entries, key=lambda item: item.timestamp)[-100:]
+        return [entry.as_dict() for entry in ordered]
+
+    def clear_diagnostics(self) -> None:
+        self.runtime.plugins.diagnostics.clear()
+        self.diagnostics.clear()
 
     async def revoke_device(self, device_id: UUID) -> bool:
         async with self._session_lock:
@@ -436,10 +470,11 @@ class WebGatewayServer:
                 web.get("/pair", self._pair_redirect),
                 web.post("/pair", self._pair_page),
                 web.post("/api/logout", self._logout),
+                web.post("/api/diagnostics", self._report_diagnostic),
                 web.get("/ws", self._websocket),
                 web.get(
                     "/{asset:index.html|app.mjs|bootstrap.mjs|command.mjs|connection-lifecycle.mjs|"
-                    "event-details.mjs|effects-lab.mjs|history-notice.mjs|linkify.mjs|motion.mjs|pairing.mjs|"
+                    "diagnostics.mjs|event-details.mjs|effects-lab.mjs|history-notice.mjs|linkify.mjs|motion.mjs|pairing.mjs|"
                     "presentation.mjs|scroll-restoration.mjs|combo.mjs|swipe.mjs|text-runs.mjs|"
                     "transcript-events.mjs|styles.css|manifest.webmanifest|"
                     "repair.html|repair.css|repair.mjs|sw.js|icon.svg|icon-512.png|"
@@ -554,6 +589,52 @@ class WebGatewayServer:
                 ),
             }
         )
+
+    async def _report_diagnostic(self, request: web.Request) -> web.Response:
+        self._validate_public_request(request, require_origin=True)
+        device = self._authenticate(request)
+        if device is None:
+            raise web.HTTPUnauthorized(text="Pair this device first")
+        now = time.monotonic()
+        attempts = self._diagnostic_times[device.device_id]
+        while attempts and attempts[0] <= now - 60:
+            attempts.popleft()
+        if len(attempts) >= MAX_WEB_DIAGNOSTICS_PER_MINUTE:
+            raise web.HTTPTooManyRequests(text="Diagnostic report rate limit reached")
+        attempts.append(now)
+        try:
+            value = await request.json(loads=json.loads)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            raise web.HTTPBadRequest(text="Invalid diagnostic report") from None
+        if not isinstance(value, dict) or set(value) - {
+            "severity",
+            "component",
+            "code",
+            "operation",
+            "event_id",
+            "shell_version",
+        }:
+            raise web.HTTPBadRequest(text="Invalid diagnostic report")
+        component = value.get("component")
+        code = value.get("code")
+        safe_message = _PWA_DIAGNOSTIC_CODES.get((component, code))
+        if safe_message is None:
+            raise web.HTTPBadRequest(text="Unsupported diagnostic code")
+        try:
+            self.diagnostics.record(
+                severity=value.get("severity", "warning"),
+                component=component,
+                code=code,
+                message=safe_message,
+                operation=value.get("operation"),
+                client="pwa",
+                event_id=value.get("event_id"),
+                device_id_suffix=str(device.device_id)[-8:],
+                shell_version=value.get("shell_version"),
+            )
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from None
+        return self._json_response({"accepted": True})
 
     def _record_pairing_attempt(self, tailscale_login: str) -> bool:
         now = time.monotonic()

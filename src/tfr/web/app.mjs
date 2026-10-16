@@ -6,6 +6,12 @@ import {
   validatedComboCue,
 } from "./combo.mjs";
 import { createConnectionLifecycle } from "./connection-lifecycle.mjs";
+import {
+  clearDiagnostics,
+  diagnosticEntries,
+  recordDiagnostic,
+  reportDiagnostic,
+} from "./diagnostics.mjs";
 import { connectionNotice, eventDetailRows } from "./event-details.mjs";
 import {
   comboLabDefinition,
@@ -23,7 +29,7 @@ import { motionAllowsAnimation } from "./motion.mjs";
 import {
   animatePresentationElement,
   splitPresentationRuns,
-  validatedPresentation,
+  presentationValidationResult,
 } from "./presentation.mjs";
 import { restoreTranscriptPosition } from "./scroll-restoration.mjs";
 import { swipeDirection } from "./swipe.mjs";
@@ -98,6 +104,12 @@ const elements = {
   effectsLabFireworks: document.querySelector("#effects-lab-fireworks"),
   effectsLabCommand: document.querySelector("#effects-lab-command"),
   effectsLabCommandInput: document.querySelector("#effects-lab-command-input"),
+  diagnosticsButton: document.querySelector("#diagnostics-button"),
+  diagnosticsDialog: document.querySelector("#diagnostics-dialog"),
+  diagnosticsOutput: document.querySelector("#diagnostics-output"),
+  diagnosticsCopy: document.querySelector("#diagnostics-copy"),
+  diagnosticsClear: document.querySelector("#diagnostics-clear"),
+  diagnosticsClose: document.querySelector("#diagnostics-close"),
 };
 
 const state = {
@@ -341,7 +353,8 @@ function previewLabCombo(count) {
 function previewLabSpeaker(demo) {
   const sample = demo?.samples?.[0];
   if (!sample) return;
-  const hasPresentation = validatedPresentation(sample) !== null;
+  const validation = presentationValidationResult(sample);
+  const hasPresentation = validation.value !== null;
   elements.effectsLabMessage.replaceChildren();
   appendEventText(
     elements.effectsLabMessage,
@@ -351,9 +364,22 @@ function previewLabSpeaker(demo) {
   elements.effectsLabNotice.textContent = hasPresentation
     ? ""
     : sample.presentation
-      ? "This PWA rejected the configured sample's portable presentation."
+      ? `This PWA rejected the configured sample's portable presentation: ${validation.error.code} at ${validation.error.path}.`
       : "The Gateway did not provide a portable presentation for this configured sample.";
   elements.effectsLabNotice.hidden = hasPresentation;
+  if (!hasPresentation) {
+    const entry = recordDiagnostic({
+      severity: "warning",
+      component: "presentation",
+      code: sample.presentation ? validation.error.code : "gateway_omitted",
+      message: sample.presentation
+        ? `The PWA rejected a configured presentation (${validation.error.code})`
+        : "The Gateway omitted a configured Effects Lab presentation",
+      operation: validation.error?.path || demo.id,
+      event_id: sample.id,
+    });
+    reportDiagnostic(entry);
+  }
 }
 
 function renderEffectsLabCatalog() {
@@ -423,6 +449,13 @@ const connection = createConnectionLifecycle({
   setTimer: (callback, delay) => window.setTimeout(callback, delay),
   clearTimer: (timer) => window.clearTimeout(timer),
   onConnectionTimeout: (socket) => {
+    reportDiagnostic(recordDiagnostic({
+      severity: "error",
+      component: "connection",
+      code: "ready_timeout",
+      message: "Gateway connection did not become ready within eight seconds",
+      operation: "websocket",
+    }));
     setConnection(navigator.onLine ? "Gateway unavailable" : "Offline", "error");
     updateWorldHeader();
     try {
@@ -1319,6 +1352,13 @@ function connect() {
   socket.addEventListener("close", async (event) => {
     const closeToken = connection.close(socket);
     if (closeToken === null) return;
+    reportDiagnostic(recordDiagnostic({
+      severity: event.code === 1000 ? "info" : "warning",
+      component: "connection",
+      code: "websocket_closed",
+      message: `WebSocket closed with code ${event.code}`,
+      operation: "websocket",
+    }));
     stopHeartbeat();
     updateWorldHeader();
     if (state.pending.size > 0) {
@@ -1688,6 +1728,32 @@ elements.effectsLabButton.addEventListener("click", () => {
   renderEffectsLabCatalog();
   elements.settingsDialog.close();
   elements.effectsLab.showModal();
+});
+elements.diagnosticsButton.addEventListener("click", () => {
+  const entries = diagnosticEntries();
+  elements.diagnosticsOutput.textContent = entries.length
+    ? JSON.stringify({
+        gateway: elements.gatewayVersion.textContent,
+        connection: elements.connectionState.textContent,
+        service_worker: navigator.serviceWorker?.controller ? "controlling" : "not controlling",
+        entries,
+      }, null, 2)
+    : "No local diagnostics.";
+  elements.settingsDialog.close();
+  elements.diagnosticsDialog.showModal();
+});
+elements.diagnosticsClose.addEventListener("click", () => elements.diagnosticsDialog.close());
+elements.diagnosticsCopy.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(elements.diagnosticsOutput.textContent);
+    showToast("Diagnostics copied");
+  } catch {
+    showToast("Could not copy diagnostics");
+  }
+});
+elements.diagnosticsClear.addEventListener("click", () => {
+  clearDiagnostics();
+  elements.diagnosticsOutput.textContent = "No local diagnostics.";
 });
 elements.effectsLabClose.addEventListener("click", () => {
   cancelComboVisuals();

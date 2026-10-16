@@ -337,6 +337,10 @@ try {
   assert.equal(await page.evaluate(() => window.__sentCommands.length), sentBeforeLab);
   await page.locator("#effects-lab-close").click();
   await page.locator("#settings-button").click();
+  await page.locator("#diagnostics-button").click();
+  assert.match(await page.locator("#diagnostics-output").innerText(), /gateway_omitted/);
+  await page.locator("#diagnostics-close").click();
+  await page.locator("#settings-button").click();
   await page.locator("#spelling-suggestions").uncheck();
   assert.equal(await page.locator("#command-input").getAttribute("spellcheck"), "false");
   assert.equal(await page.locator("#command-input").getAttribute("autocorrect"), "off");

@@ -36,6 +36,7 @@ from tfr.clear_effects import (
     validate_screen_clear_frame,
 )
 from tfr.core import CommandBus, EventBus
+from tfr.diagnostics import DiagnosticBuffer
 from tfr.events import (
     Actor,
     ActorType,
@@ -744,6 +745,7 @@ class PluginManager:
         self.config: Mapping[str, Any] = MappingProxyType({})
         self._loaded_plugins: list[str] = []
         self.load_failures: dict[str, str] = {}
+        self.diagnostics = DiagnosticBuffer()
         if scope != "gateway":
             from tfr.boss import BuiltinBossPlugin
 
@@ -945,6 +947,14 @@ class PluginManager:
         world: str = "tfr",
     ) -> None:
         error_type = type(error).__name__
+        if not operation.startswith("presentation:"):
+            self.diagnostics.record(
+                severity="error",
+                component="plugin",
+                code="operation_failed",
+                message=f"{plugin} failed during {operation}: {error_type}"[:240],
+                operation=operation[:100],
+            )
         event = Event(
             session_id=self._session_id,
             world=world,
@@ -1343,12 +1353,34 @@ class PluginManager:
         for name, (plugin, decorator) in tuple(self.registry.presentation_decorators.items()):
             try:
                 additions = tuple(decorator(event, text))
-                combined = tuple((*programs, *additions))
-                validate_effect_programs(text, combined)
-                programs.extend(additions)
             except Exception as exc:
                 self.registry.presentation_decorators.pop(name, None)
+                self.diagnostics.record(
+                    severity="error",
+                    component="presentation",
+                    code="decorator_failed",
+                    message=f"{plugin} presentation decorator raised {type(exc).__name__}",
+                    operation=name,
+                    event_id=str(event.event_id),
+                )
                 self._schedule_failure(plugin, f"presentation:{name}", exc, world=event.world)
+                continue
+            try:
+                combined = tuple((*programs, *additions))
+                validate_effect_programs(text, combined)
+            except ValueError as exc:
+                self.registry.presentation_decorators.pop(name, None)
+                self.diagnostics.record(
+                    severity="error",
+                    component="presentation",
+                    code="program_rejected",
+                    message=str(exc)[:240],
+                    operation=name,
+                    event_id=str(event.event_id),
+                )
+                self._schedule_failure(plugin, f"presentation:{name}", exc, world=event.world)
+                continue
+            programs.extend(additions)
         result = tuple(programs)
         self._presentation_cache[cache_key] = result
         if len(self._presentation_cache) > 5_000:

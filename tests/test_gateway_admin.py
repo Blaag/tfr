@@ -101,6 +101,7 @@ async def test_attached_native_client_manages_web_devices() -> None:
     socket_path = Path("/tmp") / f"tfr-native-admin-{uuid4().hex[:8]}" / "gateway.sock"
     device_id = UUID("eb4fd272-a20a-444e-8b4d-93f2e0ad2713")
     revoked: list[UUID] = []
+    cleared: list[bool] = []
 
     async def revoke(received: UUID) -> bool:
         revoked.append(received)
@@ -113,6 +114,17 @@ async def test_attached_native_client_manages_web_devices() -> None:
         device_list_factory=lambda: [{"device_id": str(device_id), "label": "Phone"}],
         device_revoke_factory=revoke,
         web_origin="https://gateway.example.ts.net",
+        diagnostic_list_factory=lambda category: [
+            {
+                "timestamp": "2026-10-16T00:00:00Z",
+                "severity": "warning",
+                "component": "presentation",
+                "code": "program_rejected",
+                "message": f"category={category}",
+                "client": "gateway",
+            }
+        ],
+        diagnostic_clear_factory=lambda: cleared.append(True),
     )
     await server.start()
     client = await GatewayClient.connect(socket_path)
@@ -129,6 +141,9 @@ async def test_attached_native_client_manages_web_devices() -> None:
         assert (await client.list_web_devices())[0]["device_id"] == str(device_id)
         await client.revoke_web_device(device_id)
         assert revoked == [device_id]
+        assert (await client.diagnostics("presentations"))[0]["code"] == "program_rejected"
+        await client.clear_diagnostics()
+        assert cleared == [True]
     finally:
         await client.stop()
         await server.stop()
