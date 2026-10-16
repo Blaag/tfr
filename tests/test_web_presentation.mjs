@@ -325,7 +325,11 @@ test("renders hue-wave and palette-front character colors", () => {
     }, "2026-01-01T00:00:00Z", Date.parse("2026-01-01T00:00:00Z"));
     scheduled();
     assert.equal(new Set(characters.map((character) => character.style.color)).size, 5);
+    animation.currentTime = 2500;
+    scheduled();
+    assert.ok(characters.every((character) => character.style.color === "#ffc9d7"));
 
+    animation.currentTime = 450;
     animatePresentationElement(element, {
       ...base,
       characterPaletteFront: {
@@ -336,6 +340,9 @@ test("renders hue-wave and palette-front character colors", () => {
     }, "2026-01-01T00:00:00Z", Date.parse("2026-01-01T00:00:00Z"));
     scheduled();
     assert.notEqual(characters[0].style.color, characters.at(-1).style.color);
+    animation.currentTime = 3500;
+    scheduled();
+    assert.ok(characters.every((character) => character.style.color === "#a9914a"));
   } finally {
     globalThis.requestAnimationFrame = originalRequestAnimationFrame;
     globalThis.cancelAnimationFrame = originalCancelAnimationFrame;

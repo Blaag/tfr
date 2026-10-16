@@ -836,6 +836,9 @@ async def test_web_commands_manage_devices_through_attached_gateway() -> None:
                     "label": "Chris iPhone",
                     "tailscale_login": "chris@example.com",
                     "allowed_worlds": ["alpha"],
+                    "active": True,
+                    "created_at": "2026-10-15T00:00:00Z",
+                    "last_used_at": "2026-10-16T00:00:00Z",
                     "expires_at": "2027-01-01T00:00:00Z",
                 }
             ]
@@ -862,6 +865,7 @@ async def test_web_commands_manage_devices_through_attached_gateway() -> None:
     assert "https://gateway.example.ts.net/#pair=test-secret" in text
     assert any(glyph in text for glyph in "▀▄█")
     assert "Chris iPhone  chris@example.com" in text
+    assert "active now; created: 2026-10-15T00:00:00Z" in text
     assert f"Revoked web device {device_id}" in text
     assert runtime.revoked == [device_id]
 

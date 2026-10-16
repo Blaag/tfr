@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import stat
 from dataclasses import replace
@@ -65,6 +66,53 @@ async def test_pairing_code_retry_is_atomic_and_idempotent(tmp_path: Path) -> No
     assert await store.redeem(code, "black@example.com") == results[0]
     with pytest.raises(ValueError, match="invalid or expired"):
         await store.redeem(code, "other@example.com")
+
+
+async def test_device_activity_is_persisted_with_a_bounded_write_rate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = DeviceStore(tmp_path / "web", "https://gateway.example.ts.net")
+    device, token = await store.redeem(
+        pairing_code(store.create_pairing_url("Phone", ("alpha",))),
+        "black@example.com",
+    )
+    old = device.last_used_at - timedelta(minutes=10)
+    store._devices[device.token_digest] = replace(device, last_used_at=old)
+    original_save = store._save
+    saves = 0
+
+    def save() -> None:
+        nonlocal saves
+        saves += 1
+        original_save()
+
+    monkeypatch.setattr(store, "_save", save)
+
+    updated = await store.mark_used(device.device_id)
+    repeated = await store.mark_used(device.device_id)
+
+    assert updated is not None and updated.last_used_at > old
+    assert repeated == updated
+    assert saves == 1
+    assert DeviceStore(store.state_directory, store.origin).authenticate(token) == updated
+
+
+async def test_device_state_without_last_use_migrates_from_creation_time(tmp_path: Path) -> None:
+    state_directory = tmp_path / "web"
+    store = DeviceStore(state_directory, "https://gateway.example.ts.net")
+    await store.redeem(
+        pairing_code(store.create_pairing_url("Phone", ("alpha",))),
+        "black@example.com",
+    )
+    value = json.loads(store.path.read_text(encoding="utf-8"))
+    del value["devices"][0]["last_used_at"]
+    store.path.write_text(json.dumps(value), encoding="utf-8")
+    store.path.chmod(0o600)
+
+    migrated = DeviceStore(state_directory, store.origin).device_descriptors()[0]
+
+    assert migrated["last_used_at"] == migrated["created_at"]
 
 
 async def test_pairing_retry_secret_expires_and_is_cleared_on_revoke(
