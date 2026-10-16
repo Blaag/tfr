@@ -5,6 +5,7 @@ import {
   animatePresentationElement,
   interpolatePresentationColor,
   presentationAnimationFrames,
+  presentationValidationResult,
   selectPresentation,
   splitPresentationRuns,
   validatedPresentation,
@@ -122,6 +123,24 @@ test("invalid presentation falls back to unchanged readable text", () => {
   assert.deepEqual(splitPresentationRuns(event, null, true), [
     { text: event.text, style: {}, role: undefined, presentation: null },
   ]);
+});
+
+test("presentation validation reports a bounded palette rejection reason", () => {
+  const event = eventWithPresentation();
+  const variant = event.presentation.programs[0].variants[0];
+  variant.foreground_keyframes = [];
+  variant.style = {};
+  variant.requires = ["character_foreground", "timeline"];
+  variant.character_palette_front = {
+    colors: ["#ffffff"],
+    spread: 0.5,
+    direction: "forward",
+  };
+
+  assert.deepEqual(presentationValidationResult(event).error, {
+    code: "palette_front_rejected",
+    path: "presentation.programs[].variants[].character_palette_front",
+  });
 });
 
 test("validates and splits a bounded Unicode character sweep", () => {

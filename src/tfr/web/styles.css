@@ -869,6 +869,47 @@ a:focus-visible {
   bottom: calc(0.75rem + var(--safe-bottom));
 }
 
+.diagnostics-dialog {
+  width: min(42rem, 100%);
+  max-height: var(--viewport-height);
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--line-bright);
+  background: var(--panel);
+  color: var(--text);
+}
+
+.diagnostics-sheet {
+  display: grid;
+  gap: 1rem;
+  padding: 1.2rem;
+}
+
+.diagnostics-sheet header,
+.diagnostics-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.diagnostics-sheet h2 {
+  margin: 0;
+}
+
+.diagnostics-sheet pre {
+  max-height: 55vh;
+  margin: 0;
+  padding: 0.8rem;
+  overflow: auto;
+  border: 1px solid var(--line);
+  background: var(--ink);
+  color: var(--muted);
+  font-size: 0.72rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .text-size-controls button {
   min-width: 2.7rem;
   padding: 0 0.55rem;

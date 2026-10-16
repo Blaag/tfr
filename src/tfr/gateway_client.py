@@ -685,6 +685,23 @@ class GatewayClient:
             request_id,
         )
 
+    async def diagnostics(self, category: str | None = None) -> list[dict[str, Any]]:
+        request_id = uuid4()
+        message: dict[str, Any] = {"type": "diagnostics", "request_id": str(request_id)}
+        if category is not None:
+            message["category"] = category
+        result = await self._request(message, request_id)
+        entries = result.get("entries") if result is not None else None
+        if not isinstance(entries, list) or not all(isinstance(item, dict) for item in entries):
+            raise GatewayProtocolError("Gateway returned invalid diagnostics")
+        return entries
+
+    async def clear_diagnostics(self) -> None:
+        request_id = uuid4()
+        await self._request(
+            {"type": "clear_diagnostics", "request_id": str(request_id)}, request_id
+        )
+
     async def verify_connection(self, *, timeout: float) -> bool:
         """Actively confirm the connection is alive with a bounded ping round trip.
 
@@ -1008,6 +1025,12 @@ class GatewayUiRuntime:
 
     async def revoke_web_device(self, device_id: UUID) -> None:
         await self.client.revoke_web_device(device_id)
+
+    async def diagnostics(self, category: str | None = None) -> list[dict[str, Any]]:
+        return await self.client.diagnostics(category)
+
+    async def clear_diagnostics(self) -> None:
+        await self.client.clear_diagnostics()
 
     async def _check_update(self) -> dict[str, Any]:
         available = (

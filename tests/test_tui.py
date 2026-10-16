@@ -846,6 +846,21 @@ async def test_web_commands_manage_devices_through_attached_gateway() -> None:
         async def revoke_web_device(self, received: UUID) -> None:
             self.revoked.append(received)
 
+        async def diagnostics(self, category: str | None = None) -> list[dict[str, object]]:
+            return [
+                {
+                    "timestamp": "2026-10-16T00:00:00Z",
+                    "severity": "warning",
+                    "component": "presentation",
+                    "code": "client_rejected",
+                    "message": "The PWA rejected Wedge's presentation",
+                    "client": "pwa",
+                }
+            ]
+
+        async def clear_diagnostics(self) -> None:
+            return None
+
     runtime = WebRuntime()
     tui = make_tui(service_runtime=runtime)
     tui.active_view.display.resize(width=120, height=100)
@@ -856,6 +871,7 @@ async def test_web_commands_manage_devices_through_attached_gateway() -> None:
         '/web pair "Chris iPhone"',
         "/web devices",
         f"/web revoke {device_id}",
+        "/diagnostics presentations",
     ):
         await tui._handle_client_command("alpha", command)
 
@@ -868,6 +884,7 @@ async def test_web_commands_manage_devices_through_attached_gateway() -> None:
     assert "active now; created: 2026-10-15T00:00:00Z" in text
     assert f"Revoked web device {device_id}" in text
     assert runtime.revoked == [device_id]
+    assert "pwa/presentation  client_rejected" in text
 
 
 async def test_bare_update_reports_the_coordinated_release_link(tmp_path: Path) -> None:

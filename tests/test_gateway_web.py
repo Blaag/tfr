@@ -100,7 +100,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v53";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v54";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
 
 
@@ -591,6 +591,9 @@ def test_browser_projection_omits_invalid_presentation_without_dropping_text() -
     assert projected["event"]["text"] == "short"
     assert "presentation" not in projected["event"]
     assert manager.registry.presentation_decorators == {}
+    diagnostic = manager.diagnostics.entries()[0]
+    assert diagnostic.code == "program_rejected"
+    assert diagnostic.message == "presentation target extends beyond visible text"
 
 
 def test_browser_projection_discards_osc_cursor_and_malformed_controls() -> None:
@@ -952,6 +955,47 @@ async def paired_client(
     assert 0 < int(morsel["max-age"]) <= 180 * 24 * 60 * 60
     assert parsedate_to_datetime(morsel["expires"]).timestamp() > time.time()
     return gateway, client, morsel.value
+
+
+async def test_pwa_reports_bounded_authenticated_diagnostics(tmp_path: Path) -> None:
+    bus = EventBus()
+    runtime = FakeRuntime(EventHistory(bus, {"alpha": 5}))
+    gateway, client, token = await paired_client(tmp_path, runtime)
+    headers = {
+        **PUBLIC_HEADERS,
+        "Cookie": f"{SESSION_COOKIE}={token}",
+        "Content-Type": "application/json",
+    }
+    try:
+        response = await client.post(
+            "/api/diagnostics",
+            headers=headers,
+            json={
+                "severity": "warning",
+                "component": "presentation",
+                "code": "palette_front_rejected",
+                "operation": "speaker:wedge",
+            },
+        )
+        assert response.status == 200
+        entries = gateway.diagnostic_entries("presentations")
+        assert entries[0]["code"] == "palette_front_rejected"
+        assert entries[0]["client"] == "pwa"
+        assert "device_id_suffix" in entries[0]
+
+        hostile = await client.post(
+            "/api/diagnostics",
+            headers=headers,
+            json={
+                "component": "web",
+                "code": "bad",
+                "message": "secret\ncommand",
+            },
+        )
+        assert hostile.status == 400
+    finally:
+        await client.close()
+        await bus.close()
 
 
 async def test_pairing_requires_exact_origin_and_host(tmp_path: Path) -> None:

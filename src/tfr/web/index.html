@@ -141,6 +141,7 @@
             <input id="spelling-suggestions" type="checkbox" role="switch" checked>
           </label>
           <button id="effects-lab-button" type="button">Open Effects Lab</button>
+          <button id="diagnostics-button" type="button">Open Diagnostics</button>
         </fieldset>
         <section class="about-settings" aria-labelledby="about-heading">
           <h3 id="about-heading" class="settings-heading">About</h3>
@@ -151,6 +152,23 @@
         </section>
         <button id="unpair-device" class="unpair-device" type="button">Unpair this phone</button>
       </form>
+    </dialog>
+
+    <dialog id="diagnostics-dialog" class="diagnostics-dialog" aria-labelledby="diagnostics-title">
+      <section class="diagnostics-sheet">
+        <header>
+          <div>
+            <p class="eyebrow">Local, redacted, bounded</p>
+            <h2 id="diagnostics-title">Diagnostics</h2>
+          </div>
+          <button id="diagnostics-close" class="close-button" type="button" aria-label="Close diagnostics">×</button>
+        </header>
+        <pre id="diagnostics-output">No local diagnostics.</pre>
+        <div class="diagnostics-actions">
+          <button id="diagnostics-copy" type="button">Copy JSON</button>
+          <button id="diagnostics-clear" type="button">Clear</button>
+        </div>
+      </section>
     </dialog>
 
     <dialog id="effects-lab" class="effects-lab" aria-labelledby="effects-lab-title">

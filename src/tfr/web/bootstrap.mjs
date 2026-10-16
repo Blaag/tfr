@@ -50,8 +50,16 @@ async function bootstrap() {
   } catch (error) {
     window.clearTimeout(slow);
     console.error("TFR startup failed", error);
+    reportDiagnostic(recordDiagnostic({
+      severity: "error",
+      component: "startup",
+      code: "application_import_failed",
+      message: "The PWA application module failed to initialize",
+      operation: "bootstrap",
+    }));
     showStartupFailure("TFR could not load its app files. Repair the cached app and try again.");
   }
 }
 
 if (typeof document !== "undefined") bootstrap();
+import { recordDiagnostic, reportDiagnostic } from "./diagnostics.mjs";
