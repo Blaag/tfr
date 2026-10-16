@@ -1,4 +1,5 @@
-const CACHE_NAME = "tfr-shell-web1-v50";
+const CACHE_NAME = "tfr-shell-web1-v51";
+const NETWORK_TIMEOUT_MS = 5000;
 const SHELL = [
   "/",
   "/app.mjs",
@@ -50,8 +51,10 @@ self.addEventListener("fetch", (event) => {
   }
   if (url.search) return;
   if (!SHELL.includes(url.pathname)) return;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), NETWORK_TIMEOUT_MS);
   event.respondWith(
-    fetch(event.request)
+    fetch(event.request, { signal: controller.signal })
       .then((response) => {
         if (response.ok) {
           const copy = response.clone();
@@ -59,6 +62,7 @@ self.addEventListener("fetch", (event) => {
         }
         return response;
       })
-      .catch(() => caches.match(event.request).then((response) => response || caches.match("/"))),
+      .catch(() => caches.match(event.request).then((response) => response || caches.match("/")))
+      .finally(() => clearTimeout(timeout)),
   );
 });

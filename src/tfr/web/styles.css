@@ -172,12 +172,19 @@ a:focus-visible {
   display: none;
 }
 
-.startup-actions button {
+.startup-actions button,
+.startup-actions .startup-action {
   min-height: 2.8rem;
   border: 1px solid var(--line-bright);
   background: var(--panel);
   color: var(--text);
   font-weight: 700;
+}
+
+.startup-actions .startup-action {
+  display: grid;
+  place-items: center;
+  text-decoration: none;
 }
 
 .startup-actions #startup-repair {
