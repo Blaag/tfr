@@ -862,6 +862,7 @@ class GatewayServer:
         pairing_url_factory: Callable[[str], str] | None = None,
         device_list_factory: Callable[[], list[dict[str, Any]]] | None = None,
         device_revoke_factory: Callable[[UUID], Awaitable[bool]] | None = None,
+        web_origin: str | None = None,
         update_notice: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         if (
@@ -898,6 +899,7 @@ class GatewayServer:
         self.pairing_url_factory = pairing_url_factory
         self.device_list_factory = device_list_factory
         self.device_revoke_factory = device_revoke_factory
+        self.web_origin = web_origin
         self.update_notice = update_notice
         self._server: asyncio.Server | None = None
         self._tcp_server: asyncio.Server | None = None
@@ -1186,7 +1188,7 @@ class GatewayServer:
                     connection_id,
                     writer,
                     write_lock,
-                    allow_admin=auth_token is None,
+                    allow_admin=True,
                 ),
                 name=f"tfr-gateway-requests-{connection_id}",
             )
@@ -1389,6 +1391,17 @@ class GatewayServer:
                 if not isinstance(label, str):
                     raise ValueError("device label must be a string")
                 result = {"pairing_url": self.pairing_url_factory(label)}
+            elif message_type == "web_status":
+                if not allow_admin:
+                    raise ValueError("web device administration is unavailable")
+                if set(message) != {"type", "protocol", "request_id"}:
+                    raise ValueError("web_status has invalid fields")
+                devices = self.device_list_factory() if self.device_list_factory else []
+                result = {
+                    "enabled": self.web_origin is not None,
+                    "origin": self.web_origin,
+                    "device_count": len(devices),
+                }
             elif message_type == "list_devices":
                 if not allow_admin or self.device_list_factory is None:
                     raise ValueError("web device administration is unavailable")
@@ -1819,6 +1832,7 @@ async def run_gateway(
         pairing_url_factory=(web_server.create_pairing_url if web_server is not None else None),
         device_list_factory=(web_server.device_descriptors if web_server is not None else None),
         device_revoke_factory=(web_server.revoke_device if web_server is not None else None),
+        web_origin=bundle.main.web_gateway.canonical_origin,
         update_notice=(web_server.notify_update if web_server is not None else None),
     )
     stop = asyncio.Event()

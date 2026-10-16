@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
+import qrcode
 from PIL import Image
 from prompt_toolkit import Application
 from prompt_toolkit.application import get_app
@@ -138,6 +139,7 @@ _CORE_CLIENT_COMMANDS = frozenset(
         "testspeaker",
         "teststreak",
         "update",
+        "web",
         "world",
     }
 )
@@ -147,12 +149,46 @@ _MAX_PENDING_SPELLCHECK_ECHOES = 32
 _SPELLCHECK_ECHO_TIMEOUT_SECONDS = 10.0
 
 
+def pairing_qr_code(value: str) -> str:
+    code = qrcode.QRCode(
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        border=2,
+        box_size=1,
+    )
+    code.add_data(value)
+    code.make(fit=True)
+    matrix = code.get_matrix()
+    if len(matrix) % 2:
+        matrix.append([False] * len(matrix[0]))
+    glyphs = {
+        (False, False): " ",
+        (True, False): "▀",
+        (False, True): "▄",
+        (True, True): "█",
+    }
+    return "\n".join(
+        "".join(
+            glyphs[(top, bottom)]
+            for top, bottom in zip(matrix[row], matrix[row + 1], strict=False)
+        )
+        for row in range(0, len(matrix), 2)
+    )
+
+
 class ServiceRuntime(Protocol):
     async def start(self) -> None: ...
 
     async def stop(self) -> None: ...
 
     async def request_update(self, *, force: bool = False) -> dict[str, Any]: ...
+
+    async def web_status(self) -> dict[str, Any]: ...
+
+    async def pair_web_device(self, label: str) -> str: ...
+
+    async def list_web_devices(self) -> list[dict[str, Any]]: ...
+
+    async def revoke_web_device(self, device_id: UUID) -> None: ...
 
 
 @dataclass(slots=True)
@@ -3146,6 +3182,8 @@ class TfrTui:
                     self.add_notice(alias, result)
         elif command == "update":
             await self._handle_update_command(alias, parameters)
+        elif command == "web":
+            await self._handle_web_command(alias, parameters)
         elif command == "plugins":
             if parameters:
                 self.add_notice(alias, "Usage: /plugins")
@@ -3246,6 +3284,7 @@ class TfrTui:
             "  /update - update TFR and stable-auto plugins on the Gateway and all connected UIs",
             f"  /update status|check - inspect {update_channel} TFR and plugin releases",
             "  /update force - candidate channel only; force every host to stage locally",
+            "  /web status|pair|devices|revoke - manage the private iPhone PWA",
             "  /plugins - show configured, loaded, and failed plugins",
             "  /agent status|inspect|pause|resume|trigger|close - manage agents",
             "  /quit - exit TFR; //TEXT sends a literal leading slash",
@@ -3607,6 +3646,66 @@ class TfrTui:
                 reason = self.plugins.load_failures.get(name, "not loaded")
                 lines.append(f"  {name}: failed ({reason})")
         return "\n".join(lines)
+
+    async def _handle_web_command(self, alias: str, parameters: list[str]) -> None:
+        usage = 'Usage: /web status|devices|pair "Device name"|revoke DEVICE_ID'
+        if self.service_runtime is None:
+            self.add_notice(alias, "Web administration is available only in an attached UI")
+            return
+        action = parameters[0].casefold() if parameters else "status"
+        try:
+            if not parameters or (action == "status" and len(parameters) == 1):
+                status = await self.service_runtime.web_status()
+                if status.get("enabled") is not True:
+                    self.add_notice(alias, "The Gateway web client is disabled")
+                    return
+                origin = status.get("origin")
+                count = status.get("device_count")
+                if not isinstance(origin, str) or not isinstance(count, int):
+                    raise ValueError("Gateway returned invalid web status")
+                self.add_notice(
+                    alias,
+                    f"PWA origin: {origin}\nPaired devices: {count}\n"
+                    f"Repair page: {origin}/repair.html",
+                )
+                return
+            if action == "pair" and len(parameters) >= 2:
+                label = " ".join(parameters[1:]).strip()
+                pairing_url = await self.service_runtime.pair_web_device(label)
+                self.add_notice(
+                    alias,
+                    f"Pair {label!r} within ten minutes:\n{pairing_url}\n\n"
+                    f"Scan with the iPhone Camera:\n{pairing_qr_code(pairing_url)}",
+                )
+                return
+            if action == "devices" and len(parameters) == 1:
+                devices = await self.service_runtime.list_web_devices()
+                if not devices:
+                    self.add_notice(alias, "No paired web devices")
+                    return
+                lines = ["Paired web devices"]
+                for device in devices:
+                    worlds = ", ".join(str(world) for world in device.get("allowed_worlds", ()))
+                    lines.append(
+                        f"  {device.get('device_id')}  {device.get('label')}  "
+                        f"{device.get('tailscale_login')}\n"
+                        f"    worlds: {worlds or 'none'}; expires: {device.get('expires_at')}"
+                    )
+                self.add_notice(alias, "\n".join(lines))
+                return
+            if action == "revoke" and len(parameters) == 2:
+                try:
+                    device_id = UUID(parameters[1])
+                except (TypeError, ValueError, AttributeError):
+                    self.add_notice(alias, "Device ID must be a UUID")
+                    return
+                await self.service_runtime.revoke_web_device(device_id)
+                self.add_notice(alias, f"Revoked web device {device_id}")
+                return
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            self.add_notice(alias, f"Web administration failed: {exc}")
+            return
+        self.add_notice(alias, usage)
 
     async def _handle_update_command(self, alias: str, parameters: list[str]) -> None:
         if parameters not in ([], ["status"], ["check"], ["force"]):

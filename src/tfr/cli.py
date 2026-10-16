@@ -310,7 +310,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                 print(f"Revoked web device {device_id}.")
             return 0
         except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
-            print(f"tfr: pairing error: {exc}", file=sys.stderr)
+            print(f"tfr: web device administration error: {exc}", file=sys.stderr)
             return 2
 
     if args.device_name is not None or args.device_id is not None:

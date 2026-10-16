@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import pytest
 from PIL import Image
@@ -92,6 +93,7 @@ def make_tui(
     typing_glow: TypingGlowConfig | None = None,
     character: str | None = None,
     speaking_streaks_enabled: bool = True,
+    service_runtime: Any | None = None,
 ) -> TfrTui:
     event_bus = EventBus()
     command_bus = CommandBus()
@@ -136,6 +138,7 @@ def make_tui(
         spellcheck=spellcheck,
         typing_glow=typing_glow,
         speaking_streaks_enabled=speaking_streaks_enabled,
+        service_runtime=service_runtime,
         input=input or DummyInput(),
         output=DummyOutput(),
     )
@@ -806,6 +809,59 @@ async def test_update_check_reports_configured_candidate_channel(tmp_path: Path)
     assert "UI 1.2.3 (aaaaaaaaaaaa) [candidate]: up to date" in text
     assert "Gateway 1.2.3 (aaaaaaaaaaaa) [candidate]: up to date" in text
     assert "inspect candidate TFR and plugin releases" in tui.help_text()
+
+
+async def test_web_commands_manage_devices_through_attached_gateway() -> None:
+    device_id = UUID("eb4fd272-a20a-444e-8b4d-93f2e0ad2713")
+
+    class WebRuntime:
+        def __init__(self) -> None:
+            self.revoked: list[UUID] = []
+
+        async def web_status(self) -> dict[str, object]:
+            return {
+                "enabled": True,
+                "origin": "https://gateway.example.ts.net",
+                "device_count": 1,
+            }
+
+        async def pair_web_device(self, label: str) -> str:
+            assert label == "Chris iPhone"
+            return "https://gateway.example.ts.net/#pair=test-secret"
+
+        async def list_web_devices(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "device_id": str(device_id),
+                    "label": "Chris iPhone",
+                    "tailscale_login": "chris@example.com",
+                    "allowed_worlds": ["alpha"],
+                    "expires_at": "2027-01-01T00:00:00Z",
+                }
+            ]
+
+        async def revoke_web_device(self, received: UUID) -> None:
+            self.revoked.append(received)
+
+    runtime = WebRuntime()
+    tui = make_tui(service_runtime=runtime)
+    tui.active_view.display.resize(width=120, height=100)
+
+    for command in (
+        "/web status",
+        '/web pair "Chris iPhone"',
+        "/web devices",
+        f"/web revoke {device_id}",
+    ):
+        await tui._handle_client_command("alpha", command)
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "PWA origin: https://gateway.example.ts.net" in text
+    assert "https://gateway.example.ts.net/#pair=test-secret" in text
+    assert any(glyph in text for glyph in "▀▄█")
+    assert "Chris iPhone  chris@example.com" in text
+    assert f"Revoked web device {device_id}" in text
+    assert runtime.revoked == [device_id]
 
 
 async def test_bare_update_reports_the_coordinated_release_link(tmp_path: Path) -> None:

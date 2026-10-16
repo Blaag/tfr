@@ -467,14 +467,31 @@ requires the `Tailscale-User-Login` identity header added by Serve and binds eac
 device credential to the identity that redeemed its pairing link; Funnel traffic
 does not carry this header and is rejected.
 
-Create a ten-minute, single-credential pairing link through the Gateway's owner-only
-Unix socket. A lost browser response may safely retry the exchange from the same
-Tailscale identity without creating another device, provided the Gateway has not
-restarted and the link has not expired:
+From any attached native UI, create a ten-minute, single-credential pairing
+link and scannable QR code without logging into the Gateway host:
+
+```text
+/web pair "My iPhone"
+```
+
+Use `/web status` to show the canonical PWA and repair URLs, `/web devices` to
+list paired devices, and `/web revoke DEVICE_ID` to revoke one. These commands
+travel over the existing authenticated native Gateway connection and are never
+available to limited PWA credentials.
+
+As an owner-only fallback on the Gateway host, the CLI provides the equivalent
+administration commands through its Unix socket. Without `--socket`, it tries
+both the runtime-directory and persistent-state defaults:
 
 ```console
 tfr pair --device-name "My iPhone"
+tfr devices
+tfr revoke-device --device-id DEVICE_ID
 ```
+
+A lost browser response may safely retry the exchange from the same
+Tailscale identity without creating another device, provided the Gateway has not
+restarted and the link has not expired:
 
 Open the printed URL on the phone while Tailscale is connected. The pairing
 secret is in the URL fragment, removed from browser history before submission,

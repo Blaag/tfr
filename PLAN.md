@@ -952,10 +952,19 @@ Acceptance criteria:
   implementation, structured ANSI-derived text runs, and initial iPhone
   validation are complete; deeper accessibility testing and the longer platform
   pilot remain follow-up work.
-- [ ] Add a Gateway/PWA administration helper that discovers the running
-  Gateway's Unix socket, validates or configures Tailscale Serve, reports
-  actionable service-status failures, and wraps device pairing, listing, and
-  revocation without requiring users to coordinate runtime paths manually.
+- [x] Add native-UI Gateway/PWA administration for status, pairing, device
+  listing, and revocation, including a scannable pairing QR code. Keep the
+  owner-only CLI as a fallback, but discover both standard Unix socket paths
+  and report actionable attempted-path failures rather than requiring users to
+  coordinate runtime paths manually.
+- [ ] Add optional Gateway service management as an explicit setup choice.
+  Detect systemd/launchd support, generate one stable explicit socket path,
+  install/start/restart only with operator approval, report process/socket/web
+  backend/Tailscale Serve health separately in `tfr doctor`, and document
+  lingering/login behavior and logs. Keep launcher-only operation supported.
+- [ ] Add bounded Tailscale Serve inspection and guided configuration to the
+  Gateway/PWA administration flow without invoking Funnel or weakening the
+  canonical HTTPS-origin and identity-header requirements.
 - [ ] Generate smart, guided installation scripts for both Gateway and UI
   hosts. Detect the host environment, install and configure the appropriate
   service, paths, permissions, and update mechanism, and optionally prompt for
