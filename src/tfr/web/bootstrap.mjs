@@ -1,23 +1,8 @@
-const SHELL_CACHE_PREFIX = "tfr-shell-";
-
 export function iphoneInstallMode({ userAgent, maxTouchPoints, standalone, displayModeStandalone }) {
   if (standalone || displayModeStandalone) return "installed";
   const ios = /iPhone|iPad|iPod/i.test(userAgent)
     || (/Macintosh/i.test(userAgent) && maxTouchPoints > 1);
   return ios ? "browser" : "other";
-}
-
-export async function repairAppShell({ serviceWorker, cacheStorage }) {
-  const registrations = serviceWorker ? await serviceWorker.getRegistrations() : [];
-  await Promise.all(registrations.map((registration) => registration.unregister()));
-  if (cacheStorage) {
-    const keys = await cacheStorage.keys();
-    await Promise.all(
-      keys
-        .filter((key) => key.startsWith(SHELL_CACHE_PREFIX))
-        .map((key) => cacheStorage.delete(key)),
-    );
-  }
 }
 
 function showStartupFailure(message) {
@@ -51,18 +36,6 @@ async function bootstrap() {
       localStorage.setItem("tfr.installHintDismissed", "yes");
     } catch {
       // Dismissal remains effective for the current page.
-    }
-  });
-
-  document.querySelector("#startup-repair")?.addEventListener("click", async () => {
-    showStartupFailure("Repairing cached app files…");
-    try {
-      await repairAppShell({
-        serviceWorker: navigator.serviceWorker,
-        cacheStorage: window.caches,
-      });
-    } finally {
-      location.reload();
     }
   });
 

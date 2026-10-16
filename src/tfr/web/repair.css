@@ -1,0 +1,49 @@
+:root {
+  color-scheme: dark;
+  background: #0d1717;
+  color: #d9e5df;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  display: grid;
+  place-items: center;
+}
+
+main {
+  width: min(calc(100% - 2.8rem), 28rem);
+  padding: 2rem 1.6rem;
+  border: 1px solid #33564f;
+  background: #122321;
+}
+
+.eyebrow {
+  color: #89a49b;
+  font-size: 0.7rem;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+h1 {
+  font-family: Iowan Old Style, Baskerville, Georgia, serif;
+  font-size: 2.5rem;
+  font-weight: 500;
+}
+
+a {
+  display: inline-grid;
+  min-height: 2.8rem;
+  margin-top: 1rem;
+  padding: 0 1rem;
+  place-items: center;
+  background: #8fdbc4;
+  color: #0d1717;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+[hidden] {
+  display: none !important;
+}

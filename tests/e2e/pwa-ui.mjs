@@ -355,6 +355,7 @@ try {
   await recoveryPage.goto(origin);
   await recoveryPage.locator("#startup-actions:not([hidden])").waitFor();
   assert.match(await recoveryPage.locator("#startup-status").innerText(), /could not load/);
+  assert.equal(await recoveryPage.locator("#startup-repair").getAttribute("href"), "/repair.html");
   assert.equal(await recoveryPage.locator("#ios-install-help").getAttribute("hidden"), null);
   assert.equal(await recoveryPage.locator("#ios-install-notice").getAttribute("hidden"), null);
   await recoveryContext.close();

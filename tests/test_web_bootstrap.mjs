@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { iphoneInstallMode, repairAppShell } from "../src/tfr/web/bootstrap.mjs";
+import { iphoneInstallMode } from "../src/tfr/web/bootstrap.mjs";
+import { repairAppShell } from "../src/tfr/web/repair.mjs";
 
 test("detects iPhone browser and installed display modes", () => {
   const iphone = {
