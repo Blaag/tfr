@@ -632,8 +632,8 @@ class WebGatewayServer:
                 device_id_suffix=str(device.device_id)[-8:],
                 shell_version=value.get("shell_version"),
             )
-        except ValueError as exc:
-            raise web.HTTPBadRequest(text=str(exc)) from None
+        except ValueError:
+            raise web.HTTPBadRequest(text="Invalid diagnostic report") from None
         return self._json_response({"accepted": True})
 
     def _record_pairing_attempt(self, tailscale_login: str) -> bool:
