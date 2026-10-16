@@ -8,7 +8,7 @@ import os
 import secrets
 import stat
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -19,6 +19,7 @@ MAX_DEVICE_LABEL_CHARACTERS = 80
 DEVICE_TOKEN_BYTES = 32
 PAIRING_CODE_BYTES = 32
 DEVICE_LIFETIME_SECONDS = 180 * 24 * 60 * 60
+DEVICE_ACTIVITY_WRITE_INTERVAL_SECONDS = 5 * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +28,7 @@ class DeviceRecord:
     label: str
     token_digest: str
     created_at: datetime
+    last_used_at: datetime
     expires_at: datetime
     allowed_worlds: tuple[str, ...]
     tailscale_login: str
@@ -38,6 +40,7 @@ class DeviceRecord:
             "label": self.label,
             "token_digest": self.token_digest,
             "created_at": self.created_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            "last_used_at": self.last_used_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
             "expires_at": self.expires_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
             "allowed_worlds": list(self.allowed_worlds),
             "tailscale_login": self.tailscale_login,
@@ -46,7 +49,7 @@ class DeviceRecord:
 
     @classmethod
     def from_dict(cls, value: object) -> DeviceRecord:
-        if not isinstance(value, dict) or set(value) != {
+        if not isinstance(value, dict) or set(value) not in ({
             "device_id",
             "label",
             "token_digest",
@@ -55,7 +58,17 @@ class DeviceRecord:
             "allowed_worlds",
             "tailscale_login",
             "scope",
-        }:
+        }, {
+            "device_id",
+            "label",
+            "token_digest",
+            "created_at",
+            "last_used_at",
+            "expires_at",
+            "allowed_worlds",
+            "tailscale_login",
+            "scope",
+        }):
             raise ValueError("web device record has invalid fields")
         label = value["label"]
         digest = value["token_digest"]
@@ -75,7 +88,10 @@ class DeviceRecord:
         if scope != "chat":
             raise ValueError("web device scope is invalid")
         created_at = cls._timestamp(value["created_at"], "creation")
+        last_used_at = cls._timestamp(value.get("last_used_at", value["created_at"]), "last use")
         expires_at = cls._timestamp(value["expires_at"], "expiration")
+        if not created_at <= last_used_at <= expires_at:
+            raise ValueError("web device last use time is outside its lifetime")
         allowed_worlds = value["allowed_worlds"]
         tailscale_login = value["tailscale_login"]
         if (
@@ -100,6 +116,7 @@ class DeviceRecord:
             label=label,
             token_digest=digest,
             created_at=created_at,
+            last_used_at=last_used_at,
             expires_at=expires_at,
             allowed_worlds=tuple(allowed_worlds),
             tailscale_login=tailscale_login,
@@ -214,6 +231,7 @@ class DeviceStore:
                 label=challenge.label,
                 token_digest=self._digest(token),
                 created_at=created_at,
+                last_used_at=created_at,
                 expires_at=datetime.fromtimestamp(
                     created_at.timestamp() + DEVICE_LIFETIME_SECONDS,
                     UTC,
@@ -268,12 +286,42 @@ class DeviceStore:
             return None
         return device
 
+    async def mark_used(self, device_id: UUID) -> DeviceRecord | None:
+        async with self._lock:
+            digest = next(
+                (
+                    token_digest
+                    for token_digest, device in self._devices.items()
+                    if device.device_id == device_id
+                ),
+                None,
+            )
+            if digest is None:
+                return None
+            device = self._devices[digest]
+            now = datetime.now(UTC)
+            if device.expires_at <= now:
+                return None
+            if (now - device.last_used_at).total_seconds() < DEVICE_ACTIVITY_WRITE_INTERVAL_SECONDS:
+                return device
+            updated = replace(device, last_used_at=now)
+            self._devices[digest] = updated
+            try:
+                self._save()
+            except BaseException:
+                self._devices[digest] = device
+                raise
+            return updated
+
     def device_descriptors(self) -> list[dict[str, object]]:
         return [
             {
                 "device_id": str(device.device_id),
                 "label": device.label,
                 "created_at": device.created_at.astimezone(UTC).isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "last_used_at": device.last_used_at.astimezone(UTC).isoformat().replace(
                     "+00:00", "Z"
                 ),
                 "expires_at": device.expires_at.astimezone(UTC).isoformat().replace(

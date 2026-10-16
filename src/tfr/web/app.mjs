@@ -23,6 +23,7 @@ import { motionAllowsAnimation } from "./motion.mjs";
 import {
   animatePresentationElement,
   splitPresentationRuns,
+  validatedPresentation,
 } from "./presentation.mjs";
 import { restoreTranscriptPosition } from "./scroll-restoration.mjs";
 import { swipeDirection } from "./swipe.mjs";
@@ -340,12 +341,17 @@ function previewLabCombo(count) {
 function previewLabSpeaker(demo) {
   const sample = demo?.samples?.[0];
   if (!sample) return;
+  const hasPresentation = validatedPresentation(sample) !== null;
   elements.effectsLabMessage.replaceChildren();
   appendEventText(
     elements.effectsLabMessage,
     { ...sample, timestamp: new Date().toISOString() },
     { animate: labMotionEnabled(), animationsEnabled: labMotionEnabled() },
   );
+  elements.effectsLabNotice.textContent = hasPresentation
+    ? ""
+    : "Portable presentation unavailable for this configured sample.";
+  elements.effectsLabNotice.hidden = hasPresentation;
 }
 
 function renderEffectsLabCatalog() {
@@ -399,7 +405,11 @@ function presentationAnimationCost(node) {
 
 function eventPresentationAnimationCost(event) {
   return event?.presentation?.programs?.some((program) =>
-    program.variants?.some((variant) => variant.character_sweep),
+    program.variants?.some((variant) =>
+      variant.character_sweep
+      || variant.character_hue_wave
+      || variant.character_palette_front
+    ),
   )
     ? CHARACTER_SWEEP_ANIMATION_COST
     : 1;

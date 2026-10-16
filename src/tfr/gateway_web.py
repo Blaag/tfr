@@ -386,7 +386,19 @@ class WebGatewayServer:
         return frozenset(device.allowed_worlds) & self._non_agent_worlds()
 
     def device_descriptors(self) -> list[dict[str, object]]:
-        return self.devices.device_descriptors()
+        descriptors = self.devices.device_descriptors()
+        for descriptor in descriptors:
+            try:
+                device_id = UUID(str(descriptor["device_id"]))
+            except (KeyError, TypeError, ValueError, AttributeError):
+                descriptor["active"] = False
+            else:
+                descriptor["active"] = bool(self._active_sockets.get(device_id))
+        return sorted(
+            descriptors,
+            key=lambda item: (bool(item["active"]), str(item.get("last_used_at", ""))),
+            reverse=True,
+        )
 
     async def revoke_device(self, device_id: UUID) -> bool:
         async with self._session_lock:
@@ -767,6 +779,9 @@ class WebGatewayServer:
                 )
             if socket.closed:
                 return socket
+            refreshed = await self.devices.mark_used(device.device_id)
+            if refreshed is not None:
+                device = refreshed
             await self._send_initial_state(
                 socket,
                 subscription,

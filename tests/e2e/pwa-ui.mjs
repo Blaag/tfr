@@ -113,6 +113,51 @@ await context.addInitScript(() => {
                 },
               ],
             },
+            {
+              id: "speaker:wedge",
+              label: "Wedge",
+              category: "speaker",
+              samples: [
+                {
+                  id: "demo-wedge",
+                  timestamp: new Date().toISOString(),
+                  world: "dev-local",
+                  connection_generation: "1",
+                  direction: "inbound",
+                  kind: "say",
+                  text: 'Wedge says, "Portable ember preview."',
+                  redacted: false,
+                  text_truncated: false,
+                  presentation: {
+                    version: 1,
+                    programs: [
+                      {
+                        start: 0,
+                        end: 5,
+                        duration_ms: 1000,
+                        repeat_ms: 10000,
+                        repeat_count: 2,
+                        frames_per_second: 20,
+                        variants: [
+                          {
+                            requires: ["character_foreground", "timeline"],
+                            style: {},
+                            foreground_keyframes: [],
+                            character_palette_front: {
+                              colors: ["#ffff5f", "#ffaf00", "#ff5f00", "#d70000", "#a9914a"],
+                              spread: 0.55,
+                              direction: "forward",
+                            },
+                          },
+                        ],
+                        reduced_motion: { foreground: "#ffaf00", bold: true },
+                        fallback: { foreground: "#a9914a" },
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
           ],
         });
         for (const event of events) this.message(event);
@@ -271,6 +316,20 @@ try {
   await page.waitForFunction(() => document.querySelector("#effects-lab-notice")?.textContent.includes("GODLIKE"));
   await page.locator("#effects-lab-speakers button").getByText("Bob").click();
   assert.match(await page.locator("#effects-lab-message").innerText(), /Bob says/);
+  await page.locator("#effects-lab-speakers button").getByText("Wedge").click();
+  await page.waitForTimeout(100);
+  const emberColors = await page.locator("#effects-lab-message .presentation-character").evaluateAll(
+    (nodes) => nodes.map((node) => node.style.color),
+  );
+  assert.equal(emberColors.length, 5);
+  assert.ok(new Set(emberColors).size > 1);
+  await page.waitForTimeout(1000);
+  assert.deepEqual(
+    await page.locator("#effects-lab-message .presentation-character").evaluateAll(
+      (nodes) => nodes.map((node) => node.style.color),
+    ),
+    Array(5).fill("rgb(169, 145, 74)"),
+  );
   await page.locator("#effects-lab-command-input").fill("/teststreak 4");
   await page.locator("#effects-lab-command button").click();
   assert.match(await page.locator("#effects-lab-notice").innerText(), /Rampage/);

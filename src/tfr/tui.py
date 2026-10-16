@@ -3699,9 +3699,15 @@ class TfrTui:
                 lines = ["Paired web devices"]
                 for device in devices:
                     worlds = ", ".join(str(world) for world in device.get("allowed_worlds", ()))
+                    activity = (
+                        "active now"
+                        if device.get("active") is True
+                        else f"last used: {device.get('last_used_at', 'unknown')}"
+                    )
                     lines.append(
                         f"  {device.get('device_id')}  {device.get('label')}  "
                         f"{device.get('tailscale_login')}\n"
+                        f"    {activity}; created: {device.get('created_at', 'unknown')}\n"
                         f"    worlds: {worlds or 'none'}; expires: {device.get('expires_at')}"
                     )
                 self.add_notice(alias, "\n".join(lines))
