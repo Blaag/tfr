@@ -96,7 +96,8 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v50";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v51";' in worker
+    assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
 
 
 async def test_all_declared_pwa_assets_are_routable(tmp_path: Path) -> None:

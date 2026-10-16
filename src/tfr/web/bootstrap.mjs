@@ -54,7 +54,6 @@ async function bootstrap() {
     }
   });
 
-  document.querySelector("#startup-reload")?.addEventListener("click", () => location.reload());
   document.querySelector("#startup-repair")?.addEventListener("click", async () => {
     showStartupFailure("Repairing cached app files…");
     try {
