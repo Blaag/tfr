@@ -25,11 +25,16 @@ COMMIT = "a" * 40
 def wheel_bytes(*, version: str = VERSION, commit: str = COMMIT) -> bytes:
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w") as wheel:
-        wheel.writestr(
-            f"tfr-{version}.dist-info/METADATA",
-            f"Metadata-Version: 2.4\nName: tfr\nVersion: {version}\n",
-        )
-        wheel.writestr("tfr/_build.py", f'BUILD_COMMIT: str | None = "{commit}"\n')
+        for name, content in (
+            (
+                f"tfr-{version}.dist-info/METADATA",
+                f"Metadata-Version: 2.4\nName: tfr\nVersion: {version}\n",
+            ),
+            ("tfr/_build.py", f'BUILD_COMMIT: str | None = "{commit}"\n'),
+        ):
+            member = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            member.external_attr = 0o644 << 16
+            wheel.writestr(member, content)
     return output.getvalue()
 
 
