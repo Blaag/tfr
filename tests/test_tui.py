@@ -849,6 +849,7 @@ async def test_web_commands_manage_devices_through_attached_gateway() -> None:
 
     for command in (
         "/web status",
+        "/web repair",
         '/web pair "Chris iPhone"',
         "/web devices",
         f"/web revoke {device_id}",
@@ -857,6 +858,7 @@ async def test_web_commands_manage_devices_through_attached_gateway() -> None:
 
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
     assert "PWA origin: https://gateway.example.ts.net" in text
+    assert "PWA repair page:\nhttps://gateway.example.ts.net/repair.html" in text
     assert "https://gateway.example.ts.net/#pair=test-secret" in text
     assert any(glyph in text for glyph in "▀▄█")
     assert "Chris iPhone  chris@example.com" in text

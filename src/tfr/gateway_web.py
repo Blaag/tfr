@@ -79,8 +79,10 @@ _ASSETS = {
     "/motion.mjs": ("motion.mjs", "text/javascript; charset=utf-8"),
     "/pairing.mjs": ("pairing.mjs", "text/javascript; charset=utf-8"),
     "/presentation.mjs": ("presentation.mjs", "text/javascript; charset=utf-8"),
+    "/scroll-restoration.mjs": ("scroll-restoration.mjs", "text/javascript; charset=utf-8"),
     "/swipe.mjs": ("swipe.mjs", "text/javascript; charset=utf-8"),
     "/text-runs.mjs": ("text-runs.mjs", "text/javascript; charset=utf-8"),
+    "/transcript-events.mjs": ("transcript-events.mjs", "text/javascript; charset=utf-8"),
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
     "/repair.html": ("repair.html", "text/html; charset=utf-8"),
@@ -426,7 +428,8 @@ class WebGatewayServer:
                 web.get(
                     "/{asset:index.html|app.mjs|bootstrap.mjs|command.mjs|connection-lifecycle.mjs|"
                     "event-details.mjs|effects-lab.mjs|history-notice.mjs|linkify.mjs|motion.mjs|pairing.mjs|"
-                    "presentation.mjs|combo.mjs|swipe.mjs|text-runs.mjs|styles.css|manifest.webmanifest|"
+                    "presentation.mjs|scroll-restoration.mjs|combo.mjs|swipe.mjs|text-runs.mjs|"
+                    "transcript-events.mjs|styles.css|manifest.webmanifest|"
                     "repair.html|repair.css|repair.mjs|sw.js|icon.svg|icon-512.png|"
                     "apple-touch-icon.png}",
                     self._asset,

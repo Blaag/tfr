@@ -3284,7 +3284,7 @@ class TfrTui:
             "  /update - update TFR and stable-auto plugins on the Gateway and all connected UIs",
             f"  /update status|check - inspect {update_channel} TFR and plugin releases",
             "  /update force - candidate channel only; force every host to stage locally",
-            "  /web status|pair|devices|revoke - manage the private iPhone PWA",
+            "  /web status|repair|pair|devices|revoke - manage the private iPhone PWA",
             "  /plugins - show configured, loaded, and failed plugins",
             "  /agent status|inspect|pause|resume|trigger|close - manage agents",
             "  /quit - exit TFR; //TEXT sends a literal leading slash",
@@ -3648,7 +3648,7 @@ class TfrTui:
         return "\n".join(lines)
 
     async def _handle_web_command(self, alias: str, parameters: list[str]) -> None:
-        usage = 'Usage: /web status|devices|pair "Device name"|revoke DEVICE_ID'
+        usage = 'Usage: /web status|repair|devices|pair "Device name"|revoke DEVICE_ID'
         if self.service_runtime is None:
             self.add_notice(alias, "Web administration is available only in an attached UI")
             return
@@ -3667,6 +3667,19 @@ class TfrTui:
                     alias,
                     f"PWA origin: {origin}\nPaired devices: {count}\n"
                     f"Repair page: {origin}/repair.html",
+                )
+                return
+            if action == "repair" and len(parameters) == 1:
+                status = await self.service_runtime.web_status()
+                origin = status.get("origin")
+                if status.get("enabled") is not True or not isinstance(origin, str):
+                    self.add_notice(alias, "The Gateway web client is disabled")
+                    return
+                repair_url = f"{origin}/repair.html"
+                self.add_notice(
+                    alias,
+                    f"PWA repair page:\n{repair_url}\n\n"
+                    f"Scan with the iPhone Camera:\n{pairing_qr_code(repair_url)}",
                 )
                 return
             if action == "pair" and len(parameters) >= 2:
