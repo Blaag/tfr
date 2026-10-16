@@ -350,7 +350,9 @@ function previewLabSpeaker(demo) {
   );
   elements.effectsLabNotice.textContent = hasPresentation
     ? ""
-    : "Portable presentation unavailable for this configured sample.";
+    : sample.presentation
+      ? "This PWA rejected the configured sample's portable presentation."
+      : "The Gateway did not provide a portable presentation for this configured sample.";
   elements.effectsLabNotice.hidden = hasPresentation;
 }
 

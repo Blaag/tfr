@@ -316,6 +316,7 @@ try {
   await page.waitForFunction(() => document.querySelector("#effects-lab-notice")?.textContent.includes("GODLIKE"));
   await page.locator("#effects-lab-speakers button").getByText("Bob").click();
   assert.match(await page.locator("#effects-lab-message").innerText(), /Bob says/);
+  assert.match(await page.locator("#effects-lab-notice").innerText(), /Gateway did not provide/);
   await page.locator("#effects-lab-speakers button").getByText("Wedge").click();
   await page.waitForTimeout(100);
   const emberColors = await page.locator("#effects-lab-message .presentation-character").evaluateAll(
