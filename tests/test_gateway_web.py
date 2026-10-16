@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -99,8 +100,20 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v51";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v52";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
+
+
+def test_every_application_module_is_routable_and_in_the_atomic_shell() -> None:
+    asset_directory = files("tfr").joinpath("web")
+    application_modules = {
+        asset.name for asset in asset_directory.iterdir() if asset.name.endswith(".mjs")
+    } - {"repair.mjs"}
+    worker = asset_directory.joinpath("sw.js").read_text(encoding="utf-8")
+    shell_modules = set(re.findall(r'"/([^"/]+\.mjs)"', worker))
+
+    assert application_modules <= {name.removeprefix("/") for name in gateway_web._ASSETS}
+    assert application_modules == shell_modules
 
 
 async def test_all_declared_pwa_assets_are_routable(tmp_path: Path) -> None:

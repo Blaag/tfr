@@ -475,7 +475,8 @@ link and scannable QR code without logging into the Gateway host:
 ```
 
 Use `/web status` to show the canonical PWA and repair URLs, `/web devices` to
-list paired devices, and `/web revoke DEVICE_ID` to revoke one. These commands
+list paired devices, `/web repair` to show a scannable repair-page QR code, and
+`/web revoke DEVICE_ID` to revoke one. These commands
 travel over the existing authenticated native Gateway connection and are never
 available to limited PWA credentials.
 
