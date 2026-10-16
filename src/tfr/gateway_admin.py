@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -16,19 +17,35 @@ from tfr.gateway_protocol import (
 )
 
 
+def gateway_socket_candidates(path: Path | str | None) -> tuple[Path, ...]:
+    if path is not None:
+        return (Path(path).expanduser(),)
+    candidates = [default_gateway_socket(), Path.home() / ".local/state/tfr/run/gateway.sock"]
+    if hasattr(os, "getuid"):
+        candidates.append(Path("/run/user") / str(os.getuid()) / "tfr/gateway.sock")
+    return tuple(dict.fromkeys(candidates))
+
+
 async def _admin_request(
     path: Path | str | None,
     message_type: str,
     **values: Any,
 ) -> dict[str, Any]:
-    socket_path = Path(path).expanduser() if path is not None else default_gateway_socket()
-    try:
-        reader, writer = await asyncio.open_unix_connection(
-            str(socket_path),
-            limit=MAX_MESSAGE_BYTES,
-        )
-    except (ConnectionError, OSError) as exc:
-        raise ConnectionError(f"cannot connect to Gateway at {socket_path}") from exc
+    attempted = gateway_socket_candidates(path)
+    last_error: Exception | None = None
+    for socket_path in attempted:
+        try:
+            reader, writer = await asyncio.open_unix_connection(
+                str(socket_path),
+                limit=MAX_MESSAGE_BYTES,
+            )
+            break
+        except (ConnectionError, OSError) as exc:
+            last_error = exc
+    else:
+        paths = ", ".join(str(candidate) for candidate in attempted)
+        hint = " Start the Gateway or use /web from an attached native UI."
+        raise ConnectionError(f"cannot reach the Gateway; tried {paths}.{hint}") from last_error
     try:
         await write_message(
             writer,

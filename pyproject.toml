@@ -13,6 +13,7 @@ dependencies = [
     "pillow>=12.3.0,<13",
     "plotext>=6.1.0,<7",
     "prompt-toolkit>=3.0.53",
+    "qrcode>=8.2",
     "pydantic>=2.14.0",
     "regex>=2026.9.29",
     "retroflow>=0.10.0,<0.11",

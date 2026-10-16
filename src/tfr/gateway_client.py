@@ -644,6 +644,47 @@ class GatewayClient:
             raise GatewayProtocolError("Gateway returned no update result")
         return result
 
+    async def web_status(self) -> dict[str, Any]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "web_status", "request_id": str(request_id)}, request_id
+        )
+        if result is None:
+            raise GatewayProtocolError("Gateway returned no web status")
+        return result
+
+    async def pair_web_device(self, label: str) -> str:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "pair_device", "request_id": str(request_id), "label": label},
+            request_id,
+        )
+        pairing_url = result.get("pairing_url") if result is not None else None
+        if not isinstance(pairing_url, str):
+            raise GatewayProtocolError("Gateway returned an invalid pairing URL")
+        return pairing_url
+
+    async def list_web_devices(self) -> list[dict[str, Any]]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "list_devices", "request_id": str(request_id)}, request_id
+        )
+        devices = result.get("devices") if result is not None else None
+        if not isinstance(devices, list) or not all(isinstance(item, dict) for item in devices):
+            raise GatewayProtocolError("Gateway returned an invalid web device list")
+        return devices
+
+    async def revoke_web_device(self, device_id: UUID) -> None:
+        request_id = uuid4()
+        await self._request(
+            {
+                "type": "revoke_device",
+                "request_id": str(request_id),
+                "device_id": str(device_id),
+            },
+            request_id,
+        )
+
     async def verify_connection(self, *, timeout: float) -> bool:
         """Actively confirm the connection is alive with a bounded ping round trip.
 
@@ -955,6 +996,18 @@ class GatewayUiRuntime:
         except BaseException:
             self._update_transaction_active = False
             raise
+
+    async def web_status(self) -> dict[str, Any]:
+        return await self.client.web_status()
+
+    async def pair_web_device(self, label: str) -> str:
+        return await self.client.pair_web_device(label)
+
+    async def list_web_devices(self) -> list[dict[str, Any]]:
+        return await self.client.list_web_devices()
+
+    async def revoke_web_device(self, device_id: UUID) -> None:
+        await self.client.revoke_web_device(device_id)
 
     async def _check_update(self) -> dict[str, Any]:
         available = (
