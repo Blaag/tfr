@@ -68,7 +68,7 @@ async def test_pairing_code_retry_is_atomic_and_idempotent(tmp_path: Path) -> No
         await store.redeem(code, "other@example.com")
 
 
-async def test_device_activity_is_persisted_with_a_bounded_write_rate(
+async def test_device_activity_slides_expiration_with_a_daily_write_rate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -77,8 +77,13 @@ async def test_device_activity_is_persisted_with_a_bounded_write_rate(
         pairing_code(store.create_pairing_url("Phone", ("alpha",))),
         "black@example.com",
     )
-    old = device.last_used_at - timedelta(minutes=10)
-    store._devices[device.token_digest] = replace(device, last_used_at=old)
+    old = device.last_used_at - timedelta(days=2)
+    old_expiration = device.expires_at - timedelta(days=2)
+    store._devices[device.token_digest] = replace(
+        device,
+        last_used_at=old,
+        expires_at=old_expiration,
+    )
     original_save = store._save
     saves = 0
 
@@ -89,10 +94,14 @@ async def test_device_activity_is_persisted_with_a_bounded_write_rate(
 
     monkeypatch.setattr(store, "_save", save)
 
-    updated = await store.mark_used(device.device_id)
-    repeated = await store.mark_used(device.device_id)
+    updated, changed = await store.mark_used(device.device_id)
+    repeated, changed_again = await store.mark_used(device.device_id)
 
+    assert changed is True
+    assert changed_again is False
     assert updated is not None and updated.last_used_at > old
+    assert updated.expires_at > old_expiration
+    assert updated.expires_at - updated.last_used_at == timedelta(days=180)
     assert repeated == updated
     assert saves == 1
     assert DeviceStore(store.state_directory, store.origin).authenticate(token) == updated
