@@ -461,6 +461,68 @@ function previewLabSpeaker(demo) {
       event_id: sample.id,
     });
     reportDiagnostic(entry);
+  } else {
+    scheduleLabPresentationTrace(demo, validation.value);
+  }
+}
+
+function presentationTrack(program) {
+  const variant = program?.variants?.[0];
+  if (!variant) return "style";
+  for (const [field, name] of [
+    ["character_palette_front", "palette_front"],
+    ["character_hue_wave", "hue_wave"],
+    ["character_sweep", "sweep"],
+    ["character_style_sweep", "style_sweep"],
+    ["character_sparkle", "sparkle"],
+    ["character_reveal", "reveal"],
+  ]) {
+    if (variant[field]) return name;
+  }
+  return variant.foreground_keyframes?.length ? "foreground_timeline" : "style";
+}
+
+function recordLabPresentationTrace(demo, programs, phase) {
+  const characters = [...elements.effectsLabMessage.querySelectorAll(".presentation-character")];
+  const colors = characters.slice(0, 5).map((node) => getComputedStyle(node).color);
+  const inline = characters.slice(0, 5).map((node) => node.style.color || "-");
+  const visual = characters.slice(0, 5).map((node) => node.dataset.visualText ? "v" : "-").join("");
+  const clocks = [...elements.effectsLabMessage.querySelectorAll(".presentation-target")]
+    .flatMap((node) => node.getAnimations())
+    .map((animation) => `${animation.playState}:${Math.round(Number(animation.currentTime) || 0)}`);
+  const message = [
+    `phase=${phase}`,
+    `tracks=${programs.map(presentationTrack).join("+")}`,
+    `targets=${characters.length}`,
+    `clocks=${clocks.join(",") || "none"}`,
+    `computed=${colors.join(",") || "none"}`,
+    `inline=${inline.join(",") || "none"}`,
+    `visual=${visual || "none"}`,
+  ].join("; ").slice(0, 240);
+  reportDiagnostic(recordDiagnostic({
+    severity: "info",
+    component: "presentation",
+    code: "lab_presentation_trace",
+    message,
+    operation: `${demo.id}:${phase}`.slice(0, 100),
+  }));
+}
+
+function scheduleLabPresentationTrace(demo, programs) {
+  const primary = programs.find((program) =>
+    !program.variants.some((variant) => variant.character_reveal)
+  ) || programs[0];
+  const reveal = programs.find((program) =>
+    program.variants.some((variant) => variant.character_reveal)
+  );
+  const checkpoints = new Map([
+    [100, "start"],
+    [Math.max(150, Math.round(primary.duration_ms / 2)), "active"],
+    [primary.duration_ms + 100, "idle"],
+  ]);
+  if (reveal) checkpoints.set(reveal.duration_ms + 100, "after-reveal");
+  for (const [delay, phase] of checkpoints) {
+    window.setTimeout(() => recordLabPresentationTrace(demo, programs, phase), delay);
   }
 }
 
@@ -1574,6 +1636,7 @@ function scheduleReconnect() {
 
 function sendCommand(event) {
   event.preventDefault();
+  acknowledgeInteraction(elements.sendButton);
   const world = currentWorld();
   const text = normalizeWorldCommand(elements.commandInput.value);
   if (

@@ -174,12 +174,12 @@ await context.addInitScript(() => {
                   redacted: false,
                   text_truncated: false,
                   presentation: {
-                    version: 1,
+                    version: 2,
                     programs: [
                       {
                         start: 0,
                         end: 5,
-                        duration_ms: 1000,
+                        duration_ms: 3000,
                         repeat_ms: 10000,
                         repeat_count: 2,
                         frames_per_second: 20,
@@ -197,6 +197,31 @@ await context.addInitScript(() => {
                         ],
                         reduced_motion: { foreground: "#ffaf00", bold: true },
                         fallback: { foreground: "#a9914a" },
+                      },
+                      {
+                        start: 0,
+                        end: Array.from('Wedge says, "Portable ember preview."').length,
+                        duration_ms: 1200,
+                        repeat_ms: 1200,
+                        repeat_count: 1,
+                        frames_per_second: 20,
+                        variants: [{
+                          requires: ["character_foreground", "character_text", "timeline"],
+                          style: {},
+                          foreground_keyframes: [],
+                          character_reveal: {
+                            interval_ms: 20,
+                            base_color: "#d7d7d7",
+                            accent_color: "#ffffff",
+                            glitch_width: 3,
+                            settle_width: 3,
+                            seed: 17,
+                            glitch_characters: "#%",
+                            inline_glitch_chance: 0.05,
+                          },
+                        }],
+                        reduced_motion: {},
+                        fallback: {},
                       },
                     ],
                   },
@@ -223,12 +248,12 @@ await context.addInitScript(() => {
                   redacted: false,
                   text_truncated: false,
                   presentation: {
-                    version: 1,
+                    version: 2,
                     programs: [
                       {
                         start: 0,
                         end: 5,
-                        duration_ms: 1000,
+                        duration_ms: 1800,
                         repeat_ms: 10000,
                         repeat_count: 2,
                         frames_per_second: 20,
@@ -248,6 +273,31 @@ await context.addInitScript(() => {
                         ],
                         reduced_motion: { foreground: "#ffc9d7", bold: true },
                         fallback: { foreground: "#ffc9d7" },
+                      },
+                      {
+                        start: 0,
+                        end: Array.from('Jarin says, "Portable rainbow preview."').length,
+                        duration_ms: 1200,
+                        repeat_ms: 1200,
+                        repeat_count: 1,
+                        frames_per_second: 20,
+                        variants: [{
+                          requires: ["character_foreground", "character_text", "timeline"],
+                          style: {},
+                          foreground_keyframes: [],
+                          character_reveal: {
+                            interval_ms: 20,
+                            base_color: "#d7d7d7",
+                            accent_color: "#ffffff",
+                            glitch_width: 3,
+                            settle_width: 3,
+                            seed: 18,
+                            glitch_characters: "#%",
+                            inline_glitch_chance: 0.05,
+                          },
+                        }],
+                        reduced_motion: {},
+                        fallback: {},
                       },
                     ],
                   },
@@ -442,24 +492,28 @@ try {
   assert.match(await page.locator("#effects-lab-message").innerText(), /Bob says/);
   assert.match(await page.locator("#effects-lab-notice").innerText(), /Gateway did not provide/);
   await page.locator("#effects-lab-speakers button").getByText("Wedge").click();
-  await page.waitForTimeout(100);
+  await page.waitForTimeout(1300);
   const emberColors = await page.locator("#effects-lab-message .presentation-character").evaluateAll(
-    (nodes) => nodes.map((node) => node.style.color),
+    (nodes) => nodes.slice(0, 5).map((node) => getComputedStyle(node).color),
   );
-  assert.equal(emberColors.length, 5);
   assert.ok(new Set(emberColors).size > 1);
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(500);
+  const movedEmberColors = await page.locator("#effects-lab-message .presentation-character").evaluateAll(
+    (nodes) => nodes.slice(0, 5).map((node) => getComputedStyle(node).color),
+  );
+  assert.notDeepEqual(movedEmberColors, emberColors);
+  await page.waitForTimeout(1400);
   assert.deepEqual(
     await page.locator("#effects-lab-message .presentation-character").evaluateAll(
-      (nodes) => nodes.map((node) => node.style.color),
+      (nodes) => nodes.slice(0, 5).map((node) => getComputedStyle(node).color),
     ),
     Array(5).fill("rgb(169, 145, 74)"),
   );
   await page.locator("#effects-lab-speakers button").getByText("Jarin").click();
-  await page.waitForTimeout(1100);
+  await page.waitForTimeout(1900);
   assert.deepEqual(
     await page.locator("#effects-lab-message .presentation-character").evaluateAll(
-      (nodes) => nodes.map((node) => node.style.color),
+      (nodes) => nodes.slice(0, 5).map((node) => getComputedStyle(node).color),
     ),
     Array(5).fill("rgb(255, 201, 215)"),
   );
@@ -470,7 +524,11 @@ try {
   await page.locator("#effects-lab-close").click();
   await page.locator("#settings-button").click();
   await page.locator("#diagnostics-button").click();
-  assert.match(await page.locator("#diagnostics-output").innerText(), /gateway_omitted/);
+  const diagnostics = await page.locator("#diagnostics-output").innerText();
+  assert.match(diagnostics, /gateway_omitted/);
+  assert.match(diagnostics, /lab_presentation_trace/);
+  assert.match(diagnostics, /tracks=palette_front\+reveal/);
+  assert.match(diagnostics, /tracks=hue_wave\+reveal/);
   await page.locator("#diagnostics-close").click();
   await page.locator("#settings-button").click();
   await page.locator("#spelling-suggestions").uncheck();
