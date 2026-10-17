@@ -2,16 +2,18 @@
 
 ## Status
 
-This document records the architecture and migration plan for plugin-driven
-presentation across TFR clients. The first portable vertical slice is
-implemented alongside the existing `TextDecoration` API. It provides typed
-effect programs, terminal and PWA interpreters, a bounded browser projection,
-explicit reduced-motion and unsupported-capability fallbacks, a
-`color_pulse()` constructor, and a bounded `character_sweep()` primitive.
+This document records the architecture for plugin-driven presentation across
+TFR clients. Portable versions 1 and 2 provide typed effect programs, terminal
+and PWA interpreters, a bounded browser projection, and explicit reduced-motion
+and unsupported-capability fallbacks. Version 1 contains foreground timelines,
+character color sweeps, hue waves, and palette fronts. Version 2 adds reusable
+character style/case sweeps, deterministic sparkles, filled fronts, bounded
+long-running transitions, reverse video, and character reveal/substitution.
 
-The model is intentionally still version 1 and narrow. Additional primitives
-must preserve its validation, fallback, accessibility, and resource-boundary
-rules rather than treating the current wire shape as a general animation API.
+Named speaker effects compile to these shared primitives instead of adding a
+renderer branch for every preset. The contract remains deliberately bounded;
+additional primitives must preserve its validation, fallback, accessibility,
+and resource-boundary rules rather than becoming a general animation API.
 
 ## Decision
 

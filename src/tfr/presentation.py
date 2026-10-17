@@ -10,16 +10,16 @@ import regex
 
 from tfr.text_effects import interpolate_color, validate_color
 
-PRESENTATION_VERSION = 1
-MAX_PRESENTATION_PROGRAMS = 1
+PRESENTATION_VERSION = 2
+MAX_PRESENTATION_PROGRAMS = 4
 MAX_PRESENTATION_VARIANTS = 4
 MAX_PRESENTATION_KEYFRAMES = 3
-MAX_PRESENTATION_TARGET_CHARACTERS = 2_048
-MAX_PRESENTATION_DURATION_SECONDS = 3.0
+MAX_PRESENTATION_TARGET_CHARACTERS = 4_096
+MAX_PRESENTATION_DURATION_SECONDS = 30.0
 MAX_PRESENTATION_REPEAT_SECONDS = 60.0
 MAX_PRESENTATION_REPEAT_COUNT = 20
 MAX_PRESENTATION_TOTAL_SECONDS = 300.0
-MAX_PRESENTATION_SWEEP_GRAPHEMES = 64
+MAX_PRESENTATION_SWEEP_GRAPHEMES = 100
 MAX_PRESENTATION_TRAIL_WIDTH = 8
 
 
@@ -30,6 +30,8 @@ class PresentationCapability(StrEnum):
     TIMELINE = "timeline"
     CHARACTER_FOREGROUND = "character_foreground"
     CHARACTER_CASE = "character_case"
+    CHARACTER_STYLE = "character_style"
+    CHARACTER_TEXT = "character_text"
 
 
 class SweepTrailMode(StrEnum):
@@ -46,11 +48,12 @@ class PresentationStyle:
     foreground: str | None = None
     bold: bool = False
     underline: bool = False
+    reverse: bool = False
 
     def __post_init__(self) -> None:
         if self.foreground is not None:
             object.__setattr__(self, "foreground", validate_color(self.foreground))
-        if not isinstance(self.bold, bool) or not isinstance(self.underline, bool):
+        if not all(isinstance(value, bool) for value in (self.bold, self.underline, self.reverse)):
             raise ValueError("presentation style flags must be booleans")
 
     def as_style(self) -> str:
@@ -61,6 +64,8 @@ class PresentationStyle:
             values.append("bold")
         if self.underline:
             values.append("underline")
+        if self.reverse:
+            values.append("reverse")
         return " ".join(values)
 
     def as_dict(self) -> dict[str, Any]:
@@ -71,6 +76,8 @@ class PresentationStyle:
             value["bold"] = True
         if self.underline:
             value["underline"] = True
+        if self.reverse:
+            value["reverse"] = True
         return value
 
 
@@ -119,6 +126,7 @@ class CharacterSweepTrack:
     trail_mode: SweepTrailMode = SweepTrailMode.SYMMETRIC
     start_padding: float = 0
     end_padding: float = 0
+    fill_behind: bool = False
 
     def __post_init__(self) -> None:
         if any(type(frame) is not PositionKeyframe for frame in self.positions):
@@ -151,8 +159,126 @@ class CharacterSweepTrack:
             object.__setattr__(self, name.replace(" ", "_"), float(value))
         if not isinstance(self.uppercase_head, bool):
             raise ValueError("presentation character sweep uppercase flag must be boolean")
+        if not isinstance(self.fill_behind, bool):
+            raise ValueError("presentation character sweep fill flag must be boolean")
+        if self.fill_behind and self.trail_mode is not SweepTrailMode.BEHIND:
+            raise ValueError("presentation character sweep fill requires a behind trail")
         if not isinstance(self.trail_mode, SweepTrailMode):
             raise ValueError("presentation character sweep trail mode is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class CharacterStyleSweepTrack:
+    positions: tuple[PositionKeyframe, ...]
+    base_style: PresentationStyle
+    active_style: PresentationStyle
+    width: float = 1
+    trail_mode: SweepTrailMode = SweepTrailMode.SYMMETRIC
+    start_padding: float = 0
+    end_padding: float = 0
+    uppercase_active: bool = False
+    lowercase_inactive: bool = False
+    stepped: bool = False
+
+    def __post_init__(self) -> None:
+        CharacterSweepTrack(
+            positions=self.positions,
+            base_color=self.base_style.foreground or "#ffffff",
+            head_color=self.active_style.foreground or self.base_style.foreground or "#ffffff",
+            trail_width=self.width,
+            trail_mode=self.trail_mode,
+            start_padding=self.start_padding,
+            end_padding=self.end_padding,
+        )
+        if (
+            type(self.base_style) is not PresentationStyle
+            or type(self.active_style) is not PresentationStyle
+        ):
+            raise ValueError("presentation character style sweep styles are invalid")
+        for name, value in (
+            ("uppercase active", self.uppercase_active),
+            ("lowercase inactive", self.lowercase_inactive),
+            ("stepped", self.stepped),
+        ):
+            if not isinstance(value, bool):
+                raise ValueError(f"presentation character style sweep {name} flag must be boolean")
+
+
+@dataclass(frozen=True, slots=True)
+class CharacterSparkleTrack:
+    base_color: str
+    accent_color: str
+    count: int = 2
+    seed: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "base_color", validate_color(self.base_color))
+        object.__setattr__(self, "accent_color", validate_color(self.accent_color))
+        if (
+            not isinstance(self.count, int)
+            or isinstance(self.count, bool)
+            or not 1 <= self.count <= 10
+        ):
+            raise ValueError("presentation sparkle count must be between 1 and 10")
+        if (
+            not isinstance(self.seed, int)
+            or isinstance(self.seed, bool)
+            or not 0 <= self.seed <= 0xFFFFFFFF
+        ):
+            raise ValueError("presentation sparkle seed must be an unsigned 32-bit integer")
+
+
+@dataclass(frozen=True, slots=True)
+class CharacterRevealTrack:
+    interval_seconds: float
+    base_color: str
+    accent_color: str
+    glitch_width: int
+    settle_width: int
+    seed: int
+    glitch_characters: str
+    inline_glitch_chance: float = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "base_color", validate_color(self.base_color))
+        object.__setattr__(self, "accent_color", validate_color(self.accent_color))
+        if (
+            not isinstance(self.interval_seconds, (int, float))
+            or isinstance(self.interval_seconds, bool)
+            or not math.isfinite(self.interval_seconds)
+            or self.interval_seconds <= 0
+        ):
+            raise ValueError("presentation reveal interval must be positive")
+        object.__setattr__(self, "interval_seconds", float(self.interval_seconds))
+        for name, value, lower in (
+            ("glitch width", self.glitch_width, 1),
+            ("settle width", self.settle_width, 0),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or not lower <= value <= 20:
+                raise ValueError(f"presentation reveal {name} must be between {lower} and 20")
+        if (
+            not isinstance(self.seed, int)
+            or isinstance(self.seed, bool)
+            or not 0 <= self.seed <= 0xFFFFFFFF
+        ):
+            raise ValueError("presentation reveal seed must be an unsigned 32-bit integer")
+        if (
+            not self.glitch_characters
+            or len(self.glitch_characters) > 256
+            or any(
+                not character.isascii() or not character.isprintable() or character.isspace()
+                for character in self.glitch_characters
+            )
+        ):
+            raise ValueError("presentation reveal characters must be bounded visible ASCII")
+        if (
+            not isinstance(self.inline_glitch_chance, (int, float))
+            or isinstance(self.inline_glitch_chance, bool)
+            or not math.isfinite(self.inline_glitch_chance)
+            or not 0 <= self.inline_glitch_chance <= 1
+        ):
+            raise ValueError("presentation reveal inline glitch chance must be between 0 and 1")
+        object.__setattr__(self, "inline_glitch_chance", float(self.inline_glitch_chance))
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +339,9 @@ class PresentationVariant:
     character_sweep: CharacterSweepTrack | None = None
     character_hue_wave: CharacterHueWaveTrack | None = None
     character_palette_front: CharacterPaletteFrontTrack | None = None
+    character_style_sweep: CharacterStyleSweepTrack | None = None
+    character_sparkle: CharacterSparkleTrack | None = None
+    character_reveal: CharacterRevealTrack | None = None
 
     def __post_init__(self) -> None:
         if not self.requires or len(self.requires) > len(PresentationCapability):
@@ -228,6 +357,8 @@ class PresentationVariant:
             used.add(PresentationCapability.BOLD)
         if self.style.underline:
             used.add(PresentationCapability.UNDERLINE)
+        if self.style.reverse:
+            used.add(PresentationCapability.CHARACTER_STYLE)
         if self.foreground_keyframes:
             used.update(
                 {
@@ -264,12 +395,40 @@ class PresentationVariant:
                         PresentationCapability.TIMELINE,
                     }
                 )
+        if self.character_style_sweep is not None:
+            used.update({PresentationCapability.CHARACTER_STYLE, PresentationCapability.TIMELINE})
+            styles = (
+                self.character_style_sweep.base_style,
+                self.character_style_sweep.active_style,
+            )
+            if any(style.foreground is not None for style in styles):
+                used.add(PresentationCapability.CHARACTER_FOREGROUND)
+            if (
+                self.character_style_sweep.uppercase_active
+                or self.character_style_sweep.lowercase_inactive
+            ):
+                used.add(PresentationCapability.CHARACTER_CASE)
+        if self.character_sparkle is not None:
+            used.update(
+                {PresentationCapability.CHARACTER_FOREGROUND, PresentationCapability.TIMELINE}
+            )
+        if self.character_reveal is not None:
+            used.update(
+                {
+                    PresentationCapability.CHARACTER_FOREGROUND,
+                    PresentationCapability.CHARACTER_TEXT,
+                    PresentationCapability.TIMELINE,
+                }
+            )
         tracks = sum(
             track is not None
             for track in (
                 self.character_sweep,
                 self.character_hue_wave,
                 self.character_palette_front,
+                self.character_style_sweep,
+                self.character_sparkle,
+                self.character_reveal,
             )
         )
         if bool(self.foreground_keyframes) + tracks > 1:
@@ -310,11 +469,11 @@ class EffectProgram:
             (
                 "duration",
                 self.duration_seconds,
-                1.0,
+                0.1,
                 MAX_PRESENTATION_DURATION_SECONDS,
             ),
-            ("repeat interval", self.repeat_seconds, 1.0, MAX_PRESENTATION_REPEAT_SECONDS),
-            ("frame rate", self.frames_per_second, 1.0, 20.0),
+            ("repeat interval", self.repeat_seconds, 0.1, MAX_PRESENTATION_REPEAT_SECONDS),
+            ("frame rate", self.frames_per_second, 1.0, 30.0),
         ):
             if (
                 isinstance(value, bool)
@@ -385,44 +544,64 @@ def validate_effect_programs(text: str, programs: tuple[EffectProgram, ...]) -> 
     for match in regex.finditer(r"\X", text):
         offset += len(match.group())
         boundaries.add(offset)
-    previous_end = 0
     for program in sorted(programs, key=lambda item: item.start):
         if type(program) is not EffectProgram:
             raise ValueError("presentation decorator must return effect programs")
         if any(type(variant) is not PresentationVariant for variant in program.variants):
             raise ValueError("presentation program variants are invalid")
-        if any(
-            type(variant.style) is not PresentationStyle
-            or any(
-                type(frame) is not ForegroundKeyframe
-                for frame in variant.foreground_keyframes
-            )
-            or (
-                variant.character_sweep is not None
-                and (
-                    type(variant.character_sweep) is not CharacterSweepTrack
-                    or any(
-                        type(frame) is not PositionKeyframe
-                        for frame in variant.character_sweep.positions
+        if (
+            any(
+                type(variant.style) is not PresentationStyle
+                or any(
+                    type(frame) is not ForegroundKeyframe for frame in variant.foreground_keyframes
+                )
+                or (
+                    variant.character_sweep is not None
+                    and (
+                        type(variant.character_sweep) is not CharacterSweepTrack
+                        or any(
+                            type(frame) is not PositionKeyframe
+                            for frame in variant.character_sweep.positions
+                        )
                     )
                 )
+                or (
+                    variant.character_style_sweep is not None
+                    and (
+                        type(variant.character_style_sweep) is not CharacterStyleSweepTrack
+                        or any(
+                            type(frame) is not PositionKeyframe
+                            for frame in variant.character_style_sweep.positions
+                        )
+                    )
+                )
+                or (
+                    variant.character_sparkle is not None
+                    and type(variant.character_sparkle) is not CharacterSparkleTrack
+                )
+                or (
+                    variant.character_reveal is not None
+                    and type(variant.character_reveal) is not CharacterRevealTrack
+                )
+                for variant in program.variants
             )
-            for variant in program.variants
-        ) or type(program.reduced_motion) is not PresentationStyle or type(
-            program.fallback
-        ) is not PresentationStyle:
+            or type(program.reduced_motion) is not PresentationStyle
+            or type(program.fallback) is not PresentationStyle
+        ):
             raise ValueError("presentation program contains invalid typed values")
         if program.end > len(text):
             raise ValueError("presentation target extends beyond visible text")
         if program.start not in boundaries or program.end not in boundaries:
             raise ValueError("presentation target must align with grapheme boundaries")
-        if any(variant.character_sweep is not None for variant in program.variants):
+        if any(
+            variant.character_sweep is not None
+            or variant.character_style_sweep is not None
+            or variant.character_sparkle is not None
+            for variant in program.variants
+        ):
             target = text[program.start : program.end]
             if len(tuple(regex.finditer(r"\X", target))) > MAX_PRESENTATION_SWEEP_GRAPHEMES:
                 raise ValueError("presentation character sweep target is too large")
-        if program.start < previous_end:
-            raise ValueError("presentation targets cannot overlap")
-        previous_end = program.end
 
 
 def select_presentation_variant(
@@ -430,11 +609,7 @@ def select_presentation_variant(
     capabilities: frozenset[PresentationCapability],
 ) -> PresentationVariant | None:
     return next(
-        (
-            variant
-            for variant in program.variants
-            if set(variant.requires) <= capabilities
-        ),
+        (variant for variant in program.variants if set(variant.requires) <= capabilities),
         None,
     )
 
@@ -472,6 +647,7 @@ def presentation_style_at(
         foreground=interpolate_color(before.color, after.color, local_progress),
         bold=variant.style.bold,
         underline=variant.style.underline,
+        reverse=variant.style.reverse,
     )
 
 
@@ -487,6 +663,41 @@ def _timeline_value(keyframes: tuple[Any, ...], progress: float, attribute: str)
     local = 1.0 if span == 0 else (progress - before.at) / span
     start = getattr(before, attribute)
     return start + (getattr(after, attribute) - start) * local
+
+
+def _effect_seed_value(seed: int, frame: int, index: int) -> int:
+    value = (seed ^ (frame * 0x9E3779B1) ^ (index * 0x85EBCA77)) & 0xFFFFFFFF
+    value ^= value >> 16
+    value = (value * 0x7FEB352D) & 0xFFFFFFFF
+    value ^= value >> 15
+    return value
+
+
+def _style_sweep_selected(
+    track: CharacterStyleSweepTrack, index: int, count: int, progress: float
+) -> bool:
+    position = _timeline_value(track.positions, progress, "position")
+    head = -track.start_padding + position * (
+        max(0, count - 1) + track.start_padding + track.end_padding
+    )
+    if track.stepped:
+        head = math.floor(head + 1e-9)
+    delta = index - head
+    distance = (
+        abs(delta)
+        if track.trail_mode is SweepTrailMode.SYMMETRIC
+        else -delta
+        if track.trail_mode is SweepTrailMode.BEHIND and delta <= 0
+        else delta
+        if track.trail_mode is SweepTrailMode.AHEAD and delta >= 0
+        else math.inf
+    )
+    return distance < track.width
+
+
+def _reveal_glitch(track: CharacterRevealTrack, frame: int, index: int) -> str:
+    value = _effect_seed_value(track.seed, frame, index)
+    return track.glitch_characters[value % len(track.glitch_characters)]
 
 
 def presentation_grapheme_at(
@@ -508,6 +719,9 @@ def presentation_grapheme_at(
         variant.character_sweep
         or variant.character_hue_wave
         or variant.character_palette_front
+        or variant.character_style_sweep
+        or variant.character_sparkle
+        or variant.character_reveal
     )
     if character_track is None:
         return presentation_style_at(
@@ -533,11 +747,15 @@ def presentation_grapheme_at(
         distance = (
             abs(delta)
             if sweep.trail_mode is SweepTrailMode.SYMMETRIC
-            else -delta if sweep.trail_mode is SweepTrailMode.BEHIND and delta <= 0
-            else delta if sweep.trail_mode is SweepTrailMode.AHEAD and delta >= 0
+            else -delta
+            if sweep.trail_mode is SweepTrailMode.BEHIND and delta <= 0
+            else delta
+            if sweep.trail_mode is SweepTrailMode.AHEAD and delta >= 0
             else math.inf
         )
         intensity = max(0.0, 1.0 - distance / sweep.trail_width)
+        if sweep.fill_behind and math.isfinite(distance):
+            intensity = min(1.0, distance / sweep.trail_width)
         intensity = intensity * intensity * (3 - 2 * intensity)
         rendered = grapheme
         if sweep.uppercase_head and grapheme.isascii() and grapheme.isalpha():
@@ -545,6 +763,75 @@ def presentation_grapheme_at(
         return PresentationStyle(
             foreground=interpolate_color(sweep.base_color, sweep.head_color, intensity)
         ), rendered
+    if variant.character_style_sweep is not None:
+        track = variant.character_style_sweep
+        selected = _style_sweep_selected(track, index, count, progress)
+        rendered = grapheme
+        if grapheme.isascii() and grapheme.isalpha():
+            if selected and track.uppercase_active:
+                rendered = grapheme.upper()
+            elif not selected and track.lowercase_inactive:
+                rendered = grapheme.lower()
+        return track.active_style if selected else track.base_style, rendered
+    if variant.character_sparkle is not None:
+        sparkle = variant.character_sparkle
+        phase_seconds = progress * program.duration_seconds
+        flash_rate = program.frames_per_second / 2
+        frame = int(phase_seconds * flash_rate)
+        selected = sorted(
+            range(count), key=lambda candidate: _effect_seed_value(sparkle.seed, frame, candidate)
+        )[: min(sparkle.count, count)]
+        flash_progress = (phase_seconds * flash_rate) % 1
+        intensity = 0.25 + 0.75 * math.sin(math.pi * flash_progress) if index in selected else 0
+        return PresentationStyle(
+            foreground=interpolate_color(sparkle.base_color, sparkle.accent_color, intensity)
+        ), grapheme
+    if variant.character_reveal is not None:
+        reveal = variant.character_reveal
+        phase_seconds = progress * program.duration_seconds
+        frame = int((phase_seconds + 1e-12) * program.frames_per_second)
+        frontier = int(phase_seconds / reveal.interval_seconds)
+        revealed = min(count, frontier)
+        if index >= revealed:
+            return PresentationStyle(), " "
+        trail_position = frontier - 1 - index
+        if trail_position < reveal.glitch_width:
+            return PresentationStyle(foreground=reveal.accent_color), _reveal_glitch(
+                reveal, frame, index
+            )
+        if trail_position < reveal.glitch_width + reveal.settle_width:
+            settle_position = trail_position - reveal.glitch_width
+            progress_to_base = (
+                1.0 if reveal.settle_width <= 1 else settle_position / (reveal.settle_width - 1)
+            )
+            return PresentationStyle(
+                foreground=interpolate_color(
+                    reveal.accent_color, reveal.base_color, progress_to_base
+                )
+            ), grapheme
+        fill_duration = count * reveal.interval_seconds
+        selection = _effect_seed_value(reveal.seed ^ 0xA5A5A5A5, 0, index) / 0x100000000
+        if reveal.inline_glitch_chance > 0 and selection < reveal.inline_glitch_chance:
+            stable_at = (
+                index + 1 + reveal.glitch_width + reveal.settle_width
+            ) * reveal.interval_seconds
+            pulse_duration = (1 + reveal.settle_width) * reveal.interval_seconds
+            latest_start = fill_duration - pulse_duration
+            if latest_start > stable_at:
+                position = _effect_seed_value(reveal.seed ^ 0x5A5A5A5A, 0, index) / 0x100000000
+                pulse_phase = phase_seconds - (stable_at + position * (latest_start - stable_at))
+                if 0 <= pulse_phase < pulse_duration:
+                    if pulse_phase < reveal.interval_seconds:
+                        return PresentationStyle(
+                            foreground=reveal.accent_color, bold=True
+                        ), _reveal_glitch(reveal, frame, index)
+                    settle = (pulse_phase - reveal.interval_seconds) / max(
+                        reveal.interval_seconds, reveal.settle_width * reveal.interval_seconds
+                    )
+                    return PresentationStyle(
+                        foreground=interpolate_color(reveal.accent_color, reveal.base_color, settle)
+                    ), grapheme
+        return PresentationStyle(), grapheme
     if variant.character_hue_wave is not None:
         wave = variant.character_hue_wave
         hue = (index / max(1, count) * wave.spatial_cycles + progress * wave.temporal_cycles) % 1
@@ -577,6 +864,9 @@ def presentation_frame_delay(program: EffectProgram, elapsed_seconds: float) -> 
         and variant.character_sweep is None
         and variant.character_hue_wave is None
         and variant.character_palette_front is None
+        and variant.character_style_sweep is None
+        and variant.character_sparkle is None
+        and variant.character_reveal is None
     ):
         return None
     elapsed = max(0.0, elapsed_seconds)
@@ -592,8 +882,26 @@ def presentation_frame_delay(program: EffectProgram, elapsed_seconds: float) -> 
 
 
 def effect_programs_as_dict(programs: tuple[EffectProgram, ...]) -> dict[str, Any]:
+    version = (
+        2
+        if any(
+            program.duration_seconds > 3
+            or program.reduced_motion.reverse
+            or program.fallback.reverse
+            or any(
+                variant.style.reverse
+                or variant.character_style_sweep is not None
+                or variant.character_sparkle is not None
+                or variant.character_reveal is not None
+                or bool(variant.character_sweep and variant.character_sweep.fill_behind)
+                for variant in program.variants
+            )
+            for program in programs
+        )
+        else 1
+    )
     return {
-        "version": PRESENTATION_VERSION,
+        "version": version,
         "programs": [
             {
                 "start": program.start,
@@ -637,9 +945,75 @@ def effect_programs_as_dict(programs: tuple[EffectProgram, ...]) -> dict[str, An
                                         if variant.character_sweep.end_padding
                                         else {}
                                     ),
+                                    **(
+                                        {"fill_behind": True}
+                                        if variant.character_sweep.fill_behind
+                                        else {}
+                                    ),
                                 }
                             }
                             if variant.character_sweep is not None
+                            else {}
+                        ),
+                        **(
+                            {
+                                "character_style_sweep": {
+                                    "positions": [
+                                        {"at": frame.at, "position": frame.position}
+                                        for frame in variant.character_style_sweep.positions
+                                    ],
+                                    "base_style": (
+                                        variant.character_style_sweep.base_style.as_dict()
+                                    ),
+                                    "active_style": (
+                                        variant.character_style_sweep.active_style.as_dict()
+                                    ),
+                                    "width": variant.character_style_sweep.width,
+                                    "trail_mode": variant.character_style_sweep.trail_mode.value,
+                                    "start_padding": variant.character_style_sweep.start_padding,
+                                    "end_padding": variant.character_style_sweep.end_padding,
+                                    "uppercase_active": (
+                                        variant.character_style_sweep.uppercase_active
+                                    ),
+                                    "lowercase_inactive": (
+                                        variant.character_style_sweep.lowercase_inactive
+                                    ),
+                                    "stepped": variant.character_style_sweep.stepped,
+                                }
+                            }
+                            if variant.character_style_sweep is not None
+                            else {}
+                        ),
+                        **(
+                            {
+                                "character_sparkle": {
+                                    "base_color": variant.character_sparkle.base_color,
+                                    "accent_color": variant.character_sparkle.accent_color,
+                                    "count": variant.character_sparkle.count,
+                                    "seed": variant.character_sparkle.seed,
+                                }
+                            }
+                            if variant.character_sparkle is not None
+                            else {}
+                        ),
+                        **(
+                            {
+                                "character_reveal": {
+                                    "interval_ms": round(
+                                        variant.character_reveal.interval_seconds * 1_000, 6
+                                    ),
+                                    "base_color": variant.character_reveal.base_color,
+                                    "accent_color": variant.character_reveal.accent_color,
+                                    "glitch_width": variant.character_reveal.glitch_width,
+                                    "settle_width": variant.character_reveal.settle_width,
+                                    "seed": variant.character_reveal.seed,
+                                    "glitch_characters": variant.character_reveal.glitch_characters,
+                                    "inline_glitch_chance": (
+                                        variant.character_reveal.inline_glitch_chance
+                                    ),
+                                }
+                            }
+                            if variant.character_reveal is not None
                             else {}
                         ),
                         **(
@@ -714,6 +1088,39 @@ def color_pulse(
     )
 
 
+def foreground_transition(
+    start: int,
+    end: int,
+    *,
+    start_color: str,
+    end_color: str,
+    duration_seconds: float,
+    repeat_seconds: float | None = None,
+    repeat_count: int = 1,
+    reduced_motion: PresentationStyle | None = None,
+) -> EffectProgram:
+    final = PresentationStyle(foreground=end_color)
+    return EffectProgram(
+        start=start,
+        end=end,
+        variants=(
+            PresentationVariant(
+                requires=(PresentationCapability.FOREGROUND_COLOR, PresentationCapability.TIMELINE),
+                style=final,
+                foreground_keyframes=(
+                    ForegroundKeyframe(0, start_color),
+                    ForegroundKeyframe(1, end_color),
+                ),
+            ),
+        ),
+        reduced_motion=reduced_motion or final,
+        fallback=final,
+        duration_seconds=duration_seconds,
+        repeat_seconds=repeat_seconds or duration_seconds,
+        repeat_count=repeat_count,
+    )
+
+
 def character_sweep(
     start: int,
     end: int,
@@ -725,6 +1132,7 @@ def character_sweep(
     trail_mode: SweepTrailMode = SweepTrailMode.SYMMETRIC,
     start_padding: float = 0,
     end_padding: float = 0,
+    fill_behind: bool = False,
     return_to_start: bool = True,
     duration_seconds: float = 2.0,
     repeat_seconds: float = 2.0,
@@ -760,6 +1168,7 @@ def character_sweep(
                     trail_mode=trail_mode,
                     start_padding=start_padding,
                     end_padding=end_padding,
+                    fill_behind=fill_behind,
                 ),
             ),
         ),
@@ -790,12 +1199,17 @@ def character_hue_wave(
     return EffectProgram(
         start=start,
         end=end,
-        variants=(PresentationVariant(
-            requires=(PresentationCapability.CHARACTER_FOREGROUND, PresentationCapability.TIMELINE),
-            character_hue_wave=CharacterHueWaveTrack(
-                base_color, saturation, brightness, spatial_cycles, temporal_cycles
+        variants=(
+            PresentationVariant(
+                requires=(
+                    PresentationCapability.CHARACTER_FOREGROUND,
+                    PresentationCapability.TIMELINE,
+                ),
+                character_hue_wave=CharacterHueWaveTrack(
+                    base_color, saturation, brightness, spatial_cycles, temporal_cycles
+                ),
             ),
-        ),),
+        ),
         reduced_motion=reduced_motion or PresentationStyle(foreground=base_color, bold=True),
         fallback=PresentationStyle(foreground=base_color),
         duration_seconds=duration_seconds,
@@ -822,14 +1236,160 @@ def character_palette_front(
     return EffectProgram(
         start=start,
         end=end,
-        variants=(PresentationVariant(
-            requires=(PresentationCapability.CHARACTER_FOREGROUND, PresentationCapability.TIMELINE),
-            character_palette_front=track,
-        ),),
+        variants=(
+            PresentationVariant(
+                requires=(
+                    PresentationCapability.CHARACTER_FOREGROUND,
+                    PresentationCapability.TIMELINE,
+                ),
+                character_palette_front=track,
+            ),
+        ),
         reduced_motion=reduced_motion or PresentationStyle(foreground=track.colors[0], bold=True),
         fallback=PresentationStyle(foreground=track.colors[-1]),
         duration_seconds=duration_seconds,
         repeat_seconds=repeat_seconds,
         repeat_count=repeat_count,
+        frames_per_second=frames_per_second,
+    )
+
+
+def character_style_sweep(
+    start: int,
+    end: int,
+    *,
+    base_style: PresentationStyle,
+    active_style: PresentationStyle,
+    width: float = 1,
+    trail_mode: SweepTrailMode = SweepTrailMode.SYMMETRIC,
+    start_padding: float = 0,
+    end_padding: float = 0,
+    uppercase_active: bool = False,
+    lowercase_inactive: bool = False,
+    stepped: bool = False,
+    return_to_start: bool = False,
+    duration_seconds: float = 1,
+    repeat_seconds: float = 10,
+    repeat_count: int = MAX_PRESENTATION_REPEAT_COUNT,
+    frames_per_second: float = 20,
+    reduced_motion: PresentationStyle | None = None,
+) -> EffectProgram:
+    positions = (
+        (PositionKeyframe(0, 0), PositionKeyframe(0.5, 1), PositionKeyframe(1, 0))
+        if return_to_start
+        else (PositionKeyframe(0, 0), PositionKeyframe(1, 1))
+    )
+    requires = [PresentationCapability.CHARACTER_STYLE, PresentationCapability.TIMELINE]
+    if base_style.foreground is not None or active_style.foreground is not None:
+        requires.append(PresentationCapability.CHARACTER_FOREGROUND)
+    if uppercase_active or lowercase_inactive:
+        requires.append(PresentationCapability.CHARACTER_CASE)
+    return EffectProgram(
+        start=start,
+        end=end,
+        variants=(
+            PresentationVariant(
+                requires=tuple(requires),
+                character_style_sweep=CharacterStyleSweepTrack(
+                    positions=positions,
+                    base_style=base_style,
+                    active_style=active_style,
+                    width=width,
+                    trail_mode=trail_mode,
+                    start_padding=start_padding,
+                    end_padding=end_padding,
+                    uppercase_active=uppercase_active,
+                    lowercase_inactive=lowercase_inactive,
+                    stepped=stepped,
+                ),
+            ),
+        ),
+        reduced_motion=reduced_motion or active_style,
+        fallback=base_style,
+        duration_seconds=duration_seconds,
+        repeat_seconds=repeat_seconds,
+        repeat_count=repeat_count,
+        frames_per_second=frames_per_second,
+    )
+
+
+def character_sparkle(
+    start: int,
+    end: int,
+    *,
+    base_color: str,
+    accent_color: str,
+    count: int,
+    seed: int,
+    duration_seconds: float = 1.2,
+    repeat_seconds: float = 10,
+    repeat_count: int = MAX_PRESENTATION_REPEAT_COUNT,
+    frames_per_second: float = 20,
+) -> EffectProgram:
+    base = PresentationStyle(foreground=base_color)
+    return EffectProgram(
+        start=start,
+        end=end,
+        variants=(
+            PresentationVariant(
+                requires=(
+                    PresentationCapability.CHARACTER_FOREGROUND,
+                    PresentationCapability.TIMELINE,
+                ),
+                character_sparkle=CharacterSparkleTrack(base_color, accent_color, count, seed),
+            ),
+        ),
+        reduced_motion=PresentationStyle(foreground=accent_color, bold=True),
+        fallback=base,
+        duration_seconds=duration_seconds,
+        repeat_seconds=repeat_seconds,
+        repeat_count=repeat_count,
+        frames_per_second=frames_per_second,
+    )
+
+
+def character_reveal(
+    start: int,
+    end: int,
+    *,
+    interval_seconds: float,
+    base_color: str,
+    accent_color: str,
+    glitch_width: int,
+    settle_width: int,
+    seed: int,
+    glitch_characters: str,
+    inline_glitch_chance: float = 0,
+    frames_per_second: float = 20,
+) -> EffectProgram:
+    duration = interval_seconds * ((end - start) + glitch_width + settle_width)
+    duration = max(0.1, min(MAX_PRESENTATION_DURATION_SECONDS, duration))
+    return EffectProgram(
+        start=start,
+        end=end,
+        variants=(
+            PresentationVariant(
+                requires=(
+                    PresentationCapability.CHARACTER_FOREGROUND,
+                    PresentationCapability.CHARACTER_TEXT,
+                    PresentationCapability.TIMELINE,
+                ),
+                character_reveal=CharacterRevealTrack(
+                    interval_seconds=interval_seconds,
+                    base_color=base_color,
+                    accent_color=accent_color,
+                    glitch_width=glitch_width,
+                    settle_width=settle_width,
+                    seed=seed,
+                    glitch_characters=glitch_characters,
+                    inline_glitch_chance=inline_glitch_chance,
+                ),
+            ),
+        ),
+        reduced_motion=PresentationStyle(),
+        fallback=PresentationStyle(),
+        duration_seconds=duration,
+        repeat_seconds=duration,
+        repeat_count=1,
         frames_per_second=frames_per_second,
     )
