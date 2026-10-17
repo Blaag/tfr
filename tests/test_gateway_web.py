@@ -998,6 +998,39 @@ async def test_pwa_reports_bounded_authenticated_diagnostics(tmp_path: Path) -> 
         await bus.close()
 
 
+async def test_authenticated_session_slides_device_and_cookie_expiration_daily(
+    tmp_path: Path,
+) -> None:
+    bus = EventBus()
+    runtime = FakeRuntime(EventHistory(bus, {"alpha": 5}))
+    gateway, client, token = await paired_client(tmp_path, runtime)
+    device = gateway.devices.authenticate(token)
+    assert device is not None
+    old = replace(
+        device,
+        last_used_at=datetime.now(UTC) - timedelta(days=2),
+        expires_at=datetime.now(UTC) + timedelta(days=178),
+    )
+    gateway.devices._devices[device.token_digest] = old
+    gateway.devices._save()
+    try:
+        response = await client.get(
+            "/api/session",
+            headers={**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"},
+        )
+        assert response.status == 200
+        refreshed = gateway.devices.authenticate(token)
+        assert refreshed is not None
+        assert refreshed.last_used_at > old.last_used_at
+        assert refreshed.expires_at - refreshed.last_used_at == timedelta(days=180)
+        cookie = SimpleCookie()
+        cookie.load(response.headers["Set-Cookie"])
+        assert int(cookie[SESSION_COOKIE]["max-age"]) >= 180 * 24 * 60 * 60 - 5
+    finally:
+        await client.close()
+        await bus.close()
+
+
 async def test_pairing_requires_exact_origin_and_host(tmp_path: Path) -> None:
     bus = EventBus()
     history = EventHistory(bus, {"alpha": 5})

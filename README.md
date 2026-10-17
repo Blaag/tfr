@@ -514,7 +514,9 @@ Add `--socket PATH` to these commands when the Gateway uses a non-default Unix
 socket. Revocation invalidates the credential and closes any active PWA socket.
 Deleting `web_gateway.state_directory` revokes every device, but normal
 administration should use `revoke-device`. Device credentials expire after 180
-days and authorize only non-agent worlds that existed when the link was created.
+days of inactivity. Successful authenticated use slides the Gateway record and
+HttpOnly cookie out another 180 days, persisted at most once daily. Credentials
+authorize only non-agent worlds that existed when the link was created.
 Pair again after adding a world that the phone should access.
 
 The PWA provides retained and live world output, validated ANSI-derived colors

@@ -19,7 +19,7 @@ MAX_DEVICE_LABEL_CHARACTERS = 80
 DEVICE_TOKEN_BYTES = 32
 PAIRING_CODE_BYTES = 32
 DEVICE_LIFETIME_SECONDS = 180 * 24 * 60 * 60
-DEVICE_ACTIVITY_WRITE_INTERVAL_SECONDS = 5 * 60
+DEVICE_ACTIVITY_WRITE_INTERVAL_SECONDS = 24 * 60 * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,7 +286,7 @@ class DeviceStore:
             return None
         return device
 
-    async def mark_used(self, device_id: UUID) -> DeviceRecord | None:
+    async def mark_used(self, device_id: UUID) -> tuple[DeviceRecord | None, bool]:
         async with self._lock:
             digest = next(
                 (
@@ -297,21 +297,25 @@ class DeviceStore:
                 None,
             )
             if digest is None:
-                return None
+                return None, False
             device = self._devices[digest]
             now = datetime.now(UTC)
             if device.expires_at <= now:
-                return None
+                return None, False
             if (now - device.last_used_at).total_seconds() < DEVICE_ACTIVITY_WRITE_INTERVAL_SECONDS:
-                return device
-            updated = replace(device, last_used_at=now)
+                return device, False
+            updated = replace(
+                device,
+                last_used_at=now,
+                expires_at=datetime.fromtimestamp(now.timestamp() + DEVICE_LIFETIME_SECONDS, UTC),
+            )
             self._devices[digest] = updated
             try:
                 self._save()
             except BaseException:
                 self._devices[digest] = device
                 raise
-            return updated
+            return updated, True
 
     def device_descriptors(self) -> list[dict[str, object]]:
         return [

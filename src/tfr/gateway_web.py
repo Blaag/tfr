@@ -579,7 +579,11 @@ class WebGatewayServer:
     async def _session(self, request: web.Request) -> web.Response:
         self._validate_public_request(request, require_origin=False)
         device = self._authenticate(request)
-        return self._json_response(
+        token = request.cookies.get(SESSION_COOKIE)
+        refreshed = False
+        if device is not None:
+            device, refreshed = await self.devices.mark_used(device.device_id)
+        response = self._json_response(
             {
                 "paired": device is not None,
                 "device": (
@@ -589,6 +593,9 @@ class WebGatewayServer:
                 ),
             }
         )
+        if device is not None and refreshed and token is not None:
+            self._set_session_cookie(response, token, device)
+        return response
 
     async def _report_diagnostic(self, request: web.Request) -> web.Response:
         self._validate_public_request(request, require_origin=True)
@@ -844,9 +851,14 @@ class WebGatewayServer:
             max_msg_size=MAX_WEB_MESSAGE_BYTES,
             compress=False,
         )
+        session_token = request.cookies.get(SESSION_COOKIE)
+        refreshed, cookie_changed = await self.devices.mark_used(device.device_id)
+        if refreshed is not None:
+            device = refreshed
+        if cookie_changed and session_token is not None:
+            self._set_session_cookie(socket, session_token, device)
         try:
             await socket.prepare(request)
-            session_token = request.cookies.get(SESSION_COOKIE)
             async with self._session_lock:
                 current = self.devices.authenticate(session_token)
                 if current is None or current.device_id != device.device_id:
@@ -860,9 +872,6 @@ class WebGatewayServer:
                 )
             if socket.closed:
                 return socket
-            refreshed = await self.devices.mark_used(device.device_id)
-            if refreshed is not None:
-                device = refreshed
             await self._send_initial_state(
                 socket,
                 subscription,
