@@ -283,8 +283,10 @@ class EffectDemoSample:
     def __post_init__(self) -> None:
         if self.kind not in {EventKind.SAY, EventKind.POSE, EventKind.SPEECH}:
             raise ValueError("effect demo samples must be speech or poses")
-        if not self.text or len(self.text) > 2_048 or any(
-            character in self.text for character in "\r\n"
+        if (
+            not self.text
+            or len(self.text) > 2_048
+            or any(character in self.text for character in "\r\n")
         ):
             raise ValueError("effect demo sample text must be one bounded line")
 
@@ -306,9 +308,7 @@ class EffectDemo:
             type(sample) is not EffectDemoSample for sample in self.samples
         ):
             raise ValueError("effect demos must contain 1-10 typed samples")
-        if len(self.worlds) > 100 or any(
-            not world or len(world) > 100 for world in self.worlds
-        ):
+        if len(self.worlds) > 100 or any(not world or len(world) > 100 for world in self.worlds):
             raise ValueError("effect demo worlds must contain bounded world names")
 
 
@@ -738,9 +738,7 @@ class PluginManager:
         self._session_id = uuid4()
         self._sequence = 0
         self._failure_tasks: set[asyncio.Task[Any]] = set()
-        self._presentation_cache: dict[
-            tuple[UUID, str], tuple[EffectProgram, ...]
-        ] = {}
+        self._presentation_cache: dict[tuple[UUID, str], tuple[EffectProgram, ...]] = {}
         self.requested_plugins: tuple[str, ...] = ()
         self.config: Mapping[str, Any] = MappingProxyType({})
         self._loaded_plugins: list[str] = []
@@ -1354,7 +1352,6 @@ class PluginManager:
             try:
                 additions = tuple(decorator(event, text))
             except Exception as exc:
-                self.registry.presentation_decorators.pop(name, None)
                 self.diagnostics.record(
                     severity="error",
                     component="presentation",
@@ -1369,7 +1366,6 @@ class PluginManager:
                 combined = tuple((*programs, *additions))
                 validate_effect_programs(text, combined)
             except ValueError as exc:
-                self.registry.presentation_decorators.pop(name, None)
                 self.diagnostics.record(
                     severity="error",
                     component="presentation",

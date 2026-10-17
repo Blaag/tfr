@@ -158,6 +158,57 @@ await context.addInitScript(() => {
                 },
               ],
             },
+            {
+              id: "speaker:jarin",
+              label: "Jarin",
+              category: "speaker",
+              samples: [
+                {
+                  id: "demo-jarin",
+                  timestamp: new Date().toISOString(),
+                  world: "dev-local",
+                  connection_generation: "1",
+                  direction: "inbound",
+                  kind: "say",
+                  text: 'Jarin says, "Portable rainbow preview."',
+                  text_runs: [
+                    { text: "Jarin", style: { foreground: "#ff0000" }, role: "speaker" },
+                    { text: ' says, "Portable rainbow preview."', style: {} },
+                  ],
+                  redacted: false,
+                  text_truncated: false,
+                  presentation: {
+                    version: 1,
+                    programs: [
+                      {
+                        start: 0,
+                        end: 5,
+                        duration_ms: 1000,
+                        repeat_ms: 10000,
+                        repeat_count: 2,
+                        frames_per_second: 20,
+                        variants: [
+                          {
+                            requires: ["character_foreground", "timeline"],
+                            style: {},
+                            foreground_keyframes: [],
+                            character_hue_wave: {
+                              base_color: "#ffc9d7",
+                              saturation: 0.78,
+                              brightness: 1,
+                              spatial_cycles: 1,
+                              temporal_cycles: 1,
+                            },
+                          },
+                        ],
+                        reduced_motion: { foreground: "#ffc9d7", bold: true },
+                        fallback: { foreground: "#ffc9d7" },
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
           ],
         });
         for (const event of events) this.message(event);
@@ -234,6 +285,13 @@ try {
   await page.waitForFunction(() => document.querySelectorAll("#event-list .event").length === 500);
   assertGeometry(await geometry(), "portrait");
   assert.equal(await page.locator("#event-list .event").count(), 500);
+  assert.deepEqual(
+    await page.locator("#transcript").evaluate((node) => ({
+      behavior: getComputedStyle(node).scrollBehavior,
+      atBottom: node.scrollHeight - node.scrollTop - node.clientHeight < 2,
+    })),
+    { behavior: "auto", atBottom: true },
+  );
   assert.equal(
     await page.locator("#event-list .event").first().getAttribute("data-event-id"),
     "event-200",
@@ -330,6 +388,14 @@ try {
       (nodes) => nodes.map((node) => node.style.color),
     ),
     Array(5).fill("rgb(169, 145, 74)"),
+  );
+  await page.locator("#effects-lab-speakers button").getByText("Jarin").click();
+  await page.waitForTimeout(1100);
+  assert.deepEqual(
+    await page.locator("#effects-lab-message .presentation-character").evaluateAll(
+      (nodes) => nodes.map((node) => node.style.color),
+    ),
+    Array(5).fill("rgb(255, 201, 215)"),
   );
   await page.locator("#effects-lab-command-input").fill("/teststreak 4");
   await page.locator("#effects-lab-command button").click();

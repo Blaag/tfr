@@ -375,7 +375,7 @@ function previewLabSpeaker(demo) {
       message: sample.presentation
         ? `The PWA rejected a configured presentation (${validation.error.code})`
         : "The Gateway omitted a configured Effects Lab presentation",
-      operation: validation.error?.path || demo.id,
+      operation: demo.id,
       event_id: sample.id,
     });
     reportDiagnostic(entry);
@@ -434,9 +434,12 @@ function presentationAnimationCost(node) {
 function eventPresentationAnimationCost(event) {
   return event?.presentation?.programs?.some((program) =>
     program.variants?.some((variant) =>
-      variant.character_sweep
-      || variant.character_hue_wave
-      || variant.character_palette_front
+       variant.character_sweep
+       || variant.character_hue_wave
+       || variant.character_palette_front
+       || variant.character_style_sweep
+       || variant.character_sparkle
+       || variant.character_reveal
     ),
   )
     ? CHARACTER_SWEEP_ANIMATION_COST
@@ -851,20 +854,42 @@ function appendEventText(
       elements.motionPreference.value,
       window.matchMedia("(prefers-reduced-motion: reduce)").matches,
     );
-  let presentationWrapper = null;
-  let activeProgram = null;
+  let presentationWrappers = [];
+  let activePresentations = [];
   for (const run of splitPresentationRuns(event, runs, animationsEnabled)) {
-    let parent = container;
-    if (run.presentation) {
-      if (activeProgram !== run.presentation.program) {
-        presentationWrapper = document.createElement("span");
+    const presentations = run.presentations || (run.presentation ? [run.presentation] : []);
+    let shared = 0;
+    while (
+      shared < presentations.length &&
+      activePresentations[shared]?.program === presentations[shared].program
+    ) shared += 1;
+    activePresentations = activePresentations.slice(0, shared);
+    presentationWrappers = presentationWrappers.slice(0, shared);
+    let parent = presentationWrappers.at(-1) || container;
+    for (const presentation of presentations.slice(shared)) {
+        const presentationWrapper = document.createElement("span");
         presentationWrapper.className = "presentation-target";
-        applyTextStyle(presentationWrapper, run.presentation.style);
-        container.append(presentationWrapper);
+        if (presentation.characterReveal) {
+          presentationWrapper.setAttribute(
+            "aria-label",
+            Array.from(event.text || "")
+              .slice(presentation.program.start, presentation.program.end)
+              .join(""),
+          );
+        }
+        applyTextStyle(presentationWrapper, presentation.style);
+        if (presentation.style.reverse) {
+          presentationWrapper.classList.add("presentation-reverse");
+          presentationWrapper.style.setProperty(
+            "--presentation-reverse-background",
+            presentation.style.foreground || "var(--text)",
+          );
+        }
+        parent.append(presentationWrapper);
         if (animate) {
           const animation = animatePresentationElement(
             presentationWrapper,
-            run.presentation,
+            presentation,
             event.timestamp,
           );
           if (animation) {
@@ -879,27 +904,31 @@ function appendEventText(
             animation.addEventListener("cancel", release);
           }
         }
-        activeProgram = run.presentation.program;
-      }
-      parent = presentationWrapper;
-    } else {
-      presentationWrapper = null;
-      activeProgram = null;
+        activePresentations.push(presentation);
+        presentationWrappers.push(presentationWrapper);
+        parent = presentationWrapper;
     }
     const styled = document.createElement("span");
     applyTextStyle(styled, run.style);
-    const hasCharacterTrack = run.presentation && (
-      run.presentation.characterSweep
-      || run.presentation.characterHueWave
-      || run.presentation.characterPaletteFront
+    const characterPresentations = presentations.filter((presentation) =>
+      presentation.characterIndex !== null && (
+        presentation.characterSweep || presentation.characterHueWave ||
+        presentation.characterPaletteFront || presentation.characterStyleSweep ||
+        presentation.characterSparkle || presentation.characterReveal
+      )
     );
-    if (hasCharacterTrack && run.presentation.characterIndex !== null) {
+    if (characterPresentations.length) {
       styled.classList.add("presentation-character");
       styled.dataset.caseable = /^[A-Za-z]$/.test(run.text) ? "true" : "false";
+      styled.dataset.originalText = run.text;
+      const baseColor = characterPresentations.findLast(
+        (presentation) => presentation.style.foreground,
+      )?.style.foreground;
+      if (baseColor) styled.style.color = baseColor;
     }
     if (
-      run.presentation?.style.foreground &&
-      !hasCharacterTrack &&
+      presentations.some((presentation) => presentation.style.foreground) &&
+      !characterPresentations.length &&
       !(run.role === "speaker" && event.spoof_status === "spoofed")
     ) {
       styled.classList.add("presentation-content");

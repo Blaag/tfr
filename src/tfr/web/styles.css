@@ -348,7 +348,7 @@ a:focus-visible {
   min-height: 0;
   overflow: auto;
   overscroll-behavior-y: contain;
-  scroll-behavior: smooth;
+  scroll-behavior: auto;
   scrollbar-color: var(--line-bright) transparent;
   -webkit-overflow-scrolling: touch;
   touch-action: pan-y pinch-zoom;
@@ -492,6 +492,22 @@ a:focus-visible {
 .presentation-content,
 .presentation-content a { color: inherit !important; }
 .presentation-character { color: inherit; }
+.presentation-character[data-visual-text] {
+  color: transparent !important;
+  position: relative;
+}
+.presentation-character[data-visual-text]::after {
+  color: var(--presentation-visual-color, currentColor);
+  content: attr(data-visual-text);
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+}
+.presentation-reverse {
+  background: var(--presentation-reverse-background, var(--text));
+  color: var(--ink) !important;
+}
 
 :root[data-text-size="-2"] { --transcript-font-size: 0.76rem; }
 :root[data-text-size="-1"] { --transcript-font-size: 0.84rem; }

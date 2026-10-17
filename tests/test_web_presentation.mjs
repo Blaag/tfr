@@ -48,7 +48,7 @@ function eventWithPresentation(overrides = {}) {
 test("validates the bounded versioned presentation schema", () => {
   assert.equal(validatedPresentation(eventWithPresentation())?.length, 1);
   for (const mutate of [
-    (value) => (value.version = 2),
+    (value) => (value.version = 3),
     (value) => (value.programs[0].end = 999),
     (value) => (value.programs[0].duration_ms = Infinity),
     (value) => (value.programs[0].variants[0].style.position = "fixed"),
@@ -91,6 +91,7 @@ test("splits Unicode text by scalar offsets and preserves static run styles", ()
       baseColor: "#fff08a",
       style: { foreground: "#fff08a", bold: true },
     },
+    presentations: [split[0].presentation],
   });
 });
 
@@ -121,7 +122,7 @@ test("invalid presentation falls back to unchanged readable text", () => {
   event.presentation.programs[0].fallback = { backgroundImage: "url(javascript:alert(1))" };
 
   assert.deepEqual(splitPresentationRuns(event, null, true), [
-    { text: event.text, style: {}, role: undefined, presentation: null },
+    { text: event.text, style: {}, role: undefined, presentation: null, presentations: [] },
   ]);
 });
 
@@ -181,8 +182,8 @@ test("validates and splits a bounded Unicode character sweep", () => {
 });
 
 test("rejects oversized or malformed character sweeps", () => {
-  const event = eventWithPresentation({ text: "a".repeat(65) });
-  event.presentation.programs[0].end = 65;
+  const event = eventWithPresentation({ text: "a".repeat(101) });
+  event.presentation.programs[0].end = 101;
   const variant = event.presentation.programs[0].variants[0];
   variant.requires = ["character_foreground", "timeline", "character_case"];
   variant.style = {};
@@ -234,6 +235,85 @@ test("validates bounded hue-wave and palette-front character tracks", () => {
 
   ember.presentation.programs[0].variants[0].character_palette_front.colors = ["#ffffff"];
   assert.equal(validatedPresentation(ember), null);
+});
+
+test("validates version two style, sparkle, and reveal tracks", () => {
+  const styleEvent = eventWithPresentation({ text: "Alice" });
+  styleEvent.presentation.version = 2;
+  const variant = styleEvent.presentation.programs[0].variants[0];
+  variant.requires = ["character_style", "character_foreground", "character_case", "timeline"];
+  variant.style = {};
+  variant.foreground_keyframes = [];
+  variant.character_style_sweep = {
+    positions: [{ at: 0, position: 0 }, { at: 1, position: 1 }],
+    base_style: { foreground: "#111111" },
+    active_style: { foreground: "#eeeeee", reverse: true },
+    width: 1,
+    trail_mode: "symmetric",
+    start_padding: 0,
+    end_padding: 1,
+    uppercase_active: true,
+    lowercase_inactive: true,
+    stepped: true,
+  };
+  assert.equal(validatedPresentation(styleEvent)?.length, 1);
+  assert.equal(splitPresentationRuns(styleEvent, null, true).length, 5);
+
+  const sparkleEvent = structuredClone(styleEvent);
+  const sparkleVariant = sparkleEvent.presentation.programs[0].variants[0];
+  sparkleVariant.requires = ["character_foreground", "timeline"];
+  delete sparkleVariant.character_style_sweep;
+  sparkleVariant.character_sparkle = {
+    base_color: "#111111", accent_color: "#ffffff", count: 2, seed: 42,
+  };
+  assert.equal(validatedPresentation(sparkleEvent)?.length, 1);
+
+  const revealEvent = structuredClone(styleEvent);
+  const revealVariant = revealEvent.presentation.programs[0].variants[0];
+  revealVariant.requires = ["character_foreground", "character_text", "timeline"];
+  delete revealVariant.character_style_sweep;
+  revealVariant.character_reveal = {
+    interval_ms: 20,
+    base_color: "#d7d7d7",
+    accent_color: "#ffffff",
+    glitch_width: 3,
+    settle_width: 3,
+    seed: 7,
+    glitch_characters: "#%",
+    inline_glitch_chance: 0.05,
+  };
+  assert.equal(validatedPresentation(revealEvent)?.length, 1);
+  revealVariant.character_reveal.glitch_characters = "bad value";
+  assert.equal(validatedPresentation(revealEvent), null);
+});
+
+test("composes overlapping speaker and reveal programs", () => {
+  const event = eventWithPresentation({ text: 'Jarin says, "hello"' });
+  event.presentation.version = 2;
+  event.presentation.programs[0].end = 5;
+  const reveal = structuredClone(event.presentation.programs[0]);
+  reveal.end = Array.from(event.text).length;
+  reveal.variants[0] = {
+    requires: ["character_foreground", "character_text", "timeline"],
+    style: {},
+    foreground_keyframes: [],
+    character_reveal: {
+      interval_ms: 50,
+      base_color: "#d7d7d7",
+      accent_color: "#ffffff",
+      glitch_width: 2,
+      settle_width: 1,
+      seed: 7,
+      glitch_characters: "#%",
+      inline_glitch_chance: 0,
+    },
+  };
+  event.presentation.programs.push(reveal);
+
+  assert.equal(validatedPresentation(event)?.length, 2);
+  const runs = splitPresentationRuns(event, null, true);
+  assert.equal(runs[0].presentations.length, 2);
+  assert.equal(runs.at(-1).presentations.length, 1);
 });
 
 test("runs one bounded animation clock for a character sweep and cleans up", () => {
@@ -362,6 +442,66 @@ test("renders hue-wave and palette-front character colors", () => {
     animation.currentTime = 3500;
     scheduled();
     assert.ok(characters.every((character) => character.style.color === "#a9914a"));
+  } finally {
+    globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+    globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
+  }
+});
+
+test("renders and restores portable style sweeps and terminal reveal", () => {
+  const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+  const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
+  let scheduled = null;
+  globalThis.requestAnimationFrame = (callback) => { scheduled = callback; return 1; };
+  globalThis.cancelAnimationFrame = () => {};
+  const characters = [..."Alice"].map((text) => ({
+    dataset: { originalText: text, caseable: "true" }, style: {}, textContent: text,
+  }));
+  const animation = { currentTime: 500, addEventListener() {} };
+  const element = { animate() { return animation; }, querySelectorAll() { return characters; } };
+  const base = {
+    program: { duration_ms: 1000, repeat_ms: 2000, repeat_count: 1, frames_per_second: 20 },
+    keyframes: null,
+  };
+  try {
+    animatePresentationElement(element, {
+      ...base,
+      characterStyleSweep: {
+        positions: [{ at: 0, position: 0 }, { at: 1, position: 1 }],
+        base_style: { foreground: "#111111" },
+        active_style: { foreground: "#eeeeee", bold: true, reverse: true },
+        width: 1,
+        trail_mode: "symmetric",
+        start_padding: 0,
+        end_padding: 1,
+        uppercase_active: true,
+        lowercase_inactive: true,
+        stepped: true,
+      },
+    }, "2026-01-01T00:00:00Z", Date.parse("2026-01-01T00:00:00Z"));
+    scheduled();
+    assert.ok(characters.some((character) => character.style.fontWeight === "700"));
+    assert.ok(characters.some((character) => character.style.backgroundColor === "#eeeeee"));
+
+    animation.currentTime = 100;
+    animatePresentationElement(element, {
+      ...base,
+      characterReveal: {
+        interval_ms: 100,
+        base_color: "#d7d7d7",
+        accent_color: "#ffffff",
+        glitch_width: 2,
+        settle_width: 1,
+        seed: 7,
+        glitch_characters: "#%",
+        inline_glitch_chance: 0,
+      },
+    }, "2026-01-01T00:00:00Z", Date.parse("2026-01-01T00:00:00Z"));
+    scheduled();
+    assert.equal(characters[0].textContent, "A");
+    assert.match(characters[0].dataset.visualText, /^[#%]$/);
+    assert.equal(characters[1].textContent, "l");
+    assert.equal(characters[1].dataset.visualText, " ");
   } finally {
     globalThis.requestAnimationFrame = originalRequestAnimationFrame;
     globalThis.cancelAnimationFrame = originalCancelAnimationFrame;

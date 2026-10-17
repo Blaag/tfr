@@ -100,7 +100,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v54";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v55";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
 
 
@@ -210,8 +210,7 @@ def test_history_notices_auto_dismiss() -> None:
     application = files("tfr").joinpath("web", "app.mjs").read_text(encoding="utf-8")
 
     assert (
-        '"The Gateway restarted. Showing a fresh retained history.",\n        6000,'
-        in application
+        '"The Gateway restarted. Showing a fresh retained history.",\n        6000,' in application
     )
     assert "showHistoryNotice(decision.message, 10000)" in application
     assert "if (connection.ready) recordLiveHistoryEvent(world, event);" in application
@@ -281,9 +280,11 @@ def test_world_composer_uses_native_spelling_but_secret_and_lab_inputs_do_not() 
     page = files("tfr").joinpath("web", "index.html").read_text(encoding="utf-8")
     composer = page[page.index('id="command-input"') : page.index('id="send-button"')]
     pairing = page[page.index('id="pairing-link"') : page.index('type="submit"')]
-    lab = page[page.index('id="effects-lab-command-input"') : page.index(
-        'placeholder="/teststreak', page.index('id="effects-lab-command-input"')
-    )]
+    lab = page[
+        page.index('id="effects-lab-command-input"') : page.index(
+            'placeholder="/teststreak', page.index('id="effects-lab-command-input"')
+        )
+    ]
 
     assert 'spellcheck="true"' in composer and 'autocorrect="on"' in composer
     assert 'spellcheck="false"' in pairing and 'autocorrect="off"' in pairing
@@ -309,7 +310,7 @@ def test_mobile_keyboard_preserves_live_edge_and_compacts_landscape() -> None:
     assert "preserveLiveDuringViewportChange = readingState().atLive;" in application
     assert "elements.transcript.scrollTop = elements.transcript.scrollHeight;" in application
     assert 'toggleAttribute("data-input-focused", inputFocused)' in application
-    assert ':root[data-input-focused] .composer' in styles
+    assert ":root[data-input-focused] .composer" in styles
     assert "@media (orientation: landscape), (max-height: 500px)" in styles
     assert ":root[data-input-focused] .topbar" in styles
     assert ":root[data-input-focused] .history-button" in styles
@@ -416,10 +417,7 @@ class FakeRuntime:
         ]
 
     def agent_descriptors(self) -> list[dict[str, object]]:
-        return [
-            {"name": f"bot-{world}", "world": world}
-            for world in sorted(self.agent_worlds)
-        ]
+        return [{"name": f"bot-{world}", "world": world} for world in sorted(self.agent_worlds)]
 
     async def submit_command(
         self,
@@ -508,9 +506,10 @@ def test_browser_projection_emits_safe_exact_style_runs() -> None:
 
     assert projected is not None
     assert projected["event"]["text"] == "plain styled <script>雪</script>"
-    assert "".join(run["text"] for run in projected["event"]["text_runs"]) == projected[
-        "event"
-    ]["text"]
+    assert (
+        "".join(run["text"] for run in projected["event"]["text_runs"])
+        == projected["event"]["text"]
+    )
     styled = next(run for run in projected["event"]["text_runs"] if run["text"] == "styled")
     assert styled["style"] == {
         "foreground": "#aa0000",
@@ -580,9 +579,7 @@ def test_browser_projection_omits_invalid_presentation_without_dropping_text() -
     )
     manager._registrar("fixture").register_presentation_decorator(
         "outside",
-        lambda _event, _text: (
-            color_pulse(0, 99, base_color="#a9914a", accent_color="#fff08a"),
-        ),
+        lambda _event, _text: (color_pulse(0, 99, base_color="#a9914a", accent_color="#fff08a"),),
     )
 
     projected = browser_event(1, make_event(text="short"), manager)
@@ -590,7 +587,7 @@ def test_browser_projection_omits_invalid_presentation_without_dropping_text() -
     assert projected is not None
     assert projected["event"]["text"] == "short"
     assert "presentation" not in projected["event"]
-    assert manager.registry.presentation_decorators == {}
+    assert set(manager.registry.presentation_decorators) == {"outside"}
     diagnostic = manager.diagnostics.entries()[0]
     assert diagnostic.code == "program_rejected"
     assert diagnostic.message == "presentation target extends beyond visible text"
@@ -601,11 +598,7 @@ def test_browser_projection_discards_osc_cursor_and_malformed_controls() -> None
         1,
         make_event(
             text=(
-                "before"
-                "\x1b]8;;https://evil.example\x07link\x1b]8;;\x07"
-                "\x1b[2J"
-                "\x01\x02"
-                "after\x1b[31"
+                "before\x1b]8;;https://evil.example\x07link\x1b]8;;\x07\x1b[2J\x01\x02after\x1b[31"
             )
         ),
     )
@@ -1309,9 +1302,7 @@ async def test_pairing_rate_limit_is_isolated_by_tailscale_identity(
     await client.start_server()
     try:
         first = await client.post("/api/pair", json={"code": "invalid"}, headers=PUBLIC_HEADERS)
-        limited = await client.post(
-            "/api/pair", json={"code": "invalid"}, headers=PUBLIC_HEADERS
-        )
+        limited = await client.post("/api/pair", json={"code": "invalid"}, headers=PUBLIC_HEADERS)
         other_identity = await client.post(
             "/api/pair",
             json={"code": "invalid"},
@@ -1494,10 +1485,7 @@ async def test_websocket_delivers_rapid_event_burst_in_order(tmp_path: Path) -> 
         for sequence in range(5_000):
             await bus.publish(make_event(text=f"stress {sequence:03d}"))
         await history.flush()
-        received = [
-            await asyncio.wait_for(socket.receive_json(), timeout=5)
-            for _ in range(5_000)
-        ]
+        received = [await asyncio.wait_for(socket.receive_json(), timeout=5) for _ in range(5_000)]
 
         assert [message["event"]["text"] for message in received] == [
             f"stress {sequence:03d}" for sequence in range(5_000)
@@ -1617,9 +1605,10 @@ async def test_websocket_reports_omitted_current_generation_retention(tmp_path: 
             "snapshot_count": 2,
             "snapshot_gap": False,
         }
-        assert [
-            (await socket.receive_json())["event"]["text"] for _ in range(2)
-        ] == ["retained 3", "retained 4"]
+        assert [(await socket.receive_json())["event"]["text"] for _ in range(2)] == [
+            "retained 3",
+            "retained 4",
+        ]
         assert (await socket.receive_json())["type"] == "ready"
         await socket.close()
     finally:
@@ -1653,9 +1642,10 @@ async def test_websocket_resume_reports_total_generation_and_backfill_counts(
             "snapshot_count": 2,
             "snapshot_gap": False,
         }
-        assert [
-            (await socket.receive_json())["event"]["text"] for _ in range(2)
-        ] == ["message 3", "message 4"]
+        assert [(await socket.receive_json())["event"]["text"] for _ in range(2)] == [
+            "message 3",
+            "message 4",
+        ]
         assert (await socket.receive_json())["type"] == "ready"
         await socket.close()
     finally:

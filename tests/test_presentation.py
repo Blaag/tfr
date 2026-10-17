@@ -13,9 +13,13 @@ from tfr.presentation import (
     SweepTrailMode,
     character_hue_wave,
     character_palette_front,
+    character_reveal,
+    character_sparkle,
+    character_style_sweep,
     character_sweep,
     color_pulse,
     effect_programs_as_dict,
+    foreground_transition,
     presentation_frame_delay,
     presentation_grapheme_at,
     presentation_style_at,
@@ -196,9 +200,9 @@ def test_character_sweep_has_bounded_target_and_static_reduced_motion() -> None:
     )
     assert sharp_s == "ß"
 
-    too_long = character_sweep(0, 65, base_color="#180000", head_color="#ff0000")
+    too_long = character_sweep(0, 101, base_color="#180000", head_color="#ff0000")
     with pytest.raises(ValueError, match="sweep target is too large"):
-        validate_effect_programs("a" * 65, (too_long,))
+        validate_effect_programs("a" * 101, (too_long,))
 
 
 def test_character_sweep_supports_one_way_padding_and_directional_trails() -> None:
@@ -272,6 +276,153 @@ def test_character_hue_wave_and_palette_front_are_portable_and_bounded() -> None
         character_palette_front(0, 1, colors=("#ffffff",))
 
 
+def test_style_sweep_collapses_case_and_attribute_effects() -> None:
+    case = character_style_sweep(
+        0,
+        5,
+        base_style=PresentationStyle(foreground="#111111"),
+        active_style=PresentationStyle(foreground="#eeeeee"),
+        width=0.5,
+        end_padding=1,
+        uppercase_active=True,
+        lowercase_inactive=True,
+        stepped=True,
+        duration_seconds=2.5,
+    )
+    reverse = character_style_sweep(
+        0,
+        5,
+        base_style=PresentationStyle(foreground="#111111"),
+        active_style=PresentationStyle(foreground="#111111", reverse=True),
+        width=2,
+    )
+    capabilities = frozenset(PresentationCapability)
+
+    rendered = [
+        presentation_grapheme_at(
+            case, character, index, 5, 1, animations_enabled=True, capabilities=capabilities
+        )
+        for index, character in enumerate("alice")
+    ]
+
+    assert "".join(text for _style, text in rendered) == "alIce"
+    assert rendered[2][0].foreground == "#eeeeee"
+    assert (
+        presentation_grapheme_at(
+            reverse, "x", 0, 5, 0, animations_enabled=True, capabilities=capabilities
+        )[0].reverse
+        is True
+    )
+    projected = effect_programs_as_dict((case,))
+    assert projected["version"] == 2
+    assert "character_style_sweep" in projected["programs"][0]["variants"][0]
+
+
+def test_sparkle_is_deterministic_and_front_can_fill_behind() -> None:
+    sparkle = character_sparkle(
+        0,
+        5,
+        base_color="#000000",
+        accent_color="#ffffff",
+        count=2,
+        seed=42,
+    )
+    frost = character_sweep(
+        0,
+        5,
+        base_color="#102030",
+        head_color="#d7ffff",
+        trail_width=2,
+        trail_mode=SweepTrailMode.BEHIND,
+        end_padding=3,
+        fill_behind=True,
+    )
+    capabilities = frozenset(PresentationCapability)
+    first = [
+        presentation_grapheme_at(
+            sparkle, "x", index, 5, 0.05, animations_enabled=True, capabilities=capabilities
+        )[0].foreground
+        for index in range(5)
+    ]
+    repeated = [
+        presentation_grapheme_at(
+            sparkle, "x", index, 5, 0.05, animations_enabled=True, capabilities=capabilities
+        )[0].foreground
+        for index in range(5)
+    ]
+
+    assert first == repeated
+    assert sum(color != "#000000" for color in first) == 2
+    assert (
+        presentation_grapheme_at(
+            frost, "x", 0, 5, 1, animations_enabled=True, capabilities=capabilities
+        )[0].foreground
+        == "#d7ffff"
+    )
+
+
+def test_age_transition_and_terminal_reveal_are_bounded_portable_programs() -> None:
+    decay = foreground_transition(
+        0,
+        5,
+        start_color="#ffffff",
+        end_color="#222222",
+        duration_seconds=30,
+    )
+    reveal = character_reveal(
+        0,
+        5,
+        interval_seconds=0.1,
+        base_color="#d7d7d7",
+        accent_color="#ffffff",
+        glitch_width=2,
+        settle_width=1,
+        seed=7,
+        glitch_characters="#%",
+    )
+    capabilities = frozenset(PresentationCapability)
+
+    assert (
+        presentation_style_at(
+            decay, 0, animations_enabled=True, capabilities=capabilities
+        ).foreground
+        == "#ffffff"
+    )
+    hidden = presentation_grapheme_at(
+        reveal, "a", 0, 5, 0, animations_enabled=True, capabilities=capabilities
+    )
+    glitch = presentation_grapheme_at(
+        reveal, "a", 0, 5, 0.15, animations_enabled=True, capabilities=capabilities
+    )
+    complete = presentation_grapheme_at(
+        reveal, "a", 0, 5, 1, animations_enabled=True, capabilities=capabilities
+    )
+
+    assert hidden[1] == " "
+    assert glitch[1] in "#%"
+    assert complete == (PresentationStyle(), "a")
+    assert effect_programs_as_dict((decay,))["version"] == 2
+    assert effect_programs_as_dict((reveal,))["version"] == 2
+
+
+def test_overlapping_speaker_and_reveal_programs_compose() -> None:
+    speaker = character_hue_wave(0, 5, base_color="#ffc9d7")
+    reveal = character_reveal(
+        0,
+        19,
+        interval_seconds=0.05,
+        base_color="#d7d7d7",
+        accent_color="#ffffff",
+        glitch_width=2,
+        settle_width=1,
+        seed=7,
+        glitch_characters="#%",
+    )
+
+    validate_effect_programs('Jarin says, "hello"', (speaker, reveal))
+    assert len(effect_programs_as_dict((speaker, reveal))["programs"]) == 2
+
+
 def test_unsupported_variant_uses_fallback_without_partial_interpretation() -> None:
     program = EffectProgram(
         start=0,
@@ -309,7 +460,7 @@ def test_effect_program_rejects_invalid_duration(value: float) -> None:
         )
 
 
-def test_effect_program_rejects_bad_keyframes_and_overlapping_targets() -> None:
+def test_effect_program_rejects_bad_keyframes_and_too_many_targets() -> None:
     with pytest.raises(ValueError, match="start at 0 and end at 1"):
         PresentationVariant(
             requires=(
@@ -322,10 +473,12 @@ def test_effect_program_rejects_bad_keyframes_and_overlapping_targets() -> None:
             ),
         )
 
-    first = color_pulse(0, 3, base_color="#000000", accent_color="#ffffff")
-    second = color_pulse(2, 4, base_color="#000000", accent_color="#ffffff")
+    programs = tuple(
+        color_pulse(0, 3, base_color="#000000", accent_color="#ffffff")
+        for _ in range(5)
+    )
     with pytest.raises(ValueError, match="too many presentation programs"):
-        validate_effect_programs("test", (first, second))
+        validate_effect_programs("test", programs)
 
 
 def test_effect_program_requires_integer_grapheme_aligned_targets() -> None:

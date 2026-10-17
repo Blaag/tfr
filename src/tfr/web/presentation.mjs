@@ -6,12 +6,14 @@ const CAPABILITIES = new Set([
   "timeline",
   "character_foreground",
   "character_case",
+  "character_style",
+  "character_text",
 ]);
-const MAX_PROGRAMS = 1;
+const MAX_PROGRAMS = 4;
 const MAX_VARIANTS = 4;
 const MAX_KEYFRAMES = 3;
-const MAX_TARGET_CHARACTERS = 2048;
-const MAX_SWEEP_GRAPHEMES = 64;
+const MAX_TARGET_CHARACTERS = 4096;
+const MAX_SWEEP_GRAPHEMES = 100;
 const MAX_TRAIL_WIDTH = 8;
 const MAX_PALETTE_COLORS = 8;
 
@@ -21,13 +23,13 @@ function exactKeys(value, allowed) {
 
 function validatedStyle(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  if (!exactKeys(value, new Set(["foreground", "bold", "underline"]))) return null;
+  if (!exactKeys(value, new Set(["foreground", "bold", "underline", "reverse"]))) return null;
   const style = {};
   if (value.foreground !== undefined) {
     if (typeof value.foreground !== "string" || !COLOR.test(value.foreground)) return null;
     style.foreground = value.foreground;
   }
-  for (const key of ["bold", "underline"]) {
+  for (const key of ["bold", "underline", "reverse"]) {
     if (value[key] !== undefined) {
       if (value[key] !== true) return null;
       style[key] = true;
@@ -45,6 +47,9 @@ function validatedVariant(value) {
     "character_sweep",
     "character_hue_wave",
     "character_palette_front",
+    "character_style_sweep",
+    "character_sparkle",
+    "character_reveal",
   ]))) return null;
   if (
     !Array.isArray(value.requires) ||
@@ -95,6 +100,7 @@ function validatedVariant(value) {
           "trail_mode",
           "start_padding",
           "end_padding",
+          "fill_behind",
         ]),
       ) ||
       !Array.isArray(sweep.positions) ||
@@ -108,7 +114,9 @@ function validatedVariant(value) {
       sweep.trail_width < 0.5 ||
       sweep.trail_width > MAX_TRAIL_WIDTH ||
       typeof sweep.uppercase_head !== "boolean" ||
+      (sweep.fill_behind !== undefined && typeof sweep.fill_behind !== "boolean") ||
       !["symmetric", "behind", "ahead"].includes(trailMode) ||
+      (sweep.fill_behind === true && trailMode !== "behind") ||
       !Number.isFinite(startPadding) ||
       startPadding < 0 ||
       startPadding > MAX_TRAIL_WIDTH ||
@@ -152,6 +160,7 @@ function validatedVariant(value) {
       trail_mode: trailMode,
       start_padding: startPadding,
       end_padding: endPadding,
+      fill_behind: sweep.fill_behind ?? false,
     };
   }
   let characterHueWave = null;
@@ -187,6 +196,72 @@ function validatedVariant(value) {
     ) return null;
     characterPaletteFront = { ...front, colors: [...front.colors] };
   }
+  let characterStyleSweep = null;
+  if (value.character_style_sweep !== undefined) {
+    const sweep = value.character_style_sweep;
+    if (
+      !sweep || typeof sweep !== "object" || Array.isArray(sweep) ||
+      !exactKeys(sweep, new Set([
+        "positions", "base_style", "active_style", "width", "trail_mode",
+        "start_padding", "end_padding", "uppercase_active", "lowercase_inactive", "stepped",
+      ])) ||
+      !Array.isArray(sweep.positions) || sweep.positions.length < 2 || sweep.positions.length > MAX_KEYFRAMES ||
+      !Number.isFinite(sweep.width) || sweep.width < 0.5 || sweep.width > MAX_TRAIL_WIDTH ||
+      !["symmetric", "behind", "ahead"].includes(sweep.trail_mode) ||
+      !Number.isFinite(sweep.start_padding) || sweep.start_padding < 0 || sweep.start_padding > MAX_TRAIL_WIDTH ||
+      !Number.isFinite(sweep.end_padding) || sweep.end_padding < 0 || sweep.end_padding > MAX_TRAIL_WIDTH ||
+      typeof sweep.uppercase_active !== "boolean" || typeof sweep.lowercase_inactive !== "boolean" ||
+      typeof sweep.stepped !== "boolean"
+    ) return null;
+    const positions = sweep.positions.map((frame) =>
+      frame && typeof frame === "object" && !Array.isArray(frame) &&
+      exactKeys(frame, new Set(["at", "position"])) && Number.isFinite(frame.at) &&
+      frame.at >= 0 && frame.at <= 1 && Number.isFinite(frame.position) &&
+      frame.position >= 0 && frame.position <= 1
+        ? { at: frame.at, position: frame.position } : null
+    );
+    const baseStyle = validatedStyle(sweep.base_style);
+    const activeStyle = validatedStyle(sweep.active_style);
+    if (!baseStyle || !activeStyle || positions.some((frame) => frame === null) ||
+      positions[0].at !== 0 || positions.at(-1).at !== 1 ||
+      positions.some((frame, index) => index > 0 && positions[index - 1].at >= frame.at) ||
+      !value.requires.includes("character_style") || !value.requires.includes("timeline") ||
+      ((baseStyle.foreground || activeStyle.foreground) && !value.requires.includes("character_foreground")) ||
+      ((sweep.uppercase_active || sweep.lowercase_inactive) && !value.requires.includes("character_case"))) return null;
+    characterStyleSweep = { ...sweep, positions, base_style: baseStyle, active_style: activeStyle };
+  }
+  let characterSparkle = null;
+  if (value.character_sparkle !== undefined) {
+    const sparkle = value.character_sparkle;
+    if (!sparkle || typeof sparkle !== "object" || Array.isArray(sparkle) ||
+      !exactKeys(sparkle, new Set(["base_color", "accent_color", "count", "seed"])) ||
+      typeof sparkle.base_color !== "string" || !COLOR.test(sparkle.base_color) ||
+      typeof sparkle.accent_color !== "string" || !COLOR.test(sparkle.accent_color) ||
+      !Number.isInteger(sparkle.count) || sparkle.count < 1 || sparkle.count > 10 ||
+      !Number.isInteger(sparkle.seed) || sparkle.seed < 0 || sparkle.seed > 0xffffffff ||
+      !value.requires.includes("character_foreground") || !value.requires.includes("timeline")) return null;
+    characterSparkle = { ...sparkle };
+  }
+  let characterReveal = null;
+  if (value.character_reveal !== undefined) {
+    const reveal = value.character_reveal;
+    if (!reveal || typeof reveal !== "object" || Array.isArray(reveal) ||
+      !exactKeys(reveal, new Set([
+        "interval_ms", "base_color", "accent_color", "glitch_width", "settle_width",
+        "seed", "glitch_characters", "inline_glitch_chance",
+      ])) || !Number.isFinite(reveal.interval_ms) || reveal.interval_ms <= 0 ||
+      typeof reveal.base_color !== "string" || !COLOR.test(reveal.base_color) ||
+      typeof reveal.accent_color !== "string" || !COLOR.test(reveal.accent_color) ||
+      !Number.isInteger(reveal.glitch_width) || reveal.glitch_width < 1 || reveal.glitch_width > 20 ||
+      !Number.isInteger(reveal.settle_width) || reveal.settle_width < 0 || reveal.settle_width > 20 ||
+      !Number.isInteger(reveal.seed) || reveal.seed < 0 || reveal.seed > 0xffffffff ||
+      typeof reveal.glitch_characters !== "string" || reveal.glitch_characters.length < 1 ||
+      reveal.glitch_characters.length > 256 || /[^\x21-\x7e]/.test(reveal.glitch_characters) ||
+      !Number.isFinite(reveal.inline_glitch_chance) || reveal.inline_glitch_chance < 0 || reveal.inline_glitch_chance > 1 ||
+      !value.requires.includes("character_foreground") || !value.requires.includes("character_text") ||
+      !value.requires.includes("timeline")) return null;
+    characterReveal = { ...reveal };
+  }
   if (keyframes.length) {
     if (
       keyframes.length < 2 ||
@@ -201,7 +276,10 @@ function validatedVariant(value) {
     }
     if (!style.foreground) return null;
   }
-  const characterTracks = [characterSweep, characterHueWave, characterPaletteFront].filter(Boolean);
+  const characterTracks = [
+    characterSweep, characterHueWave, characterPaletteFront, characterStyleSweep,
+    characterSparkle, characterReveal,
+  ].filter(Boolean);
   if ((keyframes.length ? 1 : 0) + characterTracks.length > 1) return null;
   if (!Object.keys(style).length && !keyframes.length && !characterTracks.length) return null;
   const used = new Set();
@@ -218,6 +296,21 @@ function validatedVariant(value) {
     used.add("character_foreground");
     used.add("timeline");
   }
+  if (characterStyleSweep) {
+    used.add("character_style");
+    used.add("timeline");
+    if (characterStyleSweep.base_style.foreground || characterStyleSweep.active_style.foreground) used.add("character_foreground");
+    if (characterStyleSweep.uppercase_active || characterStyleSweep.lowercase_inactive) used.add("character_case");
+  }
+  if (characterSparkle) {
+    used.add("character_foreground");
+    used.add("timeline");
+  }
+  if (characterReveal) {
+    used.add("character_foreground");
+    used.add("character_text");
+    used.add("timeline");
+  }
   if (![...used].every((capability) => value.requires.includes(capability))) return null;
   return {
     requires: value.requires,
@@ -226,6 +319,9 @@ function validatedVariant(value) {
     character_sweep: characterSweep,
     character_hue_wave: characterHueWave,
     character_palette_front: characterPaletteFront,
+    character_style_sweep: characterStyleSweep,
+    character_sparkle: characterSparkle,
+    character_reveal: characterReveal,
   };
 }
 
@@ -257,8 +353,8 @@ function validatedProgram(value, textLength) {
     value.end > textLength ||
     value.end - value.start > MAX_TARGET_CHARACTERS ||
     !Number.isInteger(value.duration_ms) ||
-    value.duration_ms < 1000 ||
-    value.duration_ms > 3000 ||
+    value.duration_ms < 100 ||
+    value.duration_ms > 30000 ||
     !Number.isInteger(value.repeat_ms) ||
     value.repeat_ms < value.duration_ms ||
     value.repeat_ms > 60000 ||
@@ -268,7 +364,7 @@ function validatedProgram(value, textLength) {
     value.repeat_ms * value.repeat_count > 300000 ||
     !Number.isFinite(value.frames_per_second) ||
     value.frames_per_second < 1 ||
-    value.frames_per_second > 20 ||
+    value.frames_per_second > 30 ||
     !Array.isArray(value.variants) ||
     value.variants.length < 1 ||
     value.variants.length > MAX_VARIANTS
@@ -295,17 +391,20 @@ function validatedProgram(value, textLength) {
 export function validatedPresentation(event) {
   const value = event?.presentation;
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  if (!exactKeys(value, new Set(["version", "programs"])) || value.version !== 1) return null;
+  if (!exactKeys(value, new Set(["version", "programs"])) || ![1, 2].includes(value.version)) return null;
   if (!Array.isArray(value.programs) || value.programs.length < 1 || value.programs.length > MAX_PROGRAMS) {
     return null;
   }
   const textLength = Array.from(event.text || "").length;
   const programs = value.programs.map((program) => validatedProgram(program, textLength));
   if (programs.some((program) => program === null)) return null;
+  if (value.version === 1 && programs.some((program) =>
+    program.duration_ms > 3000 || program.variants.some((variant) =>
+      variant.style.reverse || variant.character_style_sweep || variant.character_sparkle ||
+      variant.character_reveal || variant.character_sweep?.fill_behind
+    )
+  )) return null;
   const ordered = [...programs].sort((left, right) => left.start - right.start);
-  if (ordered.some((program, index) => index > 0 && ordered[index - 1].end > program.start)) {
-    return null;
-  }
   const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
   const boundaries = new Set([0]);
   let offset = 0;
@@ -319,7 +418,8 @@ export function validatedPresentation(event) {
   if (
     ordered.some((program) => {
       if (!program.variants.some((variant) =>
-        variant.character_sweep || variant.character_hue_wave || variant.character_palette_front
+        variant.character_sweep || variant.character_hue_wave || variant.character_palette_front ||
+        variant.character_style_sweep || variant.character_sparkle
       )) return false;
       const target = Array.from(event.text || "").slice(program.start, program.end).join("");
       return [...segmenter.segment(target)].length > MAX_SWEEP_GRAPHEMES;
@@ -378,11 +478,20 @@ export function selectPresentation(program, animationsEnabled) {
         ? { foreground: variant.character_hue_wave.base_color }
       : variant.character_palette_front
         ? { foreground: variant.character_palette_front.colors.at(-1) }
+      : variant.character_style_sweep
+        ? variant.character_style_sweep.base_style
+      : variant.character_sparkle
+        ? { foreground: variant.character_sparkle.base_color }
+      : variant.character_reveal
+        ? {}
       : variant.style,
     animation: variant.foreground_keyframes.length ? variant.foreground_keyframes : null,
     ...(variant.character_sweep ? { characterSweep: variant.character_sweep } : {}),
     ...(variant.character_hue_wave ? { characterHueWave: variant.character_hue_wave } : {}),
     ...(variant.character_palette_front ? { characterPaletteFront: variant.character_palette_front } : {}),
+    ...(variant.character_style_sweep ? { characterStyleSweep: variant.character_style_sweep } : {}),
+    ...(variant.character_sparkle ? { characterSparkle: variant.character_sparkle } : {}),
+    ...(variant.character_reveal ? { characterReveal: variant.character_reveal } : {}),
   };
 }
 
@@ -494,7 +603,7 @@ export function presentationAnimationFrames(program, keyframes, baseColor) {
 export function splitPresentationRuns(event, runs, animationsEnabled) {
   const programs = validatedPresentation(event);
   const baseRuns = runs || [{ text: event.text || "", style: {}, role: undefined }];
-  if (!programs) return baseRuns.map((run) => ({ ...run, presentation: null }));
+  if (!programs) return baseRuns.map((run) => ({ ...run, presentation: null, presentations: [] }));
   const characters = Array.from(event.text || "");
   const boundaries = new Set([0, characters.length]);
   const normalizedRuns = [];
@@ -510,7 +619,8 @@ export function splitPresentationRuns(event, runs, animationsEnabled) {
     boundaries.add(program.start);
     boundaries.add(program.end);
     const selected = selectPresentation(program, animationsEnabled);
-    if (selected.characterSweep || selected.characterHueWave || selected.characterPaletteFront) {
+    if (selected.characterSweep || selected.characterHueWave || selected.characterPaletteFront ||
+      selected.characterStyleSweep || selected.characterSparkle || selected.characterReveal) {
       let graphemeOffset = program.start;
       const target = characters.slice(program.start, program.end).join("");
       for (const segment of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(target)) {
@@ -523,58 +633,59 @@ export function splitPresentationRuns(event, runs, animationsEnabled) {
   return ordered.slice(0, -1).map((start, index) => {
     const end = ordered[index + 1];
     const run = normalizedRuns.find((candidate) => candidate.start <= start && end <= candidate.end);
-    const program = programs.find((candidate) => candidate.start <= start && end <= candidate.end);
-    const selected = program ? selectPresentation(program, animationsEnabled) : null;
-    const characterSegments =
-      program && (selected?.characterSweep || selected?.characterHueWave || selected?.characterPaletteFront)
-        ? [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(
-            characters.slice(program.start, program.end).join(""),
-          )]
-        : [];
-    let characterIndex = null;
-    if (characterSegments.length) {
-      let characterOffset = program.start;
-      characterIndex = characterSegments.findIndex((segment) => {
-        const next = characterOffset + Array.from(segment.segment).length;
-        const matches = characterOffset === start && next === end;
-        characterOffset = next;
-        return matches;
+    const presentations = programs
+      .filter((candidate) => candidate.start <= start && end <= candidate.end)
+      .map((program) => {
+        const selected = selectPresentation(program, animationsEnabled);
+        const hasCharacterTrack = selected.characterSweep || selected.characterHueWave ||
+          selected.characterPaletteFront || selected.characterStyleSweep ||
+          selected.characterSparkle || selected.characterReveal;
+        const characterSegments = hasCharacterTrack
+          ? [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(
+              characters.slice(program.start, program.end).join(""),
+            )]
+          : [];
+        let characterIndex = null;
+        if (characterSegments.length) {
+          let characterOffset = program.start;
+          characterIndex = characterSegments.findIndex((segment) => {
+            const next = characterOffset + Array.from(segment.segment).length;
+            const matches = characterOffset === start && next === end;
+            characterOffset = next;
+            return matches;
+          });
+        }
+        return {
+          program,
+          keyframes: selected.animation,
+          baseColor: selected.style.foreground,
+          style: selected.style,
+          ...(selected.characterSweep
+            ? { characterSweep: selected.characterSweep, characterIndex, characterCount: characterSegments.length }
+            : {}),
+          ...(selected.characterHueWave
+            ? { characterHueWave: selected.characterHueWave, characterIndex, characterCount: characterSegments.length }
+            : {}),
+          ...(selected.characterPaletteFront
+            ? { characterPaletteFront: selected.characterPaletteFront, characterIndex, characterCount: characterSegments.length }
+            : {}),
+          ...(selected.characterStyleSweep
+            ? { characterStyleSweep: selected.characterStyleSweep, characterIndex, characterCount: characterSegments.length }
+            : {}),
+          ...(selected.characterSparkle
+            ? { characterSparkle: selected.characterSparkle, characterIndex, characterCount: characterSegments.length }
+            : {}),
+          ...(selected.characterReveal
+            ? { characterReveal: selected.characterReveal, characterIndex, characterCount: characterSegments.length }
+            : {}),
+        };
       });
-    }
     return {
       text: characters.slice(start, end).join(""),
       style: { ...(run?.style || {}) },
       role: run?.role,
-      presentation:
-        program && selected
-          ? {
-              program,
-              keyframes: selected.animation,
-              baseColor: selected.style.foreground,
-              style: selected.style,
-              ...(selected.characterSweep
-                ? {
-                    characterSweep: selected.characterSweep,
-                    characterIndex,
-                    characterCount: characterSegments.length,
-                  }
-                : {}),
-              ...(selected.characterHueWave
-                ? {
-                    characterHueWave: selected.characterHueWave,
-                    characterIndex,
-                    characterCount: characterSegments.length,
-                  }
-                : {}),
-              ...(selected.characterPaletteFront
-                ? {
-                    characterPaletteFront: selected.characterPaletteFront,
-                    characterIndex,
-                    characterCount: characterSegments.length,
-                  }
-                : {}),
-            }
-          : null,
+      presentation: presentations[0] || null,
+      presentations,
     };
   });
 }
@@ -606,8 +717,45 @@ function paletteFrontColor(front, index, count, progress) {
   return interpolatePresentationColor(front.colors[section], front.colors[section + 1], scaled - section);
 }
 
+function effectSeedValue(seed, frame, index) {
+  let value = (seed ^ Math.imul(frame, 0x9e3779b1) ^ Math.imul(index, 0x85ebca77)) >>> 0;
+  value ^= value >>> 16;
+  value = Math.imul(value, 0x7feb352d) >>> 0;
+  value ^= value >>> 15;
+  return value >>> 0;
+}
+
+function styleSweepSelected(track, index, count, progress) {
+  let head = -(track.start_padding) + timelineValue(track.positions, progress, "position") * (
+    Math.max(0, count - 1) + track.start_padding + track.end_padding
+  );
+  if (track.stepped) head = Math.floor(head + 1e-9);
+  const delta = index - head;
+  const distance = track.trail_mode === "symmetric" ? Math.abs(delta)
+    : track.trail_mode === "behind" && delta <= 0 ? -delta
+      : track.trail_mode === "ahead" && delta >= 0 ? delta
+        : Infinity;
+  return distance < track.width;
+}
+
+function applyCharacterStyle(character, style = {}) {
+  character.style.color = style.reverse ? "var(--ink)" : style.foreground || "";
+  character.style.backgroundColor = style.reverse
+    ? style.foreground || "var(--text)"
+    : "";
+  character.style.fontWeight = style.bold ? "700" : "";
+  character.style.textDecoration = style.underline ? "underline" : "";
+}
+
+function setVisualCharacter(character, text, color = "currentColor") {
+  character.dataset.visualText = text;
+  character.style.setProperty?.("--presentation-visual-color", color);
+}
+
 export function animatePresentationElement(element, presentation, eventTimestamp, now = Date.now()) {
-  const characterTrack = presentation?.characterSweep || presentation?.characterHueWave || presentation?.characterPaletteFront;
+  const characterTrack = presentation?.characterSweep || presentation?.characterHueWave ||
+    presentation?.characterPaletteFront || presentation?.characterStyleSweep ||
+    presentation?.characterSparkle || presentation?.characterReveal;
   if ((!presentation?.keyframes && !characterTrack) || typeof element?.animate !== "function") return null;
   const age = Math.max(0, now - Date.parse(eventTimestamp));
   const total = presentation.program.repeat_ms * presentation.program.repeat_count;
@@ -647,6 +795,13 @@ export function animatePresentationElement(element, presentation, eventTimestamp
         : 0;
       const head = sweep?.uppercase_head ? Math.round(rawHead) : rawHead;
       for (const [index, character] of characters.entries()) {
+        const original = character.dataset.originalText ?? character.textContent;
+        character.textContent = original;
+        delete character.dataset.visualText;
+        character.style.removeProperty?.("--presentation-visual-color");
+        character.style.fontWeight = "";
+        character.style.textDecoration = "";
+        character.style.backgroundColor = "";
         if (active && sweep) {
           const delta = index - head;
           const trailMode = sweep.trail_mode ?? "symmetric";
@@ -654,24 +809,110 @@ export function animatePresentationElement(element, presentation, eventTimestamp
             : trailMode === "behind" && delta <= 0 ? -delta
               : trailMode === "ahead" && delta >= 0 ? delta
                 : Infinity;
-          let intensity = Math.max(0, 1 - distance / sweep.trail_width);
+          let intensity = sweep.fill_behind && Number.isFinite(distance)
+            ? Math.min(1, distance / sweep.trail_width)
+            : Math.max(0, 1 - distance / sweep.trail_width);
           intensity = intensity * intensity * (3 - 2 * intensity);
           character.style.color = interpolatePresentationColor(sweep.base_color, sweep.head_color, intensity);
         } else if (active && presentation.characterHueWave) {
           character.style.color = hueWaveColor(presentation.characterHueWave, index, characters.length, progress);
         } else if (active && presentation.characterPaletteFront) {
           character.style.color = paletteFrontColor(presentation.characterPaletteFront, index, characters.length, progress);
+        } else if (active && presentation.characterStyleSweep) {
+          const track = presentation.characterStyleSweep;
+          const selected = styleSweepSelected(track, index, characters.length, progress);
+          applyCharacterStyle(character, selected ? track.active_style : track.base_style);
+          if (character.dataset.caseable === "true") {
+            character.style.textTransform = selected && track.uppercase_active ? "uppercase"
+              : !selected && track.lowercase_inactive ? "lowercase" : "none";
+          }
+        } else if (active && presentation.characterSparkle) {
+          const sparkle = presentation.characterSparkle;
+          const phaseSeconds = progress * presentation.program.duration_ms / 1000;
+          const flashRate = presentation.program.frames_per_second / 2;
+          const sparkleFrame = Math.floor(phaseSeconds * flashRate);
+          const selected = [...characters.keys()]
+            .sort((left, right) => effectSeedValue(sparkle.seed, sparkleFrame, left) - effectSeedValue(sparkle.seed, sparkleFrame, right))
+            .slice(0, Math.min(sparkle.count, characters.length));
+          const flashProgress = (phaseSeconds * flashRate) % 1;
+          const intensity = selected.includes(index) ? 0.25 + 0.75 * Math.sin(Math.PI * flashProgress) : 0;
+          character.style.color = interpolatePresentationColor(sparkle.base_color, sparkle.accent_color, intensity);
+        } else if (active && presentation.characterReveal) {
+          const reveal = presentation.characterReveal;
+          const phaseMs = progress * presentation.program.duration_ms;
+          const revealFrame = Math.floor((phaseMs / 1000 + 1e-12) * presentation.program.frames_per_second);
+          const frontier = Math.floor(phaseMs / reveal.interval_ms);
+          const revealed = Math.min(characters.length, frontier);
+          if (index >= revealed) {
+            setVisualCharacter(character, " ");
+          } else {
+            const trailPosition = frontier - 1 - index;
+            if (trailPosition < reveal.glitch_width) {
+              setVisualCharacter(
+                character,
+                reveal.glitch_characters[
+                  effectSeedValue(reveal.seed, revealFrame, index) % reveal.glitch_characters.length
+                ],
+                reveal.accent_color,
+              );
+            } else if (trailPosition < reveal.glitch_width + reveal.settle_width) {
+              const settlePosition = trailPosition - reveal.glitch_width;
+              const settleProgress = reveal.settle_width <= 1 ? 1 : settlePosition / (reveal.settle_width - 1);
+              setVisualCharacter(
+                character,
+                original,
+                interpolatePresentationColor(reveal.accent_color, reveal.base_color, settleProgress),
+              );
+            } else {
+              const fillDuration = characters.length * reveal.interval_ms;
+              const selection = effectSeedValue(reveal.seed ^ 0xa5a5a5a5, 0, index) / 0x100000000;
+              const stableAt = (index + 1 + reveal.glitch_width + reveal.settle_width) * reveal.interval_ms;
+              const pulseDuration = (1 + reveal.settle_width) * reveal.interval_ms;
+              const latestStart = fillDuration - pulseDuration;
+              if (reveal.inline_glitch_chance > 0 && selection < reveal.inline_glitch_chance && latestStart > stableAt) {
+                const position = effectSeedValue(reveal.seed ^ 0x5a5a5a5a, 0, index) / 0x100000000;
+                const pulsePhase = phaseMs - (stableAt + position * (latestStart - stableAt));
+                if (pulsePhase >= 0 && pulsePhase < pulseDuration) {
+                  if (pulsePhase < reveal.interval_ms) {
+                    character.style.fontWeight = "700";
+                    setVisualCharacter(
+                      character,
+                      reveal.glitch_characters[
+                        effectSeedValue(reveal.seed, revealFrame, index) % reveal.glitch_characters.length
+                      ],
+                      reveal.accent_color,
+                    );
+                  } else {
+                    const settle = (pulsePhase - reveal.interval_ms) /
+                      Math.max(reveal.interval_ms, reveal.settle_width * reveal.interval_ms);
+                    setVisualCharacter(
+                      character,
+                      original,
+                      interpolatePresentationColor(reveal.accent_color, reveal.base_color, settle),
+                    );
+                  }
+                }
+              }
+            }
+          }
         } else {
-          character.style.color = sweep?.base_color
-            || presentation.characterHueWave?.base_color
-            || presentation.characterPaletteFront?.colors.at(-1);
+          if (!presentation.characterReveal) {
+            character.style.color = sweep?.base_color
+              || presentation.characterHueWave?.base_color
+              || presentation.characterPaletteFront?.colors.at(-1)
+              || presentation.characterStyleSweep?.base_style.foreground
+              || presentation.characterSparkle?.base_color
+              || "";
+          }
         }
-        character.style.textTransform =
-          active && sweep?.uppercase_head && character.dataset.caseable === "true"
-            ? index === head
-              ? "uppercase"
-              : "lowercase"
-            : "none";
+        if (!(active && presentation.characterStyleSweep)) {
+          character.style.textTransform =
+            active && sweep?.uppercase_head && character.dataset.caseable === "true"
+              ? index === head
+                ? "uppercase"
+                : "lowercase"
+              : "none";
+        }
       }
       frame = requestAnimationFrame(render);
     };
@@ -679,10 +920,21 @@ export function animatePresentationElement(element, presentation, eventTimestamp
       if (frame !== null) cancelAnimationFrame(frame);
       frame = null;
       for (const character of element.querySelectorAll(".presentation-character")) {
-        character.style.color = presentation.characterSweep?.base_color
-          || presentation.characterHueWave?.base_color
-          || presentation.characterPaletteFront?.colors.at(-1);
+        character.textContent = character.dataset.originalText ?? character.textContent;
+        delete character.dataset.visualText;
+        character.style.removeProperty?.("--presentation-visual-color");
+        if (!presentation.characterReveal) {
+          character.style.color = presentation.characterSweep?.base_color
+            || presentation.characterHueWave?.base_color
+            || presentation.characterPaletteFront?.colors.at(-1)
+            || presentation.characterStyleSweep?.base_style.foreground
+            || presentation.characterSparkle?.base_color
+            || "";
+        }
         character.style.textTransform = "none";
+        character.style.fontWeight = "";
+        character.style.textDecoration = "";
+        character.style.backgroundColor = "";
       }
     };
     animation.addEventListener("finish", stop);
