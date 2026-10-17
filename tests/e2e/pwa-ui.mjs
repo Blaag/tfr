@@ -41,22 +41,53 @@ const context = await browser.newContext({
   hasTouch: true,
 });
 await context.addInitScript(() => {
-  const events = Array.from({ length: 700 }, (_, index) => ({
-    type: "event",
-    protocol: 1,
-    cursor: String(index + 1),
-    event: {
+  const events = Array.from({ length: 700 }, (_, index) => {
+    const text = `output ${index} ${"x".repeat(80)}`;
+    return {
+      type: "event",
+      protocol: 1,
+      cursor: String(index + 1),
+      event: {
       id: `event-${index}`,
       timestamp: new Date(1_700_000_000_000 + index * 1_000).toISOString(),
       world: "dev-local",
       connection_generation: "1",
       direction: "inbound",
       kind: "raw_output",
-      text: `output ${index} ${"x".repeat(80)}`,
+      text,
       redacted: false,
       text_truncated: false,
-    },
-  }));
+      presentation: {
+        version: 2,
+        programs: [{
+          start: 0,
+          end: Array.from(text).length,
+          duration_ms: 3000,
+          repeat_ms: 3000,
+          repeat_count: 1,
+          frames_per_second: 20,
+          variants: [{
+            requires: ["character_foreground", "character_text", "timeline"],
+            style: {},
+            foreground_keyframes: [],
+            character_reveal: {
+              interval_ms: 20,
+              base_color: "#d7d7d7",
+              accent_color: "#ffffff",
+              glitch_width: 3,
+              settle_width: 3,
+              seed: index,
+              glitch_characters: "#%",
+              inline_glitch_chance: 0.05,
+            },
+          }],
+          reduced_motion: {},
+          fallback: {},
+        }],
+      },
+      },
+    };
+  });
   window.__sentCommands = [];
   class FakeWebSocket extends EventTarget {
     static CONNECTING = 0;
@@ -88,6 +119,20 @@ await context.addInitScript(() => {
                 connection_generation: "1",
                 available_count: "700",
                 snapshot_count: 700,
+                snapshot_gap: false,
+              },
+            },
+            {
+              world: "quiet-world",
+              state: "connected",
+              aliases: ["quiet"],
+              server: "bare",
+              character: "Black",
+              connection_generation: "1",
+              history: {
+                connection_generation: "1",
+                available_count: "0",
+                snapshot_count: 0,
                 snapshot_gap: false,
               },
             },
@@ -285,6 +330,7 @@ try {
   await page.waitForFunction(() => document.querySelectorAll("#event-list .event").length === 500);
   assertGeometry(await geometry(), "portrait");
   assert.equal(await page.locator("#event-list .event").count(), 500);
+  assert.equal(await page.locator("#event-list .presentation-character").count(), 0);
   assert.deepEqual(
     await page.locator("#transcript").evaluate((node) => ({
       behavior: getComputedStyle(node).scrollBehavior,
@@ -298,6 +344,26 @@ try {
   );
   assert.equal(await page.locator("#command-input").getAttribute("spellcheck"), "true");
   assert.equal(await page.locator("#command-input").getAttribute("autocorrect"), "on");
+  await page.evaluate(() => {
+    window.__fakeSocket.message({
+      type: "event",
+      protocol: 1,
+      cursor: "activity-1",
+      event: {
+        id: "other-world-activity",
+        timestamp: new Date().toISOString(),
+        world: "quiet-world",
+        connection_generation: "1",
+        direction: "inbound",
+        kind: "raw_output",
+        text: "activity elsewhere",
+        redacted: false,
+        text_truncated: false,
+      },
+    });
+  });
+  await page.waitForFunction(() => document.querySelectorAll("#world-activity .unread").length === 1);
+  assert.match(await page.locator("#world-activity").getAttribute("aria-label"), /1 unread message/);
   assert.equal((await page.request.get(`${origin}/combo.mjs`)).status(), 200);
   await page.locator("#motion-preference").evaluate((select) => {
     select.value = "full";
@@ -439,6 +505,10 @@ try {
   assert.equal(await page.locator('#event-list .event:text-is("\\"test")').count(), 0);
   await page.locator("#history-button").click();
   assert.equal(await page.locator("#history-list button").getByText('"test', { exact: true }).count(), 1);
+  await page.locator("#history-list button").getByText('"test', { exact: true }).click();
+  await page.locator("#command-input").press("Enter");
+  await page.locator("#history-button").dispatchEvent("pointerdown", { pointerType: "touch" });
+  await page.locator("#history-dialog[open]").waitFor();
   await page.keyboard.press("Escape");
 
   await page.locator("#command-input").fill("draft");

@@ -47,6 +47,13 @@ const RECONNECT_DELAYS = [500, 1000, 2000, 4000, 8000, 15000];
 const HEARTBEAT_INTERVAL_MS = 20000;
 const HEARTBEAT_TIMEOUT_MS = 8000;
 const CONNECTION_TIMEOUT_MS = 8000;
+const EVENT_LOOP_PROBE_MS = 2000;
+const EVENT_LOOP_STALL_MS = 1000;
+const RESPONSIVENESS_REPORT_COOLDOWN_MS = 30000;
+const INTERACTION_ACK_TIMEOUT_MS = 1500;
+const SLOW_TRANSCRIPT_RENDER_MS = 250;
+const PRESENTATION_CHARACTER_PRESSURE = 2000;
+const TRANSCRIPT_NODE_PRESSURE = 10000;
 const MIN_TEXT_SIZE = -2;
 const MAX_TEXT_SIZE = 4;
 
@@ -59,6 +66,7 @@ const elements = {
   settingsButton: document.querySelector("#settings-button"),
   worldName: document.querySelector("#world-name"),
   worldSignal: document.querySelector("#world-signal"),
+  worldActivity: document.querySelector("#world-activity"),
   connectionState: document.querySelector("#connection-state"),
   historyNotice: document.querySelector("#history-notice"),
   transcript: document.querySelector("#transcript"),
@@ -145,6 +153,10 @@ let pairingRecoveryTimer = null;
 let viewportTimer = null;
 let historyNoticeTimer = null;
 let historyNoticeKey = null;
+let historyDialogPending = false;
+let pendingInteraction = null;
+let interactionSequence = 0;
+const lastResponsivenessReports = new Map();
 let transcriptTouch = null;
 let suppressTranscriptClickUntil = 0;
 let transcriptPointerTarget = null;
@@ -155,6 +167,76 @@ const installedTextRunColors = new Set();
 const activePresentationAnimations = new Set();
 let comboNoticeAnimation = null;
 const comboTimers = new Set();
+
+function responsivenessMessage(prefix) {
+  const events = elements.eventList?.children.length || 0;
+  const characters = elements.eventList?.querySelectorAll(".presentation-character").length || 0;
+  return `${prefix}; events=${events}; characters=${characters}; animations=${activePresentationAnimations.size}`;
+}
+
+function reportResponsiveness(code, message, operation) {
+  const now = performance.now();
+  if (now - (lastResponsivenessReports.get(code) ?? -Infinity) < RESPONSIVENESS_REPORT_COOLDOWN_MS) return;
+  lastResponsivenessReports.set(code, now);
+  reportDiagnostic(recordDiagnostic({
+    severity: "warning",
+    component: "responsiveness",
+    code,
+    message: responsivenessMessage(message),
+    operation,
+  }));
+}
+
+function interactionOperation(target) {
+  if (!(target instanceof Element)) return null;
+  const control = target.closest("button, input, textarea, select, a, [role='button']");
+  if (!control) return null;
+  return (control.id || control.getAttribute("aria-label") || control.tagName).slice(0, 100);
+}
+
+function acknowledgeInteraction(target = null) {
+  if (!pendingInteraction) return;
+  if (target && pendingInteraction.target !== target) return;
+  pendingInteraction = null;
+}
+
+function monitorEventLoop(expected = performance.now() + EVENT_LOOP_PROBE_MS) {
+  window.setTimeout(() => {
+    const now = performance.now();
+    const delay = now - expected;
+    if (delay >= EVENT_LOOP_STALL_MS && document.visibilityState === "visible") {
+      reportResponsiveness(
+        "main_thread_stall",
+        `Main thread probe was delayed ${Math.round(delay)} ms`,
+        document.visibilityState,
+      );
+    }
+    monitorEventLoop(now + EVENT_LOOP_PROBE_MS);
+  }, EVENT_LOOP_PROBE_MS);
+}
+
+document.addEventListener("pointerdown", (event) => {
+  const operation = interactionOperation(event.target);
+  if (!operation) return;
+  const control = event.target instanceof Element
+    ? event.target.closest("button, input, textarea, select, a, [role='button']")
+    : null;
+  if (!control) return;
+  const sequence = ++interactionSequence;
+  pendingInteraction = { sequence, target: control };
+  window.setTimeout(() => {
+    if (pendingInteraction?.sequence !== sequence) return;
+    pendingInteraction = null;
+    reportResponsiveness(
+      "interaction_unacknowledged",
+      `Pointer interaction produced no click or focus within ${INTERACTION_ACK_TIMEOUT_MS} ms`,
+      operation,
+    );
+  }, INTERACTION_ACK_TIMEOUT_MS);
+}, true);
+document.addEventListener("click", () => acknowledgeInteraction(), true);
+document.addEventListener("focusin", () => acknowledgeInteraction(), true);
+monitorEventLoop();
 
 function scheduleCombo(callback, delay) {
   const timer = window.setTimeout(() => {
@@ -723,6 +805,32 @@ function updateWorldHeader() {
   elements.historyButton.disabled = !world;
 }
 
+function renderWorldActivity() {
+  const indicators = state.worlds.map((world) => {
+    const unread = state.unread.get(world.world) || 0;
+    const indicator = document.createElement("span");
+    indicator.className = `world-activity-dot${world.world === state.selectedWorld ? " active" : ""}${unread ? " unread" : ""}`;
+    indicator.title = unread
+      ? `${world.world}: ${unread} unread message${unread === 1 ? "" : "s"}`
+      : world.world;
+    return indicator;
+  });
+  elements.worldActivity.replaceChildren(...indicators);
+  const activeWorlds = state.worlds.filter(
+    (world) => world.world !== state.selectedWorld && (state.unread.get(world.world) || 0) > 0,
+  );
+  const unread = activeWorlds.reduce(
+    (total, world) => total + (state.unread.get(world.world) || 0),
+    0,
+  );
+  elements.worldActivity.setAttribute(
+    "aria-label",
+    unread
+      ? `${unread} unread message${unread === 1 ? "" : "s"} in ${activeWorlds.length} other world${activeWorlds.length === 1 ? "" : "s"}`
+      : "No unread activity in other worlds",
+  );
+}
+
 function restoreHistoryCommand(text) {
   if (!state.selectedWorld) return;
   elements.commandInput.value = text;
@@ -738,7 +846,8 @@ function restoreHistoryCommand(text) {
 
 function openHistoryDialog() {
   const world = currentWorld();
-  if (!world || elements.historyDialog.open) return;
+  if (!world || elements.historyDialog.open || historyDialogPending) return;
+  historyDialogPending = true;
   elements.commandInput.blur();
   elements.historyDialogWorld.textContent = world.world;
   const history = state.commandHistory.get(world.world) || [];
@@ -751,8 +860,11 @@ function openHistoryDialog() {
   });
   elements.historyList.replaceChildren(...buttons);
   elements.historyEmpty.hidden = buttons.length > 0;
-  elements.historyDialog.showModal();
-  scheduleViewportUpdate();
+  window.requestAnimationFrame(() => {
+    historyDialogPending = false;
+    if (!elements.historyDialog.open) elements.historyDialog.showModal();
+    scheduleViewportUpdate();
+  });
 }
 
 function renderWorlds() {
@@ -784,6 +896,7 @@ function renderWorlds() {
     button.addEventListener("click", () => selectWorld(world.world));
     elements.worldList.append(button);
   }
+  renderWorldActivity();
 }
 
 function selectWorld(worldName, { focusInput = true } = {}) {
@@ -856,7 +969,7 @@ function appendEventText(
     );
   let presentationWrappers = [];
   let activePresentations = [];
-  for (const run of splitPresentationRuns(event, runs, animationsEnabled)) {
+  for (const run of splitPresentationRuns(event, runs, animationsEnabled && animate, Date.now())) {
     const presentations = run.presentations || (run.presentation ? [run.presentation] : []);
     let shared = 0;
     while (
@@ -878,6 +991,11 @@ function appendEventText(
           );
         }
         applyTextStyle(presentationWrapper, presentation.style);
+        if (presentation.style.foreground) {
+          presentationWrapper.style.color = presentation.style.foreground;
+        }
+        if (presentation.style.bold) presentationWrapper.style.fontWeight = "700";
+        if (presentation.style.underline) presentationWrapper.style.textDecoration = "underline";
         if (presentation.style.reverse) {
           presentationWrapper.classList.add("presentation-reverse");
           presentationWrapper.style.setProperty(
@@ -1006,6 +1124,7 @@ function openEventDetails(item, { pointerActivated = false } = {}) {
 }
 
 function renderTranscript({ scrollToLive = false, smoothScroll = false, restorePosition = false } = {}) {
+  const renderStarted = performance.now();
   cancelPresentationAnimations();
   if (liveRenderFrame !== null) window.cancelAnimationFrame(liveRenderFrame);
   liveRenderFrame = null;
@@ -1023,6 +1142,28 @@ function renderTranscript({ scrollToLive = false, smoothScroll = false, restoreP
   }
   elements.eventList.replaceChildren(...nodes);
   elements.emptyState.hidden = visible.length > 0;
+  const renderDuration = performance.now() - renderStarted;
+  if (renderDuration >= SLOW_TRANSCRIPT_RENDER_MS) {
+    reportResponsiveness(
+      "transcript_render_slow",
+      `Transcript render took ${Math.round(renderDuration)} ms for ${visible.length} events`,
+      restorePosition ? "restore" : scrollToLive ? "return-live" : "render",
+    );
+  }
+  const presentationCharacters = elements.eventList.querySelectorAll(
+    ".presentation-character",
+  ).length;
+  const transcriptNodes = elements.eventList.getElementsByTagName("*").length;
+  if (
+    presentationCharacters > PRESENTATION_CHARACTER_PRESSURE ||
+    transcriptNodes > TRANSCRIPT_NODE_PRESSURE
+  ) {
+    reportResponsiveness(
+      "transcript_node_pressure",
+      `Transcript contains ${transcriptNodes} nodes and ${presentationCharacters} presentation characters`,
+      restorePosition ? "restore" : "render",
+    );
+  }
   if (restorePosition) {
     restoreTranscriptPosition({
       transcript: elements.transcript,
@@ -1744,7 +1885,16 @@ elements.commandInput.addEventListener("blur", () => {
   scheduleViewportUpdate();
 });
 elements.historyButton.addEventListener("click", openHistoryDialog);
-elements.historyDialog.addEventListener("close", () => elements.historyList.replaceChildren());
+elements.historyButton.addEventListener("pointerdown", (event) => {
+  if (event.pointerType !== "touch") return;
+  event.preventDefault();
+  acknowledgeInteraction(elements.historyButton);
+  openHistoryDialog();
+});
+elements.historyDialog.addEventListener("close", () => {
+  historyDialogPending = false;
+  elements.historyList.replaceChildren();
+});
 elements.textSmaller.addEventListener("click", () => applyTextSize(textSizePreference() - 1));
 elements.textReset.addEventListener("click", () => applyTextSize(0));
 elements.textLarger.addEventListener("click", () => applyTextSize(textSizePreference() + 1));

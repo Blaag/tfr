@@ -316,6 +316,33 @@ test("composes overlapping speaker and reveal programs", () => {
   assert.equal(runs.at(-1).presentations.length, 1);
 });
 
+test("expired and non-budgeted character programs collapse to static runs", () => {
+  const event = eventWithPresentation({ text: "Alice" });
+  const variant = event.presentation.programs[0].variants[0];
+  variant.requires = ["character_foreground", "timeline", "character_case"];
+  variant.style = {};
+  variant.foreground_keyframes = [];
+  variant.character_sweep = {
+    positions: [{ at: 0, position: 0 }, { at: 1, position: 1 }],
+    base_color: "#180000",
+    head_color: "#ff0000",
+    trail_width: 2,
+    uppercase_head: true,
+  };
+  const started = Date.parse(event.timestamp);
+
+  const expired = splitPresentationRuns(event, null, true, started + 12001);
+  const nonBudgeted = splitPresentationRuns(event, null, false, started);
+
+  assert.equal(expired.length, 1);
+  assert.equal(expired[0].text, "Alice");
+  assert.equal(expired[0].presentation.characterSweep, undefined);
+  assert.deepEqual(expired[0].presentation.style, { foreground: "#a9914a" });
+  assert.equal(nonBudgeted.length, 1);
+  assert.equal(nonBudgeted[0].presentation.characterSweep, undefined);
+  assert.deepEqual(nonBudgeted[0].presentation.style, { foreground: "#fff08a", bold: true });
+});
+
 test("runs one bounded animation clock for a character sweep and cleans up", () => {
   const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
   const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;

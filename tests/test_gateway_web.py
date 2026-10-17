@@ -100,7 +100,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v55";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v56";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
 
 
@@ -314,6 +314,16 @@ def test_mobile_keyboard_preserves_live_edge_and_compacts_landscape() -> None:
     assert "@media (orientation: landscape), (max-height: 500px)" in styles
     assert ":root[data-input-focused] .topbar" in styles
     assert ":root[data-input-focused] .history-button" in styles
+
+
+def test_pwa_records_bounded_responsiveness_diagnostics() -> None:
+    application = files("tfr").joinpath("web", "app.mjs").read_text(encoding="utf-8")
+
+    assert '"main_thread_stall"' in application
+    assert '"interaction_unacknowledged"' in application
+    assert '"transcript_render_slow"' in application
+    assert '"transcript_node_pressure"' in application
+    assert 'component: "responsiveness"' in application
 
 
 def test_mobile_multiline_paste_is_blocked_before_command_submission() -> None:
