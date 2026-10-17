@@ -465,7 +465,8 @@ export function presentationValidationResult(event) {
   };
 }
 
-export function selectPresentation(program, animationsEnabled) {
+export function selectPresentation(program, animationsEnabled, animationActive = true) {
+  if (!animationActive) return { style: program.fallback, animation: null };
   if (!animationsEnabled) return { style: program.reduced_motion, animation: null };
   const variant = program.variants.find((candidate) =>
     candidate.requires.every((capability) => CAPABILITIES.has(capability)),
@@ -600,7 +601,7 @@ export function presentationAnimationFrames(program, keyframes, baseColor) {
   return frames;
 }
 
-export function splitPresentationRuns(event, runs, animationsEnabled) {
+export function splitPresentationRuns(event, runs, animationsEnabled, now = null) {
   const programs = validatedPresentation(event);
   const baseRuns = runs || [{ text: event.text || "", style: {}, role: undefined }];
   if (!programs) return baseRuns.map((run) => ({ ...run, presentation: null, presentations: [] }));
@@ -618,7 +619,9 @@ export function splitPresentationRuns(event, runs, animationsEnabled) {
   for (const program of programs) {
     boundaries.add(program.start);
     boundaries.add(program.end);
-    const selected = selectPresentation(program, animationsEnabled);
+    const age = now === null ? 0 : Math.max(0, now - Date.parse(event.timestamp));
+    const animationActive = Number.isFinite(age) && age < program.repeat_ms * program.repeat_count;
+    const selected = selectPresentation(program, animationsEnabled, animationActive);
     if (selected.characterSweep || selected.characterHueWave || selected.characterPaletteFront ||
       selected.characterStyleSweep || selected.characterSparkle || selected.characterReveal) {
       let graphemeOffset = program.start;
@@ -636,7 +639,9 @@ export function splitPresentationRuns(event, runs, animationsEnabled) {
     const presentations = programs
       .filter((candidate) => candidate.start <= start && end <= candidate.end)
       .map((program) => {
-        const selected = selectPresentation(program, animationsEnabled);
+        const age = now === null ? 0 : Math.max(0, now - Date.parse(event.timestamp));
+        const animationActive = Number.isFinite(age) && age < program.repeat_ms * program.repeat_count;
+        const selected = selectPresentation(program, animationsEnabled, animationActive);
         const hasCharacterTrack = selected.characterSweep || selected.characterHueWave ||
           selected.characterPaletteFront || selected.characterStyleSweep ||
           selected.characterSparkle || selected.characterReveal;
