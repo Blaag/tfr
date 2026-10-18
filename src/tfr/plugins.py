@@ -739,6 +739,9 @@ class PluginManager:
         self._sequence = 0
         self._failure_tasks: set[asyncio.Task[Any]] = set()
         self._presentation_cache: dict[tuple[UUID, str], tuple[EffectProgram, ...]] = {}
+        self._presentation_source_cache: dict[
+            tuple[UUID, str], tuple[tuple[str, tuple[EffectProgram, ...]], ...]
+        ] = {}
         self.requested_plugins: tuple[str, ...] = ()
         self.config: Mapping[str, Any] = MappingProxyType({})
         self._loaded_plugins: list[str] = []
@@ -877,6 +880,14 @@ class PluginManager:
             if isinstance(speaker, str) and 0 < len(speaker) <= 100 and speaker not in speakers:
                 speakers.append(speaker)
         return tuple(speakers)
+
+    def configured_portable_plugins(self) -> tuple[str, ...]:
+        sources = {plugin for plugin, _decorator in self.registry.presentation_decorators.values()}
+        return tuple(
+            plugin
+            for plugin in self.requested_plugins
+            if plugin in sources and plugin in self.config
+        )
 
     def effect_demos(self) -> tuple[EffectDemo, ...]:
         registered = [demo for _plugin, demo in self.registry.effect_demos.values()]
@@ -1343,11 +1354,21 @@ class PluginManager:
         return tuple(decorations)
 
     def presentation_programs(self, event: Event, text: str) -> tuple[EffectProgram, ...]:
+        return tuple(
+            program
+            for _plugin, programs in self.presentation_programs_by_plugin(event, text)
+            for program in programs
+        )
+
+    def presentation_programs_by_plugin(
+        self, event: Event, text: str
+    ) -> tuple[tuple[str, tuple[EffectProgram, ...]], ...]:
         cache_key = (event.event_id, text)
-        cached = self._presentation_cache.get(cache_key)
+        cached = self._presentation_source_cache.get(cache_key)
         if cached is not None:
             return cached
         programs: list[EffectProgram] = []
+        grouped: list[tuple[str, tuple[EffectProgram, ...]]] = []
         for name, (plugin, decorator) in tuple(self.registry.presentation_decorators.items()):
             try:
                 additions = tuple(decorator(event, text))
@@ -1377,10 +1398,21 @@ class PluginManager:
                 self._schedule_failure(plugin, f"presentation:{name}", exc, world=event.world)
                 continue
             programs.extend(additions)
-        result = tuple(programs)
-        self._presentation_cache[cache_key] = result
-        if len(self._presentation_cache) > 5_000:
-            self._presentation_cache.pop(next(iter(self._presentation_cache)))
+            if additions:
+                existing = next(
+                    (index for index, item in enumerate(grouped) if item[0] == plugin), None
+                )
+                if existing is None:
+                    grouped.append((plugin, additions))
+                else:
+                    grouped[existing] = (plugin, (*grouped[existing][1], *additions))
+        result = tuple(grouped)
+        self._presentation_source_cache[cache_key] = result
+        self._presentation_cache[cache_key] = tuple(programs)
+        if len(self._presentation_source_cache) > 5_000:
+            oldest = next(iter(self._presentation_source_cache))
+            self._presentation_source_cache.pop(oldest)
+            self._presentation_cache.pop(oldest, None)
         return result
 
     @property

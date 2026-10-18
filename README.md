@@ -564,6 +564,17 @@ problem when rerun later.
 
 The remaining steps in this section are the equivalent manual procedure.
 
+Portable presentation plugins are migrating to Gateway-owned policy. During
+the compatibility release, a remote native UI that has local portable plugin
+configuration continues to use that local source as an override and prints a
+warning listing the affected plugin IDs. Copy **only those identified plugins**
+to the Gateway `config.jsonc`: add their IDs to the Gateway `plugins.enabled`
+list and copy their matching `plugins.config` objects. Do not move the entire
+local `plugins` section. Borders, screen effects, boss views, keybindings,
+status segments, and other client-only plugins remain local. An upcoming
+release will ignore the listed local portable settings for remote sessions;
+standalone mode is unaffected.
+
 Clone the repository on the UI host as an installer bootstrap:
 
 ```console

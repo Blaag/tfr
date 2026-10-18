@@ -59,6 +59,21 @@ from tfr.updates import (
 _RESTART_GATEWAY_ID = "TFR_RESTART_GATEWAY_ID"
 _RESTART_CURSOR = "TFR_RESTART_CURSOR"
 _RESTART_WORLD = "TFR_RESTART_WORLD"
+
+
+def portable_plugin_migration_warning(plugins: tuple[str, ...]) -> str | None:
+    if not plugins:
+        return None
+    listed = ", ".join(plugins)
+    return (
+        f"Gateway configuration migration required for these portable plugins only: {listed}. "
+        "Copy only the identified plugins' enabled entries and plugins.config sections to "
+        "the Gateway config.jsonc; do not move all local plugins. Local settings still "
+        "override Gateway presentations in this release, but an upcoming release will "
+        "ignore them for remote sessions. Client-only plugins remain local."
+    )
+
+
 _UPDATE_RESTART = "TFR_UPDATE_RESTART"
 
 
@@ -69,9 +84,7 @@ class GatewayDisconnectedError(ConnectionError):
 ReconnectFactory = Callable[[UUID, int], Awaitable["GatewayClient"]]
 ConnectHandler = Callable[[], Awaitable[None]]
 DisconnectHandler = Callable[[Exception], None]
-UpdatePrepareHandler = Callable[
-    [Mapping[str, Any] | None, bool], Awaitable[dict[str, Any]]
-]
+UpdatePrepareHandler = Callable[[Mapping[str, Any] | None, bool], Awaitable[dict[str, Any]]]
 UpdateCommitHandler = Callable[[str], Awaitable[None]]
 UpdateCheckHandler = Callable[[], Awaitable[dict[str, Any]]]
 
@@ -527,8 +540,7 @@ class GatewayClient:
                 )
             )
             aliases_changed = any(
-                current_sessions[world].config.aliases
-                != replacement_sessions[world].config.aliases
+                current_sessions[world].config.aliases != replacement_sessions[world].config.aliases
                 for world in current_sessions.keys() & replacement_sessions.keys()
             )
             current_agents = set(self.agents.controllers) if self.agents is not None else set()
@@ -637,9 +649,7 @@ class GatewayClient:
         message: dict[str, Any] = {"type": "update", "request_id": str(request_id)}
         if force:
             message["force"] = True
-        result = await self._request(
-            message, request_id
-        )
+        result = await self._request(message, request_id)
         if result is None:
             raise GatewayProtocolError("Gateway returned no update result")
         return result
@@ -717,14 +727,10 @@ class GatewayClient:
             return False
         return True
 
-    async def _request(
-        self, message: dict[str, Any], request_id: UUID
-    ) -> dict[str, Any] | None:
+    async def _request(self, message: dict[str, Any], request_id: UUID) -> dict[str, Any] | None:
         if self._pump is None or self._pump.done():
             raise GatewayDisconnectedError("gateway client is not running")
-        future: asyncio.Future[dict[str, Any] | None] = (
-            asyncio.get_running_loop().create_future()
-        )
+        future: asyncio.Future[dict[str, Any] | None] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
         try:
             await write_message(self.writer, message, lock=self._write_lock)
@@ -1061,9 +1067,7 @@ class GatewayUiRuntime:
                 )
             except (TypeError, ValueError, UpdateError) as exc:
                 raise ValueError(f"Gateway update manifest is invalid: {exc}") from exc
-            self.notify(
-                f"Preparing UI update {manifest.version}. {manifest.release_url}"
-            )
+            self.notify(f"Preparing UI update {manifest.version}. {manifest.release_url}")
         else:
             self.notify("Force-preparing the locally configured candidate update.")
         try:
@@ -1084,8 +1088,7 @@ class GatewayUiRuntime:
         await asyncio.to_thread(activate_managed_update, release_id)
         self._update_restart_expected = True
         self.notify(
-            f"Activated UI {self._staged_update.version}. "
-            f"{self._staged_update.release_url}"
+            f"Activated UI {self._staged_update.version}. {self._staged_update.release_url}"
         )
 
     def _abort_update(self, error: str) -> None:
@@ -1247,6 +1250,7 @@ async def run_gateway_ui(
         # A replacement UI needs retained history to rebuild its in-memory display.
         "after_cursor": None,
     }
+
     async def connect() -> GatewayClient:
         if gateway_host is None:
             return await GatewayClient.connect(
@@ -1372,6 +1376,21 @@ async def run_gateway_ui(
         initial_scroll_to_end=True,
     )
     runtime.notify = lambda text: tui.add_notice(tui.active_alias, text)
+    configured_portable_plugins = getattr(plugins, "configured_portable_plugins", lambda: ())
+    local_portable_plugins = configured_portable_plugins()
+    warning = portable_plugin_migration_warning(local_portable_plugins)
+    if warning is not None:
+        listed = ", ".join(local_portable_plugins)
+        tui.queue_startup_notice(tui.active_alias, warning)
+        plugins.diagnostics.record(
+            severity="warning",
+            component="config",
+            code="local_portable_plugins_deprecated",
+            message=warning[:240],
+            operation=listed[:100],
+            client="native-ui",
+        )
+
     def restart_after_update() -> None:
         tui.update_restart_requested = True
         if tui.application.is_running:

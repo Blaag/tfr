@@ -21,6 +21,7 @@ from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from tfr.agents import AgentRuntime
+from tfr.ansi import terminal_plain_text
 from tfr.config import ConfigurationBundle
 from tfr.core import CommandBus, EventBus, UnknownSessionError
 from tfr.eventlog import EventSink, JsonlEventSink
@@ -50,6 +51,7 @@ from tfr.managed_updates import (
 )
 from tfr.plugin_sources import PluginSourceNotice, PluginUpdateChecker, load_plugin_sources
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
+from tfr.presentation import effect_programs_as_dict
 from tfr.sessions import (
     ConnectorSessionBridge,
     ConnectorWorldSession,
@@ -298,10 +300,7 @@ class EventHistory:
                         continue
                     if any(
                         cursor > after_cursor
-                        and (
-                            event_class_filter is None
-                            or event_class_filter(kind, actor_type)
-                        )
+                        and (event_class_filter is None or event_class_filter(kind, actor_type))
                         for (kind, actor_type), cursor in dropped.items()
                     ):
                         after_cursor_gaps.add((world, generation))
@@ -315,10 +314,7 @@ class EventHistory:
                     include_history
                     and (
                         available_count > len(retained)
-                        or (
-                            after_cursor is not None
-                            and after_cursor < self._dropped_through
-                        )
+                        or (after_cursor is not None and after_cursor < self._dropped_through)
                     )
                 ),
                 available_counts=MappingProxyType(available_counts),
@@ -355,13 +351,9 @@ class EventHistory:
                         self._generation_counts[bounded_event.world] = generation_counts
                     if bounded_event.connection_generation == generation_counts[0]:
                         actor_type = (
-                            bounded_event.actor.type
-                            if bounded_event.actor is not None
-                            else None
+                            bounded_event.actor.type if bounded_event.actor is not None else None
                         )
-                        generation_counts[1][
-                            (bounded_event.kind, actor_type)
-                        ] += 1
+                        generation_counts[1][(bounded_event.kind, actor_type)] += 1
                     history = self._history.get(event.world)
                     if history is None:
                         history = deque(maxlen=self.limits.get(event.world, self.default_limit))
@@ -464,9 +456,7 @@ def remove_stale_gateway_socket(path: Path) -> bool:
         probe.connect(str(path))
     except OSError as exc:
         if exc.errno not in {errno.ECONNREFUSED, errno.ENOENT}:
-            raise RuntimeError(
-                f"cannot validate existing gateway socket: {path}: {exc}"
-            ) from exc
+            raise RuntimeError(f"cannot validate existing gateway socket: {path}: {exc}") from exc
     else:
         raise RuntimeError(f"an active Gateway already owns socket: {path}")
     finally:
@@ -1136,9 +1126,8 @@ class GatewayServer:
                 or after_cursor < 0
             ):
                 raise GatewayProtocolError("after_cursor must be a non-negative integer or null")
-            history_reset = (
-                requested_gateway not in {None, str(self.runtime.gateway_id)}
-                or (requested_gateway is None and after_cursor is not None)
+            history_reset = requested_gateway not in {None, str(self.runtime.gateway_id)} or (
+                requested_gateway is None and after_cursor is not None
             )
             subscription = await self.runtime.history.subscribe(
                 None if history_reset else after_cursor,
@@ -1167,7 +1156,11 @@ class GatewayServer:
                 lock=write_lock,
             )
             for item in snapshot.events:
-                await write_message(writer, event_message(item.cursor, item.event), lock=write_lock)
+                await write_message(
+                    writer,
+                    self._native_event_message(item.cursor, item.event),
+                    lock=write_lock,
+                )
             if not admin:
                 participant = _GatewayUpdateParticipant(
                     connection_id=connection_id,
@@ -1242,7 +1235,30 @@ class GatewayServer:
             item = await subscription.queue.get()
             if item is None:
                 raise GatewayProtocolError("event stream overflowed; reconnect for backfill")
-            await write_message(writer, event_message(item.cursor, item.event), lock=write_lock)
+            await write_message(
+                writer,
+                self._native_event_message(item.cursor, item.event),
+                lock=write_lock,
+            )
+
+    def _native_event_message(self, cursor: int, event: Event) -> dict[str, Any]:
+        plugins = getattr(self.runtime, "plugins", None)
+        if not isinstance(plugins, PluginManager):
+            return event_message(cursor, event)
+        text = terminal_plain_text(
+            event.display_text or event.plain_text or event.canonical_text or ""
+        )
+        groups = plugins.presentation_programs_by_plugin(event, text)
+        presentations = [
+            {"source": source, "presentation": effect_programs_as_dict(programs)}
+            for source, programs in groups
+        ]
+        message = event_message(cursor, event, presentations=presentations)
+        try:
+            encode_message(message)
+        except GatewayProtocolError:
+            return event_message(cursor, event)
+        return message
 
     async def _receive_requests(
         self,
@@ -1505,14 +1521,10 @@ class GatewayServer:
             try:
                 update_result = await self.runtime.update_checker.check()
                 if update_result.error is not None:
-                    raise ValueError(
-                        f"cannot check {channel} TFR updates: {update_result.error}"
-                    )
+                    raise ValueError(f"cannot check {channel} TFR updates: {update_result.error}")
                 manifest = update_result.manifest
                 if manifest is None:
-                    raise ValueError(
-                        f"{channel} TFR update check returned no release manifest"
-                    )
+                    raise ValueError(f"{channel} TFR update check returned no release manifest")
                 gateway_build = getattr(self.runtime, "build", current_build())
                 gateway_core_update = force or update_result.available_for(gateway_build)
                 participant_core_updates = {
@@ -1610,8 +1622,7 @@ class GatewayServer:
             incompatible = [
                 participant
                 for participant in selected_participants
-                if participant.build is None
-                or not staged.manifest.supports(participant.build)
+                if participant.build is None or not staged.manifest.supports(participant.build)
             ]
             if incompatible:
                 async with self._update_participants_lock:
@@ -1642,9 +1653,7 @@ class GatewayServer:
                         participant,
                         "update_prepare",
                         timeout=UPDATE_PREPARE_TIMEOUT_SECONDS,
-                        manifest=(
-                            None if self._update_force else staged.manifest.as_dict()
-                        ),
+                        manifest=(None if self._update_force else staged.manifest.as_dict()),
                         force=self._update_force,
                     )
                     for participant in participants
@@ -1658,9 +1667,7 @@ class GatewayServer:
                 or result.get("commit") != staged.commit
             ]
             if mismatched:
-                raise ValueError(
-                    "one or more UI hosts staged a different candidate release"
-                )
+                raise ValueError("one or more UI hosts staged a different candidate release")
         except (ConnectionError, OSError, RuntimeError, TimeoutError, ValueError) as exc:
             await self._broadcast_update_message(
                 participants, "update_abort", error=f"Update aborted: {exc}"
@@ -1730,9 +1737,7 @@ class GatewayServer:
         **values: Any,
     ) -> dict[str, Any] | None:
         request_id = uuid4()
-        future: asyncio.Future[dict[str, Any] | None] = (
-            asyncio.get_running_loop().create_future()
-        )
+        future: asyncio.Future[dict[str, Any] | None] = asyncio.get_running_loop().create_future()
         participant.pending[request_id] = future
         try:
             await write_message(
@@ -1923,9 +1928,7 @@ async def run_gateway(
         if web_server is not None:
             await web_server.stop()
         await server.stop()
-        await runtime.stop(
-            preserve_worlds=restart_requested or application_restart.is_set()
-        )
+        await runtime.stop(preserve_worlds=restart_requested or application_restart.is_set())
     if application_restart.is_set():
         return GATEWAY_APPLICATION_RESTART_EXIT
     if restart_requested:

@@ -56,9 +56,7 @@ def test_configured_speaker_effect_demo_preserves_world_scope() -> None:
         scope="ui",
     )
     manager.config = {
-        "speaker_effects": {
-            "rules": [{"speaker": "Bob", "worlds": ["alpha"], "effect": "cylon"}]
-        }
+        "speaker_effects": {"rules": [{"speaker": "Bob", "worlds": ["alpha"], "effect": "cylon"}]}
     }
 
     demo = manager.effect_demos()[0]
@@ -233,6 +231,8 @@ async def test_fixture_plugin_registers_every_extension_and_submits_through_bus(
     assert manager.transform_display(enriched) == "HELLO"
     assert manager.decorate_display(enriched, "HELLO")[0].end == 5
     assert manager.presentation_programs(enriched, "HELLO")[0].end == 5
+    assert manager.presentation_programs_by_plugin(enriched, "HELLO")[0][0] == "fixture"
+    assert manager.configured_portable_plugins() == ("fixture",)
     assert manager.render_status("alpha") == ("plugin:alpha",)
     assert manager.render_screen_clear(
         "fixture",

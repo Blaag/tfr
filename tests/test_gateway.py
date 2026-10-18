@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from tfr.core import EventBus
+from tfr.core import CommandBus, EventBus
 from tfr.events import Actor, ActorType, Direction, Event, EventKind, SpoofAssessment, SpoofStatus
 from tfr.gateway import (
     EventHistory,
@@ -22,6 +22,8 @@ from tfr.gateway import (
     remove_stale_gateway_socket,
 )
 from tfr.gateway_protocol import MAX_MESSAGE_BYTES, encode_message, event_message, read_message
+from tfr.plugins import PluginManager
+from tfr.presentation import color_pulse
 from tfr.sessions import SessionState
 from tfr.updates import current_build
 
@@ -322,6 +324,28 @@ class FakeRuntime:
 
     async def control(self, *, world: str, action: str) -> None:
         raise AssertionError(f"unexpected control request: {world} {action}")
+
+
+def test_native_gateway_event_groups_portable_programs_by_plugin() -> None:
+    history = SimpleNamespace()
+    runtime = FakeRuntime(history)  # type: ignore[arg-type]
+    plugins = PluginManager(
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        scope="gateway",
+    )
+    plugins._registrar("speaker_effects").register_presentation_decorator(
+        "speaker",
+        lambda _event, _text: (color_pulse(0, 5, base_color="#112233", accent_color="#ffffff"),),
+    )
+    runtime.plugins = plugins
+    server = GatewayServer(runtime, Path("/unused"))  # type: ignore[arg-type]
+
+    message = server._native_event_message(1, make_event("alpha", 0))
+
+    assert message["presentations"][0]["source"] == "speaker_effects"
+    assert message["presentations"][0]["presentation"]["programs"][0]["start"] == 0
 
 
 def test_runtime_world_descriptors_include_switch_aliases() -> None:

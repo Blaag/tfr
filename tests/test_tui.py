@@ -62,6 +62,7 @@ from tfr.plugin_api import (
 )
 from tfr.plugin_sources import PluginSourceNotice, PluginUpdateChecker, PluginUpdateResult
 from tfr.plugins import BossViewEvent, PluginManager
+from tfr.presentation import effect_programs_as_dict
 from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.tui import (
     _MAX_OBSERVED_SPEAKER_LENGTH,
@@ -1244,8 +1245,7 @@ async def test_core_and_plugin_commands_take_priority_over_world_aliases() -> No
     assert "/fixture - switch to alpha; shadowed by fixture plugin command" in help_text
     assert {world for world, _text in tui._startup_notices} == {"alpha", "beta"}
     assert all(
-        "World-switch aliases shadowed by commands" in text
-        for _world, text in tui._startup_notices
+        "World-switch aliases shadowed by commands" in text for _world, text in tui._startup_notices
     )
 
 
@@ -2133,9 +2133,7 @@ def test_combo_notice_is_confined_to_output_bottom_border() -> None:
 
     for panel in ("output", "input"):
         for edge in BorderEdge:
-            rendered = fragment_list_to_text(
-                tui._border_text(tui.active_view, panel, edge, 4)
-            )
+            rendered = fragment_list_to_text(tui._border_text(tui.active_view, panel, edge, 4))
             if panel == "output" and edge is BorderEdge.BOTTOM:
                 assert "> Speaking Spree! <" in rendered
             else:
@@ -2718,6 +2716,95 @@ def test_world_transition_notices_include_local_and_utc_timestamps() -> None:
     assert text.count("UTC 2026-09-28 18:34:56 UTC") == 3
 
 
+def test_remote_tui_renders_gateway_portable_presentations() -> None:
+    tui = make_tui()
+    tui.gateway_reconnect = lambda: None  # type: ignore[assignment]
+    program = color_pulse(0, 5, base_color="#112233", accent_color="#ffffff")
+    event = Event(
+        session_id=tui.active_view.session.session_id,
+        world="alpha",
+        connection_generation=1,
+        sequence=1,
+        direction=Direction.INBOUND,
+        kind=EventKind.SAY,
+        canonical_text="Alice says hello",
+        plain_text="Alice says hello",
+        display_text="Alice says hello",
+        metadata={
+            "gateway_presentations": [
+                {
+                    "source": "speaker_effects",
+                    "presentation": effect_programs_as_dict((program,)),
+                }
+            ]
+        },
+    )
+
+    tui.handle_event(event)
+
+    presentations = tui.active_view.display._entry_presentations[-1]
+    assert len(presentations) == 1
+    assert presentations[0].program.fallback.foreground == "#112233"
+
+
+async def test_remote_tui_local_portable_plugin_overrides_only_its_gateway_source() -> None:
+    class LocalPresentation:
+        api_version = 1
+
+        def register(self, registrar: Any, _config: object) -> None:
+            registrar.register_presentation_decorator(
+                "local",
+                lambda _event, _text: (
+                    color_pulse(0, 5, base_color="#445566", accent_color="#ffffff"),
+                ),
+            )
+
+    manager = await PluginManager.load(
+        enabled=("speaker_effects",),
+        config={"speaker_effects": {"rules": []}},
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        discovered=(entry_point("speaker_effects", LocalPresentation()),),
+        scope="ui",
+    )
+    tui = make_tui(plugins=manager)
+    tui.gateway_reconnect = lambda: None  # type: ignore[assignment]
+    speaker = color_pulse(0, 5, base_color="#112233", accent_color="#ffffff")
+    reveal = color_pulse(6, 10, base_color="#778899", accent_color="#ffffff")
+    event = Event(
+        session_id=tui.active_view.session.session_id,
+        world="alpha",
+        connection_generation=1,
+        sequence=1,
+        direction=Direction.INBOUND,
+        kind=EventKind.SAY,
+        canonical_text="Alice says hello",
+        plain_text="Alice says hello",
+        display_text="Alice says hello",
+        metadata={
+            "gateway_presentations": [
+                {
+                    "source": "speaker_effects",
+                    "presentation": effect_programs_as_dict((speaker,)),
+                },
+                {
+                    "source": "terminal_reveal",
+                    "presentation": effect_programs_as_dict((reveal,)),
+                },
+            ]
+        },
+    )
+
+    tui.handle_event(event)
+
+    presentations = tui.active_view.display._entry_presentations[-1]
+    assert [item.program.fallback.foreground for item in presentations] == [
+        "#445566",
+        "#778899",
+    ]
+
+
 async def test_speaker_effect_cycles_are_anchored_to_event_arrival(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2844,9 +2931,7 @@ async def test_output_border_summarizes_unread_world_activity() -> None:
     await add_animated_border(tui)
     effected = tui._border_text(view, "output", BorderEdge.BOTTOM, 2)
     label = [
-        (style, text)
-        for index, (style, text, *_mouse) in enumerate(effected)
-        if 13 <= index < 43
+        (style, text) for index, (style, text, *_mouse) in enumerate(effected) if 13 <= index < 43
     ]
     assert "Activity in world(s): beta +2" in fragment_list_to_text(label)
     assert all(style == "class:border.activity" for style, _text in label)
@@ -3523,14 +3608,10 @@ async def test_spellcheck_output_highlight_expires_without_animation_and_is_not_
 
     tui.active_view.display.clear_screen()
     await tui._handle_client_command("alpha", "/recall 1")
-    assert not any(
-        "underline" in style for style, _text in tui.active_view.output_text()
-    )
+    assert not any("underline" in style for style, _text in tui.active_view.output_text())
 
     now = 103.0
-    assert not any(
-        "underline" in style for style, _text in tui.active_view.output_text()
-    )
+    assert not any("underline" in style for style, _text in tui.active_view.output_text())
 
 
 async def test_spellcheck_output_highlight_expires_in_low_bandwidth(
@@ -3743,9 +3824,7 @@ async def test_spellcheck_highlights_bare_pose_echo_for_configured_character(
         )
     )
 
-    corrected = [
-        (style, text) for style, text in tui.active_view.output_text() if text == "waves"
-    ]
+    corrected = [(style, text) for style, text in tui.active_view.output_text() if text == "waves"]
     assert len(corrected) == 1
     assert "bold" in corrected[0][0] and "underline" in corrected[0][0]
 

@@ -19,6 +19,7 @@ from tfr.presentation import (
     character_sweep,
     color_pulse,
     effect_programs_as_dict,
+    effect_programs_from_dict,
     foreground_transition,
     presentation_frame_delay,
     presentation_grapheme_at,
@@ -52,6 +53,8 @@ def test_color_pulse_compiles_to_portable_timeline() -> None:
         "foreground": "#fff08a",
         "bold": True,
     }
+
+    assert effect_programs_from_dict("Alice", projected) == (program,)
 
 
 def test_timeline_interpolates_and_uses_explicit_reduced_motion_style() -> None:
@@ -402,7 +405,9 @@ def test_age_transition_and_terminal_reveal_are_bounded_portable_programs() -> N
     assert glitch[1] in "#%"
     assert complete == (PresentationStyle(), "a")
     assert effect_programs_as_dict((decay,))["version"] == 2
-    assert effect_programs_as_dict((reveal,))["version"] == 2
+    projected_reveal = effect_programs_as_dict((reveal,))
+    assert projected_reveal["version"] == 2
+    assert effect_programs_from_dict("Alice", projected_reveal) == (reveal,)
 
 
 def test_overlapping_speaker_and_reveal_programs_compose() -> None:
@@ -474,8 +479,7 @@ def test_effect_program_rejects_bad_keyframes_and_too_many_targets() -> None:
         )
 
     programs = tuple(
-        color_pulse(0, 3, base_color="#000000", accent_color="#ffffff")
-        for _ in range(5)
+        color_pulse(0, 3, base_color="#000000", accent_color="#ffffff") for _ in range(5)
     )
     with pytest.raises(ValueError, match="too many presentation programs"):
         validate_effect_programs("test", programs)

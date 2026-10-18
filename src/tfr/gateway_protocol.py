@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 from tfr.eventlog import event_to_dict
@@ -77,15 +78,23 @@ async def write_message(
         await asyncio.wait_for(writer.drain(), timeout=WRITE_TIMEOUT_SECONDS)
 
 
-def event_message(cursor: int, event: Event) -> dict[str, Any]:
+def event_message(
+    cursor: int,
+    event: Event,
+    *,
+    presentations: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     if cursor < 1:
         raise GatewayProtocolError("event cursor must be positive")
-    return {
+    message = {
         "type": "event",
         "protocol": PROTOCOL_VERSION,
         "cursor": cursor,
         "event": event_to_dict(event),
     }
+    if presentations:
+        message["presentations"] = presentations
+    return message
 
 
 def event_from_message(message: Mapping[str, Any]) -> tuple[int, Event]:
@@ -100,6 +109,15 @@ def event_from_message(message: Mapping[str, Any]) -> tuple[int, Event]:
     if not isinstance(value, dict):
         raise GatewayProtocolError("event payload must be an object")
     try:
-        return cursor, event_from_dict(value)
+        event = event_from_dict(value)
+        presentations = message.get("presentations")
+        if presentations is not None:
+            if not isinstance(presentations, list) or len(presentations) > 16:
+                raise ValueError("event presentations must be a bounded list")
+            event = replace(
+                event,
+                metadata={**event.metadata, "gateway_presentations": presentations},
+            )
+        return cursor, event
     except (KeyError, TypeError, ValueError) as exc:
         raise GatewayProtocolError(f"invalid event payload: {exc}") from exc
