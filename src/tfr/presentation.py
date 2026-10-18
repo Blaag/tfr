@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import colorsys
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -1049,6 +1050,145 @@ def effect_programs_as_dict(programs: tuple[EffectProgram, ...]) -> dict[str, An
             for program in programs
         ],
     }
+
+
+def _wire_style(value: object) -> PresentationStyle:
+    if not isinstance(value, Mapping) or set(value) - {
+        "foreground",
+        "bold",
+        "underline",
+        "reverse",
+    }:
+        raise ValueError("presentation wire style is invalid")
+    return PresentationStyle(
+        foreground=value.get("foreground"),
+        bold=value.get("bold", False),
+        underline=value.get("underline", False),
+        reverse=value.get("reverse", False),
+    )
+
+
+def _wire_positions(value: object) -> tuple[PositionKeyframe, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ValueError("presentation wire positions are invalid")
+    return tuple(PositionKeyframe(frame["at"], frame["position"]) for frame in value)
+
+
+def effect_programs_from_dict(text: str, value: object) -> tuple[EffectProgram, ...]:
+    """Decode the bounded transport representation used by remote native UIs."""
+    if not isinstance(value, Mapping) or set(value) != {"version", "programs"}:
+        raise ValueError("presentation wire envelope is invalid")
+    if value["version"] not in {1, 2} or not isinstance(value["programs"], Sequence):
+        raise ValueError("presentation wire version or programs are invalid")
+    programs: list[EffectProgram] = []
+    for raw_program in value["programs"]:
+        if not isinstance(raw_program, Mapping):
+            raise ValueError("presentation wire program is invalid")
+        variants: list[PresentationVariant] = []
+        for raw_variant in raw_program.get("variants", ()):
+            if not isinstance(raw_variant, Mapping):
+                raise ValueError("presentation wire variant is invalid")
+            requires = tuple(PresentationCapability(item) for item in raw_variant["requires"])
+            sweep_value = raw_variant.get("character_sweep")
+            sweep = (
+                CharacterSweepTrack(
+                    positions=_wire_positions(sweep_value["positions"]),
+                    base_color=sweep_value["base_color"],
+                    head_color=sweep_value["head_color"],
+                    trail_width=sweep_value["trail_width"],
+                    uppercase_head=sweep_value["uppercase_head"],
+                    trail_mode=SweepTrailMode(sweep_value.get("trail_mode", "symmetric")),
+                    start_padding=sweep_value.get("start_padding", 0),
+                    end_padding=sweep_value.get("end_padding", 0),
+                    fill_behind=sweep_value.get("fill_behind", False),
+                )
+                if isinstance(sweep_value, Mapping)
+                else None
+            )
+            style_sweep_value = raw_variant.get("character_style_sweep")
+            style_sweep = (
+                CharacterStyleSweepTrack(
+                    positions=_wire_positions(style_sweep_value["positions"]),
+                    base_style=_wire_style(style_sweep_value["base_style"]),
+                    active_style=_wire_style(style_sweep_value["active_style"]),
+                    width=style_sweep_value["width"],
+                    trail_mode=SweepTrailMode(style_sweep_value["trail_mode"]),
+                    start_padding=style_sweep_value["start_padding"],
+                    end_padding=style_sweep_value["end_padding"],
+                    uppercase_active=style_sweep_value["uppercase_active"],
+                    lowercase_inactive=style_sweep_value["lowercase_inactive"],
+                    stepped=style_sweep_value["stepped"],
+                )
+                if isinstance(style_sweep_value, Mapping)
+                else None
+            )
+            hue_value = raw_variant.get("character_hue_wave")
+            hue = (
+                CharacterHueWaveTrack(**dict(hue_value)) if isinstance(hue_value, Mapping) else None
+            )
+            palette_value = raw_variant.get("character_palette_front")
+            palette = (
+                CharacterPaletteFrontTrack(
+                    colors=tuple(palette_value["colors"]),
+                    spread=palette_value["spread"],
+                    direction=palette_value["direction"],
+                )
+                if isinstance(palette_value, Mapping)
+                else None
+            )
+            sparkle_value = raw_variant.get("character_sparkle")
+            sparkle = (
+                CharacterSparkleTrack(**dict(sparkle_value))
+                if isinstance(sparkle_value, Mapping)
+                else None
+            )
+            reveal_value = raw_variant.get("character_reveal")
+            reveal = (
+                CharacterRevealTrack(
+                    interval_seconds=reveal_value["interval_ms"] / 1_000,
+                    base_color=reveal_value["base_color"],
+                    accent_color=reveal_value["accent_color"],
+                    glitch_width=reveal_value["glitch_width"],
+                    settle_width=reveal_value["settle_width"],
+                    seed=reveal_value["seed"],
+                    glitch_characters=reveal_value["glitch_characters"],
+                    inline_glitch_chance=reveal_value["inline_glitch_chance"],
+                )
+                if isinstance(reveal_value, Mapping)
+                else None
+            )
+            variants.append(
+                PresentationVariant(
+                    requires=requires,
+                    style=_wire_style(raw_variant["style"]),
+                    foreground_keyframes=tuple(
+                        ForegroundKeyframe(frame["at"], frame["color"])
+                        for frame in raw_variant["foreground_keyframes"]
+                    ),
+                    character_sweep=sweep,
+                    character_hue_wave=hue,
+                    character_palette_front=palette,
+                    character_style_sweep=style_sweep,
+                    character_sparkle=sparkle,
+                    character_reveal=reveal,
+                )
+            )
+        programs.append(
+            EffectProgram(
+                start=raw_program["start"],
+                end=raw_program["end"],
+                duration_seconds=raw_program["duration_ms"] / 1_000,
+                repeat_seconds=raw_program["repeat_ms"] / 1_000,
+                repeat_count=raw_program["repeat_count"],
+                frames_per_second=raw_program["frames_per_second"],
+                variants=tuple(variants),
+                reduced_motion=_wire_style(raw_program["reduced_motion"]),
+                fallback=_wire_style(raw_program["fallback"]),
+            )
+        )
+    result = tuple(programs)
+    validate_effect_programs(text, result)
+    return result
 
 
 def color_pulse(

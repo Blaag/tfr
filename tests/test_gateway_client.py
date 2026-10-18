@@ -29,6 +29,7 @@ from tfr.gateway_client import (
     GatewayDisconnectedError,
     GatewayUiRuntime,
     RemoteWorldSession,
+    portable_plugin_migration_warning,
     run_gateway_ui,
 )
 from tfr.gateway_protocol import GatewayProtocolError
@@ -53,6 +54,19 @@ def make_event(sequence: int) -> Event:
         canonical_text=f"line {sequence}",
         display_text=f"line {sequence}",
     )
+
+
+def test_portable_plugin_migration_warning_lists_only_affected_plugins() -> None:
+    warning = portable_plugin_migration_warning(("speaker_effects", "terminal_reveal"))
+
+    assert warning is not None
+    assert "speaker_effects, terminal_reveal" in warning
+    assert "these portable plugins only" in warning
+    assert "do not move all local plugins" in warning
+    assert "Local settings still override" in warning
+    assert "upcoming release will ignore them" in warning
+    assert "Client-only plugins remain local" in warning
+    assert portable_plugin_migration_warning(()) is None
 
 
 async def test_missing_gateway_socket_reports_the_path() -> None:
@@ -185,6 +199,7 @@ async def test_coordinated_update_prepares_and_commits_every_connected_ui(
     ]
     events: list[tuple[int, str]] = []
     for index, client in enumerate(clients):
+
         async def prepare(
             _manifest: object,
             _force: bool,
@@ -294,9 +309,7 @@ async def test_gateway_rejects_force_update_on_stable_channel(
     runtime = FakeRuntime(history)
     runtime.update_checker = SimpleNamespace(
         config=UpdateConfig(),
-        check=AsyncMock(
-            return_value=UpdateResult(checked_at=None, manifest=update_manifest())
-        ),
+        check=AsyncMock(return_value=UpdateResult(checked_at=None, manifest=update_manifest())),
     )
     stage = AsyncMock()
     monkeypatch.setattr("tfr.gateway.stage_managed_update", stage)
@@ -325,9 +338,7 @@ async def test_coordinated_update_rejects_an_unmanaged_connected_ui(
     runtime = FakeRuntime(history)
     runtime.update_checker = SimpleNamespace(
         config=UpdateConfig(),
-        check=AsyncMock(
-            return_value=UpdateResult(checked_at=None, manifest=update_manifest())
-        ),
+        check=AsyncMock(return_value=UpdateResult(checked_at=None, manifest=update_manifest())),
     )
     socket_path = Path("/tmp") / f"tfr-update-{uuid4().hex[:8]}" / "gateway.sock"
     server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
@@ -1524,7 +1535,6 @@ async def test_gateway_ui_queues_plugin_source_messages_for_resumed_world(
         ("beta", "Plugin source broken/plugins: checkout is invalid"),
         (
             "beta",
-            "Plugin source owner/plugins: stable plugin release 0.1.2 is available "
-            "(current 0.1.1)",
+            "Plugin source owner/plugins: stable plugin release 0.1.2 is available (current 0.1.1)",
         ),
     ]

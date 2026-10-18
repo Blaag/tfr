@@ -13,7 +13,7 @@ import sys
 import time
 import webbrowser
 from collections import deque
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -84,7 +84,7 @@ from tfr.plugin_sources import (
     format_plugin_update_status,
 )
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
-from tfr.presentation import ActiveEffectProgram
+from tfr.presentation import ActiveEffectProgram, EffectProgram, effect_programs_from_dict
 from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.spellcheck import Correction, LocalSpellChecker, speech_payload
 from tfr.text_effects import TextDecoration, TextEffectKind, derive_bright_color, interpolate_color
@@ -168,8 +168,7 @@ def pairing_qr_code(value: str) -> str:
     }
     return "\n".join(
         "".join(
-            glyphs[(top, bottom)]
-            for top, bottom in zip(matrix[row], matrix[row + 1], strict=False)
+            glyphs[(top, bottom)] for top, bottom in zip(matrix[row], matrix[row + 1], strict=False)
         )
         for row in range(0, len(matrix), 2)
     )
@@ -511,10 +510,7 @@ def _format_transition_timestamp(timestamp: datetime) -> str:
     local = timestamp.astimezone()
     local_zone = local.tzname() or "local"
     utc = timestamp.astimezone(UTC)
-    return (
-        f"local {local:%Y-%m-%d %H:%M:%S} {local_zone}; "
-        f"UTC {utc:%Y-%m-%d %H:%M:%S} UTC"
-    )
+    return f"local {local:%Y-%m-%d %H:%M:%S} {local_zone}; UTC {utc:%Y-%m-%d %H:%M:%S} UTC"
 
 
 def _selected_row(row: FormattedRow, start: int, end: int) -> FormattedRow:
@@ -1068,9 +1064,7 @@ class TfrTui:
         self.effects_input_window = VSplit(
             [
                 Window(
-                    content=FormattedTextControl(
-                        [("class:input.prompt", "[Effects Lab]> ")]
-                    ),
+                    content=FormattedTextControl([("class:input.prompt", "[Effects Lab]> ")]),
                     dont_extend_width=True,
                 ),
                 Window(
@@ -1080,6 +1074,7 @@ class TfrTui:
             ],
             height=1,
         )
+
         def effects_output_height() -> int:
             return self.effects_display.pager.height + 1
 
@@ -1518,7 +1513,9 @@ class TfrTui:
         mode = (
             "Unicode Braille"
             if preview.rendered.mode == "braille"
-            else "ASCII color" if preview.requested_with_color else "ASCII grayscale"
+            else "ASCII color"
+            if preview.requested_with_color
+            else "ASCII grayscale"
         )
         controls = (
             f"Image preview for {preview.alias}: {preview.rendered.width}x"
@@ -1894,10 +1891,7 @@ class TfrTui:
             panel == "output"
             and edge is BorderEdge.BOTTOM
             and notice is not None
-            and (
-                (self.animations_enabled and not self.low_bandwidth)
-                or force_animation
-            )
+            and ((self.animations_enabled and not self.low_bandwidth) or force_animation)
         ):
             notice_age = time.monotonic() - notice.started_at
             if notice_age >= 3.6:
@@ -1929,9 +1923,7 @@ class TfrTui:
                         )
                     else:
                         notice_start = center
-                    reversed_phase = (
-                        notice_age >= 3.0 and int((notice_age - 3.0) / 0.1) % 2 == 0
-                    )
+                    reversed_phase = notice_age >= 3.0 and int((notice_age - 3.0) / 0.1) % 2 == 0
                     impact = notice.count >= 6 and 1.2 <= notice_age < 1.5
                     notice_style = f"fg:{notice.color} bold" + (
                         " reverse" if reversed_phase or impact else ""
@@ -2169,6 +2161,55 @@ class TfrTui:
         )
         self.application.invalidate()
 
+    def _gateway_presentation_programs(
+        self,
+        event: Event,
+        text: str,
+    ) -> tuple[tuple[str, tuple[EffectProgram, ...]], ...]:
+        raw_groups = event.metadata.get("gateway_presentations")
+        if (
+            isinstance(raw_groups, (str, bytes))
+            or not isinstance(raw_groups, Sequence)
+            or len(raw_groups) > 16
+        ):
+            return ()
+        groups: list[tuple[str, tuple[EffectProgram, ...]]] = []
+        try:
+            for raw_group in raw_groups:
+                if not isinstance(raw_group, Mapping) or set(raw_group) != {
+                    "source",
+                    "presentation",
+                }:
+                    raise ValueError("presentation source envelope is invalid")
+                source = raw_group["source"]
+                if (
+                    not isinstance(source, str)
+                    or not source
+                    or len(source) > 100
+                    or any(
+                        character not in "abcdefghijklmnopqrstuvwxyz0123456789_-"
+                        for character in source
+                    )
+                ):
+                    raise ValueError("presentation source is invalid")
+                groups.append(
+                    (
+                        source,
+                        effect_programs_from_dict(text, raw_group["presentation"]),
+                    )
+                )
+        except (KeyError, TypeError, ValueError) as exc:
+            self.plugins.diagnostics.record(
+                severity="warning",
+                component="presentation",
+                code="gateway_program_rejected",
+                message=str(exc)[:240],
+                operation="native-ui",
+                event_id=str(event.event_id),
+            )
+            return ()
+        return tuple(groups)
+
     def queue_startup_notice(self, alias: str, text: str) -> None:
         self._startup_notices.append((alias, text))
 
@@ -2231,12 +2272,11 @@ class TfrTui:
                         f"{character_name} says, “",
                     }
                 )
-            if echo_prefix not in expected or echo_suffix not in {'', '"', "”"}:
+            if echo_prefix not in expected or echo_suffix not in {"", '"', "”"}:
                 return None
         else:
             if (
-                event.kind not in {EventKind.POSE, EventKind.SPEECH}
-                and not bare_raw
+                event.kind not in {EventKind.POSE, EventKind.SPEECH} and not bare_raw
             ) or character_name is None:
                 return None
             expected = {
@@ -2264,9 +2304,7 @@ class TfrTui:
 
         now = time.monotonic()
         pending_echoes = self._spellcheck_echoes[event.world]
-        retained: deque[PendingSpellcheckEcho] = deque(
-            maxlen=_MAX_PENDING_SPELLCHECK_ECHOES
-        )
+        retained: deque[PendingSpellcheckEcho] = deque(maxlen=_MAX_PENDING_SPELLCHECK_ECHOES)
         plain_message = terminal_plain_text(message_text)
         plain_display = terminal_plain_text(display_text)
         matched: PendingSpellcheckEcho | None = None
@@ -2455,9 +2493,7 @@ class TfrTui:
         self._firework_height = max(1, height)
         now = time.monotonic()
         self._firework_particles = [
-            particle
-            for particle in self._firework_particles
-            if now - particle.started_at < 2.2
+            particle for particle in self._firework_particles if now - particle.started_at < 2.2
         ]
 
     @staticmethod
@@ -2553,13 +2589,35 @@ class TfrTui:
                     if self.plugins is not None
                     else ()
                 )
-                presentations = (
-                    self.plugins.presentation_programs(
+                plain_display_text = terminal_plain_text(display_text)
+                local_groups = (
+                    self.plugins.presentation_programs_by_plugin(
                         effect_event,
-                        terminal_plain_text(display_text),
+                        plain_display_text,
                     )
                     if self.plugins is not None
                     else ()
+                )
+                local_overrides = (
+                    set(self.plugins.configured_portable_plugins())
+                    if self.gateway_reconnect is not None and self.plugins is not None
+                    else set()
+                )
+                gateway_groups = self._gateway_presentation_programs(
+                    event,
+                    plain_display_text,
+                )
+                gateway_sources = {source for source, _programs in gateway_groups}
+                local_by_source = dict(local_groups)
+                selected_groups = tuple(
+                    (source, local_by_source[source])
+                    if source in local_overrides and source in local_by_source
+                    else (source, programs)
+                    for source, programs in gateway_groups
+                    if source not in local_overrides or source in local_by_source
+                ) + tuple(item for item in local_groups if item[0] not in gateway_sources)
+                presentations = tuple(
+                    program for _source, programs in selected_groups for program in programs
                 )
                 elapsed_seconds = self._animation_elapsed_seconds()
                 combo = None
@@ -2704,9 +2762,7 @@ class TfrTui:
                 reason = event.metadata.get("error")
                 suffix = f": {reason}" if reason else ""
                 view.display.append(
-                    self.theme.ansi_text(
-                        "error", f"-- Disconnected{suffix} [{timestamp}] --"
-                    )
+                    self.theme.ansi_text("error", f"-- Disconnected{suffix} [{timestamp}] --")
                 )
                 should_count = True
             elif state == SessionState.RECONNECT_WAIT.value:
@@ -2714,9 +2770,7 @@ class TfrTui:
                 delay = event.metadata.get("delay_seconds")
                 suffix = f" in {delay:g}s" if isinstance(delay, (int, float)) else ""
                 view.display.append(
-                    self.theme.ansi_text(
-                        "warning", f"-- Reconnecting{suffix} [{timestamp}] --"
-                    )
+                    self.theme.ansi_text("warning", f"-- Reconnecting{suffix} [{timestamp}] --")
                 )
                 should_count = True
         if should_count and (self.effects_lab_open or event.world != self.active_alias):
@@ -3087,8 +3141,7 @@ class TfrTui:
                 index += 1
                 if index >= len(parameters):
                     raise ValueError(
-                        "Usage: /image [--width 1-80] [--ascii|--unicode] "
-                        "[--withcolor] [path]"
+                        "Usage: /image [--width 1-80] [--ascii|--unicode] [--withcolor] [path]"
                     )
                 try:
                     width = int(parameters[index])
@@ -3106,8 +3159,7 @@ class TfrTui:
                 with_color = True
             elif parameter.startswith("--") or path is not None:
                 raise ValueError(
-                    "Usage: /image [--width 1-80] [--ascii|--unicode] "
-                    "[--withcolor] [path]"
+                    "Usage: /image [--width 1-80] [--ascii|--unicode] [--withcolor] [path]"
                 )
             else:
                 path = Path(parameter).expanduser()
@@ -3127,8 +3179,8 @@ class TfrTui:
         command, *parameters = arguments
         command = command.casefold()
         lab_commands = {
-        "demoeffects",
-        "diagnostics",
+            "demoeffects",
+            "diagnostics",
             "effects",
             "n",
             "next",
@@ -3266,9 +3318,7 @@ class TfrTui:
 
     def help_text(self) -> str:
         update_channel = (
-            self.update_checker.config.channel
-            if self.update_checker is not None
-            else "stable"
+            self.update_checker.config.channel if self.update_checker is not None else "stable"
         )
         lines = [
             "TFR commands",
@@ -3396,8 +3446,7 @@ class TfrTui:
                 "  /effects force on|off  override motion only inside this lab",
                 "  /effects close         return to the active world",
                 "",
-                "Configured speakers: "
-                + (", ".join(speakers) if speakers else "none registered"),
+                "Configured speakers: " + (", ".join(speakers) if speakers else "none registered"),
             )
         )
 
@@ -3442,9 +3491,7 @@ class TfrTui:
         self.application.invalidate()
 
     def _effects_motion_enabled(self) -> bool:
-        return self.effects_lab_force_motion or (
-            self.animations_enabled and not self.low_bandwidth
-        )
+        return self.effects_lab_force_motion or (self.animations_enabled and not self.low_bandwidth)
 
     def _effects_animation_elapsed_seconds(self) -> float:
         if self.effects_lab_open and self.effects_lab_force_motion:
@@ -3482,9 +3529,7 @@ class TfrTui:
         decorations = self.plugins.decorate_display(event, text)
         programs = self.plugins.presentation_programs(event, terminal_plain_text(text))
         elapsed = self._effects_animation_elapsed_seconds()
-        decorations = tuple(
-            replace(item, phase_offset_seconds=-elapsed) for item in decorations
-        )
+        decorations = tuple(replace(item, phase_offset_seconds=-elapsed) for item in decorations)
         presentations = tuple(
             ActiveEffectProgram(item, phase_offset_seconds=-elapsed) for item in programs
         )
@@ -3635,9 +3680,7 @@ class TfrTui:
         )
         self._effects_notice = ComboNotice(combo.notice, combo.color, time.monotonic(), count)
         if count == 7:
-            self._start_fireworks(
-                self._effect_demo_event("Demo", EventKind.SAY, text)
-            )
+            self._start_fireworks(self._effect_demo_event("Demo", EventKind.SAY, text))
         self._sync_animation_task(restart=True)
         self.application.invalidate()
 
@@ -3752,6 +3795,17 @@ class TfrTui:
                 self.add_notice(alias, "Cleared bounded runtime diagnostics")
                 return
             entries = await self.service_runtime.diagnostics(category)
+            if category in {None, "plugins", "presentations"}:
+                entries = [
+                    *entries,
+                    *(
+                        entry.as_dict()
+                        for entry in self.plugins.diagnostics.entries()
+                        if category is None
+                        or (category == "plugins" and entry.component in {"config", "plugin"})
+                        or (category == "presentations" and entry.component == "presentation")
+                    ),
+                ]
             status = await self.service_runtime.web_status() if category is None else None
         except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
             self.add_notice(alias, f"Diagnostics failed: {exc}")
@@ -3786,17 +3840,14 @@ class TfrTui:
             self.plugin_update_checker is not None and self.plugin_update_checker.enabled
         )
         channel = (
-            self.update_checker.config.channel
-            if self.update_checker is not None
-            else "stable"
+            self.update_checker.config.channel if self.update_checker is not None else "stable"
         )
         if not core_enabled and not plugins_enabled:
             self.add_notice(alias, f"{channel.title()} update checks are disabled")
             return
         force = parameters == ["force"]
         if force and (
-            self.update_checker is None
-            or self.update_checker.config.channel != "candidate"
+            self.update_checker is None or self.update_checker.config.channel != "candidate"
         ):
             self.add_notice(alias, "/update force is available only on the candidate channel")
             return
@@ -3816,9 +3867,7 @@ class TfrTui:
                 else:
                     core_result = await self.update_checker.check()
                     if core_result.error is not None:
-                        raise ValueError(
-                            f"cannot check {channel} TFR updates: {core_result.error}"
-                        )
+                        raise ValueError(f"cannot check {channel} TFR updates: {core_result.error}")
                     core_available = core_result.available_for(self.update_checker.build)
                     plugin_available = (
                         await self.plugin_update_checker.stable_auto_update_available()
@@ -3854,7 +3903,9 @@ class TfrTui:
             scope = (
                 "TFR and plugin"
                 if core_enabled and plugins_enabled
-                else "plugin" if plugins_enabled else "TFR"
+                else "plugin"
+                if plugins_enabled
+                else "TFR"
             )
             self.add_notice(alias, f"Checking for {channel} {scope} updates...")
             if core_enabled and plugins_enabled:
@@ -3873,9 +3924,7 @@ class TfrTui:
         else:
             result = self.update_checker.result if self.update_checker is not None else None
             plugin_results = (
-                self.plugin_update_checker.results
-                if self.plugin_update_checker is not None
-                else ()
+                self.plugin_update_checker.results if self.plugin_update_checker is not None else ()
             )
         if result is not None:
             self._show_update_status(result, available_only=False, alias=alias)
@@ -3895,9 +3944,7 @@ class TfrTui:
         for label, build in builds:
             if not available_only or result.available_for(build):
                 channel = (
-                    self.update_checker.config.channel
-                    if self.update_checker is not None
-                    else None
+                    self.update_checker.config.channel if self.update_checker is not None else None
                 )
                 self.add_notice(
                     target,
@@ -3978,9 +4025,7 @@ class TfrTui:
         view = self.views[alias]
         recalled = view.display.recent_entries(count)
         view.clear_selection()
-        view.display.append(
-            self.theme.ansi_text("warning", f"-- Recall {count}"), recallable=False
-        )
+        view.display.append(self.theme.ansi_text("warning", f"-- Recall {count}"), recallable=False)
         elapsed_seconds = self._animation_elapsed_seconds()
         for text, decorations, presentations, style_spans in recalled:
             replayed = tuple(
@@ -4024,9 +4069,7 @@ class TfrTui:
             self.add_notice(alias, "Usage: /mouse auto|terminal|tfr|status")
             return
         reason = (
-            "; mosh-server detected"
-            if self.mouse_mode == "auto" and self._mosh_detected
-            else ""
+            "; mosh-server detected" if self.mouse_mode == "auto" and self._mosh_detected else ""
         )
         self.add_notice(
             alias,
@@ -4072,9 +4115,7 @@ class TfrTui:
         for view in self.views.values():
             view.display.clear_combo_effects()
 
-    def _handle_speaking_streaks_command(
-        self, alias: str, parameters: list[str]
-    ) -> None:
+    def _handle_speaking_streaks_command(self, alias: str, parameters: list[str]) -> None:
         operation = parameters[0].casefold() if len(parameters) == 1 else ""
         if operation in {"on", "off"}:
             self.speaking_streaks_enabled = operation == "on"
