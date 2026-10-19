@@ -247,6 +247,7 @@ class PluginKeyBinding:
 class PluginWorldInfo:
     server: str
     encoding: str
+    gag_patterns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -705,6 +706,14 @@ class PluginManager:
         self.command_bus = command_bus
         self.targets = MappingProxyType(dict(targets))
         self.worlds = MappingProxyType(dict(worlds or {}))
+        self._gag_patterns: dict[str, tuple[re.Pattern[str], ...]] = {
+            world: tuple(
+                re.compile(pattern, re.IGNORECASE)
+                for pattern in info.gag_patterns
+            )
+            for world, info in self.worlds.items()
+            if info.gag_patterns
+        }
         self.registry = PluginRegistry()
         self.scope = scope
         self._active_boss_view: str | None = None
@@ -984,7 +993,73 @@ class PluginManager:
         self._sequence += 1
         await self.event_bus.publish(event)
 
+    def _is_gagged(self, event: Event) -> bool:
+        patterns = self._gag_patterns.get(event.world)
+        if not patterns:
+            return False
+        text = event.canonical_text or event.plain_text or event.display_text
+        if not text:
+            return False
+        plain = terminal_plain_text(text)
+        return any(pattern.search(plain) for pattern in patterns)
+
+    MAX_GAG_PATTERNS_PER_WORLD = 64
+
+    def list_gag_patterns(self, world: str) -> tuple[str, ...]:
+        """Return the live (session) gag patterns for a world, in order."""
+        return tuple(pattern.pattern for pattern in self._gag_patterns.get(world, ()))
+
+    def add_gag_pattern(self, world: str, pattern: str) -> bool:
+        """Add a live gag pattern for a world.
+
+        Returns True if added, False if it was already present. Raises
+        ValueError for an invalid regex, an empty/oversized pattern, or when the
+        world is unknown or the per-world limit is reached.
+        """
+        if world not in self.worlds:
+            raise ValueError(f"unknown world: {world}")
+        if not pattern:
+            raise ValueError("gag pattern cannot be empty")
+        if len(pattern) > 512:
+            raise ValueError("gag pattern cannot exceed 512 characters")
+        try:
+            compiled = re.compile(pattern, re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError(f"invalid gag pattern: {exc}") from exc
+        existing = self._gag_patterns.get(world, ())
+        if any(current.pattern == pattern for current in existing):
+            return False
+        if len(existing) >= self.MAX_GAG_PATTERNS_PER_WORLD:
+            raise ValueError(
+                f"world already has the maximum of {self.MAX_GAG_PATTERNS_PER_WORLD} gag patterns"
+            )
+        self._gag_patterns[world] = (*existing, compiled)
+        return True
+
+    def remove_gag_pattern(self, world: str, pattern: str) -> bool:
+        """Remove a live gag pattern from a world.
+
+        Returns True if removed, False if the pattern was not present.
+        """
+        if world not in self.worlds:
+            raise ValueError(f"unknown world: {world}")
+        existing = self._gag_patterns.get(world, ())
+        remaining = tuple(current for current in existing if current.pattern != pattern)
+        if len(remaining) == len(existing):
+            return False
+        if remaining:
+            self._gag_patterns[world] = remaining
+        else:
+            self._gag_patterns.pop(world, None)
+        return True
+
     async def process_event(self, event: Event) -> Event:
+        if event.direction is Direction.INBOUND and self._is_gagged(event):
+            # TinyFugue-style gag: suppress this line before it generates any
+            # world-activity notification or unread count. The event is still
+            # written to canonical sinks (event log) for audit, and is tagged so
+            # UI clients skip display and unread accounting.
+            return replace(event, metadata={**event.metadata, "gagged": True})
         if event.direction is Direction.INBOUND:
             for name, (plugin, enricher) in tuple(self.registry.enrichers.items()):
                 try:

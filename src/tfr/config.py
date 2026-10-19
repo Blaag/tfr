@@ -390,6 +390,32 @@ class IdleConfig(StrictModel):
     command: str = Field(min_length=1)
 
 
+class GagConfig(StrictModel):
+    """Per-world inbound line suppression (TinyFugue-style gag).
+
+    Any inbound event whose text matches one of these case-insensitive
+    regular expressions is suppressed on the gateway before world-activity
+    notifications and unread counts are generated. Gagged events are still
+    written to the canonical event log for audit.
+    """
+
+    patterns: tuple[str, ...] = Field(default=(), max_length=64)
+
+    @field_validator("patterns")
+    @classmethod
+    def patterns_compile(cls, patterns: tuple[str, ...]) -> tuple[str, ...]:
+        for pattern in patterns:
+            if not pattern:
+                raise ValueError("gag patterns cannot be empty")
+            if len(pattern) > 512:
+                raise ValueError("gag pattern cannot exceed 512 characters")
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(f"invalid gag pattern {pattern!r}: {exc}") from exc
+        return patterns
+
+
 WorldSwitchAlias = Annotated[
     str,
     Field(
@@ -414,6 +440,7 @@ class WorldConfig(StrictModel):
     provenance: ProvenanceConfig = Field(default_factory=ProvenanceConfig)
     capabilities: WorldCapabilitiesConfig = Field(default_factory=WorldCapabilitiesConfig)
     idle: IdleConfig | None = None
+    gag: GagConfig | None = None
     startup_commands: tuple[str, ...] = ()
 
     @field_validator("aliases")

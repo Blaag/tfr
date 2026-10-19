@@ -1,5 +1,22 @@
 {
   "$defs": {
+    "GagConfig": {
+      "additionalProperties": false,
+      "description": "Per-world inbound line suppression (TinyFugue-style gag).\n\nAny inbound event whose text matches one of these case-insensitive\nregular expressions is suppressed on the gateway before world-activity\nnotifications and unread counts are generated. Gagged events are still\nwritten to the canonical event log for audit.",
+      "properties": {
+        "patterns": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Patterns",
+          "type": "array"
+        }
+      },
+      "title": "GagConfig",
+      "type": "object"
+    },
     "IdleConfig": {
       "additionalProperties": false,
       "properties": {
@@ -155,6 +172,17 @@
           ],
           "default": null,
           "title": "Encoding"
+        },
+        "gag": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GagConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "host": {
           "minLength": 1,

@@ -193,6 +193,15 @@ class ServiceRuntime(Protocol):
 
     async def clear_diagnostics(self) -> None: ...
 
+    async def request_gag_control(
+        self,
+        *,
+        world: str,
+        action: str,
+        pattern: str | None = None,
+        persist: bool = False,
+    ) -> dict[str, Any]: ...
+
 
 @dataclass(slots=True)
 class ImagePreview:
@@ -2527,6 +2536,11 @@ class TfrTui:
         view = self.views.get(event.world)
         if view is None:
             return
+        if event.metadata.get("gagged"):
+            # Gateway marked this inbound line as gagged: suppress display and
+            # unread accounting entirely, mirroring TinyFugue's gag. It remains
+            # in the canonical event log on the gateway.
+            return
         should_count = False
         if event.direction is Direction.INBOUND:
             view.last_inbound_at = time.monotonic()
@@ -3187,8 +3201,10 @@ class TfrTui:
             "p",
             "prev",
             "previous",
+            "gag",
             "testspeaker",
             "teststreak",
+            "ungag",
             "world",
         }
         if (
@@ -3287,6 +3303,10 @@ class TfrTui:
             self._handle_animations_command(alias, parameters)
         elif command == "spellcheck":
             self._handle_spellcheck_command(alias, parameters)
+        elif command == "gag":
+            await self._handle_gag_command(alias, parameters)
+        elif command == "ungag":
+            await self._handle_ungag_command(alias, parameters)
         elif command == "streaks":
             self._handle_speaking_streaks_command(alias, parameters)
         elif command in {"effects", "demoeffects"}:
@@ -3336,6 +3356,8 @@ class TfrTui:
             "  /mouse auto|terminal|tfr|status - choose who handles mouse input",
             "  /animations [on|off|status] - enable continuous UI effects",
             "  /spellcheck on|off|status|undo - correct explicit speech and poses locally",
+            "  /gag PATTERN [--persist] - hide inbound lines matching PATTERN in this world",
+            "  /gag list - show active gag patterns; /ungag PATTERN removes one this session",
             "  /streaks on|off|status - control speaking streak effects",
             "  /effects - open the local Effects Lab; /demoeffects is an alias",
             "  /update - update TFR and stable-auto plugins on the Gateway and all connected UIs",
@@ -3830,6 +3852,82 @@ class TfrTui:
                 f"    {entry.get('message', 'No message')}"
             )
         self.add_notice(alias, "\n".join(lines))
+
+    async def _handle_gag_command(self, alias: str, parameters: list[str]) -> None:
+        if self.service_runtime is None or not hasattr(
+            self.service_runtime, "request_gag_control"
+        ):
+            self.add_notice(alias, "Gag control is available only in a gateway-attached UI")
+            return
+        if parameters == ["list"]:
+            try:
+                result = await self.service_runtime.request_gag_control(
+                    world=alias, action="list"
+                )
+            except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+                self.add_notice(alias, f"Gag list failed: {exc}")
+                return
+            patterns = result.get("patterns") or []
+            if not patterns:
+                self.add_notice(alias, f"No active gag patterns for {alias}")
+            else:
+                listing = "\n".join(
+                    f"  {index}. {value}" for index, value in enumerate(patterns, 1)
+                )
+                self.add_notice(alias, f"Active gag patterns for {alias}:\n{listing}")
+            return
+        persist = "--persist" in parameters
+        positional = [item for item in parameters if item != "--persist"]
+        if len(positional) != 1 or not positional[0]:
+            self.add_notice(alias, "Usage: /gag PATTERN [--persist] | /gag list")
+            return
+        pattern = positional[0]
+        try:
+            result = await self.service_runtime.request_gag_control(
+                world=alias, action="add", pattern=pattern, persist=persist
+            )
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            self.add_notice(alias, f"Gag failed: {exc}")
+            return
+        changed = result.get("changed")
+        persisted = result.get("persisted")
+        if changed is False:
+            message = f"Already gagging {pattern!r} in {alias}"
+        else:
+            message = f"Gagging {pattern!r} in {alias} this session"
+        if persist:
+            message += (
+                " and saved to worlds.jsonc" if persisted else " (already saved to worlds.jsonc)"
+            )
+        self.add_notice(alias, message)
+
+    async def _handle_ungag_command(self, alias: str, parameters: list[str]) -> None:
+        if self.service_runtime is None or not hasattr(
+            self.service_runtime, "request_gag_control"
+        ):
+            self.add_notice(alias, "Gag control is available only in a gateway-attached UI")
+            return
+        if "--persist" in parameters:
+            self.add_notice(
+                alias,
+                "Persisted removal is not supported; edit worlds.jsonc to remove a saved gag",
+            )
+            return
+        if len(parameters) != 1 or not parameters[0]:
+            self.add_notice(alias, "Usage: /ungag PATTERN")
+            return
+        pattern = parameters[0]
+        try:
+            result = await self.service_runtime.request_gag_control(
+                world=alias, action="remove", pattern=pattern
+            )
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            self.add_notice(alias, f"Ungag failed: {exc}")
+            return
+        if result.get("changed") is False:
+            self.add_notice(alias, f"No active gag {pattern!r} in {alias}")
+        else:
+            self.add_notice(alias, f"Removed gag {pattern!r} from {alias} this session")
 
     async def _handle_update_command(self, alias: str, parameters: list[str]) -> None:
         if parameters not in ([], ["status"], ["check"], ["force"]):

@@ -712,6 +712,31 @@ class GatewayClient:
             {"type": "clear_diagnostics", "request_id": str(request_id)}, request_id
         )
 
+    async def request_gag_control(
+        self,
+        *,
+        world: str,
+        action: str,
+        pattern: str | None = None,
+        persist: bool = False,
+    ) -> dict[str, Any]:
+        """Add, remove, or list live gag patterns for a world on the gateway."""
+        request_id = uuid4()
+        message: dict[str, Any] = {
+            "type": "gag_control",
+            "request_id": str(request_id),
+            "world": world,
+            "action": action,
+        }
+        if pattern is not None:
+            message["pattern"] = pattern
+        if persist:
+            message["persist"] = True
+        result = await self._request(message, request_id)
+        if result is None:
+            raise GatewayProtocolError("Gateway returned no gag_control result")
+        return result
+
     async def verify_connection(self, *, timeout: float) -> bool:
         """Actively confirm the connection is alive with a bounded ping round trip.
 
@@ -1037,6 +1062,18 @@ class GatewayUiRuntime:
 
     async def clear_diagnostics(self) -> None:
         await self.client.clear_diagnostics()
+
+    async def request_gag_control(
+        self,
+        *,
+        world: str,
+        action: str,
+        pattern: str | None = None,
+        persist: bool = False,
+    ) -> dict[str, Any]:
+        return await self.client.request_gag_control(
+            world=world, action=action, pattern=pattern, persist=persist
+        )
 
     async def _check_update(self) -> dict[str, Any]:
         available = (

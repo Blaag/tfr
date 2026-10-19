@@ -26,6 +26,7 @@ from tfr.config import ConfigurationBundle
 from tfr.core import CommandBus, EventBus, UnknownSessionError
 from tfr.eventlog import EventSink, JsonlEventSink
 from tfr.events import Actor, ActorType, CommandRequest, Event, EventKind
+from tfr.gag_persist import persist_gag_pattern
 from tfr.gateway_protocol import (
     MAX_MESSAGE_BYTES,
     MAX_SNAPSHOT_EVENTS,
@@ -577,6 +578,11 @@ class GatewayRuntime:
                 session.world: PluginWorldInfo(
                     server=session.config.server,
                     encoding=session.encoding,
+                    gag_patterns=(
+                        session.config.gag.patterns
+                        if session.config.gag is not None
+                        else ()
+                    ),
                 )
                 for session in sessions
             },
@@ -856,6 +862,7 @@ class GatewayServer:
         diagnostic_list_factory: Callable[[str | None], list[dict[str, Any]]] | None = None,
         diagnostic_clear_factory: Callable[[], None] | None = None,
         update_notice: Callable[[str], Awaitable[None]] | None = None,
+        worlds_path: Path | None = None,
     ) -> None:
         if (
             maximum_clients < 1
@@ -865,6 +872,7 @@ class GatewayServer:
         ):
             raise ValueError("client limits must be positive")
         self.runtime = runtime
+        self.worlds_path = worlds_path
         self.path = Path(path).expanduser()
         self.maximum_clients = maximum_clients
         self.maximum_tcp_clients = maximum_tcp_clients
@@ -1463,6 +1471,57 @@ class GatewayServer:
                 if not await self.device_revoke_factory(device_id):
                     raise ValueError(f"unknown web device: {device_id}")
                 result = {"device_id": str(device_id)}
+            elif message_type == "gag_control":
+                allowed_fields = (
+                    {"type", "protocol", "request_id", "world", "action"},
+                    {"type", "protocol", "request_id", "world", "action", "pattern"},
+                    {"type", "protocol", "request_id", "world", "action", "pattern", "persist"},
+                )
+                if set(message) not in allowed_fields:
+                    raise ValueError("gag_control has invalid fields")
+                world = self._world(message)
+                action = message.get("action")
+                if action not in {"add", "remove", "list"}:
+                    raise ValueError("gag_control action must be add, remove, or list")
+                persist = message.get("persist", False)
+                if not isinstance(persist, bool):
+                    raise ValueError("gag_control persist marker must be a boolean")
+                plugins = self.runtime.plugins
+                if action == "list":
+                    result = {"world": world, "patterns": list(plugins.list_gag_patterns(world))}
+                else:
+                    pattern = message.get("pattern")
+                    if not isinstance(pattern, str) or not pattern:
+                        raise ValueError("gag_control pattern must be a non-empty string")
+                    if action == "add":
+                        changed = plugins.add_gag_pattern(world, pattern)
+                        persisted = False
+                        if persist:
+                            if self.worlds_path is None:
+                                raise ValueError(
+                                    "cannot persist gag: gateway has no worlds configuration path"
+                                )
+                            persisted = persist_gag_pattern(self.worlds_path, world, pattern)
+                        result = {
+                            "world": world,
+                            "action": "add",
+                            "pattern": pattern,
+                            "changed": changed,
+                            "persisted": persisted,
+                        }
+                    else:
+                        if persist:
+                            raise ValueError(
+                                "persisted removal is not supported; edit worlds.jsonc manually"
+                            )
+                        changed = plugins.remove_gag_pattern(world, pattern)
+                        result = {
+                            "world": world,
+                            "action": "remove",
+                            "pattern": pattern,
+                            "changed": changed,
+                            "persisted": False,
+                        }
             else:
                 raise ValueError(f"unsupported request type: {message_type}")
         except (TypeError, UnknownSessionError, RuntimeError, ValueError) as exc:
@@ -1868,6 +1927,7 @@ async def run_gateway(
         diagnostic_list_factory=(web_server.diagnostic_entries if web_server is not None else None),
         diagnostic_clear_factory=(web_server.clear_diagnostics if web_server is not None else None),
         update_notice=(web_server.notify_update if web_server is not None else None),
+        worlds_path=bundle.worlds_path,
     )
     stop = asyncio.Event()
     application_restart = asyncio.Event()
