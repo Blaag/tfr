@@ -888,6 +888,31 @@ async def test_web_commands_manage_devices_through_attached_gateway() -> None:
     assert "pwa/presentation  client_rejected" in text
 
 
+async def test_web_pair_explains_disabled_gateway_configuration_before_pairing() -> None:
+    class DisabledWebRuntime:
+        def __init__(self) -> None:
+            self.pair_called = False
+
+        async def web_status(self) -> dict[str, object]:
+            return {"enabled": False, "origin": None, "device_count": 0}
+
+        async def pair_web_device(self, _label: str) -> str:
+            self.pair_called = True
+            raise AssertionError("pairing must not be attempted while web is disabled")
+
+    runtime = DisabledWebRuntime()
+    tui = make_tui(service_runtime=runtime)
+
+    await tui._handle_client_command("alpha", '/web pair "New phone"')
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Web device pairing is disabled on the Gateway" in text
+    assert "web_gateway.enabled" in text
+    assert "web_gateway.origin" in text
+    assert "active config.jsonc" in text
+    assert runtime.pair_called is False
+
+
 async def test_bare_update_reports_the_coordinated_release_link(tmp_path: Path) -> None:
     checker = UpdateChecker(UpdateConfig(state_directory=tmp_path))
 

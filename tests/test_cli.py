@@ -108,6 +108,16 @@ def test_admin_restart_gateway_requests_application_only_restart(
     assert "Gateway application restart requested" in capsys.readouterr().out
 
 
+def test_restart_gateway_wrong_mode_prints_correct_command(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert run(["gateway", "restart-gateway"]) == 2
+
+    error = capsys.readouterr().err
+    assert "admin action, not a gateway action" in error
+    assert "tfr admin restart-gateway [--socket PATH]" in error
+
+
 def test_ui_mode_attaches_to_the_gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config = write_configuration(tmp_path, with_world=True)
     (tmp_path / "worlds.jsonc").unlink()
@@ -377,9 +387,7 @@ def test_plugin_rollback_uses_configured_stable_source(
         ),
     )
 
-    result = run(
-        ["--config", str(config), "--rollback-plugin", "owner/plugins"]
-    )
+    result = run(["--config", str(config), "--rollback-plugin", "owner/plugins"])
 
     assert result == 0
     assert called
@@ -423,9 +431,7 @@ def test_plugin_rollback_accepts_a_path_qualified_source(
         ),
     )
 
-    result = run(
-        ["--config", str(config), "--rollback-plugin", "owner/plugins:packages/two"]
-    )
+    result = run(["--config", str(config), "--rollback-plugin", "owner/plugins:packages/two"])
 
     assert result == 0
     assert options["source_path"] == "packages/two"

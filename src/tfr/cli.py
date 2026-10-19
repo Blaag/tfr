@@ -160,7 +160,11 @@ def run(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.admin_action is not None:
-        print("tfr: restart-gateway requires admin mode", file=sys.stderr)
+        print(
+            "tfr: restart-gateway is an admin action, not a gateway action.\n"
+            "Run: tfr admin restart-gateway [--socket PATH]",
+            file=sys.stderr,
+        )
         return 2
 
     if args.rollback_plugin is not None:
@@ -193,9 +197,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                 if source.repo == args.rollback_plugin
             ]
             if len(matches) != 1:
-                raise ValueError(
-                    "--rollback-plugin must name exactly one configured plugin source"
-                )
+                raise ValueError("--rollback-plugin must name exactly one configured plugin source")
             source = matches[0]
             if source.policy not in {"stable-auto", "stable-notify"}:
                 raise ValueError("plugin rollback requires a stable plugin source policy")
@@ -229,9 +231,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             )
             if current is None:  # pragma: no cover - rollback guarantees a current release
                 raise ValueError("plugin rollback did not activate a release")
-            print(
-                f"Rolled back {source.repo} to {current[1].version} at {current[1].commit}."
-            )
+            print(f"Rolled back {source.repo} to {current[1].version} at {current[1].commit}.")
             if source.policy == "stable-auto":
                 print(
                     "Set this source to stable-notify before the next launch to hold the rollback.",
