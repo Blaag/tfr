@@ -26,6 +26,7 @@ from tfr.config import ConfigurationBundle
 from tfr.core import CommandBus, EventBus, UnknownSessionError
 from tfr.eventlog import EventSink, JsonlEventSink
 from tfr.events import Actor, ActorType, CommandRequest, Event, EventKind
+from tfr.gag import GagPolicy
 from tfr.gateway_protocol import (
     MAX_MESSAGE_BYTES,
     MAX_SNAPSHOT_EVENTS,
@@ -44,6 +45,7 @@ from tfr.gateway_transport import (
     validate_tcp_endpoint,
 )
 from tfr.installations import InstallationError, managed_restart_command
+from tfr.managed_settings import ManagedSettingsStore, apply_managed_settings
 from tfr.managed_updates import (
     StagedManagedUpdate,
     activate_managed_update,
@@ -114,6 +116,7 @@ class HistorySubscription:
     snapshot: HistorySnapshot
     queue: asyncio.Queue[SequencedEvent | None]
     worlds: frozenset[str] | None = None
+    event_filter: Callable[[Event], bool] | None = None
 
 
 class EventHistory:
@@ -125,6 +128,7 @@ class EventHistory:
         default_limit: int = 1_000,
         subscriber_queue_size: int = 1_000,
         ingress_queue_size: int = 1_000,
+        projection_filter: Callable[[Event], bool] | None = None,
     ) -> None:
         if default_limit < 1 or subscriber_queue_size < 1 or ingress_queue_size < 1:
             raise ValueError("history and subscriber limits must be positive")
@@ -135,6 +139,7 @@ class EventHistory:
         self.default_limit = default_limit
         self.subscriber_queue_size = subscriber_queue_size
         self.ingress_queue_size = ingress_queue_size
+        self.projection_filter = projection_filter
         self._history: dict[str, deque[SequencedEvent]] = {}
         self._generation_counts: dict[
             str, tuple[int, Counter[tuple[EventKind, ActorType | None]]]
@@ -207,7 +212,7 @@ class EventHistory:
                 if worlds is not None and world not in worlds:
                     continue
                 for item in history:
-                    if event_filter is not None and not event_filter(item.event):
+                    if not self._event_allowed(item.event, event_filter):
                         continue
                     if after_cursor is None or item.cursor > after_cursor:
                         candidate_count += 1
@@ -219,14 +224,19 @@ class EventHistory:
                     if event_class_filter is None or event_class_filter(kind, actor_type)
                 )
                 for world, (generation, counts) in self._generation_counts.items()
-                if worlds is None or world in worlds
+                if (worlds is None or world in worlds)
+                and any(
+                    count
+                    for (kind, actor_type), count in counts.items()
+                    if event_class_filter is None or event_class_filter(kind, actor_type)
+                )
             }
             candidates = (
                 item
                 for world, history in self._history.items()
                 if worlds is None or world in worlds
                 for item in history
-                if (event_filter is None or event_filter(item.event))
+                if self._event_allowed(item.event, event_filter)
                 and (after_cursor is None or item.cursor > after_cursor)
             )
             if not include_history:
@@ -241,7 +251,7 @@ class EventHistory:
                     iterator = (
                         item
                         for item in reversed(history)
-                        if (event_filter is None or event_filter(item.event))
+                        if self._event_allowed(item.event, event_filter)
                         and (after_cursor is None or item.cursor > after_cursor)
                     )
                     first = next(iterator, None)
@@ -285,6 +295,7 @@ class EventHistory:
                     for world, history in self._history.items()
                     if worlds is None or world in worlds
                     for item in history
+                    if self._event_allowed(item.event, None)
                 ),
                 default=self._cursor + 1,
             )
@@ -325,6 +336,7 @@ class EventHistory:
                 snapshot=snapshot,
                 queue=asyncio.Queue(maxsize=self.subscriber_queue_size),
                 worlds=worlds,
+                event_filter=event_filter,
             )
             self._subscribers.add(subscription)
             return subscription
@@ -342,6 +354,7 @@ class EventHistory:
                     self._cursor += 1
                     item = SequencedEvent(self._cursor, self._bounded_event(self._cursor, event))
                     bounded_event = item.event
+                    projected = self._event_allowed(bounded_event, None)
                     generation_counts = self._generation_counts.get(bounded_event.world)
                     if (
                         generation_counts is None
@@ -349,7 +362,7 @@ class EventHistory:
                     ):
                         generation_counts = (bounded_event.connection_generation, Counter())
                         self._generation_counts[bounded_event.world] = generation_counts
-                    if bounded_event.connection_generation == generation_counts[0]:
+                    if projected and bounded_event.connection_generation == generation_counts[0]:
                         actor_type = (
                             bounded_event.actor.type if bounded_event.actor is not None else None
                         )
@@ -360,25 +373,38 @@ class EventHistory:
                         self._history[event.world] = history
                     if len(history) == history.maxlen:
                         dropped_item = history[0]
-                        self._dropped_through = max(self._dropped_through, history[0].cursor)
                         dropped_event = dropped_item.event
-                        dropped = self._generation_dropped_through.get(dropped_event.world)
-                        if dropped is None or dropped_event.connection_generation > dropped[0]:
-                            dropped = (dropped_event.connection_generation, {})
-                            self._generation_dropped_through[dropped_event.world] = dropped
-                        if dropped_event.connection_generation == dropped[0]:
-                            dropped_actor_type = (
-                                dropped_event.actor.type
-                                if dropped_event.actor is not None
-                                else None
+                        if self._event_allowed(dropped_event, None):
+                            self._dropped_through = max(
+                                self._dropped_through, dropped_item.cursor
                             )
-                            event_class = (dropped_event.kind, dropped_actor_type)
-                            dropped[1][event_class] = dropped_item.cursor
+                            dropped = self._generation_dropped_through.get(dropped_event.world)
+                            if (
+                                dropped is None
+                                or dropped_event.connection_generation > dropped[0]
+                            ):
+                                dropped = (dropped_event.connection_generation, {})
+                                self._generation_dropped_through[dropped_event.world] = dropped
+                            if dropped_event.connection_generation == dropped[0]:
+                                dropped_actor_type = (
+                                    dropped_event.actor.type
+                                    if dropped_event.actor is not None
+                                    else None
+                                )
+                                event_class = (dropped_event.kind, dropped_actor_type)
+                                dropped[1][event_class] = dropped_item.cursor
                     history.append(item)
+                    if not projected:
+                        continue
                     for subscription in tuple(self._subscribers):
                         if (
                             subscription.worlds is not None
                             and event.world not in subscription.worlds
+                        ):
+                            continue
+                        if (
+                            subscription.event_filter is not None
+                            and not subscription.event_filter(bounded_event)
                         ):
                             continue
                         if subscription.queue.full():
@@ -390,6 +416,15 @@ class EventHistory:
                 self._queue.task_done()
             # Let active subscribers drain bursts before applying the slow-client bound.
             await asyncio.sleep(0)
+
+    def _event_allowed(
+        self,
+        event: Event,
+        event_filter: Callable[[Event], bool] | None,
+    ) -> bool:
+        return (self.projection_filter is None or self.projection_filter(event)) and (
+            event_filter is None or event_filter(event)
+        )
 
     @staticmethod
     def _close_subscription(subscription: HistorySubscription) -> None:
@@ -502,6 +537,8 @@ class GatewayRuntime:
         plugin_source_messages: tuple[str, ...] = (),
         plugin_source_notices: tuple[PluginSourceNotice, ...] = (),
         connector_bridge: ConnectorSessionBridge | None = None,
+        managed_settings: ManagedSettingsStore | None = None,
+        gag_policy: GagPolicy | None = None,
     ) -> None:
         self.event_bus = event_bus
         self.command_bus = command_bus
@@ -516,11 +553,14 @@ class GatewayRuntime:
         self.plugin_source_messages = plugin_source_messages
         self.plugin_source_notices = plugin_source_notices
         self.connector_bridge = connector_bridge
+        self.managed_settings = managed_settings
+        self.gag_policy = gag_policy
         self.gateway_id = uuid4()
         self._started = False
         self._update_task: asyncio.Task[None] | None = None
         self._control_locks = {session.world: asyncio.Lock() for session in sessions}
         self._agent_locks = {name: asyncio.Lock() for name in agents.controllers}
+        self._managed_settings_lock = asyncio.Lock()
 
     @classmethod
     async def from_configuration(
@@ -530,6 +570,8 @@ class GatewayRuntime:
         plugin_scope: Literal["all", "gateway"] = "gateway",
         connector_bridge: ConnectorSessionBridge | None = None,
     ) -> GatewayRuntime:
+        bundle, managed_settings = apply_managed_settings(bundle)
+        gag_policy = GagPolicy.from_configuration(bundle.worlds)
         sinks: list[EventSink] = []
         if bundle.main.logging.enabled:
             sinks.append(JsonlEventSink(_event_log_path(bundle.main.logging.directory)))
@@ -582,12 +624,38 @@ class GatewayRuntime:
             },
             extra_discovered=extra_plugins,
             scope=plugin_scope,
+            event_visibility=gag_policy.allows,
+        )
+        gag_policy.set_diagnostic_handler(
+            lambda code, world, index: plugins.diagnostics.record(
+                severity="warning",
+                component="gag",
+                code=code,
+                message=(
+                    f"Gag matching {code.replace('_', ' ')} for world {world[:64]!r}, "
+                    f"pattern index {index}. The event was shown."
+                )[:240],
+                operation=f"pattern_index:{index}",
+            )
+        )
+        managed_settings.set_audit_handler(
+            lambda entry: plugins.diagnostics.record(
+                severity="info" if entry["result"] != "failed" else "error",
+                component="managed-settings",
+                code=str(entry["result"]),
+                message=(
+                    f"Managed setting {entry['operation']} for world {entry['world']!r}: "
+                    f"{entry['result']} at revision {entry['revision']}"
+                )[:240],
+                operation=str(entry["operation"])[:100],
+            )
         )
         event_bus.add_processor(plugins.process_event)
         agents = AgentRuntime.from_configuration(bundle, sessions, event_bus, command_bus)
         history = EventHistory(
             event_bus,
             {alias: scrollback_for(bundle, alias) for alias in bundle.worlds.worlds},
+            projection_filter=gag_policy.allows,
         )
         return cls(
             event_bus=event_bus,
@@ -617,6 +685,8 @@ class GatewayRuntime:
             plugin_source_messages=plugin_source_messages,
             plugin_source_notices=plugin_source_notices,
             connector_bridge=connector_bridge,
+            managed_settings=managed_settings,
+            gag_policy=gag_policy,
         )
 
     async def start(self) -> None:
@@ -638,6 +708,114 @@ class GatewayRuntime:
                 self.update_checker.run_periodically(self._notify_update),
                 name="tfr-gateway-updates",
             )
+
+    async def manage_gag(
+        self,
+        world: str,
+        operation: Literal["list", "add", "remove", "reset"],
+        *,
+        pattern: str | None = None,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        if self.managed_settings is None or self.gag_policy is None:
+            raise ValueError("managed gag settings are unavailable")
+        if operation == "list":
+            if pattern is not None or expected_revision is not None:
+                raise ValueError("list gag operation does not accept mutation fields")
+            listed = await asyncio.to_thread(self.managed_settings.list_gag_patterns, world)
+            return listed.model_dump(mode="json")
+        if expected_revision is None:
+            raise ValueError("gag mutation requires expected_revision")
+        async with self._managed_settings_lock:
+            if operation == "add":
+                if pattern is None:
+                    raise ValueError("add gag operation requires a pattern")
+                result = await asyncio.to_thread(
+                    self.managed_settings.add_gag_pattern,
+                    world,
+                    pattern,
+                    expected_revision,
+                )
+            elif operation == "remove":
+                if pattern is None:
+                    raise ValueError("remove gag operation requires a pattern")
+                result = await asyncio.to_thread(
+                    self.managed_settings.remove_gag_pattern,
+                    world,
+                    pattern,
+                    expected_revision,
+                )
+            elif operation == "reset":
+                if pattern is not None:
+                    raise ValueError("reset gag operation does not accept a pattern")
+                result = await asyncio.to_thread(
+                    self.managed_settings.reset_gag_patterns,
+                    world,
+                    expected_revision,
+                )
+            else:
+                raise ValueError("unsupported gag operation")
+            restart_required = False
+            if result.changed:
+                try:
+                    self.gag_policy.replace_configuration(
+                        self.managed_settings.effective_worlds
+                    )
+                except Exception:
+                    restart_required = True
+                    self.plugins.diagnostics.record(
+                        severity="error",
+                        component="gag",
+                        code="runtime_swap_failed",
+                        message=(
+                            f"Persisted gag revision {result.revision} for world {world!r}; "
+                            "restart the Gateway to apply it"
+                        )[:240],
+                    )
+            return {
+                **result.model_dump(mode="json"),
+                "restart_required": restart_required,
+            }
+
+    def shared_ui_settings(self) -> dict[str, bool]:
+        if self.managed_settings is None:
+            return {"spellcheck_enabled": False, "speaking_streaks_enabled": True}
+        ui = self.managed_settings.effective_ui
+        return {
+            "spellcheck_enabled": ui.spellcheck.enabled,
+            "speaking_streaks_enabled": ui.speaking_streaks.enabled,
+        }
+
+    async def manage_shared_ui_setting(
+        self,
+        setting: Literal["spellcheck", "speaking_streaks"],
+        operation: Literal["get", "set"],
+        *,
+        enabled: bool | None = None,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        if self.managed_settings is None:
+            raise ValueError("managed UI settings are unavailable")
+        getter = (
+            self.managed_settings.get_spellcheck_enabled
+            if setting == "spellcheck"
+            else self.managed_settings.get_speaking_streaks_enabled
+        )
+        if operation == "get":
+            if enabled is not None or expected_revision is not None:
+                raise ValueError("get UI setting operation does not accept mutation fields")
+            result = await asyncio.to_thread(getter)
+            return result.model_dump(mode="json")
+        if enabled is None or expected_revision is None:
+            raise ValueError("set UI setting operation requires enabled and expected_revision")
+        setter = (
+            self.managed_settings.set_spellcheck_enabled
+            if setting == "spellcheck"
+            else self.managed_settings.set_speaking_streaks_enabled
+        )
+        async with self._managed_settings_lock:
+            result = await asyncio.to_thread(setter, enabled, expected_revision)
+        return result.model_dump(mode="json")
 
     async def stop(self, *, preserve_worlds: bool = False) -> None:
         if not self._started and self.history._pump is None:
@@ -856,6 +1034,7 @@ class GatewayServer:
         diagnostic_list_factory: Callable[[str | None], list[dict[str, Any]]] | None = None,
         diagnostic_clear_factory: Callable[[], None] | None = None,
         update_notice: Callable[[str], Awaitable[None]] | None = None,
+        ui_settings_notice: Callable[[Mapping[str, bool]], Awaitable[None]] | None = None,
     ) -> None:
         if (
             maximum_clients < 1
@@ -895,6 +1074,7 @@ class GatewayServer:
         self.diagnostic_list_factory = diagnostic_list_factory
         self.diagnostic_clear_factory = diagnostic_clear_factory
         self.update_notice = update_notice
+        self.ui_settings_notice = ui_settings_notice
         self._server: asyncio.Server | None = None
         self._tcp_server: asyncio.Server | None = None
         self._socket_identity: tuple[int, int] | None = None
@@ -1151,6 +1331,14 @@ class GatewayServer:
                     "history_reset": history_reset,
                     "worlds": self.runtime.world_descriptors(),
                     "agents": self.runtime.agent_descriptors(),
+                    "ui_settings": (
+                        self.runtime.shared_ui_settings()
+                        if hasattr(self.runtime, "shared_ui_settings")
+                        else {
+                            "spellcheck_enabled": False,
+                            "speaking_streaks_enabled": True,
+                        }
+                    ),
                     "build": getattr(self.runtime, "build", current_build()).as_dict(),
                 },
                 lock=write_lock,
@@ -1378,6 +1566,77 @@ class GatewayServer:
                 await self.runtime.agent_control(name=name, action=action)
             elif message_type == "ping":
                 pass
+            elif message_type == "gag_settings":
+                if not allow_admin:
+                    raise ValueError("managed gag settings require native Gateway access")
+                allowed_fields = {
+                    "type",
+                    "protocol",
+                    "request_id",
+                    "world",
+                    "operation",
+                    "pattern",
+                    "expected_revision",
+                }
+                if not set(message) <= allowed_fields:
+                    raise ValueError("gag_settings has invalid fields")
+                world = self._world(message)
+                operation = message.get("operation")
+                if operation not in {"list", "add", "remove", "reset"}:
+                    raise ValueError("gag operation is invalid")
+                pattern = message.get("pattern")
+                if pattern is not None and not isinstance(pattern, str):
+                    raise ValueError("gag pattern must be a string")
+                expected_revision = message.get("expected_revision")
+                if expected_revision is not None and (
+                    not isinstance(expected_revision, int)
+                    or isinstance(expected_revision, bool)
+                    or expected_revision < 0
+                ):
+                    raise ValueError("expected_revision must be a non-negative integer")
+                result = await self.runtime.manage_gag(
+                    world,
+                    operation,
+                    pattern=pattern,
+                    expected_revision=expected_revision,
+                )
+            elif message_type == "managed_ui_setting":
+                if not allow_admin:
+                    raise ValueError("managed UI settings require native Gateway access")
+                if not set(message) <= {
+                    "type",
+                    "protocol",
+                    "request_id",
+                    "setting",
+                    "operation",
+                    "enabled",
+                    "expected_revision",
+                }:
+                    raise ValueError("managed_ui_setting has invalid fields")
+                setting = message.get("setting")
+                operation = message.get("operation")
+                if setting not in {"spellcheck", "speaking_streaks"}:
+                    raise ValueError("managed UI setting is invalid")
+                if operation not in {"get", "set"}:
+                    raise ValueError("managed UI setting operation is invalid")
+                enabled = message.get("enabled")
+                if enabled is not None and not isinstance(enabled, bool):
+                    raise ValueError("enabled must be a boolean")
+                expected_revision = message.get("expected_revision")
+                if expected_revision is not None and (
+                    not isinstance(expected_revision, int)
+                    or isinstance(expected_revision, bool)
+                    or expected_revision < 0
+                ):
+                    raise ValueError("expected_revision must be a non-negative integer")
+                result = await self.runtime.manage_shared_ui_setting(
+                    setting,
+                    operation,
+                    enabled=enabled,
+                    expected_revision=expected_revision,
+                )
+                if operation == "set":
+                    await self._broadcast_ui_settings()
             elif message_type == "update":
                 if set(message) not in (
                     {"type", "protocol", "request_id"},
@@ -1503,6 +1762,22 @@ class GatewayServer:
             self._update_task = asyncio.create_task(
                 self._coordinate_update(), name="tfr-gateway-coordinated-update"
             )
+
+    async def _broadcast_ui_settings(self) -> None:
+        settings = self.runtime.shared_ui_settings()
+        message = {"type": "ui_settings", **settings}
+        async with self._update_participants_lock:
+            participants = tuple(self._update_participants.values())
+        await asyncio.gather(
+            *(
+                write_message(participant.writer, message, lock=participant.write_lock)
+                for participant in participants
+            ),
+            return_exceptions=True,
+        )
+        if self.ui_settings_notice is not None:
+            with contextlib.suppress(Exception):
+                await self.ui_settings_notice(settings)
 
     async def _stage_gateway_update(self, *, force: bool = False) -> StagedManagedUpdate | None:
         async with self._update_lock:
@@ -1882,6 +2157,9 @@ async def run_gateway(
         diagnostic_list_factory=(web_server.diagnostic_entries if web_server is not None else None),
         diagnostic_clear_factory=(web_server.clear_diagnostics if web_server is not None else None),
         update_notice=(web_server.notify_update if web_server is not None else None),
+        ui_settings_notice=(
+            web_server.notify_ui_settings if web_server is not None else None
+        ),
     )
     stop = asyncio.Event()
     application_restart = asyncio.Event()

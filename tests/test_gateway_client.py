@@ -32,7 +32,7 @@ from tfr.gateway_client import (
     portable_plugin_migration_warning,
     run_gateway_ui,
 )
-from tfr.gateway_protocol import GatewayProtocolError
+from tfr.gateway_protocol import GatewayProtocolError, read_message, write_message
 from tfr.gateway_transport import (
     create_gateway_client_tls_context,
     create_gateway_server_tls_context,
@@ -76,6 +76,60 @@ async def test_missing_gateway_socket_reports_the_path() -> None:
         await GatewayClient.connect(socket_path)
 
 
+async def test_client_accepts_compatible_hello_without_additive_ui_settings(
+) -> None:
+    socket_path = Path("/tmp") / f"tfr-compat-{uuid4().hex[:8]}" / "gateway.sock"
+    socket_path.parent.mkdir()
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await read_message(reader)
+        await write_message(
+            writer,
+            {
+                "type": "hello",
+                "gateway_id": str(uuid4()),
+                "client_id": str(uuid4()),
+                "connection_id": str(uuid4()),
+                "cursor": 0,
+                "oldest_cursor": 1,
+                "snapshot_count": 0,
+                "history_truncated": False,
+                "history_reset": False,
+                "worlds": [
+                    {
+                        "world": "alpha",
+                        "session_id": "63f755aa-e407-4f78-ae05-f9d62c23f765",
+                        "state": "connected",
+                        "connection_generation": 1,
+                        "server": "bare",
+                        "encoding": "utf-8",
+                        "character": None,
+                        "capabilities": {"unicode": False},
+                        "aliases": [],
+                        "agent": False,
+                        "scrollback_lines": 100,
+                        "show_nospoof_prefix": False,
+                    }
+                ],
+                "agents": [],
+                "build": current_build().as_dict(),
+            },
+        )
+        await reader.read()
+        writer.close()
+
+    server = await asyncio.start_unix_server(handle, path=socket_path)
+    async with server:
+        client = await GatewayClient.connect(socket_path)
+        try:
+            assert client.spellcheck_enabled is False
+            assert client.speaking_streaks_enabled is True
+        finally:
+            await client.stop()
+    socket_path.unlink()
+    socket_path.parent.rmdir()
+
+
 class FakeRuntime:
     def __init__(self, history: EventHistory) -> None:
         self.gateway_id = UUID("92716400-4bb9-43d2-845f-b8a0e51c9994")
@@ -83,6 +137,12 @@ class FakeRuntime:
         self.commands: list[CommandRequest] = []
         self.agent_controls: list[tuple[str, str]] = []
         self.aliases = ["a"]
+        self.gag_revision = 0
+        self.gag_patterns: list[str] = []
+        self.shared_settings = {
+            "spellcheck": False,
+            "speaking_streaks": True,
+        }
 
     def world_descriptors(self) -> list[dict[str, object]]:
         return [
@@ -112,6 +172,65 @@ class FakeRuntime:
                 "model": "example",
             }
         ]
+
+    async def manage_gag(
+        self,
+        world: str,
+        operation: str,
+        *,
+        pattern: str | None = None,
+        expected_revision: int | None = None,
+    ) -> dict[str, object]:
+        if world != "alpha":
+            raise ValueError("unknown world")
+        if operation == "list":
+            return {
+                "revision": self.gag_revision,
+                "patterns": list(self.gag_patterns),
+                "changed": False,
+            }
+        if expected_revision != self.gag_revision:
+            raise ValueError("stale revision")
+        if operation == "add" and pattern is not None:
+            self.gag_patterns.append(pattern)
+        elif operation == "remove" and pattern is not None:
+            self.gag_patterns.remove(pattern)
+        elif operation == "reset":
+            self.gag_patterns.clear()
+        else:
+            raise ValueError("invalid operation")
+        self.gag_revision += 1
+        return {
+            "revision": self.gag_revision,
+            "patterns": list(self.gag_patterns),
+            "changed": True,
+            "restart_required": False,
+        }
+
+    def shared_ui_settings(self) -> dict[str, bool]:
+        return {
+            "spellcheck_enabled": self.shared_settings["spellcheck"],
+            "speaking_streaks_enabled": self.shared_settings["speaking_streaks"],
+        }
+
+    async def manage_shared_ui_setting(
+        self,
+        setting: str,
+        operation: str,
+        *,
+        enabled: bool | None = None,
+        expected_revision: int | None = None,
+    ) -> dict[str, object]:
+        if operation == "set":
+            if expected_revision != self.gag_revision or enabled is None:
+                raise ValueError("stale revision")
+            self.shared_settings[setting] = enabled
+            self.gag_revision += 1
+        return {
+            "revision": self.gag_revision,
+            "enabled": self.shared_settings[setting],
+            "changed": operation == "set",
+        }
 
     async def submit_command(
         self,
@@ -425,6 +544,99 @@ async def test_client_receives_snapshot_live_events_and_command_acks() -> None:
         await server.stop()
         await history.stop()
         await bus.close()
+
+
+async def test_client_accepts_intentional_projection_cursor_gaps() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10}, projection_filter=lambda event: event.sequence != 1)
+    history.start()
+    runtime = FakeRuntime(history)
+    socket_path = Path("/tmp") / f"tfr-gap-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    queue = client.event_bus.subscribe()
+    client.start()
+    try:
+        await bus.publish(make_event(0))
+        first = await asyncio.wait_for(queue.get(), timeout=1)
+        assert first.canonical_text == "line 0"
+        await bus.publish(make_event(1))
+        await bus.publish(make_event(2))
+        shown = await asyncio.wait_for(queue.get(), timeout=1)
+        assert shown.canonical_text == "line 2"
+        assert client.cursor == 3
+    finally:
+        await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+    socket_path.parent.rmdir()
+
+
+async def test_native_client_manages_gateway_gag_settings() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    socket_path = Path("/tmp") / f"tfr-gag-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    client.start()
+    try:
+        listed = await client.manage_gag("alpha", "list")
+        assert listed == {"revision": 0, "patterns": [], "changed": False}
+        added = await client.manage_gag(
+            "alpha", "add", pattern="^bing", expected_revision=0
+        )
+        assert added["patterns"] == ["^bing"]
+        assert added["revision"] == 1
+    finally:
+        await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+    socket_path.parent.rmdir()
+
+
+async def test_native_client_receives_and_manages_shared_ui_settings() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    socket_path = Path("/tmp") / f"tfr-ui-settings-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    observer = await GatewayClient.connect(socket_path)
+    client.start()
+    observer.start()
+    updates: list[tuple[bool, bool]] = []
+    observer.ui_settings_handler = lambda spellcheck, streaks: updates.append(
+        (spellcheck, streaks)
+    )
+    try:
+        assert client.spellcheck_enabled is False
+        assert client.speaking_streaks_enabled is True
+        current = await client.manage_shared_ui_setting("spellcheck", "get")
+        changed = await client.manage_shared_ui_setting(
+            "spellcheck",
+            "set",
+            enabled=True,
+            expected_revision=current["revision"],
+        )
+        assert changed == {"revision": 1, "enabled": True, "changed": True}
+        await asyncio.sleep(0)
+        assert updates == [(True, True)]
+        assert observer.spellcheck_enabled is True
+    finally:
+        await observer.stop()
+        await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+    socket_path.parent.rmdir()
 
 
 async def test_new_ui_can_rebuild_display_from_retained_gateway_history() -> None:

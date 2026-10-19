@@ -700,6 +700,7 @@ class PluginManager:
         worlds: Mapping[str, PluginWorldInfo] | None = None,
         scope: Literal["all", "gateway", "ui"] = "all",
         builtin_boss_config: Mapping[str, Any] | None = None,
+        event_visibility: Callable[[Event], bool] | None = None,
     ) -> None:
         self.event_bus = event_bus
         self.command_bus = command_bus
@@ -707,6 +708,7 @@ class PluginManager:
         self.worlds = MappingProxyType(dict(worlds or {}))
         self.registry = PluginRegistry()
         self.scope = scope
+        self.event_visibility = event_visibility
         self._active_boss_view: str | None = None
         self._active_boss_world: str | None = None
         self._boss_events: deque[BossViewEvent] = deque(maxlen=_MAX_BOSS_EVENTS)
@@ -782,6 +784,7 @@ class PluginManager:
         discovered: Sequence[DiscoveredPlugin] | None = None,
         extra_discovered: Sequence[DiscoveredPlugin] = (),
         scope: Literal["all", "gateway", "ui"] = "all",
+        event_visibility: Callable[[Event], bool] | None = None,
     ) -> PluginManager:
         builtin_boss_config = config.get("tfr.boss", {})
         if scope != "gateway" and not isinstance(builtin_boss_config, Mapping):
@@ -793,6 +796,7 @@ class PluginManager:
             worlds=worlds,
             scope=scope,
             builtin_boss_config=builtin_boss_config,
+            event_visibility=event_visibility,
         )
         points = (
             discovered
@@ -1002,20 +1006,21 @@ class PluginManager:
                 except Exception as exc:
                     self.registry.enrichers.pop(name, None)
                     await self.report_failure(plugin, f"enricher:{name}", exc, world=event.world)
-            self._queue_world_activity(
-                PluginLifecycleEvent(
-                    kind="world_activity",
-                    world=event.world,
-                    state=event.kind.value,
-                    source="world",
-                    metadata={
-                        "connection_generation": event.connection_generation,
-                        "count": 1,
-                        "first_timestamp": event.timestamp.isoformat(),
-                        "last_timestamp": event.timestamp.isoformat(),
-                    },
+            if self.event_visibility is None or self.event_visibility(event):
+                self._queue_world_activity(
+                    PluginLifecycleEvent(
+                        kind="world_activity",
+                        world=event.world,
+                        state=event.kind.value,
+                        source="world",
+                        metadata={
+                            "connection_generation": event.connection_generation,
+                            "count": 1,
+                            "first_timestamp": event.timestamp.isoformat(),
+                            "last_timestamp": event.timestamp.isoformat(),
+                        },
+                    )
                 )
-            )
         if event.kind is EventKind.CONNECTION:
             await self.publish_session_state(
                 event.world,

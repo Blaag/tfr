@@ -251,6 +251,8 @@ class GatewayClient:
         sessions: list[RemoteWorldSession],
         initial_events: tuple[Event, ...],
         agent_worlds: set[str],
+        spellcheck_enabled: bool = False,
+        speaking_streaks_enabled: bool = True,
         gateway_build: BuildIdentity | None = None,
     ) -> None:
         self.reader = reader
@@ -265,6 +267,8 @@ class GatewayClient:
         self.sessions = sessions
         self.initial_events = initial_events
         self.agent_worlds = agent_worlds
+        self.spellcheck_enabled = spellcheck_enabled
+        self.speaking_streaks_enabled = speaking_streaks_enabled
         self.gateway_build = gateway_build
         self.command_bus = RemoteCommandBus(self)
         self.agents: RemoteAgentRuntime | None = None
@@ -281,6 +285,7 @@ class GatewayClient:
         self.update_abort_handler: Callable[[str], None] | None = None
         self._reconnect_lock = asyncio.Lock()
         self._gateway_request_tasks: set[asyncio.Task[None]] = set()
+        self.ui_settings_handler: Callable[[bool, bool], None] | None = None
 
     @classmethod
     async def connect(
@@ -433,10 +438,22 @@ class GatewayClient:
                 raise GatewayProtocolError("gateway history flags must be booleans")
             worlds = hello.get("worlds")
             agents = hello.get("agents")
+            ui_settings = hello.get(
+                "ui_settings",
+                {
+                    "spellcheck_enabled": False,
+                    "speaking_streaks_enabled": True,
+                },
+            )
             if not isinstance(worlds, list) or not worlds:
                 raise GatewayProtocolError("gateway hello contains no worlds")
             if not isinstance(agents, list):
                 raise GatewayProtocolError("gateway agents must be a list")
+            if not isinstance(ui_settings, dict) or not all(
+                isinstance(ui_settings.get(name), bool)
+                for name in ("spellcheck_enabled", "speaking_streaks_enabled")
+            ):
+                raise GatewayProtocolError("gateway UI settings are invalid")
             try:
                 gateway_build = (
                     BuildIdentity.from_mapping(hello["build"]) if "build" in hello else None
@@ -461,6 +478,8 @@ class GatewayClient:
                     for agent in agents
                     if isinstance(agent, dict) and "world" in agent
                 },
+                spellcheck_enabled=ui_settings["spellcheck_enabled"],
+                speaking_streaks_enabled=ui_settings["speaking_streaks_enabled"],
                 gateway_build=gateway_build,
             )
             try:
@@ -581,6 +600,8 @@ class GatewayClient:
             self.history_reset = False
             self.initial_events = replacement.initial_events
             self.agent_worlds = replacement.agent_worlds
+            self.spellcheck_enabled = replacement.spellcheck_enabled
+            self.speaking_streaks_enabled = replacement.speaking_streaks_enabled
             self.gateway_build = replacement.gateway_build
             self._write_lock = asyncio.Lock()
             await replacement.event_bus.close()
@@ -712,6 +733,66 @@ class GatewayClient:
             {"type": "clear_diagnostics", "request_id": str(request_id)}, request_id
         )
 
+    async def manage_gag(
+        self,
+        world: str,
+        operation: str,
+        *,
+        pattern: str | None = None,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        request_id = uuid4()
+        message: dict[str, Any] = {
+            "type": "gag_settings",
+            "request_id": str(request_id),
+            "world": world,
+            "operation": operation,
+        }
+        if pattern is not None:
+            message["pattern"] = pattern
+        if expected_revision is not None:
+            message["expected_revision"] = expected_revision
+        result = await self._request(message, request_id)
+        if result is None:
+            raise GatewayProtocolError("Gateway returned no gag settings result")
+        revision = result.get("revision")
+        patterns = result.get("patterns")
+        if (
+            not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 0
+            or not isinstance(patterns, list)
+            or not all(isinstance(item, str) for item in patterns)
+        ):
+            raise GatewayProtocolError("Gateway returned invalid gag settings")
+        return result
+
+    async def manage_shared_ui_setting(
+        self,
+        setting: str,
+        operation: str,
+        *,
+        enabled: bool | None = None,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        request_id = uuid4()
+        message: dict[str, Any] = {
+            "type": "managed_ui_setting",
+            "request_id": str(request_id),
+            "setting": setting,
+            "operation": operation,
+        }
+        if enabled is not None:
+            message["enabled"] = enabled
+        if expected_revision is not None:
+            message["expected_revision"] = expected_revision
+        result = await self._request(message, request_id)
+        if result is None or not isinstance(result.get("revision"), int) or not isinstance(
+            result.get("enabled"), bool
+        ):
+            raise GatewayProtocolError("Gateway returned invalid managed UI settings")
+        return result
+
     async def verify_connection(self, *, timeout: float) -> bool:
         """Actively confirm the connection is alive with a bounded ping round trip.
 
@@ -747,10 +828,6 @@ class GatewayClient:
                     cursor, event = event_from_message(message)
                     if cursor <= self.cursor:
                         continue
-                    if cursor != self.cursor + 1:
-                        raise GatewayProtocolError(
-                            f"gateway event cursor jumped from {self.cursor} to {cursor}"
-                        )
                     self.cursor = cursor
                     self._update_session(event)
                     await self.event_bus.publish(event)
@@ -768,6 +845,15 @@ class GatewayClient:
                         raise GatewayProtocolError("Gateway update abort message is invalid")
                     if self.update_abort_handler is not None:
                         self.update_abort_handler(error)
+                elif message_type == "ui_settings":
+                    spellcheck = message.get("spellcheck_enabled")
+                    streaks = message.get("speaking_streaks_enabled")
+                    if not isinstance(spellcheck, bool) or not isinstance(streaks, bool):
+                        raise GatewayProtocolError("Gateway UI settings update is invalid")
+                    self.spellcheck_enabled = spellcheck
+                    self.speaking_streaks_enabled = streaks
+                    if self.ui_settings_handler is not None:
+                        self.ui_settings_handler(spellcheck, streaks)
                 elif message_type == "error":
                     raise GatewayProtocolError(str(message.get("message", "gateway error")))
                 else:
@@ -1038,6 +1124,36 @@ class GatewayUiRuntime:
     async def clear_diagnostics(self) -> None:
         await self.client.clear_diagnostics()
 
+    async def manage_gag(
+        self,
+        world: str,
+        operation: str,
+        *,
+        pattern: str | None = None,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        return await self.client.manage_gag(
+            world,
+            operation,
+            pattern=pattern,
+            expected_revision=expected_revision,
+        )
+
+    async def manage_shared_ui_setting(
+        self,
+        setting: str,
+        operation: str,
+        *,
+        enabled: bool | None = None,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        return await self.client.manage_shared_ui_setting(
+            setting,
+            operation,
+            enabled=enabled,
+            expected_revision=expected_revision,
+        )
+
     async def _check_update(self) -> dict[str, Any]:
         available = (
             await self.plugin_update_checker.stable_auto_update_available()
@@ -1242,6 +1358,7 @@ async def run_gateway_ui(
     tls_server_name: str | None = None,
 ) -> int:
     from tfr.tui import TfrTui
+    from tfr.ui_settings import LocalUiSettingsStore
 
     resume_gateway_id, resume_world, update_restart = _restart_state_from_environment()
     connection_options = {
@@ -1342,6 +1459,10 @@ async def run_gateway_ui(
         update_config=configuration.main.updates,
         plugin_update_checker=plugin_update_checker,
     )
+    local_ui_settings = LocalUiSettingsStore(
+        configuration.main.managed_settings.state_directory
+    )
+    mouse_mode = local_ui_settings.mouse_mode or configuration.main.ui.mouse_mode
     tui = TfrTui(
         sessions=client.sessions,  # type: ignore[arg-type]
         manager=manager,
@@ -1352,12 +1473,25 @@ async def run_gateway_ui(
         pager_enabled=configuration.main.ui.pager.enabled,
         pager_overlap=configuration.main.ui.pager.overlap_lines,
         recent_input_lines=configuration.main.ui.recent_input_lines,
-        mouse_mode=configuration.main.ui.mouse_mode,
-        spellcheck=configuration.main.ui.spellcheck,
+        mouse_mode=mouse_mode,
+        local_ui_settings=local_ui_settings,
+        spellcheck=configuration.main.ui.spellcheck.model_copy(
+            update={
+                "enabled": getattr(
+                    client,
+                    "spellcheck_enabled",
+                    configuration.main.ui.spellcheck.enabled,
+                )
+            }
+        ),
         typing_glow=getattr(configuration.main.ui, "typing_glow", None),
         animations_enabled=configuration.main.ui.animations_enabled,
         low_bandwidth=configuration.main.ui.low_bandwidth,
-        speaking_streaks_enabled=configuration.main.ui.speaking_streaks.enabled,
+        speaking_streaks_enabled=getattr(
+            client,
+            "speaking_streaks_enabled",
+            configuration.main.ui.speaking_streaks.enabled,
+        ),
         output_color=configuration.main.ui.output_color,
         theme=configuration.main.ui.theme,
         screen_clear_mode=configuration.main.ui.screen_clear.mode,
@@ -1376,6 +1510,8 @@ async def run_gateway_ui(
         initial_scroll_to_end=True,
     )
     runtime.notify = lambda text: tui.add_notice(tui.active_alias, text)
+    if hasattr(tui, "apply_shared_ui_settings"):
+        client.ui_settings_handler = tui.apply_shared_ui_settings
     configured_portable_plugins = getattr(plugins, "configured_portable_plugins", lambda: ())
     local_portable_plugins = configured_portable_plugins()
     warning = portable_plugin_migration_warning(local_portable_plugins)

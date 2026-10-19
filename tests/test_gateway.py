@@ -131,6 +131,82 @@ async def test_history_snapshot_filters_worlds_and_bounds_before_delivery() -> N
         await bus.close()
 
 
+async def test_history_projection_omits_live_and_retained_events_without_cursor_loss() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10}, projection_filter=lambda event: event.sequence != 1)
+    history.start()
+    live = await history.subscribe(None)
+    try:
+        await bus.publish(make_event("alpha", 0))
+        await bus.publish(make_event("alpha", 1))
+        await bus.publish(make_event("alpha", 2))
+        await history.flush()
+
+        first = live.queue.get_nowait()
+        second = live.queue.get_nowait()
+        assert first is not None and first.cursor == 1
+        assert second is not None and second.cursor == 3
+        assert live.queue.empty()
+
+        resumed = await history.subscribe(1)
+        assert [item.cursor for item in resumed.snapshot.events] == [3]
+        assert resumed.snapshot.cursor == 3
+        assert resumed.snapshot.truncated is False
+        assert resumed.snapshot.after_cursor_gaps == frozenset()
+        assert resumed.snapshot.available_counts == {("alpha", 1): 2}
+    finally:
+        await history.stop()
+        await bus.close()
+
+
+async def test_dropped_hidden_event_does_not_report_history_truncation() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 2}, projection_filter=lambda event: event.sequence != 0)
+    history.start()
+    try:
+        await bus.publish(make_event("alpha", 0))
+        await bus.publish(make_event("alpha", 1))
+        await bus.publish(make_event("alpha", 2))
+        await history.flush()
+
+        resumed = await history.subscribe(0)
+        assert [item.cursor for item in resumed.snapshot.events] == [2, 3]
+        assert resumed.snapshot.truncated is False
+        assert resumed.snapshot.after_cursor_gaps == frozenset()
+    finally:
+        await history.stop()
+        await bus.close()
+
+
+async def test_projection_filter_keeps_canonical_sink_and_subscribers() -> None:
+    persisted: list[Event] = []
+
+    class Sink:
+        async def write(self, event: Event) -> None:
+            persisted.append(event)
+
+        async def close(self) -> None:
+            pass
+
+    bus = EventBus([Sink()])
+    observer = bus.subscribe()
+    history = EventHistory(bus, {"alpha": 10}, projection_filter=lambda _event: False)
+    history.start()
+    hidden = make_event("alpha", 0)
+    try:
+        await bus.publish(hidden)
+        await history.flush()
+
+        assert persisted == [hidden]
+        assert observer.get_nowait() is hidden
+        snapshot = await history.subscribe(None)
+        assert snapshot.snapshot.events == ()
+        assert snapshot.snapshot.available_counts == {}
+    finally:
+        await history.stop()
+        await bus.close()
+
+
 async def test_history_snapshot_filters_before_per_world_limit_and_counts_generations() -> None:
     bus = EventBus()
     history = EventHistory(bus, {"alpha": 10, "beta": 10})

@@ -1,5 +1,21 @@
 {
   "$defs": {
+    "GagConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "patterns": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Patterns",
+          "type": "array"
+        }
+      },
+      "title": "GagConfig",
+      "type": "object"
+    },
     "IdleConfig": {
       "additionalProperties": false,
       "properties": {
@@ -155,6 +171,9 @@
           ],
           "default": null,
           "title": "Encoding"
+        },
+        "gag": {
+          "$ref": "#/$defs/GagConfig"
         },
         "host": {
           "minLength": 1,

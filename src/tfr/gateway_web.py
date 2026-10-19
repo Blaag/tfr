@@ -940,6 +940,22 @@ class WebGatewayServer:
             return False
         return await self._send_bounded(socket, message)
 
+    async def notify_ui_settings(self, settings: Mapping[str, bool]) -> None:
+        message = {
+            "type": "ui_settings",
+            "protocol": WEB_PROTOCOL_VERSION,
+            "speaking_streaks_enabled": settings["speaking_streaks_enabled"],
+        }
+        sockets = tuple(
+            socket
+            for device_sockets in self._active_sockets.values()
+            for socket in device_sockets
+        )
+        await asyncio.gather(
+            *(self._send_bounded(socket, message) for socket in sockets),
+            return_exceptions=True,
+        )
+
     @staticmethod
     async def _close_bounded(
         socket: web.WebSocketResponse,
@@ -1057,7 +1073,11 @@ class WebGatewayServer:
                     if descriptor["world"] in self._authorized_worlds(device)
                 ],
                 "effect_demos": self._effect_demos(device),
-                "speaking_streaks_enabled": self.speaking_streaks_enabled,
+                "speaking_streaks_enabled": (
+                    self.runtime.shared_ui_settings()["speaking_streaks_enabled"]
+                    if hasattr(self.runtime, "shared_ui_settings")
+                    else self.speaking_streaks_enabled
+                ),
                 "snapshot_count": len(visible),
             },
         ):

@@ -808,6 +808,47 @@ async def test_operational_lifecycle_events_publish_activity_and_connection_tran
     assert "hello" not in repr(activity.metadata)
 
 
+async def test_visibility_policy_runs_after_enrichment_and_suppresses_only_activity() -> None:
+    captured: list[PluginLifecycleEvent] = []
+    enriched: list[str] = []
+
+    class VisibilityFixture:
+        def register(self, registrar: Any, _config: Any) -> None:
+            def enrich(event: Event) -> EventPatch:
+                enriched.append(event.plain_text or "")
+                return EventPatch(metadata={"enriched": True})
+
+            registrar.register_enricher("visibility-enricher", enrich)
+            registrar.register_lifecycle_handler("visibility-lifecycle", captured.append)
+
+    session_id = uuid4()
+    visibility_inputs: list[Event] = []
+
+    def visible(event: Event) -> bool:
+        visibility_inputs.append(event)
+        return event.plain_text != "hidden"
+
+    manager = await PluginManager.load(
+        enabled=("visibility",),
+        config={},
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={"alpha": session_id},
+        discovered=(FakeEntryPoint("visibility", VisibilityFixture()),),
+        event_visibility=visible,
+    )
+
+    hidden = await manager.process_event(inbound_event(session_id, text="hidden"))
+    shown = await manager.process_event(inbound_event(session_id, text="shown"))
+    await manager.drain()
+
+    assert enriched == ["hidden", "shown"]
+    assert hidden.metadata["enriched"] is True
+    assert shown.metadata["enriched"] is True
+    assert all(event.metadata["enriched"] is True for event in visibility_inputs)
+    assert [event.kind for event in captured] == ["world_activity"]
+
+
 async def test_world_activity_is_coalesced_without_blocking_event_processing() -> None:
     started = asyncio.Event()
     release = asyncio.Event()
