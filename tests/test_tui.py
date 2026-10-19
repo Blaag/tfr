@@ -4630,11 +4630,7 @@ async def test_reload_snapshot_returns_each_world_to_live_output() -> None:
 
 
 async def test_version_command_reports_ui_and_gateway_builds() -> None:
-    tui = make_tui(
-        gateway_build=BuildIdentity(
-            version="0.1.54", commit="a" * 40
-        )
-    )
+    tui = make_tui(gateway_build=BuildIdentity(version="0.1.54", commit="a" * 40))
     await tui._handle_client_command("alpha", "/version")
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
     assert "UI:" in text
@@ -4646,7 +4642,7 @@ async def test_version_command_without_gateway_reports_not_attached() -> None:
     await tui._handle_client_command("alpha", "/version")
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
     assert "UI:" in text
-    assert "Gateway: not attached" in text
+    assert "Gateway: not separately attached (local, standalone, or replay mode)" in text
 
 
 async def test_version_command_rejects_arguments() -> None:

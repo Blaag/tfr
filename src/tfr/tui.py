@@ -3703,7 +3703,7 @@ class TfrTui:
         if self.gateway_build is not None:
             lines.append(f"Gateway: {self._format_build(self.gateway_build)}")
         else:
-            lines.append("Gateway: not attached (all-in-one or standalone mode)")
+            lines.append("Gateway: not separately attached (local, standalone, or replay mode)")
         return "\n".join(lines)
 
     def _plugin_status_text(self) -> str:
