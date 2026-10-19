@@ -93,6 +93,7 @@ from tfr.updates import (
     BuildIdentity,
     UpdateChecker,
     UpdateResult,
+    current_build,
     format_update_status,
 )
 from tfr.world_text import escape_world_text
@@ -139,6 +140,7 @@ _CORE_CLIENT_COMMANDS = frozenset(
         "testspeaker",
         "teststreak",
         "update",
+        "version",
         "web",
         "world",
     }
@@ -3248,6 +3250,11 @@ class TfrTui:
                 self.add_notice(alias, "Usage: /plugins")
             else:
                 self.add_notice(alias, self._plugin_status_text())
+        elif command == "version":
+            if parameters:
+                self.add_notice(alias, "Usage: /version")
+            else:
+                self.add_notice(alias, self._version_text())
         elif command in {"quit", "exit"}:
             get_app().exit(result=0)
         elif command == "world":
@@ -3344,6 +3351,7 @@ class TfrTui:
             "  /web status|repair|pair|devices|revoke - manage the private iPhone PWA",
             "  /diagnostics [web|presentations|plugins|clear] - inspect runtime diagnostics",
             "  /plugins - show configured, loaded, and failed plugins",
+            "  /version - show the UI and gateway TFR versions",
             "  /agent status|inspect|pause|resume|trigger|close - manage agents",
             "  /quit - exit TFR; //TEXT sends a literal leading slash",
             "",
@@ -3683,6 +3691,20 @@ class TfrTui:
             self._start_fireworks(self._effect_demo_event("Demo", EventKind.SAY, text))
         self._sync_animation_task(restart=True)
         self.application.invalidate()
+
+    @staticmethod
+    def _format_build(build: BuildIdentity) -> str:
+        if build.commit is not None:
+            return f"{build.version} ({build.commit[:12]})"
+        return build.version
+
+    def _version_text(self) -> str:
+        lines = [f"UI:      {self._format_build(current_build())}"]
+        if self.gateway_build is not None:
+            lines.append(f"Gateway: {self._format_build(self.gateway_build)}")
+        else:
+            lines.append("Gateway: not separately attached (local, standalone, or replay mode)")
+        return "\n".join(lines)
 
     def _plugin_status_text(self) -> str:
         requested = self.plugins.requested_plugins

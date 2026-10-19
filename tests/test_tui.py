@@ -4627,3 +4627,26 @@ async def test_reload_snapshot_returns_each_world_to_live_output() -> None:
         await asyncio.wait_for(started.wait(), timeout=1)
         input.send_bytes(b"\x11")
         assert await asyncio.wait_for(running, timeout=1) == 0
+
+
+async def test_version_command_reports_ui_and_gateway_builds() -> None:
+    tui = make_tui(gateway_build=BuildIdentity(version="0.1.54", commit="a" * 40))
+    await tui._handle_client_command("alpha", "/version")
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "UI:" in text
+    assert "Gateway: 0.1.54 (" + "a" * 12 + ")" in text
+
+
+async def test_version_command_without_gateway_reports_not_attached() -> None:
+    tui = make_tui(gateway_build=None)
+    await tui._handle_client_command("alpha", "/version")
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "UI:" in text
+    assert "Gateway: not separately attached (local, standalone, or replay mode)" in text
+
+
+async def test_version_command_rejects_arguments() -> None:
+    tui = make_tui()
+    await tui._handle_client_command("alpha", "/version foo")
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Usage: /version" in text
