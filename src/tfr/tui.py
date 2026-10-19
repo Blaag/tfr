@@ -3735,6 +3735,15 @@ class TfrTui:
                 return
             if action == "pair" and len(parameters) >= 2:
                 label = " ".join(parameters[1:]).strip()
+                status = await self.service_runtime.web_status()
+                if status.get("enabled") is not True:
+                    self.add_notice(
+                        alias,
+                        "Web device pairing is disabled on the Gateway. Enable "
+                        "web_gateway.enabled and configure web_gateway.origin in the Gateway's "
+                        "active config.jsonc, then restart the Gateway.",
+                    )
+                    return
                 pairing_url = await self.service_runtime.pair_web_device(label)
                 self.add_notice(
                     alias,

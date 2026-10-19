@@ -1403,8 +1403,22 @@ class GatewayServer:
                     }
                     start_update = True
             elif message_type == "pair_device":
-                if not allow_admin or self.pairing_url_factory is None:
-                    raise ValueError("web device pairing is unavailable")
+                if not allow_admin:
+                    raise ValueError(
+                        "web device pairing requires an attached authenticated native UI or "
+                        "the local Gateway administration socket"
+                    )
+                if self.pairing_url_factory is None:
+                    if self.web_origin is None:
+                        raise ValueError(
+                            "web device pairing is disabled on the Gateway; enable "
+                            "web_gateway.enabled and configure web_gateway.origin in the "
+                            "Gateway's active config.jsonc, then restart the Gateway"
+                        )
+                    raise ValueError(
+                        "web device pairing is not initialized; check the Gateway web listener "
+                        "and restart the Gateway"
+                    )
                 if set(message) != {"type", "protocol", "request_id", "label"}:
                     raise ValueError("pair_device has invalid fields")
                 label = message.get("label")
