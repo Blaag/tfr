@@ -9,6 +9,7 @@ from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 import jsonc
+import regex as safe_regex
 from pydantic import (
     AnyHttpUrl,
     BaseModel,
@@ -280,6 +281,10 @@ class WebGatewayConfig(StrictModel):
         return str(self.origin).rstrip("/") if self.origin is not None else None
 
 
+class ManagedSettingsConfig(StrictModel):
+    state_directory: Path = Path("~/.local/state/tfr/settings")
+
+
 _PLUGIN_SOURCE_REPO = re.compile(r"^(?!-)[A-Za-z0-9](?:[A-Za-z0-9._~:/@%+-]*[A-Za-z0-9])?$")
 _PLUGIN_SOURCE_REF = re.compile(r"^(?!-)[A-Za-z0-9](?:[A-Za-z0-9._/+-]*[A-Za-z0-9])?$")
 _PLUGIN_SOURCE_PATH = re.compile(r"^(?!/)(?!.*\.\.)[A-Za-z0-9._/+-]*$")
@@ -355,6 +360,7 @@ class MainConfig(StrictModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     updates: UpdateConfig = Field(default_factory=UpdateConfig)
     web_gateway: WebGatewayConfig = Field(default_factory=WebGatewayConfig)
+    managed_settings: ManagedSettingsConfig = Field(default_factory=ManagedSettingsConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
 
 
@@ -390,6 +396,24 @@ class IdleConfig(StrictModel):
     command: str = Field(min_length=1)
 
 
+class GagConfig(StrictModel):
+    patterns: tuple[str, ...] = Field(default=(), max_length=64)
+
+    @field_validator("patterns")
+    @classmethod
+    def valid_patterns(cls, patterns: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(patterns)) != len(patterns):
+            raise ValueError("gag patterns must be unique")
+        for pattern in patterns:
+            if not pattern or len(pattern) > 512 or not pattern.isprintable():
+                raise ValueError("gag patterns must contain 1-512 printable characters")
+            try:
+                safe_regex.compile(pattern, safe_regex.IGNORECASE)
+            except safe_regex.error as exc:
+                raise ValueError(f"invalid gag regular expression: {exc}") from exc
+        return patterns
+
+
 WorldSwitchAlias = Annotated[
     str,
     Field(
@@ -414,6 +438,7 @@ class WorldConfig(StrictModel):
     provenance: ProvenanceConfig = Field(default_factory=ProvenanceConfig)
     capabilities: WorldCapabilitiesConfig = Field(default_factory=WorldCapabilitiesConfig)
     idle: IdleConfig | None = None
+    gag: GagConfig = Field(default_factory=GagConfig)
     startup_commands: tuple[str, ...] = ()
 
     @field_validator("aliases")
@@ -542,6 +567,15 @@ def _resolve_path(path: Path, *, relative_to: Path | None = None) -> Path:
     return expanded.resolve()
 
 
+def _absolute_path_without_symlink_resolution(
+    path: Path, *, relative_to: Path | None = None
+) -> Path:
+    expanded = path.expanduser()
+    if not expanded.is_absolute() and relative_to is not None:
+        expanded = relative_to / expanded
+    return Path(os.path.abspath(expanded))
+
+
 def _read_model[ModelT: BaseModel](path: Path, model_type: type[ModelT]) -> ModelT:
     try:
         with path.open(encoding="utf-8") as config_file:
@@ -624,6 +658,14 @@ def load_ui_configuration(main_path: Path | str | None = None) -> UiConfiguratio
                 update={
                     "state_directory": _resolve_path(
                         main.web_gateway.state_directory,
+                        relative_to=resolved_main.parent,
+                    )
+                }
+            ),
+            "managed_settings": main.managed_settings.model_copy(
+                update={
+                    "state_directory": _absolute_path_without_symlink_resolution(
+                        main.managed_settings.state_directory,
                         relative_to=resolved_main.parent,
                     )
                 }

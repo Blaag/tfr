@@ -89,6 +89,7 @@ from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.spellcheck import Correction, LocalSpellChecker, speech_payload
 from tfr.text_effects import TextDecoration, TextEffectKind, derive_bright_color, interpolate_color
 from tfr.themes import ResolvedTheme, resolve_theme
+from tfr.ui_settings import LocalUiSettingsStore
 from tfr.updates import (
     BuildIdentity,
     UpdateChecker,
@@ -118,6 +119,7 @@ _CORE_CLIENT_COMMANDS = frozenset(
         "effects",
         "exit",
         "gateway",
+        "gag",
         "help",
         "image",
         "lowbw",
@@ -194,6 +196,24 @@ class ServiceRuntime(Protocol):
     async def diagnostics(self, category: str | None = None) -> list[dict[str, Any]]: ...
 
     async def clear_diagnostics(self) -> None: ...
+
+    async def manage_gag(
+        self,
+        world: str,
+        operation: str,
+        *,
+        pattern: str | None = None,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]: ...
+
+    async def manage_shared_ui_setting(
+        self,
+        setting: str,
+        operation: str,
+        *,
+        enabled: bool | None = None,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]: ...
 
 
 @dataclass(slots=True)
@@ -839,6 +859,7 @@ class TfrTui:
         pager_overlap: int,
         recent_input_lines: int = 3,
         mouse_mode: str = "tfr",
+        local_ui_settings: LocalUiSettingsStore | None = None,
         plugins: PluginManager | None = None,
         agents: AgentRuntime | None = None,
         service_runtime: ServiceRuntime | None = None,
@@ -894,6 +915,7 @@ class TfrTui:
         )
         self.agents = agents
         self.service_runtime = service_runtime
+        self.local_ui_settings = local_ui_settings
         self.gateway_reconnect = gateway_reconnect
         self.restart_supported = restart_supported
         self.update_checker = update_checker
@@ -3289,13 +3311,15 @@ class TfrTui:
         elif command == "lowbw":
             self._handle_low_bandwidth_command(alias, parameters)
         elif command == "mouse":
-            self._handle_mouse_command(alias, parameters)
+            await self._handle_mouse_command(alias, parameters)
         elif command == "animations":
             self._handle_animations_command(alias, parameters)
         elif command == "spellcheck":
-            self._handle_spellcheck_command(alias, parameters)
+            await self._handle_spellcheck_command(alias, parameters)
+        elif command == "gag":
+            await self._handle_gag_command(alias, parameters)
         elif command == "streaks":
-            self._handle_speaking_streaks_command(alias, parameters)
+            await self._handle_speaking_streaks_command(alias, parameters)
         elif command in {"effects", "demoeffects"}:
             await self._handle_effects_command(parameters)
         elif command == "teststreak":
@@ -3340,10 +3364,11 @@ class TfrTui:
             "  /end - return to live output",
             "  /nospoof show|hide|status - control NOSPOOF prefix visibility",
             "  /lowbw [on|off|status] - suppress continuous UI animation",
-            "  /mouse auto|terminal|tfr|status - choose who handles mouse input",
+            "  /mouse auto|terminal|tfr|status - choose and save local mouse handling",
             "  /animations [on|off|status] - enable continuous UI effects",
-            "  /spellcheck on|off|status|undo - correct explicit speech and poses locally",
-            "  /streaks on|off|status - control speaking streak effects",
+            "  /spellcheck on|off|status|undo - manage shared submit-time spell checking",
+            "  /gag list|add PATTERN|remove PATTERN|reset - manage shared world gags",
+            "  /streaks on|off|status - manage shared speaking streak effects",
             "  /effects - open the local Effects Lab; /demoeffects is an alias",
             "  /update - update TFR and stable-auto plugins on the Gateway and all connected UIs",
             f"  /update status|check - inspect {update_channel} TFR and plugin releases",
@@ -4089,9 +4114,15 @@ class TfrTui:
         state = "on" if self.low_bandwidth else "off"
         self.add_notice(alias, f"Low-bandwidth mode is {state}")
 
-    def _handle_mouse_command(self, alias: str, parameters: list[str]) -> None:
+    async def _handle_mouse_command(self, alias: str, parameters: list[str]) -> None:
         operation = parameters[0].casefold() if len(parameters) == 1 else ""
         if operation in {"auto", "terminal", "tfr"}:
+            if self.local_ui_settings is not None:
+                try:
+                    await asyncio.to_thread(self.local_ui_settings.set_mouse_mode, operation)
+                except (OSError, ValueError) as exc:
+                    self.add_notice(alias, f"Mouse setting was not changed: {exc}")
+                    return
             self.mouse_mode = operation
             if operation == "auto":
                 self._mosh_detected = _running_under_mosh()
@@ -4104,7 +4135,8 @@ class TfrTui:
         )
         self.add_notice(
             alias,
-            f"Mouse mode: {self.mouse_mode} ({self.effective_mouse_mode}{reason})",
+            f"Mouse mode: {self.mouse_mode} ({self.effective_mouse_mode}{reason}) — "
+            "saved on this device",
         )
 
     def _set_low_bandwidth(self, enabled: bool) -> None:
@@ -4146,26 +4178,34 @@ class TfrTui:
         for view in self.views.values():
             view.display.clear_combo_effects()
 
-    def _handle_speaking_streaks_command(self, alias: str, parameters: list[str]) -> None:
+    async def _handle_speaking_streaks_command(
+        self, alias: str, parameters: list[str]
+    ) -> None:
         operation = parameters[0].casefold() if len(parameters) == 1 else ""
-        if operation in {"on", "off"}:
-            self.speaking_streaks_enabled = operation == "on"
+        if operation not in {"on", "off", "status", ""} or len(parameters) > 1:
+            self.add_notice(alias, "Usage: /streaks on|off|status")
+            return
+        try:
+            current = await self._shared_ui_setting("speaking_streaks", operation)
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            self.add_notice(alias, f"Speaking streak setting was not changed: {exc}")
+            return
+        changed = self.speaking_streaks_enabled != current["enabled"]
+        self.speaking_streaks_enabled = current["enabled"]
+        if changed:
             self._combo_tracker = ComboTracker()
             self._clear_combo_visuals()
             self._sync_animation_task(restart=True)
-        elif operation not in {"", "status"} or len(parameters) > 1:
-            self.add_notice(alias, "Usage: /streaks on|off|status")
-            return
         state = "on" if self.speaking_streaks_enabled else "off"
-        self.add_notice(alias, f"Speaking streak effects are {state}")
+        self.add_notice(
+            alias,
+            f"Speaking streak effects are {state} "
+            f"(Gateway-managed revision {current['revision']})",
+        )
 
-    def _handle_spellcheck_command(self, alias: str, parameters: list[str]) -> None:
+    async def _handle_spellcheck_command(self, alias: str, parameters: list[str]) -> None:
         operation = parameters[0].casefold() if len(parameters) == 1 else ""
-        if operation == "on":
-            self.spellcheck_enabled = True
-        elif operation == "off":
-            self.spellcheck_enabled = False
-        elif operation == "undo":
+        if operation == "undo":
             original = self._spellcheck_undo.get(alias)
             if original is None:
                 self.add_notice(alias, "No spell-check correction is available to undo")
@@ -4176,11 +4216,94 @@ class TfrTui:
             self.application.invalidate()
             self.add_notice(alias, "Restored the original pre-correction draft")
             return
-        elif operation not in {"", "status"} or len(parameters) > 1:
+        if operation not in {"on", "off", "status", ""} or len(parameters) > 1:
             self.add_notice(alias, "Usage: /spellcheck on|off|status|undo")
             return
+        try:
+            current = await self._shared_ui_setting("spellcheck", operation)
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            self.add_notice(alias, f"Spellcheck setting was not changed: {exc}")
+            return
+        self.spellcheck_enabled = current["enabled"]
         state = "on" if self.spellcheck_enabled else "off"
-        self.add_notice(alias, f"Submit-time spell checking is {state}")
+        self.add_notice(
+            alias,
+            f"Submit-time spell checking is {state} "
+            f"(Gateway-managed revision {current['revision']})",
+        )
+
+    async def _shared_ui_setting(self, setting: str, operation: str) -> dict[str, Any]:
+        if self.service_runtime is None:
+            current = (
+                self.spellcheck_enabled
+                if setting == "spellcheck"
+                else self.speaking_streaks_enabled
+            )
+            if operation in {"on", "off"}:
+                current = operation == "on"
+            return {"revision": 0, "enabled": current, "changed": operation in {"on", "off"}}
+        current = await self.service_runtime.manage_shared_ui_setting(setting, "get")
+        if operation in {"on", "off"}:
+            return await self.service_runtime.manage_shared_ui_setting(
+                setting,
+                "set",
+                enabled=operation == "on",
+                expected_revision=current["revision"],
+            )
+        return current
+
+    def apply_shared_ui_settings(self, spellcheck: bool, speaking_streaks: bool) -> None:
+        self.spellcheck_enabled = spellcheck
+        if self.speaking_streaks_enabled != speaking_streaks:
+            self.speaking_streaks_enabled = speaking_streaks
+            self._combo_tracker = ComboTracker()
+            self._clear_combo_visuals()
+            self._sync_animation_task(restart=True)
+
+    async def _handle_gag_command(self, alias: str, parameters: list[str]) -> None:
+        usage = "Usage: /gag list|add PATTERN|remove PATTERN|reset"
+        if self.service_runtime is None:
+            self.add_notice(alias, "Managed gag settings are unavailable")
+            return
+        operation = parameters[0].casefold() if parameters else ""
+        if operation == "list" and len(parameters) == 1:
+            pattern = None
+        elif operation in {"add", "remove"} and len(parameters) >= 2:
+            pattern = " ".join(parameters[1:])
+        elif operation == "reset" and len(parameters) == 1:
+            pattern = None
+        else:
+            self.add_notice(alias, usage)
+            return
+        try:
+            current = await self.service_runtime.manage_gag(alias, "list")
+            if operation == "list":
+                patterns = current["patterns"]
+                lines = [
+                    f"Gag patterns for {alias} (managed revision {current['revision']}):"
+                ]
+                lines.extend(f"  {item!r}" for item in patterns)
+                if not patterns:
+                    lines.append("  none")
+                self.add_notice(alias, "\n".join(lines))
+                return
+            result = await self.service_runtime.manage_gag(
+                alias,
+                operation,
+                pattern=pattern,
+                expected_revision=current["revision"],
+            )
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            self.add_notice(alias, f"Gag settings failed: {exc}")
+            return
+        verb = {"add": "Added", "remove": "Removed", "reset": "Reset"}[operation]
+        status = "restart required" if result.get("restart_required") else "active now"
+        self.add_notice(
+            alias,
+            f"{verb} gag pattern settings for {alias}.\n"
+            f"Saved in Gateway-managed settings (revision {result['revision']}; {status}).\n"
+            "Canonical logging and agent processing are unchanged.",
+        )
 
     def _animation_elapsed_seconds(self) -> float:
         now = self._animation_paused_at
@@ -4486,6 +4609,23 @@ async def run_client(bundle: ConfigurationBundle) -> int:
     from tfr.gateway import GatewayRuntime, scrollback_for
 
     runtime = await GatewayRuntime.from_configuration(bundle, plugin_scope="all")
+    managed_config = getattr(bundle.main, "managed_settings", None)
+    local_ui_settings = (
+        LocalUiSettingsStore(managed_config.state_directory)
+        if managed_config is not None
+        else None
+    )
+    mouse_mode = (
+        local_ui_settings.mouse_mode if local_ui_settings is not None else None
+    ) or bundle.main.ui.mouse_mode
+    shared_ui = (
+        runtime.shared_ui_settings()
+        if hasattr(runtime, "shared_ui_settings")
+        else {
+            "spellcheck_enabled": bundle.main.ui.spellcheck.enabled,
+            "speaking_streaks_enabled": bundle.main.ui.speaking_streaks.enabled,
+        }
+    )
     try:
         plugin_source_notices = getattr(runtime, "plugin_source_notices", ())
         tui = TfrTui(
@@ -4500,12 +4640,15 @@ async def run_client(bundle: ConfigurationBundle) -> int:
             pager_enabled=bundle.main.ui.pager.enabled,
             pager_overlap=bundle.main.ui.pager.overlap_lines,
             recent_input_lines=bundle.main.ui.recent_input_lines,
-            mouse_mode=bundle.main.ui.mouse_mode,
-            spellcheck=bundle.main.ui.spellcheck,
+            mouse_mode=mouse_mode,
+            local_ui_settings=local_ui_settings,
+            spellcheck=bundle.main.ui.spellcheck.model_copy(
+                update={"enabled": shared_ui["spellcheck_enabled"]}
+            ),
             typing_glow=getattr(bundle.main.ui, "typing_glow", TypingGlowConfig()),
             animations_enabled=bundle.main.ui.animations_enabled,
             low_bandwidth=bundle.main.ui.low_bandwidth,
-            speaking_streaks_enabled=bundle.main.ui.speaking_streaks.enabled,
+            speaking_streaks_enabled=shared_ui["speaking_streaks_enabled"],
             output_color=bundle.main.ui.output_color,
             theme=bundle.main.ui.theme,
             screen_clear_mode=bundle.main.ui.screen_clear.mode,

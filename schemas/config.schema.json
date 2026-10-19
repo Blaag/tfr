@@ -117,6 +117,19 @@
       "title": "LoggingConfig",
       "type": "object"
     },
+    "ManagedSettingsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "state_directory": {
+          "default": "~/.local/state/tfr/settings",
+          "format": "path",
+          "title": "State Directory",
+          "type": "string"
+        }
+      },
+      "title": "ManagedSettingsConfig",
+      "type": "object"
+    },
     "PagerConfig": {
       "additionalProperties": false,
       "properties": {
@@ -794,6 +807,9 @@
     },
     "logging": {
       "$ref": "#/$defs/LoggingConfig"
+    },
+    "managed_settings": {
+      "$ref": "#/$defs/ManagedSettingsConfig"
     },
     "plugins": {
       "$ref": "#/$defs/PluginsConfig"

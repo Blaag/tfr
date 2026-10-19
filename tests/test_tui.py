@@ -74,6 +74,7 @@ from tfr.tui import (
     _running_under_mosh,
     run_client,
 )
+from tfr.ui_settings import LocalUiSettingsStore
 from tfr.updates import BuildIdentity, UpdateChecker
 
 
@@ -95,6 +96,7 @@ def make_tui(
     character: str | None = None,
     speaking_streaks_enabled: bool = True,
     service_runtime: Any | None = None,
+    local_ui_settings: LocalUiSettingsStore | None = None,
 ) -> TfrTui:
     event_bus = EventBus()
     command_bus = CommandBus()
@@ -140,6 +142,7 @@ def make_tui(
         typing_glow=typing_glow,
         speaking_streaks_enabled=speaking_streaks_enabled,
         service_runtime=service_runtime,
+        local_ui_settings=local_ui_settings,
         input=input or DummyInput(),
         output=DummyOutput(),
     )
@@ -203,6 +206,16 @@ async def test_mouse_mode_defaults_to_tfr_and_can_be_changed(
 
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
     assert "Mouse mode: auto (terminal; mosh-server detected)" in text
+
+
+async def test_mouse_command_persists_only_in_local_ui_store(tmp_path: Path) -> None:
+    store = LocalUiSettingsStore(tmp_path / "ui")
+    tui = make_tui(local_ui_settings=store)
+
+    await tui._handle_client_command("alpha", "/mouse terminal")
+
+    assert tui.mouse_mode == "terminal"
+    assert LocalUiSettingsStore(tmp_path / "ui").mouse_mode == "terminal"
 
 
 async def test_mouse_command_rejects_invalid_mode() -> None:
@@ -911,6 +924,52 @@ async def test_web_pair_explains_disabled_gateway_configuration_before_pairing()
     assert "web_gateway.origin" in text
     assert "active config.jsonc" in text
     assert runtime.pair_called is False
+
+
+async def test_gag_commands_list_and_persist_with_gateway_revision() -> None:
+    class GagRuntime:
+        def __init__(self) -> None:
+            self.revision = 4
+            self.patterns = ["from base"]
+            self.mutations: list[tuple[str, str, str | None, int | None]] = []
+
+        async def manage_gag(
+            self,
+            world: str,
+            operation: str,
+            *,
+            pattern: str | None = None,
+            expected_revision: int | None = None,
+        ) -> dict[str, object]:
+            if operation == "list":
+                return {
+                    "revision": self.revision,
+                    "patterns": list(self.patterns),
+                    "changed": False,
+                }
+            self.mutations.append((world, operation, pattern, expected_revision))
+            self.revision += 1
+            if operation == "add" and pattern is not None:
+                self.patterns.append(pattern)
+            return {
+                "revision": self.revision,
+                "patterns": list(self.patterns),
+                "changed": True,
+                "restart_required": False,
+            }
+
+    runtime = GagRuntime()
+    tui = make_tui(service_runtime=runtime)
+
+    await tui._handle_client_command("alpha", "/gag list")
+    await tui._handle_client_command("alpha", "/gag add ^bing goes")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Gag patterns for alpha (managed revision 4)" in text
+    assert "'from base'" in text
+    assert runtime.mutations == [("alpha", "add", "^bing goes", 4)]
+    assert "Saved in Gateway-managed settings (revision 5; active now)" in text
+    assert "Canonical logging and agent processing are unchanged" in text
 
 
 async def test_bare_update_reports_the_coordinated_release_link(tmp_path: Path) -> None:
@@ -2513,6 +2572,46 @@ async def test_speaking_streak_status_and_usage() -> None:
     rendered = fragment_list_to_text(tui.active_view.output_text())
     assert "Speaking streak effects are off" in rendered
     assert "Usage: /streaks on|off|status" in rendered
+
+
+async def test_spellcheck_and_streak_commands_persist_on_gateway() -> None:
+    class SharedRuntime:
+        def __init__(self) -> None:
+            self.revision = 2
+            self.values = {"spellcheck": False, "speaking_streaks": True}
+            self.sets: list[tuple[str, bool, int]] = []
+
+        async def manage_shared_ui_setting(
+            self,
+            setting: str,
+            operation: str,
+            *,
+            enabled: bool | None = None,
+            expected_revision: int | None = None,
+        ) -> dict[str, object]:
+            if operation == "set":
+                assert enabled is not None and expected_revision == self.revision
+                self.sets.append((setting, enabled, expected_revision))
+                self.values[setting] = enabled
+                self.revision += 1
+            return {
+                "revision": self.revision,
+                "enabled": self.values[setting],
+                "changed": operation == "set",
+            }
+
+    runtime = SharedRuntime()
+    tui = make_tui(service_runtime=runtime)
+
+    await tui._handle_client_command("alpha", "/spellcheck on")
+    await tui._handle_client_command("alpha", "/streaks off")
+
+    assert runtime.sets == [
+        ("spellcheck", True, 2),
+        ("speaking_streaks", False, 3),
+    ]
+    assert tui.spellcheck_enabled is True
+    assert tui.speaking_streaks_enabled is False
 
 
 def test_firework_density_scales_with_viewport_area() -> None:

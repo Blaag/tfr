@@ -1439,6 +1439,14 @@ function handleMessage(message) {
     updateWorldHeader();
     return;
   }
+  if (message.type === "ui_settings") {
+    state.speakingStreaksEnabled = message.speaking_streaks_enabled !== false;
+    if (!state.speakingStreaksEnabled) {
+      state.comboStreaks.clear();
+      cancelComboVisuals();
+    }
+    return;
+  }
   if (message.type === "event") {
     addEvent(message);
     return;
