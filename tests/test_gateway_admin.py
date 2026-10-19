@@ -94,6 +94,25 @@ async def test_local_admin_protocol_pairs_lists_and_revokes_without_history() ->
         socket_path.parent.rmdir()
 
 
+async def test_pairing_error_explains_disabled_gateway_web_configuration() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 5})
+    runtime = AdminRuntime(history)
+    socket_path = Path("/tmp") / f"tfr-disabled-web-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    try:
+        with pytest.raises(
+            ValueError,
+            match=r"enable web_gateway\.enabled.*web_gateway\.origin.*restart the Gateway",
+        ):
+            await create_device_pairing_url(socket_path, "Phone")
+    finally:
+        await server.stop()
+        await bus.close()
+        socket_path.parent.rmdir()
+
+
 async def test_attached_native_client_manages_web_devices() -> None:
     bus = EventBus()
     history = EventHistory(bus, {"alpha": 5})
