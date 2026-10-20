@@ -422,6 +422,7 @@ def test_native_gateway_event_groups_portable_programs_by_plugin() -> None:
 
     assert message["presentations"][0]["source"] == "speaker_effects"
     assert message["presentations"][0]["presentation"]["programs"][0]["start"] == 0
+    assert message["presentation_text"] == "alpha 0"
 
 
 def test_runtime_world_descriptors_include_switch_aliases() -> None:

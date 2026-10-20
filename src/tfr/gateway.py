@@ -1447,7 +1447,12 @@ class GatewayServer:
             {"source": source, "presentation": effect_programs_as_dict(programs)}
             for source, programs in groups
         ]
-        message = event_message(cursor, event, presentations=presentations)
+        message = event_message(
+            cursor,
+            event,
+            presentations=presentations,
+            presentation_text=text,
+        )
         try:
             encode_message(message)
         except GatewayProtocolError:

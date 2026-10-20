@@ -61,19 +61,6 @@ _RESTART_CURSOR = "TFR_RESTART_CURSOR"
 _RESTART_WORLD = "TFR_RESTART_WORLD"
 
 
-def portable_plugin_migration_warning(plugins: tuple[str, ...]) -> str | None:
-    if not plugins:
-        return None
-    listed = ", ".join(plugins)
-    return (
-        f"Gateway configuration migration required for these portable plugins only: {listed}. "
-        "Copy only the identified plugins' enabled entries and plugins.config sections to "
-        "the Gateway config.jsonc; do not move all local plugins. Local settings still "
-        "override Gateway presentations in this release, but an upcoming release will "
-        "ignore them for remote sessions. Client-only plugins remain local."
-    )
-
-
 _UPDATE_RESTART = "TFR_UPDATE_RESTART"
 
 
@@ -1512,21 +1499,6 @@ async def run_gateway_ui(
     runtime.notify = lambda text: tui.add_notice(tui.active_alias, text)
     if hasattr(tui, "apply_shared_ui_settings"):
         client.ui_settings_handler = tui.apply_shared_ui_settings
-    configured_portable_plugins = getattr(plugins, "configured_portable_plugins", lambda: ())
-    local_portable_plugins = configured_portable_plugins()
-    warning = portable_plugin_migration_warning(local_portable_plugins)
-    if warning is not None:
-        listed = ", ".join(local_portable_plugins)
-        tui.queue_startup_notice(tui.active_alias, warning)
-        plugins.diagnostics.record(
-            severity="warning",
-            component="config",
-            code="local_portable_plugins_deprecated",
-            message=warning[:240],
-            operation=listed[:100],
-            client="native-ui",
-        )
-
     def restart_after_update() -> None:
         tui.update_restart_requested = True
         if tui.application.is_running:
