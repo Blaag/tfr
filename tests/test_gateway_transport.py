@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from tfr.gateway_transport import load_gateway_token, validate_tcp_endpoint
+from tfr.gateway_transport import (
+    load_gateway_token,
+    normalize_web_gateway_target,
+    validate_tcp_endpoint,
+)
 
 
 def test_gateway_token_file_must_be_private_and_long_enough(tmp_path: Path) -> None:
@@ -50,3 +54,33 @@ def test_gateway_token_rejects_non_ascii_text(tmp_path: Path) -> None:
 def test_gateway_tcp_endpoint_rejects_wildcard_or_empty_hosts(host: str) -> None:
     with pytest.raises(ValueError):
         validate_tcp_endpoint(host, 7347)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("bsd.shutdown.com:27047", "bsd.shutdown.com:27047"),
+        ("  bsd.shutdown.com:27047  ", "bsd.shutdown.com:27047"),
+        ("52.53.4.93:27047", "52.53.4.93:27047"),
+    ],
+)
+def test_normalize_web_gateway_target_accepts_host_port(value: str, expected: str) -> None:
+    assert normalize_web_gateway_target(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "bsd.shutdown.com",  # no port
+        "https://bsd.shutdown.com:27047",  # scheme
+        "user@bsd.shutdown.com:27047",  # credentials
+        "bsd.shutdown.com:27047/path",  # path
+        "0.0.0.0:7347",  # wildcard
+        "[2001:db8::1]:27047",  # IPv6 literals are not supported
+        "bsd.shutdown.com:0",  # port out of range
+        "bsd.shutdown.com:99999",  # port out of range
+        "bsd.shutdown.com:abc",  # non-numeric port
+    ],
+)
+def test_normalize_web_gateway_target_rejects_invalid(value: str) -> None:
+    assert normalize_web_gateway_target(value) is None

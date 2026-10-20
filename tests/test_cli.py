@@ -157,6 +157,94 @@ def test_pair_mode_requests_a_device_link_without_loading_config(
     assert capsys.readouterr().out == "https://gateway.example.ts.net/#pair=secret\n"
 
 
+def test_pair_mode_gateway_option_accepts_matching_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    socket_path = tmp_path / "gateway.sock"
+
+    async def fake_pair(_path: Path | None, _label: str) -> str:
+        return "https://bsd.shutdown.com:27047/#pair=secret"
+
+    monkeypatch.setattr("tfr.gateway_admin.create_device_pairing_url", fake_pair)
+
+    result = run(
+        [
+            "pair",
+            "--socket",
+            str(socket_path),
+            "--device-name",
+            "My iPhone",
+            "--gateway",
+            "bsd.shutdown.com:27047",
+        ]
+    )
+
+    assert result == 0
+    assert capsys.readouterr().out == "https://bsd.shutdown.com:27047/#pair=secret\n"
+
+
+def test_pair_mode_gateway_option_rejects_mismatched_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    socket_path = tmp_path / "gateway.sock"
+
+    async def fake_pair(_path: Path | None, _label: str) -> str:
+        return "https://gateway.example.ts.net/#pair=secret"
+
+    monkeypatch.setattr("tfr.gateway_admin.create_device_pairing_url", fake_pair)
+
+    result = run(
+        [
+            "pair",
+            "--socket",
+            str(socket_path),
+            "--device-name",
+            "My iPhone",
+            "--gateway",
+            "bsd.shutdown.com:27047",
+        ]
+    )
+
+    assert result == 2
+    assert "direct origin is https://gateway.example.ts.net" in capsys.readouterr().err
+
+
+def test_pair_mode_gateway_option_rejects_invalid_address(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    socket_path = tmp_path / "gateway.sock"
+
+    result = run(
+        [
+            "pair",
+            "--socket",
+            str(socket_path),
+            "--device-name",
+            "My iPhone",
+            "--gateway",
+            "0.0.0.0:7347",
+        ]
+    )
+
+    assert result == 2
+    assert "invalid --gateway address" in capsys.readouterr().err
+
+
+def test_gateway_option_requires_pair_mode(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = run(["devices", "--gateway", "bsd.shutdown.com:27047"])
+
+    assert result == 2
+    assert "device administration accepts only" in capsys.readouterr().err
+
+
 def test_devices_mode_lists_paired_devices(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

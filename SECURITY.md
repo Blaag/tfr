@@ -70,9 +70,10 @@ detached when their event queue fills and can reconnect for retained backfill.
 
 ### Web Gateway
 
-The optional mobile PWA is served by a separate HTTP/WebSocket listener that is
-restricted to `127.0.0.1` or `::1`. Deploy it behind private Tailscale Serve,
-never Tailscale Funnel, and configure one exact HTTPS origin. The service rejects
+The optional mobile PWA is served by a separate HTTP/WebSocket listener. In the
+default `tailscale` transport it is restricted to `127.0.0.1` or `::1`: deploy it
+behind private Tailscale Serve, never Tailscale Funnel, and configure one exact
+HTTPS origin. The service rejects
 unexpected Host and Origin values and does not enable CORS. Safari may omit
 `Origin` or send the opaque value `null` from the top-level pairing form; that
 endpoint accepts those values but rejects any non-matching origin and still
@@ -81,6 +82,24 @@ remain a second boundary rather than replacing application authentication. TFR
 requires the `Tailscale-User-Login` header injected by Serve and binds each
 paired credential to that identity. Funnel traffic does not carry the identity
 header and is rejected.
+
+The `direct` transport is for a Gateway with a public hostname that does not use
+Tailscale. The Gateway terminates TLS itself with its configured certificate.
+The socket binds `listen_host` — a real local interface (such as a private VPC
+IP) or a wildcard — while `direct_host`/`direct_port` is only the browser-facing
+origin and must be a specific hostname, never a wildcard. The public/NAT address
+a browser reaches (for example an EC2 instance's public IP) is deliberately not
+the bind address, since it is not assigned to any local interface. TLS is
+mandatory, which keeps the pairing code and the `Secure`, `HttpOnly`,
+`__Host-`-prefixed session cookie confidential over the public network. Because
+there is no Serve identity header, direct mode binds each credential to a fixed
+sentinel identity and relies on possession of the per-device bearer credential
+over authenticated TLS — the same trust model as the Gateway's
+token-authenticated remote UI. Pairing attempts are rate-limited by client IP
+rather than by identity. There is no Tailscale ACL in front of the listener, so
+the host or cloud firewall restricting inbound access to `direct_port` is the
+outer boundary and should be scoped to the intended devices. The TLS certificate
+must cover `direct_host` or the browser will refuse the connection.
 
 Mobile devices pair through a high-entropy, single-credential, ten-minute code created
 over the owner-only Gateway Unix socket. Concurrent or lost-response retries from
