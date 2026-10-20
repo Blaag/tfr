@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   createPairingSubmission,
   pairingCodeFromLink,
+  shouldShowInstallOnboarding,
   submitPairing,
 } from "../src/tfr/web/pairing.mjs";
 
@@ -96,4 +97,11 @@ test("reset invalidates a delayed pairing navigation", () => {
   scheduled[0]();
 
   assert.deepEqual(submitted, ["current-secret"]);
+});
+
+test("successful pairing always offers installation in an iOS browser", () => {
+  assert.equal(shouldShowInstallOnboarding("complete", "browser"), true);
+  assert.equal(shouldShowInstallOnboarding("complete", "installed"), false);
+  assert.equal(shouldShowInstallOnboarding("complete", "other"), false);
+  assert.equal(shouldShowInstallOnboarding("invalid", "browser"), false);
 });

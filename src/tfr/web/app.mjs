@@ -1,4 +1,9 @@
-import { createPairingSubmission, pairingCodeFromLink, submitPairing } from "./pairing.mjs";
+import {
+  createPairingSubmission,
+  pairingCodeFromLink,
+  shouldShowInstallOnboarding,
+  submitPairing,
+} from "./pairing.mjs";
 import { isMultilineWorldCommand, normalizeWorldCommand } from "./command.mjs";
 import {
   fireworkParticleBudget,
@@ -95,6 +100,8 @@ const elements = {
   lineWrap: document.querySelector("#line-wrap"),
   spellingSuggestions: document.querySelector("#spelling-suggestions"),
   unpairDevice: document.querySelector("#unpair-device"),
+  installOnboarding: document.querySelector("#install-onboarding"),
+  continueInBrowser: document.querySelector("#continue-in-browser"),
   uninstallDevice: document.querySelector("#uninstall-device"),
   uninstallDialog: document.querySelector("#uninstall-dialog"),
   updateNotice: document.querySelector("#update-notice"),
@@ -1831,6 +1838,14 @@ async function start() {
     if (redirectedSession === "paired") {
       clearPairingState();
       elements.pairing.hidden = true;
+      if (shouldShowInstallOnboarding(
+        pairingResult,
+        document.documentElement.dataset.iosInstallMode,
+      )) {
+        elements.installOnboarding.hidden = false;
+        elements.console.hidden = true;
+        return;
+      }
       elements.console.hidden = false;
       connect();
       return;
@@ -1960,6 +1975,11 @@ elements.pairingForm.addEventListener("submit", (event) => {
   postPairing(code);
 });
 elements.unpairDevice.addEventListener("click", unpairDevice);
+elements.continueInBrowser.addEventListener("click", () => {
+  elements.installOnboarding.hidden = true;
+  elements.console.hidden = false;
+  connect();
+});
 elements.uninstallDevice.addEventListener("click", uninstallDevice);
 elements.composer.addEventListener("submit", sendCommand);
 elements.sendButton.addEventListener(
