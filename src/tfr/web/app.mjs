@@ -4,7 +4,11 @@ import {
   shouldShowInstallOnboarding,
   submitPairing,
 } from "./pairing.mjs";
-import { isMultilineWorldCommand, normalizeWorldCommand } from "./command.mjs";
+import {
+  commandWithAutomaticSay,
+  isMultilineWorldCommand,
+  normalizeWorldCommand,
+} from "./command.mjs";
 import {
   fireworkParticleBudget,
   observeCombo,
@@ -31,6 +35,7 @@ import {
 } from "./history-notice.mjs";
 import { linkParts } from "./linkify.mjs";
 import { motionAllowsAnimation } from "./motion.mjs";
+import { preparePastePreview, validatedPasteUpdate } from "./paste.mjs";
 import {
   animatePresentationElement,
   splitPresentationRuns,
@@ -99,6 +104,7 @@ const elements = {
   motionPreference: document.querySelector("#motion-preference"),
   lineWrap: document.querySelector("#line-wrap"),
   spellingSuggestions: document.querySelector("#spelling-suggestions"),
+  automaticSay: document.querySelector("#automatic-say"),
   unpairDevice: document.querySelector("#unpair-device"),
   installOnboarding: document.querySelector("#install-onboarding"),
   continueInBrowser: document.querySelector("#continue-in-browser"),
@@ -127,6 +133,15 @@ const elements = {
   diagnosticsCopy: document.querySelector("#diagnostics-copy"),
   diagnosticsClear: document.querySelector("#diagnostics-clear"),
   diagnosticsClose: document.querySelector("#diagnostics-close"),
+  pasteDialog: document.querySelector("#paste-dialog"),
+  pasteDialogWorld: document.querySelector("#paste-dialog-world"),
+  pasteSummary: document.querySelector("#paste-summary"),
+  pastePreview: document.querySelector("#paste-preview"),
+  pastePreviewNote: document.querySelector("#paste-preview-note"),
+  pasteStatus: document.querySelector("#paste-status"),
+  pasteCancel: document.querySelector("#paste-cancel"),
+  pasteStop: document.querySelector("#paste-stop"),
+  pasteConfirm: document.querySelector("#paste-confirm"),
 };
 
 const state = {
@@ -153,6 +168,7 @@ const state = {
   comboStreaks: new Map(),
   speakingStreaksEnabled: true,
   effectDemos: [],
+  paste: null,
 };
 const pairingSubmission = createPairingSubmission(
   (code) => submitPairing(document, code),
@@ -691,7 +707,10 @@ function updateHistoryNotice() {
 
 scheduleViewportUpdate();
 window.addEventListener("resize", scheduleViewportUpdate);
-window.addEventListener("orientationchange", scheduleViewportUpdate);
+window.addEventListener("orientationchange", () => {
+  scheduleViewportUpdate();
+  window.setTimeout(scheduleViewportUpdate, 750);
+});
 window.visualViewport?.addEventListener("resize", scheduleViewportUpdate);
 window.visualViewport?.addEventListener("scroll", scheduleViewportUpdate);
 
@@ -790,10 +809,24 @@ function applySpellingSuggestions(enabled) {
   }
 }
 
+function automaticSayPreference() {
+  return readStorage("tfr.automaticSay") === "on";
+}
+
+function applyAutomaticSay(enabled) {
+  elements.automaticSay.checked = enabled;
+  if (enabled) {
+    safeStore("tfr.automaticSay", "on");
+  } else {
+    safeRemove("tfr.automaticSay");
+  }
+}
+
 applyTextSize(textSizePreference());
 applyMotionPreference(readStorage("tfr.motion") || "system");
 applyLineWrap(lineWrapPreference());
 applySpellingSuggestions(spellingSuggestionsPreference());
+applyAutomaticSay(automaticSayPreference());
 
 function readSessionStorage(key) {
   try {
@@ -867,12 +900,137 @@ function currentWorld() {
   return state.worlds.find((world) => world.world === state.selectedWorld) || null;
 }
 
+function renderPasteDialog() {
+  const paste = state.paste;
+  if (!paste) return;
+  const { preview } = paste;
+  elements.pasteDialogWorld.textContent = preview.world;
+  elements.pasteSummary.textContent = `${preview.lineCount} line${preview.lineCount === 1 ? "" : "s"} · ${preview.byteCount} UTF-8 bytes`;
+  elements.pastePreview.textContent = preview.preview;
+  elements.pastePreviewNote.hidden = !preview.previewTruncated;
+  elements.pasteCancel.hidden = paste.status === "active" || paste.status === "stopping";
+  elements.pasteStop.hidden = paste.status !== "active";
+  elements.pasteStop.disabled = paste.status !== "active";
+  elements.pasteConfirm.hidden = ["active", "stopping", "complete"].includes(paste.status);
+  elements.pasteConfirm.textContent = ["cancelled", "interrupted", "rejected"].includes(paste.status)
+    ? "Retry transfer"
+    : "Send pasted lines";
+  if (paste.status === "preview") {
+    elements.pasteStatus.textContent = "Each line will be sent as literal output, not executed as a pasted command.";
+  } else if (paste.status === "active") {
+    elements.pasteStatus.textContent = `Sending line ${Math.min(paste.sentLines + 1, paste.totalLines)} of ${paste.totalLines}.`;
+  } else if (paste.status === "stopping") {
+    elements.pasteStatus.textContent = `Stopping after ${paste.sentLines} accepted line${paste.sentLines === 1 ? "" : "s"}…`;
+  } else if (paste.status === "complete") {
+    elements.pasteStatus.textContent = `The Gateway accepted all ${paste.totalLines} lines.`;
+    elements.pasteCancel.hidden = false;
+    elements.pasteCancel.textContent = "Close";
+  } else if (paste.status === "rejected") {
+    elements.pasteStatus.textContent = paste.message || "The Gateway rejected this transfer.";
+  } else {
+    elements.pasteStatus.textContent = `${paste.sentLines} of ${paste.totalLines || preview.lineCount} lines were accepted before the transfer stopped. Retrying may duplicate them.`;
+  }
+}
+
+function openPastePreview(text) {
+  const world = currentWorld();
+  if (!world || state.paste?.status === "active" || state.paste?.status === "stopping") return;
+  try {
+    state.paste = {
+      preview: preparePastePreview(text, world.world),
+      status: "preview",
+      requestId: null,
+      sentLines: 0,
+      totalLines: 0,
+    };
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : "Pasted text is invalid", 4200);
+    return;
+  }
+  elements.commandInput.blur();
+  elements.pasteCancel.textContent = "Cancel";
+  renderPasteDialog();
+  if (!elements.pasteDialog.open) elements.pasteDialog.showModal();
+}
+
+function startPasteTransfer() {
+  const paste = state.paste;
+  if (!paste || ["active", "stopping", "complete"].includes(paste.status)) return;
+  if (!connection.ready || !connection.socket || connection.socket.readyState !== WebSocket.OPEN) {
+    paste.status = "interrupted";
+    paste.message = "Gateway is not ready.";
+    renderPasteDialog();
+    return;
+  }
+  paste.requestId = crypto.randomUUID();
+  paste.status = "active";
+  paste.sentLines = 0;
+  paste.totalLines = paste.preview.lineCount;
+  paste.message = null;
+  updateWorldHeader();
+  renderPasteDialog();
+  try {
+    connection.socket.send(JSON.stringify({
+      type: "paste",
+      request_id: paste.requestId,
+      world: paste.preview.world,
+      text: paste.preview.text,
+    }));
+  } catch {
+    paste.status = "interrupted";
+    updateWorldHeader();
+    renderPasteDialog();
+  }
+}
+
+function stopPasteTransfer() {
+  const paste = state.paste;
+  if (!paste || paste.status !== "active" || !connection.socket) return;
+  paste.status = "stopping";
+  renderPasteDialog();
+  try {
+    connection.socket.send(JSON.stringify({ type: "cancel_paste", request_id: paste.requestId }));
+  } catch {
+    paste.status = "interrupted";
+    updateWorldHeader();
+    renderPasteDialog();
+  }
+}
+
+function handlePasteUpdate(message) {
+  const paste = state.paste;
+  if (!paste?.requestId) return false;
+  const update = validatedPasteUpdate(message, paste.requestId);
+  if (!update) return false;
+  paste.sentLines = update.sentLines;
+  paste.totalLines = update.totalLines;
+  if (update.type === "paste_complete") {
+    paste.status = "complete";
+  } else if (update.type === "paste_cancelled") {
+    paste.status = update.reason === "disconnected" ? "interrupted" : "cancelled";
+  } else {
+    paste.status = "active";
+  }
+  updateWorldHeader();
+  renderPasteDialog();
+  return true;
+}
+
+function interruptPasteTransfer() {
+  const paste = state.paste;
+  if (!paste || !["active", "stopping"].includes(paste.status)) return;
+  paste.status = "interrupted";
+  updateWorldHeader();
+  renderPasteDialog();
+}
+
 function updateWorldHeader() {
   const world = currentWorld();
   elements.worldName.textContent = world?.world || "Select world";
   elements.worldSignal.className = `world-signal ${world?.state || ""}`.trim();
-  elements.commandInput.disabled = !world || !connection.ready;
-  elements.sendButton.disabled = !world || !connection.ready;
+  const transferActive = state.paste?.status === "active";
+  elements.commandInput.disabled = !world || !connection.ready || transferActive;
+  elements.sendButton.disabled = !world || !connection.ready || transferActive;
   elements.historyButton.disabled = !world;
 }
 
@@ -1414,6 +1572,7 @@ function discardEventsBeforeSnapshotGap(world) {
 
 function handleMessage(message) {
   if (!message || message.protocol !== 1 || typeof message.type !== "string") return;
+  if (message.type.startsWith("paste_") && handlePasteUpdate(message)) return;
   if (message.type === "hello") {
     connection.ready = false;
     state.historyReset = message.history_reset === true;
@@ -1497,6 +1656,13 @@ function handleMessage(message) {
     return;
   }
   if (message.type === "ack") {
+    if (state.paste?.requestId === message.request_id && message.ok !== true) {
+      state.paste.status = "rejected";
+      state.paste.message = message.error || "The Gateway rejected this transfer.";
+      updateWorldHeader();
+      renderPasteDialog();
+      return;
+    }
     if (message.request_id === state.heartbeatRequestId) {
       clearHeartbeatTimeout();
       scheduleHeartbeat();
@@ -1509,9 +1675,9 @@ function handleMessage(message) {
       if (pending) {
         state.drafts.set(
           pending.world,
-          pending.text.slice(0, MAX_STORED_COMMAND_CHARACTERS),
+          pending.draft.slice(0, MAX_STORED_COMMAND_CHARACTERS),
         );
-        if (pending.world === state.selectedWorld) elements.commandInput.value = pending.text;
+        if (pending.world === state.selectedWorld) elements.commandInput.value = pending.draft;
       }
     }
     return;
@@ -1609,14 +1775,15 @@ function connect() {
       operation: "websocket",
     }));
     stopHeartbeat();
+    interruptPasteTransfer();
     updateWorldHeader();
     if (state.pending.size > 0) {
       for (const pending of state.pending.values()) {
         state.drafts.set(
           pending.world,
-          pending.text.slice(0, MAX_STORED_COMMAND_CHARACTERS),
+          pending.draft.slice(0, MAX_STORED_COMMAND_CHARACTERS),
         );
-        if (pending.world === state.selectedWorld) elements.commandInput.value = pending.text;
+        if (pending.world === state.selectedWorld) elements.commandInput.value = pending.draft;
       }
       state.pending.clear();
       showToast("Command status unknown. Check the transcript before resending.", 6000);
@@ -1655,7 +1822,8 @@ function sendCommand(event) {
   event.preventDefault();
   acknowledgeInteraction(elements.sendButton);
   const world = currentWorld();
-  const text = normalizeWorldCommand(elements.commandInput.value);
+  const draft = normalizeWorldCommand(elements.commandInput.value);
+  const text = commandWithAutomaticSay(draft, automaticSayPreference());
   if (
     !world ||
     !connection.ready ||
@@ -1674,7 +1842,7 @@ function sendCommand(event) {
     return;
   }
   const requestId = crypto.randomUUID();
-  state.pending.set(requestId, { world: world.world, text });
+  state.pending.set(requestId, { world: world.world, text, draft });
   try {
     connection.socket.send(
       JSON.stringify({ type: "command", request_id: requestId, world: world.world, text }),
@@ -2017,7 +2185,7 @@ elements.commandInput.addEventListener("paste", (event) => {
   const text = event.clipboardData?.getData("text/plain") || "";
   if (!isMultilineWorldCommand(text)) return;
   event.preventDefault();
-  showToast("Multiline paste blocked. Paste one command at a time.");
+  openPastePreview(text);
 });
 elements.commandInput.addEventListener("focus", () => {
   preserveLiveDuringViewportChange = readingState().atLive;
@@ -2110,6 +2278,25 @@ elements.lineWrap.addEventListener("change", () => {
 });
 elements.spellingSuggestions.addEventListener("change", () => {
   applySpellingSuggestions(elements.spellingSuggestions.checked);
+});
+elements.automaticSay.addEventListener("change", () => {
+  applyAutomaticSay(elements.automaticSay.checked);
+});
+elements.pasteConfirm.addEventListener("click", startPasteTransfer);
+elements.pasteStop.addEventListener("click", stopPasteTransfer);
+elements.pasteCancel.addEventListener("click", () => {
+  if (!state.paste || ["active", "stopping"].includes(state.paste.status)) return;
+  elements.pasteDialog.close();
+});
+elements.pasteDialog.addEventListener("cancel", (event) => {
+  if (state.paste && ["active", "stopping"].includes(state.paste.status)) {
+    event.preventDefault();
+    stopPasteTransfer();
+  }
+});
+elements.pasteDialog.addEventListener("close", () => {
+  if (!state.paste || !["active", "stopping"].includes(state.paste.status)) state.paste = null;
+  updateWorldHeader();
 });
 elements.applyUpdate.addEventListener("click", () => {
   const worker = state.serviceWorkerRegistration?.waiting;

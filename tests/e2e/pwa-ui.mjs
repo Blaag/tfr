@@ -317,6 +317,28 @@ await context.addInitScript(() => {
 
     send(serialized) {
       const value = JSON.parse(serialized);
+      if (value.type === "paste") {
+        window.__pasteRequests = [...(window.__pasteRequests || []), value];
+        const lines = value.text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+        if (lines.at(-1) === "") lines.pop();
+        this.message({ type: "paste_started", protocol: 1, request_id: value.request_id, total_lines: lines.length });
+        lines.forEach((line, index) => this.message({
+          type: "paste_progress",
+          protocol: 1,
+          request_id: value.request_id,
+          sent_lines: index + 1,
+          total_lines: lines.length,
+        }));
+        this.message({
+          type: "paste_complete",
+          protocol: 1,
+          request_id: value.request_id,
+          sent_lines: lines.length,
+          total_lines: lines.length,
+        });
+        return;
+      }
+      if (value.type !== "command" && value.type !== "ping") return;
       this.message({ type: "ack", protocol: 1, request_id: value.request_id, ok: true });
       if (value.type !== "command") return;
       window.__sentCommands.push(value);
@@ -478,6 +500,13 @@ try {
       notice,
     );
   }
+  const streakPosition = await page.evaluate(() => {
+    const notice = document.querySelector("#combo-notice").getBoundingClientRect();
+    const transcript = document.querySelector("#transcript").getBoundingClientRect();
+    return { noticeTop: notice.top, transcriptTop: transcript.top, transcriptBottom: transcript.bottom };
+  });
+  assert.ok(streakPosition.noticeTop >= streakPosition.transcriptTop);
+  assert.ok(streakPosition.noticeTop < streakPosition.transcriptTop + (streakPosition.transcriptBottom - streakPosition.transcriptTop) / 2);
   const sentBeforeLab = await page.evaluate(() => window.__sentCommands.length);
   await page.locator("#settings-button").click();
   await page.locator("#effects-lab-button").click();
@@ -538,8 +567,21 @@ try {
     await page.evaluate(() => localStorage.getItem("tfr.spellingSuggestions")),
     "off",
   );
+  await page.locator("#automatic-say").check();
+  assert.equal(await page.evaluate(() => localStorage.getItem("tfr.automaticSay")), "on");
   await page.locator("#settings-dialog .close-button").click();
 
+  await page.locator("#command-input").fill("I love my cat");
+  await page.locator("#command-input").press("Enter");
+  assert.equal(await page.evaluate(() => window.__sentCommands.at(-1).text), "say I love my cat");
+  await page.locator("#settings-button").click();
+  await page.locator("#automatic-say").uncheck();
+  await page.locator("#settings-dialog .close-button").click();
+
+  const portraitFonts = await page.evaluate(() => ({
+    transcript: getComputedStyle(document.querySelector(".event-text")).fontSize,
+    input: getComputedStyle(document.querySelector("#command-input")).fontSize,
+  }));
   await page.setViewportSize({ width: 390, height: 520 });
   await page.locator("#command-input").focus();
   await page.waitForTimeout(350);
@@ -556,6 +598,10 @@ try {
   );
 
   await page.setViewportSize({ width: 390, height: 844 });
+  assert.deepEqual(await page.evaluate(() => ({
+    transcript: getComputedStyle(document.querySelector(".event-text")).fontSize,
+    input: getComputedStyle(document.querySelector("#command-input")).fontSize,
+  })), portraitFonts);
   await page.locator("#command-input").fill("“test");
   await page.locator("#command-input").press("Enter");
   assert.equal(await page.evaluate(() => window.__sentCommands.at(-1).text), '"test');
@@ -576,7 +622,19 @@ try {
     input.dispatchEvent(event);
   });
   assert.equal(await page.locator("#command-input").inputValue(), "draft");
-  assert.match(await page.locator("#toast").innerText(), /Multiline paste blocked/);
+  await page.locator("#paste-dialog[open]").waitFor();
+  assert.match(await page.locator("#paste-summary").innerText(), /2 lines/);
+  assert.equal(await page.locator("#paste-preview").textContent(), "one\ntwo");
+  await page.locator("#paste-confirm").click();
+  await page.waitForFunction(() => document.querySelector("#paste-status")?.textContent.includes("accepted all 2"));
+  assert.deepEqual(
+    await page.evaluate(() => ({
+      world: window.__pasteRequests.at(-1).world,
+      text: window.__pasteRequests.at(-1).text,
+    })),
+    { world: "dev-local", text: "one\ntwo" },
+  );
+  await page.locator("#paste-cancel").click();
 
   const unpairedContext = await browser.newContext({
     viewport: { width: 390, height: 844 },

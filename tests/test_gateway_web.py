@@ -124,6 +124,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
         "linkify.mjs",
         "motion.mjs",
         "pairing.mjs",
+        "paste.mjs",
         "presentation.mjs",
         "repair.css",
         "repair.html",
@@ -142,7 +143,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v58";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v59";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
 
 
@@ -356,6 +357,17 @@ def test_mobile_keyboard_preserves_live_edge_and_compacts_landscape() -> None:
     assert "@media (orientation: landscape), (max-height: 500px)" in styles
     assert ":root[data-input-focused] .topbar" in styles
     assert ":root[data-input-focused] .history-button" in styles
+    assert "-webkit-text-size-adjust: 100%;" in styles
+
+
+def test_pwa_locks_page_zoom_but_retains_transcript_size_controls() -> None:
+    asset_directory = files("tfr").joinpath("web")
+    page = asset_directory.joinpath("index.html").read_text(encoding="utf-8")
+    styles = asset_directory.joinpath("styles.css").read_text(encoding="utf-8")
+
+    assert "maximum-scale=1, user-scalable=no" in page
+    assert "pinch-zoom" not in styles
+    assert 'id="text-larger"' in page
 
 
 def test_pwa_records_bounded_responsiveness_diagnostics() -> None:
@@ -368,7 +380,7 @@ def test_pwa_records_bounded_responsiveness_diagnostics() -> None:
     assert 'component: "responsiveness"' in application
 
 
-def test_mobile_multiline_paste_is_blocked_before_command_submission() -> None:
+def test_mobile_multiline_paste_opens_a_deliberate_preview() -> None:
     application = files("tfr").joinpath("web", "app.mjs").read_text(encoding="utf-8")
 
     start = application.index('elements.commandInput.addEventListener("paste"')
@@ -377,7 +389,7 @@ def test_mobile_multiline_paste_is_blocked_before_command_submission() -> None:
     assert 'event.clipboardData?.getData("text/plain")' in paste_handler
     assert "isMultilineWorldCommand(text)" in paste_handler
     assert "event.preventDefault();" in paste_handler
-    assert "Multiline paste blocked" in paste_handler
+    assert "openPastePreview(text);" in paste_handler
 
 
 def test_live_transcript_rendering_is_batched_and_bounded() -> None:
@@ -441,6 +453,10 @@ class FakeRuntime:
         self.agent_worlds = {"agent-world"}
         self.command_error: Exception | None = None
         self.connection_generation = 1
+        self.world_state = "connected"
+        self.server = "bare"
+        self.encoding = "utf-8"
+        self.command_details: list[dict[str, object]] = []
         self.plugins = PluginManager(
             event_bus=EventBus(),
             command_bus=CommandBus(),
@@ -452,10 +468,11 @@ class FakeRuntime:
         return [
             {
                 "world": "alpha",
-                "state": "connected",
+                "state": self.world_state,
                 "aliases": ["a"],
                 "connection_generation": self.connection_generation,
-                "server": "bare",
+                "server": self.server,
+                "encoding": self.encoding,
                 "character": "Hamilton",
             },
             {
@@ -492,6 +509,7 @@ class FakeRuntime:
         text: str,
         client_id: str,
         request_id: UUID,
+        **details: object,
     ) -> None:
         if self.command_error is not None:
             raise self.command_error
@@ -500,6 +518,7 @@ class FakeRuntime:
         if not text or any(character in text for character in "\r\n\0"):
             raise ValueError("invalid command")
         self.commands.append((world, text, client_id, request_id))
+        self.command_details.append(details)
 
 
 class StubManagedWebServer:
@@ -1594,6 +1613,108 @@ async def test_websocket_snapshot_commands_and_idempotency(tmp_path: Path) -> No
         assert "not authorized" in unauthorized["error"]
         await socket.close()
     finally:
+        await client.close()
+        await history.stop()
+        await bus.close()
+
+
+async def test_websocket_paste_escapes_paces_and_reports_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gateway_web, "WEB_PASTE_DELAY_SECONDS", 0)
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    runtime.server = "tinymux"
+    _gateway, client, token = await paired_client(tmp_path, runtime)
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    socket = await client.ws_connect("/ws", headers=headers)
+    try:
+        assert (await socket.receive_json())["type"] == "hello"
+        assert (await socket.receive_json())["type"] == "ready"
+        request_id = str(uuid4())
+        source = "first line\r\n hostile;[x]{y}\\%#,(z)\t☃\n"
+        await socket.send_json(
+            {"type": "paste", "request_id": request_id, "world": "alpha", "text": source}
+        )
+        messages = [await socket.receive_json() for _ in range(4)]
+
+        assert [message["type"] for message in messages] == [
+            "paste_started",
+            "paste_progress",
+            "paste_progress",
+            "paste_complete",
+        ]
+        assert [message.get("sent_lines") for message in messages] == [None, 1, 2, 2]
+        assert [command[1] for command in runtime.commands] == [
+            "@emit first%bline",
+            "@emit %bhostile\\;\\[x\\]\\{y\\}\\\\\\%\\#\\,\\(z\\)%t☃",
+        ]
+        assert runtime.command_details[0]["expected_connection_generation"] == 1
+        assert runtime.command_details[1]["metadata"] == {
+            "paste_request_id": request_id,
+            "paste_line": 2,
+            "paste_total_lines": 2,
+        }
+        await socket.send_json(
+            {"type": "command", "request_id": request_id, "world": "alpha", "text": "look"}
+        )
+        reused = await socket.receive_json()
+        assert reused["ok"] is False
+        assert "paste transfer" in reused["error"]
+    finally:
+        await socket.close()
+        await client.close()
+        await history.stop()
+        await bus.close()
+
+
+async def test_websocket_paste_cancels_and_rejects_concurrent_transfer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gateway_web, "WEB_PASTE_DELAY_SECONDS", 10)
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    _gateway, client, token = await paired_client(tmp_path, runtime)
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    socket = await client.ws_connect("/ws", headers=headers)
+    try:
+        assert (await socket.receive_json())["type"] == "hello"
+        assert (await socket.receive_json())["type"] == "ready"
+        request_id = str(uuid4())
+        await socket.send_json(
+            {"type": "paste", "request_id": request_id, "world": "alpha", "text": "one\ntwo"}
+        )
+        assert (await socket.receive_json())["type"] == "paste_started"
+        assert (await socket.receive_json())["sent_lines"] == 1
+
+        other_id = str(uuid4())
+        await socket.send_json(
+            {"type": "paste", "request_id": other_id, "world": "alpha", "text": "other\nlines"}
+        )
+        rejected = await socket.receive_json()
+        assert rejected["request_id"] == other_id
+        assert rejected["ok"] is False
+        assert "already active" in rejected["error"]
+
+        await socket.send_json({"type": "cancel_paste", "request_id": request_id})
+        cancelled = await socket.receive_json()
+        assert cancelled == {
+            "type": "paste_cancelled",
+            "protocol": 1,
+            "request_id": request_id,
+            "sent_lines": 1,
+            "total_lines": 2,
+            "reason": "user",
+        }
+        assert len(runtime.commands) == 1
+    finally:
+        await socket.close()
         await client.close()
         await history.stop()
         await bus.close()

@@ -22,6 +22,8 @@
   background: var(--ink);
   color: var(--text);
   font-synthesis: none;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 * {
@@ -398,14 +400,22 @@ a:focus-visible {
   scroll-behavior: auto;
   scrollbar-color: var(--line-bright) transparent;
   -webkit-overflow-scrolling: touch;
-  touch-action: pan-y pinch-zoom;
+  touch-action: pan-y;
+}
+
+.transcript-overlay {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  height: 0;
+  pointer-events: none;
 }
 
 .combo-notice {
-  position: fixed;
-  z-index: 30;
+  position: absolute;
+  z-index: 1;
+  top: 0.8rem;
   right: 1rem;
-  bottom: calc(var(--safe-bottom) + 4.8rem);
   left: 1rem;
   pointer-events: none;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -460,7 +470,7 @@ a:focus-visible {
   border: 1px solid var(--line);
   background: #07100f;
 }
-.effects-lab-stage .combo-notice { position: absolute; bottom: 0.75rem; }
+.effects-lab-stage .combo-notice { position: absolute; top: 0.75rem; }
 .effects-lab-stage .combo-fireworks { position: absolute; inset: 0; }
 .effects-lab-command { display: flex; gap: 0.5rem; }
 .effects-lab-command input { min-width: 0; flex: 1; }
@@ -509,7 +519,7 @@ a:focus-visible {
 }
 
 :root[data-line-wrap="off"] .transcript {
-  touch-action: pan-x pan-y pinch-zoom;
+  touch-action: pan-x pan-y;
 }
 
 :root[data-line-wrap="off"] .event-text {
@@ -703,7 +713,8 @@ a:focus-visible {
 
 .settings-dialog,
 .history-dialog,
-.event-dialog {
+.event-dialog,
+.paste-dialog {
   width: 100%;
   max-width: none;
   max-height: 78dvh;
@@ -716,14 +727,16 @@ a:focus-visible {
 
 .settings-dialog::backdrop,
 .history-dialog::backdrop,
-.event-dialog::backdrop {
+.event-dialog::backdrop,
+.paste-dialog::backdrop {
   background: rgba(0, 0, 0, 0.62);
   backdrop-filter: blur(3px);
 }
 
 .settings-sheet,
 .history-sheet,
-.event-sheet {
+.event-sheet,
+.paste-sheet {
   max-height: min(78dvh, calc(var(--viewport-height) - var(--safe-top)));
   overflow: auto;
   padding: 1rem 0.9rem calc(1.1rem + var(--safe-bottom));
@@ -733,7 +746,8 @@ a:focus-visible {
 
 .settings-sheet header,
 .history-sheet header,
-.event-sheet header {
+.event-sheet header,
+.paste-sheet header {
   display: flex;
   align-items: start;
   justify-content: space-between;
@@ -742,13 +756,53 @@ a:focus-visible {
 
 .settings-sheet h2,
 .history-sheet h2,
-.event-sheet h2 {
+.event-sheet h2,
+.paste-sheet h2 {
   margin: 0;
   font-family: Iowan Old Style, Baskerville, Georgia, serif;
   font-size: 1.8rem;
   font-weight: 500;
   letter-spacing: -0.025em;
 }
+
+.paste-sheet > p {
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.paste-sheet pre {
+  max-height: min(35dvh, 18rem);
+  margin: 0;
+  padding: 0.75rem;
+  overflow: auto;
+  border: 1px solid var(--line);
+  background: var(--ink);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.76rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.paste-status { color: var(--muted); }
+
+.paste-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  margin-top: 1rem;
+}
+
+.paste-actions button {
+  min-height: 2.7rem;
+  padding: 0 0.85rem;
+  border: 1px solid var(--line-bright);
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.paste-actions #paste-confirm { border-color: var(--signal-soft); color: var(--signal); }
+.paste-actions #paste-stop { border-color: var(--error); color: var(--error); }
 
 .history-list {
   display: grid;
@@ -1066,7 +1120,8 @@ a:focus-visible {
 
   .settings-dialog,
   .history-dialog,
-  .event-dialog {
+  .event-dialog,
+  .paste-dialog {
     width: min(32rem, 100%);
     margin-inline: auto;
   }
