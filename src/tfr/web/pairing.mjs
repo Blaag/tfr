@@ -37,6 +37,10 @@ export function pairingCodeFromLink(value, expectedOrigin) {
   return code && code.length <= 128 && /^[\x21-\x7e]+$/.test(code) ? code : null;
 }
 
+export function shouldShowInstallOnboarding(pairingResult, installMode) {
+  return pairingResult === "complete" && installMode === "browser";
+}
+
 export function createPairingSubmission(submit, schedule) {
   let pending = false;
   let generation = 0;

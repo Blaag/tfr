@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { iphoneInstallMode, iosBrowserName } from "../src/tfr/web/bootstrap.mjs";
+import {
+  iphoneInstallMode,
+  iosBrowserName,
+  iosInstallInstructions,
+} from "../src/tfr/web/bootstrap.mjs";
 import { repairAppShell } from "../src/tfr/web/repair.mjs";
 
 test("detects iPhone browser and installed display modes", () => {
@@ -24,6 +28,16 @@ test("identifies the current iOS browser for installation guidance", () => {
   assert.equal(iosBrowserName("Mobile/15E148 EdgiOS/130.0"), "Edge");
   assert.equal(iosBrowserName("Mobile/15E148 FxiOS/131.0"), "Firefox");
   assert.equal(iosBrowserName("Mobile browser"), "your browser");
+});
+
+test("provides browser-specific iOS installation steps and a Safari fallback", () => {
+  assert.deepEqual(iosInstallInstructions("Chrome"), [
+    "In Chrome, open the Share menu.",
+    "Choose Add to Home Screen.",
+    "Tap Add, then open TFR from its new Home Screen icon.",
+    "If Add to Home Screen is unavailable, open this page in Safari.",
+  ]);
+  assert.equal(iosInstallInstructions("Safari").length, 3);
 });
 
 test("repairs only TFR shell caches and unregisters service workers", async () => {

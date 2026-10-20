@@ -600,6 +600,28 @@ try {
   assert.equal(pairingPost, "code=installed-app-secret");
   await unpairedContext.close();
 
+  const chromePairingContext = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+    userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 CriOS/130.0.0.0 Mobile/15E148 Safari/604.1",
+  });
+  await chromePairingContext.addInitScript(() => {
+    localStorage.setItem("tfr.installHintDismissed", "yes");
+  });
+  const chromePairingPage = await chromePairingContext.newPage();
+  await chromePairingPage.route("**/api/session", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: '{"paired":true}' }),
+  );
+  await chromePairingPage.goto(`${origin}/?pairing=complete`);
+  await chromePairingPage.locator("#install-onboarding:not([hidden])").waitFor();
+  assert.match(
+    await chromePairingPage.locator("#install-onboarding-steps").innerText(),
+    /In Chrome, open the Share menu/,
+  );
+  assert.equal(await chromePairingPage.locator("#console").isHidden(), true);
+  await chromePairingContext.close();
+
   const recoveryContext = await browser.newContext({
     viewport: { width: 390, height: 844 },
     isMobile: true,

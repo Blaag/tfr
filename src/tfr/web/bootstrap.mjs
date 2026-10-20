@@ -12,6 +12,28 @@ export function iosBrowserName(userAgent) {
   return /Safari/i.test(userAgent) ? "Safari" : "your browser";
 }
 
+export function iosInstallInstructions(browser) {
+  const instructions = [
+    `In ${browser}, open the Share menu.`,
+    "Choose Add to Home Screen.",
+    "Tap Add, then open TFR from its new Home Screen icon.",
+  ];
+  if (browser !== "Safari") {
+    instructions.push("If Add to Home Screen is unavailable, open this page in Safari.");
+  }
+  return instructions;
+}
+
+function replaceInstructions(element, instructions) {
+  if (!element) return;
+  element.replaceChildren();
+  for (const text of instructions) {
+    const item = document.createElement("li");
+    item.textContent = text;
+    element.append(item);
+  }
+}
+
 function showStartupFailure(message) {
   const status = document.querySelector("#startup-status");
   const actions = document.querySelector("#startup-actions");
@@ -30,25 +52,12 @@ async function bootstrap() {
     standalone: navigator.standalone === true,
     displayModeStandalone: window.matchMedia("(display-mode: standalone)").matches,
   });
+  document.documentElement.dataset.iosInstallMode = mode;
+  document.documentElement.dataset.iosBrowser = browser;
   if (installHelp) installHelp.hidden = mode !== "browser";
-  const installSteps = document.querySelector("#ios-install-steps");
-  if (installSteps) {
-    installSteps.replaceChildren();
-    for (const text of [
-      `Open this page in ${browser}.`,
-      "Open the Share menu, then choose Add to Home Screen.",
-      "Tap Add, then open TFR from its new Home Screen icon.",
-    ]) {
-      const item = document.createElement("li");
-      item.textContent = text;
-      installSteps.append(item);
-    }
-    if (browser !== "Safari") {
-      const fallback = document.createElement("li");
-      fallback.textContent = "If Add to Home Screen is unavailable, open this page in Safari.";
-      installSteps.append(fallback);
-    }
-  }
+  const instructions = iosInstallInstructions(browser);
+  replaceInstructions(document.querySelector("#ios-install-steps"), instructions);
+  replaceInstructions(document.querySelector("#install-onboarding-steps"), instructions);
   const installNoticeText = document.querySelector("#ios-install-notice-text");
   if (installNoticeText) {
     installNoticeText.textContent =
@@ -60,7 +69,10 @@ async function bootstrap() {
   } catch {
     // Installation guidance remains available when storage is unavailable.
   }
-  if (installNotice) installNotice.hidden = mode !== "browser" || installHintDismissed;
+  const completingPairing = new URLSearchParams(location.search).get("pairing") === "complete";
+  if (installNotice) {
+    installNotice.hidden = mode !== "browser" || installHintDismissed || completingPairing;
+  }
   document.querySelector("#ios-install-dismiss")?.addEventListener("click", () => {
     if (installNotice) installNotice.hidden = true;
     try {
