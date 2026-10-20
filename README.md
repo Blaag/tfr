@@ -492,7 +492,7 @@ the Gateway's certificate covers:
   "mode": "on-demand",
   "transport": "direct",
   "direct_host": "bsd.shutdown.com",
-  "direct_port": 7347,
+  "direct_port": 27047,
   // tls_cert/tls_key are optional; when omitted, direct mode reuses the
   // Gateway's own --tls-cert/--tls-key.
   // "tls_cert": "~/.config/tfr/gateway.crt",
@@ -504,7 +504,7 @@ In this mode the PWA listener terminates TLS itself and binds the given address.
 Then pair from any attached native UI, naming that address to confirm it:
 
 ```text
-/web pair "My iPhone" --gateway bsd.shutdown.com:7347
+/web pair "My iPhone" --gateway bsd.shutdown.com:27047
 ```
 
 TFR verifies the `--gateway` address matches the Gateway's configured direct
@@ -517,11 +517,12 @@ Requirements and caveats for direct mode:
   against `direct_host`, so it must appear in the certificate's subject
   alternative names. A bare IP address generally will not validate with a
   public certificate authority.
-- **Pick a free port.** The PWA listener is a separate socket from the native
-  remote-UI TLS listener (`tfr gateway --listen-host ... --listen-port`, default
-  `7347`). If that listener runs on the same host, `direct_port` must differ
-  from its `--listen-port`; two sockets cannot share one port. When no native
-  network listener is enabled, reusing `7347` for the PWA is fine.
+- **Use a dedicated port.** The PWA listener is its own HTTP/WebSocket socket,
+  separate from the native remote-UI TLS listener (`tfr gateway --listen-host
+  ... --listen-port`, default `7347`), which speaks TFR's own protocol and is
+  not a web server. `direct_port` must be a free port that differs from the
+  native `--listen-port`; the two cannot share one port. The examples here use
+  `27047`.
 - **The firewall is the outer boundary.** There is no Tailscale ACL in front of
   the listener, so restrict inbound access to `direct_port` to the intended
   devices with your host or cloud firewall.

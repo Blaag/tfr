@@ -59,8 +59,8 @@ def test_gateway_tcp_endpoint_rejects_wildcard_or_empty_hosts(host: str) -> None
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("bsd.shutdown.com:7347", "bsd.shutdown.com:7347"),
-        ("  bsd.shutdown.com:7347  ", "bsd.shutdown.com:7347"),
+        ("bsd.shutdown.com:27047", "bsd.shutdown.com:27047"),
+        ("  bsd.shutdown.com:27047  ", "bsd.shutdown.com:27047"),
         ("52.53.4.93:27047", "52.53.4.93:27047"),
     ],
 )
@@ -72,9 +72,9 @@ def test_normalize_web_gateway_target_accepts_host_port(value: str, expected: st
     "value",
     [
         "bsd.shutdown.com",  # no port
-        "https://bsd.shutdown.com:7347",  # scheme
-        "user@bsd.shutdown.com:7347",  # credentials
-        "bsd.shutdown.com:7347/path",  # path
+        "https://bsd.shutdown.com:27047",  # scheme
+        "user@bsd.shutdown.com:27047",  # credentials
+        "bsd.shutdown.com:27047/path",  # path
         "0.0.0.0:7347",  # wildcard
         "bsd.shutdown.com:0",  # port out of range
         "bsd.shutdown.com:99999",  # port out of range

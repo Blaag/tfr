@@ -4756,11 +4756,11 @@ def test_parse_web_pair_arguments_handles_gateway_forms() -> None:
 
     assert _parse_web_pair_arguments(["My", "iPhone"]) == (["My", "iPhone"], None, None)
     assert _parse_web_pair_arguments(
-        ["My", "iPhone", "--gateway", "bsd.shutdown.com:7347"]
-    ) == (["My", "iPhone"], "bsd.shutdown.com:7347", None)
-    assert _parse_web_pair_arguments(["My", "iPhone", "--gateway=bsd.shutdown.com:7347"]) == (
+        ["My", "iPhone", "--gateway", "bsd.shutdown.com:27047"]
+    ) == (["My", "iPhone"], "bsd.shutdown.com:27047", None)
+    assert _parse_web_pair_arguments(["My", "iPhone", "--gateway=bsd.shutdown.com:27047"]) == (
         ["My", "iPhone"],
-        "bsd.shutdown.com:7347",
+        "bsd.shutdown.com:27047",
         None,
     )
     # Bare trailing HOST:PORT (the /web pair "Name" 52.53.4.93:27047 form).
@@ -4791,7 +4791,7 @@ async def test_web_pair_direct_gateway_reports_tls_setup() -> None:
             return {
                 "enabled": True,
                 "active": False,
-                "origin": "https://bsd.shutdown.com:7347",
+                "origin": "https://bsd.shutdown.com:27047",
                 "device_count": 0,
                 "transport": "direct",
             }
@@ -4799,8 +4799,8 @@ async def test_web_pair_direct_gateway_reports_tls_setup() -> None:
         async def pair_web_device(self, label: str) -> dict[str, object]:
             self.paired.append(label)
             return {
-                "pairing_url": "https://bsd.shutdown.com:7347/#pair=test-secret",
-                "origin": "https://bsd.shutdown.com:7347",
+                "pairing_url": "https://bsd.shutdown.com:27047/#pair=test-secret",
+                "origin": "https://bsd.shutdown.com:27047",
                 "setup": {"backend_started": True, "serve_configured": False},
             }
 
@@ -4809,12 +4809,12 @@ async def test_web_pair_direct_gateway_reports_tls_setup() -> None:
     tui.active_view.display.resize(width=120, height=100)
 
     await tui._handle_client_command(
-        "alpha", '/web pair "My iPhone" --gateway bsd.shutdown.com:7347'
+        "alpha", '/web pair "My iPhone" --gateway bsd.shutdown.com:27047'
     )
 
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
     assert runtime.paired == ["My iPhone"]
-    assert "https://bsd.shutdown.com:7347/#pair=test-secret" in text
+    assert "https://bsd.shutdown.com:27047/#pair=test-secret" in text
     assert "Direct TLS access is ready; Tailscale is not required." in text
     assert "Tailscale Serve" not in text
 
@@ -4828,14 +4828,14 @@ async def test_web_pair_gateway_option_rejects_mismatched_origin() -> None:
             return {
                 "enabled": True,
                 "active": False,
-                "origin": "https://bsd.shutdown.com:7347",
+                "origin": "https://bsd.shutdown.com:27047",
                 "device_count": 0,
                 "transport": "direct",
             }
 
         async def pair_web_device(self, label: str) -> dict[str, object]:
             self.pair_called = True
-            return {"pairing_url": "https://bsd.shutdown.com:7347/#pair=x"}
+            return {"pairing_url": "https://bsd.shutdown.com:27047/#pair=x"}
 
     runtime = DirectWebRuntime()
     tui = make_tui(service_runtime=runtime)
@@ -4847,7 +4847,7 @@ async def test_web_pair_gateway_option_rejects_mismatched_origin() -> None:
 
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
     assert runtime.pair_called is False
-    assert "configured direct origin is https://bsd.shutdown.com:7347" in text
+    assert "configured direct origin is https://bsd.shutdown.com:27047" in text
 
 
 async def test_web_pair_gateway_option_requires_direct_transport() -> None:
@@ -4873,7 +4873,7 @@ async def test_web_pair_gateway_option_requires_direct_transport() -> None:
     tui.active_view.display.resize(width=120, height=100)
 
     await tui._handle_client_command(
-        "alpha", '/web pair "My iPhone" --gateway bsd.shutdown.com:7347'
+        "alpha", '/web pair "My iPhone" --gateway bsd.shutdown.com:27047'
     )
 
     text = fragment_list_to_text(tui.active_view.display.formatted_text())

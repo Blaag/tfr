@@ -2146,12 +2146,12 @@ async def test_websocket_enforces_per_device_connection_limit(tmp_path: Path) ->
 
 # --- Direct transport (no Tailscale) -----------------------------------------
 
-DIRECT_ORIGIN = "https://bsd.shutdown.com:7347"
+DIRECT_ORIGIN = "https://bsd.shutdown.com:27047"
 DIRECT_PUBLIC_HEADERS = {
-    "Host": "bsd.shutdown.com:7347",
+    "Host": "bsd.shutdown.com:27047",
     "Origin": DIRECT_ORIGIN,
 }
-DIRECT_NAVIGATION_HEADERS = {"Host": "bsd.shutdown.com:7347"}
+DIRECT_NAVIGATION_HEADERS = {"Host": "bsd.shutdown.com:27047"}
 
 
 def _dummy_server_tls_context() -> ssl.SSLContext:
@@ -2165,7 +2165,7 @@ def test_direct_server_requires_tls_and_rejects_wildcard(tmp_path: Path) -> None
             runtime,  # type: ignore[arg-type]
             origin=DIRECT_ORIGIN,
             host="bsd.shutdown.com",
-            port=7347,
+            port=27047,
             state_directory=tmp_path / "web",
             snapshot_events=5,
             transport="direct",
@@ -2175,7 +2175,7 @@ def test_direct_server_requires_tls_and_rejects_wildcard(tmp_path: Path) -> None
             runtime,  # type: ignore[arg-type]
             origin=DIRECT_ORIGIN,
             host="0.0.0.0",
-            port=7347,
+            port=27047,
             state_directory=tmp_path / "web",
             snapshot_events=5,
             transport="direct",
@@ -2189,7 +2189,7 @@ def test_direct_server_allows_public_bind_with_tls(tmp_path: Path) -> None:
         runtime,  # type: ignore[arg-type]
         origin=DIRECT_ORIGIN,
         host="bsd.shutdown.com",
-        port=7347,
+        port=27047,
         state_directory=tmp_path / "web",
         snapshot_events=5,
         transport="direct",
@@ -2222,7 +2222,7 @@ async def _direct_paired_client(
         runtime,  # type: ignore[arg-type]
         origin=DIRECT_ORIGIN,
         host="bsd.shutdown.com",
-        port=7347,
+        port=27047,
         state_directory=tmp_path / "web",
         snapshot_events=20,
         transport="direct",
@@ -2270,7 +2270,7 @@ async def test_direct_pairing_rate_limit_keys_on_client_ip(tmp_path: Path) -> No
         runtime,  # type: ignore[arg-type]
         origin=DIRECT_ORIGIN,
         host="bsd.shutdown.com",
-        port=7347,
+        port=27047,
         state_directory=tmp_path / "web",
         snapshot_events=5,
         transport="direct",
@@ -2310,7 +2310,7 @@ async def test_direct_manager_pairs_without_tailscale(
         object(),  # type: ignore[arg-type]
         configured_origin=DIRECT_ORIGIN,
         host="bsd.shutdown.com",
-        port=7347,
+        port=27047,
         state_directory=tmp_path / "web",
         snapshot_events=20,
         speaking_streaks_enabled=True,
@@ -2334,7 +2334,7 @@ def test_direct_manager_requires_origin_and_tls() -> None:
             object(),  # type: ignore[arg-type]
             configured_origin=None,
             host="bsd.shutdown.com",
-            port=7347,
+            port=27047,
             state_directory="/tmp/does-not-matter",
             snapshot_events=20,
             speaking_streaks_enabled=True,
@@ -2346,7 +2346,7 @@ def test_direct_manager_requires_origin_and_tls() -> None:
             object(),  # type: ignore[arg-type]
             configured_origin=DIRECT_ORIGIN,
             host="bsd.shutdown.com",
-            port=7347,
+            port=27047,
             state_directory="/tmp/does-not-matter",
             snapshot_events=20,
             speaking_streaks_enabled=True,

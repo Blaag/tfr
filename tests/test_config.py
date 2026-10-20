@@ -630,15 +630,15 @@ def test_web_gateway_direct_requires_host_and_derives_origin() -> None:
     config = WebGatewayConfig(
         transport="direct",
         direct_host="bsd.shutdown.com",
-        direct_port=7347,
+        direct_port=27047,
         tls_cert=Path("~/gw.crt"),
         tls_key=Path("~/gw.key"),
     )
-    assert config.canonical_origin == "https://bsd.shutdown.com:7347"
-    assert config.direct_bind == ("bsd.shutdown.com", 7347)
+    assert config.canonical_origin == "https://bsd.shutdown.com:27047"
+    assert config.direct_bind == ("bsd.shutdown.com", 27047)
 
     with pytest.raises(ValueError, match="requires web_gateway.direct_host"):
-        WebGatewayConfig(transport="direct", direct_port=7347)
+        WebGatewayConfig(transport="direct", direct_port=27047)
 
 
 def test_web_gateway_direct_allows_omitted_cert_for_fallback() -> None:
@@ -647,11 +647,11 @@ def test_web_gateway_direct_allows_omitted_cert_for_fallback() -> None:
     config = WebGatewayConfig(
         transport="direct",
         direct_host="bsd.shutdown.com",
-        direct_port=7347,
+        direct_port=27047,
     )
     assert config.tls_cert is None
     assert config.tls_key is None
-    assert config.direct_bind == ("bsd.shutdown.com", 7347)
+    assert config.direct_bind == ("bsd.shutdown.com", 27047)
 
 
 def test_web_gateway_direct_port_defaults_to_listen_port() -> None:
@@ -675,9 +675,9 @@ def test_web_gateway_direct_omits_default_https_port() -> None:
 
 def test_web_gateway_direct_rejects_wildcard_scheme_and_explicit_origin() -> None:
     with pytest.raises(ValueError, match="wildcard"):
-        WebGatewayConfig(transport="direct", direct_host="0.0.0.0", direct_port=7347)
+        WebGatewayConfig(transport="direct", direct_host="0.0.0.0", direct_port=27047)
     with pytest.raises(ValueError, match="bare hostname or IP"):
-        WebGatewayConfig(transport="direct", direct_host="https://bsd.shutdown.com:7347")
+        WebGatewayConfig(transport="direct", direct_host="https://bsd.shutdown.com:27047")
     with pytest.raises(ValueError, match="origin must not be set in direct"):
         WebGatewayConfig(
             transport="direct",
