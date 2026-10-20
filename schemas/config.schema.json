@@ -753,6 +753,15 @@
           "title": "Listen Port",
           "type": "integer"
         },
+        "mode": {
+          "default": "on-demand",
+          "enum": [
+            "on-demand",
+            "disabled"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
         "origin": {
           "anyOf": [
             {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { iphoneInstallMode } from "../src/tfr/web/bootstrap.mjs";
+import { iphoneInstallMode, iosBrowserName } from "../src/tfr/web/bootstrap.mjs";
 import { repairAppShell } from "../src/tfr/web/repair.mjs";
 
 test("detects iPhone browser and installed display modes", () => {
@@ -16,6 +16,14 @@ test("detects iPhone browser and installed display modes", () => {
   assert.equal(iphoneInstallMode({ ...iphone, standalone: true }), "installed");
   assert.equal(iphoneInstallMode({ ...iphone, displayModeStandalone: true }), "installed");
   assert.equal(iphoneInstallMode({ ...iphone, userAgent: "Firefox", maxTouchPoints: 0 }), "other");
+});
+
+test("identifies the current iOS browser for installation guidance", () => {
+  assert.equal(iosBrowserName("Version/18.0 Mobile/15E148 Safari/604.1"), "Safari");
+  assert.equal(iosBrowserName("Mobile/15E148 CriOS/130.0.0.0"), "Chrome");
+  assert.equal(iosBrowserName("Mobile/15E148 EdgiOS/130.0"), "Edge");
+  assert.equal(iosBrowserName("Mobile/15E148 FxiOS/131.0"), "Firefox");
+  assert.equal(iosBrowserName("Mobile browser"), "your browser");
 });
 
 test("repairs only TFR shell caches and unregisters service workers", async () => {

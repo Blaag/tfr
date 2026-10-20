@@ -104,7 +104,7 @@ async def test_pairing_error_explains_disabled_gateway_web_configuration() -> No
     try:
         with pytest.raises(
             ValueError,
-            match=r"enable web_gateway\.enabled.*web_gateway\.origin.*restart the Gateway",
+            match=r"web_gateway\.mode.*on-demand.*restart the Gateway",
         ):
             await create_device_pairing_url(socket_path, "Phone")
     finally:

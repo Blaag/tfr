@@ -187,7 +187,7 @@ class ServiceRuntime(Protocol):
 
     async def web_status(self) -> dict[str, Any]: ...
 
-    async def pair_web_device(self, label: str) -> str: ...
+    async def pair_web_device(self, label: str) -> str | dict[str, Any]: ...
 
     async def list_web_devices(self) -> list[dict[str, Any]]: ...
 
@@ -3759,6 +3759,13 @@ class TfrTui:
                     return
                 origin = status.get("origin")
                 count = status.get("device_count")
+                if origin is None and isinstance(count, int):
+                    self.add_notice(
+                        alias,
+                        "PWA: ready for on-demand setup\n"
+                        "Run /web pair \"Device name\" to configure private access.",
+                    )
+                    return
                 if not isinstance(origin, str) or not isinstance(count, int):
                     raise ValueError("Gateway returned invalid web status")
                 self.add_notice(
@@ -3786,15 +3793,30 @@ class TfrTui:
                 if status.get("enabled") is not True:
                     self.add_notice(
                         alias,
-                        "Web device pairing is disabled on the Gateway. Enable "
-                        "web_gateway.enabled and configure web_gateway.origin in the Gateway's "
-                        "active config.jsonc, then restart the Gateway.",
+                        "Web device pairing is disabled on the Gateway. Set web_gateway.mode "
+                        "to on-demand in the Gateway's active config.jsonc, then restart the "
+                        "Gateway.",
                     )
                     return
-                pairing_url = await self.service_runtime.pair_web_device(label)
+                result = await self.service_runtime.pair_web_device(label)
+                pairing_url = result if isinstance(result, str) else result.get("pairing_url")
+                if not isinstance(pairing_url, str):
+                    raise ValueError("Gateway returned an invalid pairing URL")
+                setup = result.get("setup") if isinstance(result, dict) else None
+                setup_lines: list[str] = []
+                if isinstance(setup, dict):
+                    if setup.get("backend_started") is True:
+                        setup_lines.append("Started the private loopback PWA backend.")
+                    if setup.get("serve_configured") is True:
+                        setup_lines.append("Configured the private Tailscale Serve HTTPS route.")
+                setup_text = "\n".join(setup_lines)
+                if setup_text:
+                    setup_text += "\nFunnel was not enabled.\n\n"
+                else:
+                    setup_text = "Private Tailscale access is ready; Funnel was not enabled.\n\n"
                 self.add_notice(
                     alias,
-                    f"Pair {label!r} within ten minutes:\n{pairing_url}\n\n"
+                    f"{setup_text}Pair {label!r} within ten minutes:\n{pairing_url}\n\n"
                     f"Scan with the iPhone Camera:\n{pairing_qr_code(pairing_url)}",
                 )
                 return

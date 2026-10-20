@@ -5,6 +5,7 @@ import contextlib
 import errno
 import heapq
 import hmac
+import inspect
 import os
 import signal
 import socket
@@ -375,14 +376,9 @@ class EventHistory:
                         dropped_item = history[0]
                         dropped_event = dropped_item.event
                         if self._event_allowed(dropped_event, None):
-                            self._dropped_through = max(
-                                self._dropped_through, dropped_item.cursor
-                            )
+                            self._dropped_through = max(self._dropped_through, dropped_item.cursor)
                             dropped = self._generation_dropped_through.get(dropped_event.world)
-                            if (
-                                dropped is None
-                                or dropped_event.connection_generation > dropped[0]
-                            ):
+                            if dropped is None or dropped_event.connection_generation > dropped[0]:
                                 dropped = (dropped_event.connection_generation, {})
                                 self._generation_dropped_through[dropped_event.world] = dropped
                             if dropped_event.connection_generation == dropped[0]:
@@ -402,9 +398,8 @@ class EventHistory:
                             and event.world not in subscription.worlds
                         ):
                             continue
-                        if (
-                            subscription.event_filter is not None
-                            and not subscription.event_filter(bounded_event)
+                        if subscription.event_filter is not None and not subscription.event_filter(
+                            bounded_event
                         ):
                             continue
                         if subscription.queue.full():
@@ -758,9 +753,7 @@ class GatewayRuntime:
             restart_required = False
             if result.changed:
                 try:
-                    self.gag_policy.replace_configuration(
-                        self.managed_settings.effective_worlds
-                    )
+                    self.gag_policy.replace_configuration(self.managed_settings.effective_worlds)
                 except Exception:
                     restart_required = True
                     self.plugins.diagnostics.record(
@@ -1027,10 +1020,14 @@ class GatewayServer:
         tcp_port: int = DEFAULT_GATEWAY_PORT,
         tcp_auth_token: str | None = None,
         tcp_ssl_context: ssl.SSLContext | None = None,
-        pairing_url_factory: Callable[[str], str] | None = None,
+        pairing_url_factory: Callable[
+            [str], str | Mapping[str, Any] | Awaitable[str | Mapping[str, Any]]
+        ]
+        | None = None,
         device_list_factory: Callable[[], list[dict[str, Any]]] | None = None,
         device_revoke_factory: Callable[[UUID], Awaitable[bool]] | None = None,
         web_origin: str | None = None,
+        web_status_factory: Callable[[], Mapping[str, Any]] | None = None,
         diagnostic_list_factory: Callable[[str | None], list[dict[str, Any]]] | None = None,
         diagnostic_clear_factory: Callable[[], None] | None = None,
         update_notice: Callable[[str], Awaitable[None]] | None = None,
@@ -1071,6 +1068,7 @@ class GatewayServer:
         self.device_list_factory = device_list_factory
         self.device_revoke_factory = device_revoke_factory
         self.web_origin = web_origin
+        self.web_status_factory = web_status_factory
         self.diagnostic_list_factory = diagnostic_list_factory
         self.diagnostic_clear_factory = diagnostic_clear_factory
         self.update_notice = update_notice
@@ -1668,33 +1666,38 @@ class GatewayServer:
                         "the local Gateway administration socket"
                     )
                 if self.pairing_url_factory is None:
-                    if self.web_origin is None:
-                        raise ValueError(
-                            "web device pairing is disabled on the Gateway; enable "
-                            "web_gateway.enabled and configure web_gateway.origin in the "
-                            "Gateway's active config.jsonc, then restart the Gateway"
-                        )
                     raise ValueError(
-                        "web device pairing is not initialized; check the Gateway web listener "
-                        "and restart the Gateway"
+                        "web device pairing is disabled on the Gateway; set web_gateway.mode "
+                        "to on-demand in the Gateway's active config.jsonc, then restart the "
+                        "Gateway"
                     )
                 if set(message) != {"type", "protocol", "request_id", "label"}:
                     raise ValueError("pair_device has invalid fields")
                 label = message.get("label")
                 if not isinstance(label, str):
                     raise ValueError("device label must be a string")
-                result = {"pairing_url": self.pairing_url_factory(label)}
+                pairing_result = self.pairing_url_factory(label)
+                if inspect.isawaitable(pairing_result):
+                    pairing_result = await pairing_result
+                result = (
+                    {"pairing_url": pairing_result}
+                    if isinstance(pairing_result, str)
+                    else dict(pairing_result)
+                )
             elif message_type == "web_status":
                 if not allow_admin:
                     raise ValueError("web device administration is unavailable")
                 if set(message) != {"type", "protocol", "request_id"}:
                     raise ValueError("web_status has invalid fields")
-                devices = self.device_list_factory() if self.device_list_factory else []
-                result = {
-                    "enabled": self.web_origin is not None,
-                    "origin": self.web_origin,
-                    "device_count": len(devices),
-                }
+                if self.web_status_factory is not None:
+                    result = dict(self.web_status_factory())
+                else:
+                    devices = self.device_list_factory() if self.device_list_factory else []
+                    result = {
+                        "enabled": self.web_origin is not None,
+                        "origin": self.web_origin,
+                        "device_count": len(devices),
+                    }
             elif message_type == "diagnostics":
                 if not allow_admin or self.diagnostic_list_factory is None:
                     raise ValueError("diagnostics are unavailable")
@@ -2129,14 +2132,13 @@ async def run_gateway(
             raise ValueError("network gateway requires --token-file, --tls-cert, and --tls-key")
         tcp_auth_token = load_gateway_token(token_file)
         tcp_ssl_context = create_gateway_server_tls_context(tls_certificate, tls_private_key)
-    web_server = None
-    if bundle.main.web_gateway.enabled:
-        from tfr.gateway_web import WebGatewayServer
+    web_manager = None
+    if bundle.main.web_gateway.mode != "disabled":
+        from tfr.gateway_web import WebGatewayManager
 
-        assert bundle.main.web_gateway.canonical_origin is not None
-        web_server = WebGatewayServer(
+        web_manager = WebGatewayManager(
             runtime,
-            origin=bundle.main.web_gateway.canonical_origin,
+            configured_origin=bundle.main.web_gateway.canonical_origin,
             host=bundle.main.web_gateway.listen_host,
             port=bundle.main.web_gateway.listen_port,
             state_directory=bundle.main.web_gateway.state_directory,
@@ -2150,16 +2152,19 @@ async def run_gateway(
         tcp_port=listen_port,
         tcp_auth_token=tcp_auth_token,
         tcp_ssl_context=tcp_ssl_context,
-        pairing_url_factory=(web_server.create_pairing_url if web_server is not None else None),
-        device_list_factory=(web_server.device_descriptors if web_server is not None else None),
-        device_revoke_factory=(web_server.revoke_device if web_server is not None else None),
-        web_origin=bundle.main.web_gateway.canonical_origin,
-        diagnostic_list_factory=(web_server.diagnostic_entries if web_server is not None else None),
-        diagnostic_clear_factory=(web_server.clear_diagnostics if web_server is not None else None),
-        update_notice=(web_server.notify_update if web_server is not None else None),
-        ui_settings_notice=(
-            web_server.notify_ui_settings if web_server is not None else None
+        pairing_url_factory=(web_manager.pair_device if web_manager is not None else None),
+        device_list_factory=(web_manager.device_descriptors if web_manager is not None else None),
+        device_revoke_factory=(web_manager.revoke_device if web_manager is not None else None),
+        web_origin=(web_manager.origin if web_manager is not None else None),
+        web_status_factory=(web_manager.status if web_manager is not None else None),
+        diagnostic_list_factory=(
+            web_manager.diagnostic_entries if web_manager is not None else None
         ),
+        diagnostic_clear_factory=(
+            web_manager.clear_diagnostics if web_manager is not None else None
+        ),
+        update_notice=(web_manager.notify_update if web_manager is not None else None),
+        ui_settings_notice=(web_manager.notify_ui_settings if web_manager is not None else None),
     )
     stop = asyncio.Event()
     application_restart = asyncio.Event()
@@ -2169,16 +2174,16 @@ async def run_gateway(
     try:
         await server.start(start_serving=False)
         await runtime.start()
-        if web_server is not None:
-            await web_server.start()
+        if web_manager is not None:
+            await web_manager.start_existing(eager=bundle.main.web_gateway.enabled)
         await server.start_serving()
         print(f"TFR Gateway listening on {server.path}", flush=True)
         for address in server.tcp_addresses:
             print(f"TFR Gateway listening with TLS on {address[0]}:{address[1]}", flush=True)
-        if web_server is not None:
+        if web_manager is not None and web_manager.active:
             print(
                 "TFR Web Gateway listening on "
-                f"http://{web_server.host}:{web_server.port} for {web_server.origin}",
+                f"http://{web_manager.host}:{web_manager.port} for {web_manager.origin}",
                 flush=True,
             )
         print("Press Ctrl-C to stop the gateway.", flush=True)
@@ -2217,8 +2222,8 @@ async def run_gateway(
     finally:
         for handled_signal in installed_signals:
             loop.remove_signal_handler(handled_signal)
-        if web_server is not None:
-            await web_server.stop()
+        if web_manager is not None:
+            await web_manager.stop()
         await server.stop()
         await runtime.stop(preserve_worlds=restart_requested or application_restart.is_set())
     if application_restart.is_set():

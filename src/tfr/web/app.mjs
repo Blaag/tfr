@@ -95,6 +95,8 @@ const elements = {
   lineWrap: document.querySelector("#line-wrap"),
   spellingSuggestions: document.querySelector("#spelling-suggestions"),
   unpairDevice: document.querySelector("#unpair-device"),
+  uninstallDevice: document.querySelector("#uninstall-device"),
+  uninstallDialog: document.querySelector("#uninstall-dialog"),
   updateNotice: document.querySelector("#update-notice"),
   applyUpdate: document.querySelector("#apply-update"),
   toast: document.querySelector("#toast"),
@@ -1747,20 +1749,69 @@ async function clearLocalData() {
   }
 }
 
+async function clearInstalledApplicationData() {
+  await clearLocalData();
+  try {
+    localStorage.clear();
+    sessionStorage.clear();
+  } catch {
+    // Continue with browser-managed storage cleanup when DOM storage is unavailable.
+  }
+  if ("indexedDB" in window && "databases" in indexedDB) {
+    try {
+      for (const database of await indexedDB.databases()) {
+        if (database.name) indexedDB.deleteDatabase(database.name);
+      }
+    } catch {
+      // TFR currently has no required IndexedDB state; cleanup remains best-effort.
+    }
+  }
+  if ("serviceWorker" in navigator) {
+    try {
+      for (const registration of await navigator.serviceWorker.getRegistrations()) {
+        await registration.unregister();
+      }
+    } catch {
+      // iOS may retain browser-managed data even after all app-owned state is cleared.
+    }
+  }
+}
+
+async function revokeCurrentDevice() {
+  const response = await fetch("/api/logout", {
+    method: "POST",
+    credentials: "same-origin",
+  });
+  if (!response.ok) throw new Error("Logout was rejected");
+}
+
 async function unpairDevice() {
   if (!window.confirm("Unpair this phone and clear its local TFR data?")) return;
   connection.intentionalClose = true;
   try {
-    const response = await fetch("/api/logout", {
-      method: "POST",
-      credentials: "same-origin",
-    });
-    if (!response.ok) throw new Error("Logout was rejected");
+    await revokeCurrentDevice();
     await clearLocalData();
     location.reload();
   } catch {
     connection.intentionalClose = false;
     showToast("Could not revoke this device. Reconnect or revoke it from the Gateway.", 6000);
+  }
+}
+
+
+async function uninstallDevice() {
+  if (!window.confirm(
+    "Revoke this phone, clear TFR browser data, and prepare the Home Screen app for removal?",
+  )) return;
+  connection.intentionalClose = true;
+  try {
+    await revokeCurrentDevice();
+    await clearInstalledApplicationData();
+    elements.settingsDialog.close();
+    elements.uninstallDialog.showModal();
+  } catch {
+    connection.intentionalClose = false;
+    showToast("Could not reset this device. Reconnect or revoke it from the Gateway.", 6000);
   }
 }
 
@@ -1909,6 +1960,7 @@ elements.pairingForm.addEventListener("submit", (event) => {
   postPairing(code);
 });
 elements.unpairDevice.addEventListener("click", unpairDevice);
+elements.uninstallDevice.addEventListener("click", uninstallDevice);
 elements.composer.addEventListener("submit", sendCommand);
 elements.sendButton.addEventListener(
   "touchstart",

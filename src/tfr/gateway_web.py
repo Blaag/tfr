@@ -4,13 +4,17 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import os
+import secrets
+import stat
 import time
 from collections import Counter, OrderedDict, defaultdict, deque
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from email.utils import format_datetime
 from importlib.resources import files
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
@@ -49,6 +53,8 @@ MAX_WEB_FRAMES_PER_MINUTE = 120
 MAX_WEB_CONNECTIONS_PER_MINUTE = 12
 MAX_WEB_DIAGNOSTICS_PER_MINUTE = 20
 WEB_WRITE_TIMEOUT_SECONDS = 5
+TAILSCALE_COMMAND_TIMEOUT_SECONDS = 10
+MAX_TAILSCALE_OUTPUT_BYTES = 1_048_576
 
 _PWA_DIAGNOSTIC_CODES = {
     ("startup", "application_import_failed"): "The PWA application module failed to initialize",
@@ -108,6 +114,335 @@ _ASSETS = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class WebProvisioningState:
+    origin: str
+
+
+def _tailscale_origin(status: object) -> str:
+    if not isinstance(status, dict) or status.get("BackendState") != "Running":
+        raise ValueError("Tailscale is not running or logged in")
+    self_status = status.get("Self")
+    dns_name = self_status.get("DNSName") if isinstance(self_status, dict) else None
+    if not isinstance(dns_name, str) or not dns_name.strip("."):
+        raise ValueError("Tailscale did not report an HTTPS MagicDNS name")
+    hostname = dns_name.rstrip(".")
+    if any(
+        character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-"
+        for character in hostname
+    ):
+        raise ValueError("Tailscale reported an invalid HTTPS MagicDNS name")
+    return f"https://{hostname}"
+
+
+def _serve_root_proxy(status: object, origin: str) -> str | None:
+    if not isinstance(status, dict):
+        raise ValueError("Tailscale Serve returned invalid status")
+    web_status = status.get("Web", {})
+    if not isinstance(web_status, dict):
+        raise ValueError("Tailscale Serve returned invalid web status")
+    expected_host = urlsplit(origin).hostname
+    roots: list[str] = []
+    for address, service in web_status.items():
+        if not isinstance(address, str) or not isinstance(service, dict):
+            continue
+        address_host = address.rsplit(":", 1)[0].strip("[]").rstrip(".")
+        if address_host != expected_host:
+            continue
+        handlers = service.get("Handlers", {})
+        if not isinstance(handlers, dict) or "/" not in handlers:
+            continue
+        handler = handlers["/"]
+        proxy = handler.get("Proxy") if isinstance(handler, dict) else None
+        roots.append(proxy if isinstance(proxy, str) else "<non-proxy handler>")
+    if len(roots) > 1:
+        raise ValueError("Tailscale Serve has multiple HTTPS root handlers for this device")
+    return roots[0] if roots else None
+
+
+class WebGatewayManager:
+    """Lazily provisions and owns the private PWA listener."""
+
+    def __init__(
+        self,
+        runtime: GatewayRuntime,
+        *,
+        configured_origin: str | None,
+        host: str,
+        port: int,
+        state_directory: Path | str,
+        snapshot_events: int,
+        speaking_streaks_enabled: bool,
+    ) -> None:
+        self.runtime = runtime
+        self.configured_origin = configured_origin
+        self.host = host
+        self.port = port
+        self.state_directory = Path(state_directory).expanduser()
+        self.snapshot_events = snapshot_events
+        self.speaking_streaks_enabled = speaking_streaks_enabled
+        self._server: WebGatewayServer | None = None
+        self._lock = asyncio.Lock()
+        self._state_path = self.state_directory / "provisioning.json"
+        self._stored_state = self._load_state()
+
+    @property
+    def origin(self) -> str | None:
+        if self._server is not None:
+            return self._server.origin
+        if self.configured_origin is not None:
+            return self.configured_origin
+        return self._stored_state.origin if self._stored_state is not None else None
+
+    @property
+    def active(self) -> bool:
+        return self._server is not None
+
+    async def start_existing(self, *, eager: bool) -> None:
+        origin = self.configured_origin if eager else self.origin
+        if origin is not None:
+            await self._start_server(origin)
+
+    async def pair_device(self, label: str) -> dict[str, Any]:
+        async with self._lock:
+            origin = self.configured_origin or await self._discover_origin()
+            started = self._server is None
+            previous_state = self._stored_state
+            await self._start_server(origin)
+            try:
+                assert self._server is not None
+                pairing_url = self._server.create_pairing_url(label)
+                target_host = f"[{self.host}]" if ":" in self.host else self.host
+                target = f"http://{target_host}:{self.port}"
+                serve_status = await self._tailscale_json("serve", "status", "--json")
+                existing = _serve_root_proxy(serve_status, origin)
+                configured = False
+                if existing is None:
+                    await self._tailscale("serve", "--bg", "--yes", target)
+                    verified = _serve_root_proxy(
+                        await self._tailscale_json("serve", "status", "--json"), origin
+                    )
+                    if verified != target:
+                        raise ValueError(
+                            "Tailscale Serve did not install the expected private route"
+                        )
+                    configured = True
+                elif existing.rstrip("/") != target:
+                    raise ValueError(
+                        f"Tailscale Serve root is already used by {existing!r}; "
+                        "TFR did not replace it"
+                    )
+                self._save_state(WebProvisioningState(origin=origin))
+                return {
+                    "pairing_url": pairing_url,
+                    "origin": origin,
+                    "setup": {
+                        "backend_started": started,
+                        "serve_configured": configured,
+                    },
+                }
+            except BaseException:
+                if started and previous_state is None:
+                    await self.stop()
+                raise
+
+    def status(self) -> dict[str, Any]:
+        devices = self.device_descriptors()
+        return {
+            "enabled": True,
+            "active": self.active,
+            "origin": self.origin,
+            "device_count": len(devices),
+        }
+
+    def device_descriptors(self) -> list[dict[str, object]]:
+        return self._server.device_descriptors() if self._server is not None else []
+
+    async def revoke_device(self, device_id: UUID) -> bool:
+        return await self._server.revoke_device(device_id) if self._server is not None else False
+
+    def diagnostic_entries(self, category: str | None = None) -> list[dict[str, Any]]:
+        return self._server.diagnostic_entries(category) if self._server is not None else []
+
+    def clear_diagnostics(self) -> None:
+        if self._server is not None:
+            self._server.clear_diagnostics()
+
+    async def notify_update(self, message: str) -> None:
+        if self._server is not None:
+            await self._server.notify_update(message)
+
+    async def notify_ui_settings(self, settings: Mapping[str, bool]) -> None:
+        if self._server is not None:
+            await self._server.notify_ui_settings(settings)
+
+    async def stop(self) -> None:
+        server, self._server = self._server, None
+        if server is not None:
+            await server.stop()
+
+    async def _start_server(self, origin: str) -> None:
+        if self._server is not None:
+            if self._server.origin != origin.rstrip("/"):
+                raise ValueError(
+                    "the running PWA origin differs from the discovered Tailscale origin"
+                )
+            return
+        server = WebGatewayServer(
+            self.runtime,
+            origin=origin,
+            host=self.host,
+            port=self.port,
+            state_directory=self.state_directory,
+            snapshot_events=self.snapshot_events,
+            speaking_streaks_enabled=self.speaking_streaks_enabled,
+        )
+        await server.start()
+        self._server = server
+
+    async def _discover_origin(self) -> str:
+        return _tailscale_origin(await self._tailscale_json("status", "--json"))
+
+    async def _tailscale_json(self, *arguments: str) -> object:
+        output = await self._tailscale(*arguments)
+        try:
+            return json.loads(output)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Tailscale returned invalid JSON") from exc
+
+    async def _tailscale(self, *arguments: str) -> str:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "tailscale",
+                *arguments,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:
+            raise ValueError(
+                "Tailscale is not installed; install and sign in before pairing"
+            ) from exc
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=TAILSCALE_COMMAND_TIMEOUT_SECONDS
+            )
+        except TimeoutError as exc:
+            process.kill()
+            await process.wait()
+            raise ValueError("Tailscale did not respond in time") from exc
+        if len(stdout) > MAX_TAILSCALE_OUTPUT_BYTES or len(stderr) > MAX_TAILSCALE_OUTPUT_BYTES:
+            raise ValueError("Tailscale returned too much output")
+        if process.returncode != 0:
+            detail = stderr.decode("utf-8", "replace").strip()
+            raise ValueError(
+                f"Tailscale command failed: {detail[:500]}"
+                if detail
+                else "Tailscale command failed"
+            )
+        return stdout.decode("utf-8", "strict")
+
+    def _load_state(self) -> WebProvisioningState | None:
+        if not self.state_directory.exists() and not self.state_directory.is_symlink():
+            return None
+        try:
+            descriptor = self._open_state(os.O_RDONLY)
+        except FileNotFoundError:
+            return None
+        with os.fdopen(descriptor, encoding="utf-8") as state_file:
+            try:
+                value = json.load(state_file)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise ValueError(f"cannot read web provisioning state: {self._state_path}") from exc
+        if not isinstance(value, dict) or set(value) != {"schema_version", "origin"}:
+            raise ValueError("web provisioning state has invalid fields")
+        origin = value.get("origin")
+        parsed = urlsplit(origin) if isinstance(origin, str) else None
+        if (
+            value.get("schema_version") != 1
+            or parsed is None
+            or parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("web provisioning state has an unsupported schema")
+        return WebProvisioningState(origin=origin.rstrip("/"))
+
+    def _save_state(self, state: WebProvisioningState) -> None:
+        self._ensure_state_directory()
+        if self._state_path.exists() or self._state_path.is_symlink():
+            descriptor = self._open_state(os.O_RDONLY)
+            os.close(descriptor)
+        temporary = self._state_path.with_name(
+            f".{self._state_path.name}.{secrets.token_hex(8)}.tmp"
+        )
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as state_file:
+                descriptor = -1
+                json.dump(
+                    {"schema_version": 1, "origin": state.origin}, state_file, separators=(",", ":")
+                )
+                state_file.write("\n")
+                state_file.flush()
+                os.fsync(state_file.fileno())
+            os.replace(temporary, self._state_path)
+            if os.name == "posix":
+                directory_descriptor = os.open(
+                    self.state_directory,
+                    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0),
+                )
+                try:
+                    os.fsync(directory_descriptor)
+                finally:
+                    os.close(directory_descriptor)
+            self._stored_state = state
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            with contextlib.suppress(FileNotFoundError):
+                temporary.unlink()
+
+    def _ensure_state_directory(self) -> None:
+        self.state_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        details = self.state_directory.stat(follow_symlinks=False)
+        if not stat.S_ISDIR(details.st_mode):
+            raise ValueError("web provisioning state parent is not a directory")
+        if os.name == "posix" and (
+            details.st_uid != os.geteuid() or stat.S_IMODE(details.st_mode) & 0o077
+        ):
+            raise ValueError(
+                "web provisioning state directory must be private and owned by this user"
+            )
+
+    def _open_state(self, flags: int) -> int:
+        self._ensure_state_directory()
+        descriptor = os.open(
+            self._state_path,
+            flags | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        details = os.fstat(descriptor)
+        if not stat.S_ISREG(details.st_mode) or (
+            os.name == "posix"
+            and (details.st_uid != os.geteuid() or stat.S_IMODE(details.st_mode) & 0o077)
+        ):
+            os.close(descriptor)
+            raise ValueError("web provisioning state must be a private regular file")
+        return descriptor
+
+
 def browser_event(
     cursor: int,
     event: Event,
@@ -163,9 +498,7 @@ def browser_event(
                 event.spoof.suspected_sender, MAX_WEB_PROVENANCE_BYTES
             )
             assert event.spoof.attribution_confidence is not None
-            value["event"]["spoof_sender_confidence"] = (
-                event.spoof.attribution_confidence.value
-            )
+            value["event"]["spoof_sender_confidence"] = event.spoof.attribution_confidence.value
     if combo is not None and 0 <= combo.body_start < combo.body_end <= len(text):
         value["event"]["combo"] = {
             "count": combo.count,
@@ -368,9 +701,9 @@ class WebGatewayServer:
         self._site: web.TCPSite | None = None
         self._active_sockets: dict[UUID, set[web.WebSocketResponse]] = defaultdict(set)
         self._connection_counts: dict[UUID, int] = defaultdict(int)
-        self._command_history: dict[
-            UUID, OrderedDict[UUID, tuple[str, dict[str, Any]]]
-        ] = defaultdict(OrderedDict)
+        self._command_history: dict[UUID, OrderedDict[UUID, tuple[str, dict[str, Any]]]] = (
+            defaultdict(OrderedDict)
+        )
         self._command_times: dict[UUID, deque[float]] = defaultdict(deque)
         self._command_locks: dict[UUID, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._frame_times: dict[UUID, deque[float]] = defaultdict(deque)
@@ -419,9 +752,7 @@ class WebGatewayServer:
         entries = [*self.runtime.plugins.diagnostics.entries(), *self.diagnostics.entries()]
         if category == "web":
             entries = [
-                entry
-                for entry in entries
-                if entry.component in {"web", "startup", "connection"}
+                entry for entry in entries if entry.component in {"web", "startup", "connection"}
             ]
         elif category == "presentations":
             entries = [entry for entry in entries if entry.component == "presentation"]
@@ -650,15 +981,12 @@ class WebGatewayServer:
                 identity_attempts.popleft()
             if not identity_attempts:
                 self._pairing_attempts.pop(identity, None)
-        while (
-            self._global_pairing_attempts and self._global_pairing_attempts[0] <= now - 60
-        ):
+        while self._global_pairing_attempts and self._global_pairing_attempts[0] <= now - 60:
             self._global_pairing_attempts.popleft()
         attempts = self._pairing_attempts.get(tailscale_login)
-        if (
-            (attempts is not None and len(attempts) >= MAX_PAIRING_ATTEMPTS_PER_MINUTE)
-            or len(self._global_pairing_attempts) >= MAX_GLOBAL_PAIRING_ATTEMPTS_PER_MINUTE
-        ):
+        if (attempts is not None and len(attempts) >= MAX_PAIRING_ATTEMPTS_PER_MINUTE) or len(
+            self._global_pairing_attempts
+        ) >= MAX_GLOBAL_PAIRING_ATTEMPTS_PER_MINUTE:
             return False
         if attempts is None:
             attempts = self._pairing_attempts[tailscale_login]
@@ -867,9 +1195,7 @@ class WebGatewayServer:
                     self._active_sockets[device.device_id].add(socket)
                     revoked = False
             if revoked:
-                await self._close_bounded(
-                    socket, code=1008, message=b"Device session revoked"
-                )
+                await self._close_bounded(socket, code=1008, message=b"Device session revoked")
             if socket.closed:
                 return socket
             await self._send_initial_state(
@@ -881,9 +1207,7 @@ class WebGatewayServer:
                 combo_tracker=(combo_tracker := ComboTracker()),
             )
             sender = asyncio.create_task(
-                self._send_events(
-                    socket, subscription, device, session_token, combo_tracker
-                ),
+                self._send_events(socket, subscription, device, session_token, combo_tracker),
                 name=f"tfr-web-events-{device.device_id}",
             )
             receiver = asyncio.create_task(
@@ -947,9 +1271,7 @@ class WebGatewayServer:
             "speaking_streaks_enabled": settings["speaking_streaks_enabled"],
         }
         sockets = tuple(
-            socket
-            for device_sockets in self._active_sockets.values()
-            for socket in device_sockets
+            socket for device_sockets in self._active_sockets.values() for socket in device_sockets
         )
         await asyncio.gather(
             *(self._send_bounded(socket, message) for socket in sockets),
@@ -986,9 +1308,7 @@ class WebGatewayServer:
                 timeout=WEB_WRITE_TIMEOUT_SECONDS,
             )
         except (ConnectionError, RuntimeError, TimeoutError):
-            await WebGatewayServer._close_bounded(
-                socket, code=1008, message=b"Web client too slow"
-            )
+            await WebGatewayServer._close_bounded(socket, code=1008, message=b"Web client too slow")
             return False
         return True
 
@@ -1003,8 +1323,7 @@ class WebGatewayServer:
         combo_tracker: ComboTracker,
     ) -> None:
         descriptors = {
-            str(descriptor["world"]): descriptor
-            for descriptor in self.runtime.world_descriptors()
+            str(descriptor["world"]): descriptor for descriptor in self.runtime.world_descriptors()
         }
         authorized = self._authorized_worlds(device)
         for item in subscription.snapshot.events:
@@ -1039,9 +1358,7 @@ class WebGatewayServer:
             projected = browser_event(item.cursor, item.event, self.runtime.plugins)
             if projected is None:
                 continue
-            projected_bytes = len(
-                json.dumps(projected, ensure_ascii=True).encode("utf-8")
-            )
+            projected_bytes = len(json.dumps(projected, ensure_ascii=True).encode("utf-8"))
             if snapshot_bytes + projected_bytes > MAX_WEB_SNAPSHOT_BYTES:
                 snapshot_truncated = True
                 break
@@ -1210,9 +1527,7 @@ class WebGatewayServer:
                 )
                 return
             if item.event.world not in self._authorized_worlds(device):
-                await self._close_bounded(
-                    socket, code=1008, message=b"World authorization changed"
-                )
+                await self._close_bounded(socket, code=1008, message=b"World authorization changed")
                 return
             descriptor = next(
                 (
@@ -1228,9 +1543,7 @@ class WebGatewayServer:
                 item.event.timestamp.timestamp(),
                 character_name=descriptor.get("character"),
             )
-            message = browser_event(
-                item.cursor, item.event, self.runtime.plugins, combo=combo
-            )
+            message = browser_event(item.cursor, item.event, self.runtime.plugins, combo=combo)
             if message is not None:
                 if not await self._send_if_active(
                     socket,
@@ -1281,9 +1594,7 @@ class WebGatewayServer:
                     continue
                 current = self.devices.authenticate(session_token)
                 if current is None or current.device_id != device.device_id:
-                    await self._close_bounded(
-                        socket, code=1008, message=b"Device session revoked"
-                    )
+                    await self._close_bounded(socket, code=1008, message=b"Device session revoked")
                     return
                 await self._handle_request(socket, device, value)
             elif frame.type in {WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR}:
@@ -1428,6 +1739,5 @@ class WebGatewayServer:
             await self._send_ack(socket, request_id, ok=False, error=message)
             return
         await self._send_bounded(
-            socket,
-            {"type": "error", "protocol": WEB_PROTOCOL_VERSION, "message": message}
+            socket, {"type": "error", "protocol": WEB_PROTOCOL_VERSION, "message": message}
         )

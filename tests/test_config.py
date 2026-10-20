@@ -32,6 +32,7 @@ def test_speaking_streaks_are_enabled_by_default_and_can_be_disabled() -> None:
     assert UiConfig().speaking_streaks.enabled is True
     assert UiConfig(speaking_streaks={"enabled": False}).speaking_streaks.enabled is False
 
+
 MAIN = """
 {
   // Referenced files are relative to this file.
@@ -136,6 +137,7 @@ def test_loads_jsonc_and_resolves_references(tmp_path: Path) -> None:
         == Path("~/.local/state/tfr/updates").expanduser().resolve()
     )
     assert bundle.main.web_gateway.enabled is False
+    assert bundle.main.web_gateway.mode == "on-demand"
     assert bundle.main.web_gateway.origin is None
     assert (
         bundle.main.web_gateway.state_directory

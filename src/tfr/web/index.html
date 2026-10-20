@@ -53,10 +53,10 @@
         <p class="fine-print">The link expires after ten minutes and creates one credential.</p>
         <section id="ios-install-help" class="install-help" hidden aria-labelledby="install-title">
           <h2 id="install-title">Install on this iPhone</h2>
-          <ol>
+          <ol id="ios-install-steps">
             <li>Open this page in Safari.</li>
             <li>Tap Share, then <strong>Add to Home Screen</strong>.</li>
-            <li>Open TFR from its new Home Screen icon and paste the pairing link.</li>
+            <li>Open TFR from its new Home Screen icon.</li>
           </ol>
         </section>
       </section>
@@ -154,7 +154,28 @@
           </div>
         </section>
         <button id="unpair-device" class="unpair-device" type="button">Unpair this phone</button>
+        <button id="uninstall-device" class="unpair-device" type="button">Reset and uninstall</button>
       </form>
+    </dialog>
+
+    <dialog id="uninstall-dialog" class="settings-dialog" aria-labelledby="uninstall-title">
+      <section class="settings-sheet">
+        <header>
+          <div>
+            <p class="eyebrow">Local reset complete</p>
+            <h2 id="uninstall-title">Remove TFR</h2>
+          </div>
+        </header>
+        <p>Your Gateway device was revoked and TFR-controlled browser data was cleared.</p>
+        <ol id="uninstall-steps">
+          <li>Return to the iPhone Home Screen.</li>
+          <li>Press and hold the TFR icon.</li>
+          <li>Choose <strong>Delete Bookmark</strong> or <strong>Remove App</strong>.</li>
+        </ol>
+        <p class="fine-print">
+          iOS requires this final manual step and does not allow a web app to remove its own icon.
+        </p>
+      </section>
     </dialog>
 
     <dialog id="diagnostics-dialog" class="diagnostics-dialog" aria-labelledby="diagnostics-title">
@@ -246,7 +267,7 @@
       <button id="apply-update" type="button">Reload</button>
     </aside>
     <aside id="ios-install-notice" class="update-notice install-notice" role="status" hidden>
-      <span>Install TFR: tap Share, then <strong>Add to Home Screen</strong>.</span>
+      <span id="ios-install-notice-text">Install TFR: tap Share, then <strong>Add to Home Screen</strong>.</span>
       <button id="ios-install-dismiss" type="button">Got it</button>
     </aside>
     <div id="toast" class="toast" role="status" hidden></div>
