@@ -29,7 +29,6 @@ from tfr.diagnostics import DiagnosticBuffer
 from tfr.events import ActorType, Confidence, Direction, Event, EventKind, Provenance
 from tfr.gateway import GatewayRuntime, HistorySubscription, SequencedEvent
 from tfr.gateway_devices import DeviceRecord, DeviceStore
-from tfr.gateway_transport import validate_tcp_endpoint
 from tfr.plugins import PluginManager
 from tfr.presentation import effect_programs_as_dict
 
@@ -746,11 +745,16 @@ class WebGatewayServer:
             if not 1 <= port <= 65_535:
                 raise ValueError("web gateway port must be between 1 and 65535")
         else:
-            # Direct transport: the Gateway terminates TLS itself and may bind a
-            # specific public or private address. A wildcard bind is rejected so
-            # the operator must name the interface, matching the native TCP
-            # gateway listener's policy.
-            validate_tcp_endpoint(host, port)
+            # Direct transport: the Gateway terminates TLS itself and binds a
+            # real local interface (for example a private VPC IP) or a wildcard.
+            # Wildcard is permitted here because, unlike the native TFR-protocol
+            # listener, the direct PWA relies on the host/cloud firewall as its
+            # outer boundary. The public/NAT address a browser reaches is
+            # direct_host and is never bound here.
+            if not host.strip():
+                raise ValueError("direct transport bind host cannot be empty")
+            if not 1 <= port <= 65_535:
+                raise ValueError("web gateway port must be between 1 and 65535")
             if ssl_context is None:
                 raise ValueError("direct transport requires a TLS context")
         parsed_origin = urlsplit(origin)

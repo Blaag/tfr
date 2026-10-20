@@ -127,10 +127,15 @@
     "mode": "on-demand",
     "transport": "tailscale",
     // "origin": "https://gateway.example.ts.net", // tailscale transport only
+    // listen_host is the local interface the PWA socket binds. Tailscale: must
+    // be loopback. Direct: a wildcard (0.0.0.0/::) or a real bindable address
+    // such as a private VPC IP — NOT the public/NAT address.
     "listen_host": "127.0.0.1",
     "listen_port": 7348,
-    // Direct transport only:
+    // Direct transport only (browser reaches direct_host; socket binds
+    // listen_host; direct_port must differ from the native --listen-port):
     // "transport": "direct",
+    // "listen_host": "0.0.0.0",
     // "direct_host": "gateway.example.com",
     // "direct_port": 27047,
     // "tls_cert": "~/.config/tfr/gateway.crt",

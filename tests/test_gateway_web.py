@@ -2158,37 +2158,28 @@ def _dummy_server_tls_context() -> ssl.SSLContext:
     return ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 
 
-def test_direct_server_requires_tls_and_rejects_wildcard(tmp_path: Path) -> None:
+def test_direct_server_requires_tls_context(tmp_path: Path) -> None:
     runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 5}))
     with pytest.raises(ValueError, match="direct transport requires a TLS context"):
         WebGatewayServer(
             runtime,  # type: ignore[arg-type]
             origin=DIRECT_ORIGIN,
-            host="bsd.shutdown.com",
+            host="172.30.1.74",
             port=27047,
             state_directory=tmp_path / "web",
             snapshot_events=5,
             transport="direct",
         )
-    with pytest.raises(ValueError, match="wildcard"):
-        WebGatewayServer(
-            runtime,  # type: ignore[arg-type]
-            origin=DIRECT_ORIGIN,
-            host="0.0.0.0",
-            port=27047,
-            state_directory=tmp_path / "web",
-            snapshot_events=5,
-            transport="direct",
-            ssl_context=_dummy_server_tls_context(),
-        )
 
 
-def test_direct_server_allows_public_bind_with_tls(tmp_path: Path) -> None:
+def test_direct_server_allows_wildcard_bind_with_tls(tmp_path: Path) -> None:
+    # The direct PWA relies on the firewall as its boundary, so a wildcard bind
+    # is permitted (unlike the native TFR-protocol TCP listener).
     runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 5}))
     gateway = WebGatewayServer(
         runtime,  # type: ignore[arg-type]
         origin=DIRECT_ORIGIN,
-        host="bsd.shutdown.com",
+        host="0.0.0.0",
         port=27047,
         state_directory=tmp_path / "web",
         snapshot_events=5,
@@ -2196,7 +2187,25 @@ def test_direct_server_allows_public_bind_with_tls(tmp_path: Path) -> None:
         ssl_context=_dummy_server_tls_context(),
     )
     assert gateway.transport == "direct"
+    assert gateway.host == "0.0.0.0"
+
+
+def test_direct_server_allows_private_interface_bind_with_tls(tmp_path: Path) -> None:
+    runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 5}))
+    gateway = WebGatewayServer(
+        runtime,  # type: ignore[arg-type]
+        origin=DIRECT_ORIGIN,
+        host="172.30.1.74",
+        port=27047,
+        state_directory=tmp_path / "web",
+        snapshot_events=5,
+        transport="direct",
+        ssl_context=_dummy_server_tls_context(),
+    )
+    assert gateway.transport == "direct"
+    # Origin advertises the public host; the socket binds the private interface.
     assert gateway.origin == DIRECT_ORIGIN
+    assert gateway.host == "172.30.1.74"
 
 
 def test_tailscale_server_rejects_ssl_context(tmp_path: Path) -> None:
@@ -2221,7 +2230,7 @@ async def _direct_paired_client(
     gateway = WebGatewayServer(
         runtime,  # type: ignore[arg-type]
         origin=DIRECT_ORIGIN,
-        host="bsd.shutdown.com",
+        host="172.30.1.74",
         port=27047,
         state_directory=tmp_path / "web",
         snapshot_events=20,
@@ -2269,7 +2278,7 @@ async def test_direct_pairing_rate_limit_keys_on_client_ip(tmp_path: Path) -> No
     gateway = WebGatewayServer(
         runtime,  # type: ignore[arg-type]
         origin=DIRECT_ORIGIN,
-        host="bsd.shutdown.com",
+        host="172.30.1.74",
         port=27047,
         state_directory=tmp_path / "web",
         snapshot_events=5,
@@ -2309,7 +2318,7 @@ async def test_direct_manager_pairs_without_tailscale(
     manager = WebGatewayManager(
         object(),  # type: ignore[arg-type]
         configured_origin=DIRECT_ORIGIN,
-        host="bsd.shutdown.com",
+        host="172.30.1.74",
         port=27047,
         state_directory=tmp_path / "web",
         snapshot_events=20,
@@ -2333,7 +2342,7 @@ def test_direct_manager_requires_origin_and_tls() -> None:
         WebGatewayManager(
             object(),  # type: ignore[arg-type]
             configured_origin=None,
-            host="bsd.shutdown.com",
+            host="172.30.1.74",
             port=27047,
             state_directory="/tmp/does-not-matter",
             snapshot_events=20,
@@ -2345,7 +2354,7 @@ def test_direct_manager_requires_origin_and_tls() -> None:
         WebGatewayManager(
             object(),  # type: ignore[arg-type]
             configured_origin=DIRECT_ORIGIN,
-            host="bsd.shutdown.com",
+            host="172.30.1.74",
             port=27047,
             state_directory="/tmp/does-not-matter",
             snapshot_events=20,

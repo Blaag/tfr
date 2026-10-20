@@ -491,6 +491,7 @@ the Gateway's certificate covers:
 "web_gateway": {
   "mode": "on-demand",
   "transport": "direct",
+  "listen_host": "0.0.0.0",
   "direct_host": "bsd.shutdown.com",
   "direct_port": 27047,
   // tls_cert/tls_key are optional; when omitted, direct mode reuses the
@@ -500,8 +501,15 @@ the Gateway's certificate covers:
 },
 ```
 
-In this mode the PWA listener terminates TLS itself and binds the given address.
-Then pair from any attached native UI, naming that address to confirm it:
+`listen_host` is the real local interface the socket binds — a wildcard
+(`0.0.0.0`/`::`) or a specific bindable address such as a private VPC IP. It is
+**not** the public address: on NAT-based hosts (for example an EC2 instance) the
+public IP is not assigned to any local interface and cannot be bound.
+`direct_host` is only the browser-facing hostname used for the origin and TLS
+certificate matching.
+
+In this mode the PWA listener terminates TLS itself and binds `listen_host`.
+Then pair from any attached native UI, naming the public address to confirm it:
 
 ```text
 /web pair "My iPhone" --gateway bsd.shutdown.com:27047
@@ -526,8 +534,9 @@ Requirements and caveats for direct mode:
 - **The firewall is the outer boundary.** There is no Tailscale ACL in front of
   the listener, so restrict inbound access to `direct_port` to the intended
   devices with your host or cloud firewall.
-- **Wildcard binds are rejected.** `direct_host` must name a specific address,
-  never `0.0.0.0` or `::`.
+- **`direct_host` must be a specific hostname, not a wildcard.** It names the
+  browser-facing origin, so `0.0.0.0` or `::` are rejected. `listen_host` may be
+  a wildcard, because it is the local bind interface guarded by the firewall.
 
 Direct mode replaces Tailscale Serve's identity header with possession of the
 per-device bearer credential over authenticated TLS, the same trust model as the

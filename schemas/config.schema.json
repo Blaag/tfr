@@ -767,10 +767,8 @@
         },
         "listen_host": {
           "default": "127.0.0.1",
-          "enum": [
-            "127.0.0.1",
-            "::1"
-          ],
+          "maxLength": 253,
+          "minLength": 1,
           "title": "Listen Host",
           "type": "string"
         },

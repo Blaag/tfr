@@ -260,11 +260,18 @@ class WebGatewayConfig(StrictModel):
     # possession of the per-device bearer credential over authenticated TLS.
     transport: Literal["tailscale", "direct"] = "tailscale"
     origin: AnyHttpUrl | None = None
-    listen_host: Literal["127.0.0.1", "::1"] = "127.0.0.1"
+    # The local interface the PWA listener binds. In tailscale transport this
+    # must be loopback (127.0.0.1 or ::1), since Tailscale Serve fronts it. In
+    # direct transport it is the real, bindable interface address (for example
+    # a private VPC IP) or a wildcard; it is NOT the public/NAT address, which
+    # cannot be bound. The browser-facing address is direct_host.
+    listen_host: str = Field(default="127.0.0.1", min_length=1, max_length=253)
     listen_port: int = Field(default=7348, ge=1, le=65_535)
     # Direct-mode only: the externally reachable host (DNS name recommended so
-    # the browser can verify the TLS certificate) and the TLS key pair the
-    # Gateway presents. The port defaults to listen_port when omitted.
+    # the browser can verify the TLS certificate) the PWA is advertised on and
+    # the TLS key pair the Gateway presents. This is used only for the origin
+    # and certificate matching, never to bind the socket. The port defaults to
+    # listen_port when omitted.
     direct_host: str | None = Field(default=None, min_length=1, max_length=253)
     direct_port: int | None = Field(default=None, ge=1, le=65_535)
     tls_cert: Path | None = None
@@ -284,6 +291,10 @@ class WebGatewayConfig(StrictModel):
                 raise ValueError(
                     f"web_gateway.{field_name} requires web_gateway.transport to be 'direct'"
                 )
+        if self.listen_host not in {"127.0.0.1", "::1"}:
+            raise ValueError(
+                "web_gateway.listen_host must be 127.0.0.1 or ::1 in tailscale transport"
+            )
         if self.enabled and self.origin is None:
             raise ValueError("web_gateway.origin is required when the web gateway is enabled")
         if self.origin is None:
@@ -345,11 +356,17 @@ class WebGatewayConfig(StrictModel):
 
     @property
     def direct_bind(self) -> tuple[str, int] | None:
-        """The (host, port) the direct-mode PWA listener should bind."""
+        """The (host, port) the direct-mode PWA listener binds locally.
+
+        The host is ``listen_host`` (a real, bindable interface such as a
+        private VPC IP, or a wildcard), NOT ``direct_host`` — the public/NAT
+        address a browser connects to usually cannot be bound. The port is the
+        same ``direct_port`` the origin advertises.
+        """
         if self.transport != "direct" or self.direct_host is None:
             return None
         port = self.direct_port if self.direct_port is not None else self.listen_port
-        return str(self.direct_host).strip(), port
+        return self.listen_host.strip(), port
 
 
 class ManagedSettingsConfig(StrictModel):

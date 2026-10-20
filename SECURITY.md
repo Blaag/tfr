@@ -84,19 +84,22 @@ paired credential to that identity. Funnel traffic does not carry the identity
 header and is rejected.
 
 The `direct` transport is for a Gateway with a public hostname that does not use
-Tailscale. The Gateway terminates TLS itself with its configured certificate and
-binds the specific `direct_host`/`direct_port` address; a wildcard bind is
-rejected so the operator always names the interface. TLS is mandatory, which
-keeps the pairing code and the `Secure`, `HttpOnly`, `__Host-`-prefixed session
-cookie confidential over the public network. Because there is no Serve identity
-header, direct mode binds each credential to a fixed sentinel identity and relies
-on possession of the per-device bearer credential over authenticated TLS — the
-same trust model as the Gateway's token-authenticated remote UI. Pairing attempts
-are rate-limited by client IP rather than by identity. There is no Tailscale ACL
-in front of the listener, so the host or cloud firewall restricting inbound
-access to `direct_port` is the outer boundary and should be scoped to the
-intended devices. The TLS certificate must cover `direct_host` or the browser
-will refuse the connection.
+Tailscale. The Gateway terminates TLS itself with its configured certificate.
+The socket binds `listen_host` — a real local interface (such as a private VPC
+IP) or a wildcard — while `direct_host`/`direct_port` is only the browser-facing
+origin and must be a specific hostname, never a wildcard. The public/NAT address
+a browser reaches (for example an EC2 instance's public IP) is deliberately not
+the bind address, since it is not assigned to any local interface. TLS is
+mandatory, which keeps the pairing code and the `Secure`, `HttpOnly`,
+`__Host-`-prefixed session cookie confidential over the public network. Because
+there is no Serve identity header, direct mode binds each credential to a fixed
+sentinel identity and relies on possession of the per-device bearer credential
+over authenticated TLS — the same trust model as the Gateway's
+token-authenticated remote UI. Pairing attempts are rate-limited by client IP
+rather than by identity. There is no Tailscale ACL in front of the listener, so
+the host or cloud firewall restricting inbound access to `direct_port` is the
+outer boundary and should be scoped to the intended devices. The TLS certificate
+must cover `direct_host` or the browser will refuse the connection.
 
 Mobile devices pair through a high-entropy, single-credential, ten-minute code created
 over the owner-only Gateway Unix socket. Concurrent or lost-response retries from

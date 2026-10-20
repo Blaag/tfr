@@ -629,16 +629,40 @@ def test_web_gateway_tailscale_defaults_reject_direct_fields() -> None:
 def test_web_gateway_direct_requires_host_and_derives_origin() -> None:
     config = WebGatewayConfig(
         transport="direct",
+        listen_host="172.30.1.74",
         direct_host="bsd.shutdown.com",
         direct_port=27047,
         tls_cert=Path("~/gw.crt"),
         tls_key=Path("~/gw.key"),
     )
+    # Origin advertises the public hostname; the socket binds the real interface.
     assert config.canonical_origin == "https://bsd.shutdown.com:27047"
-    assert config.direct_bind == ("bsd.shutdown.com", 27047)
+    assert config.direct_bind == ("172.30.1.74", 27047)
 
     with pytest.raises(ValueError, match="requires web_gateway.direct_host"):
         WebGatewayConfig(transport="direct", direct_port=27047)
+
+
+def test_web_gateway_direct_bind_defaults_to_loopback_interface() -> None:
+    # When listen_host is not set, the bind defaults to loopback even though the
+    # origin advertises the public direct_host.
+    config = WebGatewayConfig(
+        transport="direct",
+        direct_host="bsd.shutdown.com",
+        direct_port=27047,
+    )
+    assert config.canonical_origin == "https://bsd.shutdown.com:27047"
+    assert config.direct_bind == ("127.0.0.1", 27047)
+
+
+def test_web_gateway_direct_allows_wildcard_bind() -> None:
+    config = WebGatewayConfig(
+        transport="direct",
+        listen_host="0.0.0.0",
+        direct_host="bsd.shutdown.com",
+        direct_port=27047,
+    )
+    assert config.direct_bind == ("0.0.0.0", 27047)
 
 
 def test_web_gateway_direct_allows_omitted_cert_for_fallback() -> None:
@@ -646,22 +670,29 @@ def test_web_gateway_direct_allows_omitted_cert_for_fallback() -> None:
     # can be reused; the config layer accepts that and the wiring enforces it.
     config = WebGatewayConfig(
         transport="direct",
+        listen_host="172.30.1.74",
         direct_host="bsd.shutdown.com",
         direct_port=27047,
     )
     assert config.tls_cert is None
     assert config.tls_key is None
-    assert config.direct_bind == ("bsd.shutdown.com", 27047)
+    assert config.direct_bind == ("172.30.1.74", 27047)
 
 
 def test_web_gateway_direct_port_defaults_to_listen_port() -> None:
     config = WebGatewayConfig(
         transport="direct",
+        listen_host="172.30.1.74",
         direct_host="bsd.shutdown.com",
         listen_port=7348,
     )
-    assert config.direct_bind == ("bsd.shutdown.com", 7348)
+    assert config.direct_bind == ("172.30.1.74", 7348)
     assert config.canonical_origin == "https://bsd.shutdown.com:7348"
+
+
+def test_web_gateway_tailscale_rejects_non_loopback_listen_host() -> None:
+    with pytest.raises(ValueError, match="must be 127.0.0.1 or ::1"):
+        WebGatewayConfig(transport="tailscale", listen_host="0.0.0.0")
 
 
 def test_web_gateway_direct_omits_default_https_port() -> None:
