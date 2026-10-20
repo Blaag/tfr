@@ -25,16 +25,17 @@ from tfr.ansi import BrowserTextSpan, ansi_visible_text, browser_text_spans, ter
 from tfr.combo import Combo, ComboTracker
 from tfr.core import UnknownSessionError
 from tfr.diagnostics import DiagnosticBuffer
-from tfr.events import ActorType, Confidence, Direction, Event, EventKind, Provenance
+from tfr.events import Actor, ActorType, Confidence, Direction, Event, EventKind, Provenance
 from tfr.gateway import GatewayRuntime, HistorySubscription, SequencedEvent
 from tfr.gateway_devices import DeviceRecord, DeviceStore
+from tfr.multiline import PreparedMultiline, prepare_multiline_text
 from tfr.plugins import PluginManager
 from tfr.presentation import effect_programs_as_dict
 
 WEB_PROTOCOL_VERSION = 1
 SESSION_COOKIE = "__Host-tfr_session"
 TAILSCALE_LOGIN_HEADER = "Tailscale-User-Login"
-MAX_WEB_MESSAGE_BYTES = 65_536
+MAX_WEB_MESSAGE_BYTES = 131_072
 MAX_WEB_EFFECT_DEMOS_BYTES = 131_072
 MAX_COMMANDS_PER_MINUTE = 30
 MAX_PAIRING_ATTEMPTS_PER_MINUTE = 20
@@ -52,6 +53,11 @@ MAX_WEB_SNAPSHOT_SOURCE_BYTES = 8_388_608
 MAX_WEB_FRAMES_PER_MINUTE = 120
 MAX_WEB_CONNECTIONS_PER_MINUTE = 12
 MAX_WEB_DIAGNOSTICS_PER_MINUTE = 20
+MAX_WEB_PASTE_SOURCE_BYTES = 65_536
+MAX_WEB_PASTE_LINES = 100
+MAX_WEB_PASTE_COMMAND_BYTES = 7_000
+MAX_WEB_PASTE_STARTS_PER_MINUTE = 4
+WEB_PASTE_DELAY_SECONDS = 0.5
 WEB_WRITE_TIMEOUT_SECONDS = 5
 TAILSCALE_COMMAND_TIMEOUT_SECONDS = 10
 MAX_TAILSCALE_OUTPUT_BYTES = 1_048_576
@@ -97,6 +103,7 @@ _ASSETS = {
     "/linkify.mjs": ("linkify.mjs", "text/javascript; charset=utf-8"),
     "/motion.mjs": ("motion.mjs", "text/javascript; charset=utf-8"),
     "/pairing.mjs": ("pairing.mjs", "text/javascript; charset=utf-8"),
+    "/paste.mjs": ("paste.mjs", "text/javascript; charset=utf-8"),
     "/presentation.mjs": ("presentation.mjs", "text/javascript; charset=utf-8"),
     "/scroll-restoration.mjs": ("scroll-restoration.mjs", "text/javascript; charset=utf-8"),
     "/swipe.mjs": ("swipe.mjs", "text/javascript; charset=utf-8"),
@@ -117,6 +124,19 @@ _ASSETS = {
 @dataclass(frozen=True, slots=True)
 class WebProvisioningState:
     origin: str
+
+
+@dataclass(slots=True)
+class WebPasteTransfer:
+    device_id: UUID
+    request_id: UUID
+    socket: web.WebSocketResponse
+    world: str
+    generation: int
+    prepared: PreparedMultiline
+    sent_lines: int = 0
+    cancel_reason: str = "disconnected"
+    task: asyncio.Task[None] | None = None
 
 
 def _tailscale_origin(status: object) -> str:
@@ -713,6 +733,9 @@ class WebGatewayServer:
         self._session_lock = asyncio.Lock()
         self.diagnostics = DiagnosticBuffer()
         self._diagnostic_times: dict[UUID, deque[float]] = defaultdict(deque)
+        self._paste_transfers: dict[UUID, WebPasteTransfer] = {}
+        self._paste_times: dict[UUID, deque[float]] = defaultdict(deque)
+        self._paste_request_ids: dict[UUID, OrderedDict[UUID, None]] = defaultdict(OrderedDict)
 
     def create_pairing_url(self, label: str) -> str:
         allowed_worlds = tuple(self._non_agent_worlds())
@@ -770,6 +793,7 @@ class WebGatewayServer:
             revoked = await self.devices.revoke(device_id)
             sockets = tuple(self._active_sockets.get(device_id, ()))
         if revoked:
+            await self._cancel_paste(device_id, reason="revoked")
             for socket in sockets:
                 await self._close_bounded(socket, code=1008, message=b"Device session revoked")
         return revoked
@@ -805,7 +829,7 @@ class WebGatewayServer:
                 web.get("/ws", self._websocket),
                 web.get(
                     "/{asset:index.html|app.mjs|bootstrap.mjs|command.mjs|connection-lifecycle.mjs|"
-                    "diagnostics.mjs|event-details.mjs|effects-lab.mjs|history-notice.mjs|linkify.mjs|motion.mjs|pairing.mjs|"
+                    "diagnostics.mjs|event-details.mjs|effects-lab.mjs|history-notice.mjs|linkify.mjs|motion.mjs|pairing.mjs|paste.mjs|"
                     "presentation.mjs|scroll-restoration.mjs|combo.mjs|swipe.mjs|text-runs.mjs|"
                     "transcript-events.mjs|styles.css|manifest.webmanifest|"
                     "repair.html|repair.css|repair.mjs|sw.js|icon.svg|icon-512.png|"
@@ -818,6 +842,13 @@ class WebGatewayServer:
         return application
 
     async def stop(self) -> None:
+        await asyncio.gather(
+            *(
+                self._cancel_paste(device_id, reason="gateway_stopping")
+                for device_id in tuple(self._paste_transfers)
+            ),
+            return_exceptions=True,
+        )
         await asyncio.gather(
             *(
                 self._close_bounded(socket, code=1001, message=b"Gateway stopping")
@@ -1225,6 +1256,11 @@ class WebGatewayServer:
         except (ConnectionError, RuntimeError, ValueError):
             await self._close_bounded(socket, code=1008, message=b"Web gateway error")
         finally:
+            await self._cancel_paste(
+                device.device_id,
+                reason="disconnected",
+                socket=socket,
+            )
             await self.runtime.history.unsubscribe(subscription)
             async with self._session_lock:
                 sockets = self._active_sockets.get(device.device_id)
@@ -1619,6 +1655,36 @@ class WebGatewayServer:
                 return
             await self._send_ack(socket, request_id, ok=True)
             return
+        if message_type == "paste":
+            if set(message) != {"type", "request_id", "world", "text"}:
+                await self._send_error(socket, request_id, "Paste has invalid fields")
+                return
+            world = message.get("world")
+            text = message.get("text")
+            if not isinstance(world, str) or not isinstance(text, str):
+                await self._send_error(socket, request_id, "Paste world and text must be strings")
+                return
+            if world not in self._authorized_worlds(device):
+                await self._send_error(
+                    socket, request_id, "World is not authorized for this device"
+                )
+                return
+            await self._start_paste(socket, device, request_id, world, text)
+            return
+        if message_type == "cancel_paste":
+            if set(message) != {"type", "request_id"}:
+                await self._send_error(socket, request_id, "Paste cancellation has invalid fields")
+                return
+            transfer = self._paste_transfers.get(device.device_id)
+            if (
+                transfer is None
+                or transfer.request_id != request_id
+                or transfer.socket is not socket
+            ):
+                await self._send_error(socket, request_id, "Paste transfer is not active")
+                return
+            await self._cancel_paste(device.device_id, reason="user", socket=socket)
+            return
         if message_type != "command":
             await self._send_error(socket, request_id, "Unsupported request type")
             return
@@ -1638,6 +1704,196 @@ class WebGatewayServer:
             return
         await self._submit_command(socket, device, request_id, world, text)
 
+    def _world_descriptor(self, world: str) -> Mapping[str, Any] | None:
+        return next(
+            (
+                descriptor
+                for descriptor in self.runtime.world_descriptors()
+                if descriptor["world"] == world
+            ),
+            None,
+        )
+
+    async def _start_paste(
+        self,
+        socket: web.WebSocketResponse,
+        device: DeviceRecord,
+        request_id: UUID,
+        world: str,
+        text: str,
+    ) -> None:
+        descriptor = self._world_descriptor(world)
+        if descriptor is None or descriptor.get("state") != "connected":
+            await self._send_error(
+                socket, request_id, "World session is not accepting pasted lines"
+            )
+            return
+        try:
+            prepared = prepare_multiline_text(
+                text,
+                server=str(descriptor.get("server", "")),
+                encoding=str(descriptor.get("encoding", "utf-8")),
+                source="PWA paste",
+                maximum_source_bytes=MAX_WEB_PASTE_SOURCE_BYTES,
+                maximum_lines=MAX_WEB_PASTE_LINES,
+                maximum_command_bytes=MAX_WEB_PASTE_COMMAND_BYTES,
+            )
+        except ValueError as exc:
+            await self._send_error(socket, request_id, str(exc))
+            return
+        if not prepared.commands:
+            await self._send_error(socket, request_id, "Paste must contain at least one line")
+            return
+        async with self._session_lock:
+            current = self.devices.authenticate_by_id(device.device_id)
+            if current is None or world not in self._authorized_worlds(current):
+                error = "Device session was revoked or world is no longer authorized"
+            elif (
+                request_id in self._command_history[device.device_id]
+                or request_id in self._paste_request_ids[device.device_id]
+            ):
+                error = "request_id was already used"
+            elif device.device_id in self._paste_transfers:
+                error = "A paste transfer is already active for this device"
+            else:
+                now = time.monotonic()
+                starts = self._paste_times[device.device_id]
+                while starts and starts[0] <= now - 60:
+                    starts.popleft()
+                if len(starts) >= MAX_WEB_PASTE_STARTS_PER_MINUTE:
+                    error = "Paste transfer rate limit exceeded"
+                else:
+                    starts.append(now)
+                    transfer = WebPasteTransfer(
+                        device_id=device.device_id,
+                        request_id=request_id,
+                        socket=socket,
+                        world=world,
+                        generation=int(descriptor.get("connection_generation", 0)),
+                        prepared=prepared,
+                    )
+                    self._paste_transfers[device.device_id] = transfer
+                    paste_ids = self._paste_request_ids[device.device_id]
+                    paste_ids[request_id] = None
+                    while len(paste_ids) > MAX_IDEMPOTENCY_RECORDS:
+                        paste_ids.popitem(last=False)
+                    error = None
+        if error is not None:
+            await self._send_error(socket, request_id, error)
+            return
+        if not await self._send_bounded(
+            socket,
+            {
+                "type": "paste_started",
+                "protocol": WEB_PROTOCOL_VERSION,
+                "request_id": str(request_id),
+                "total_lines": prepared.line_count,
+            },
+        ):
+            await self._cancel_paste(device.device_id, reason="disconnected", socket=socket)
+            return
+        transfer.task = asyncio.create_task(
+            self._run_paste(transfer),
+            name=f"tfr-web-paste-{device.device_id}",
+        )
+
+    def _paste_status(self, transfer: WebPasteTransfer) -> str | None:
+        current = self.devices.authenticate_by_id(transfer.device_id)
+        if current is None:
+            return "revoked"
+        active_sockets = self._active_sockets.get(transfer.device_id, ())
+        if transfer.socket.closed or transfer.socket not in active_sockets:
+            return "disconnected"
+        if transfer.world not in self._authorized_worlds(current):
+            return "revoked"
+        descriptor = self._world_descriptor(transfer.world)
+        if descriptor is None or descriptor.get("state") != "connected":
+            return "world_disconnected"
+        if int(descriptor.get("connection_generation", 0)) != transfer.generation:
+            return "world_changed"
+        return None
+
+    async def _run_paste(self, transfer: WebPasteTransfer) -> None:
+        completed = False
+        reason = "submission_failed"
+        try:
+            await asyncio.sleep(0)
+            for line_number, command in enumerate(transfer.prepared.commands, start=1):
+                if line_number > 1:
+                    await asyncio.sleep(WEB_PASTE_DELAY_SECONDS)
+                if status := self._paste_status(transfer):
+                    reason = status
+                    break
+                try:
+                    self.runtime.submit_command_nowait(
+                        world=transfer.world,
+                        text=command,
+                        client_id=f"web:{transfer.device_id}",
+                        request_id=uuid4(),
+                        actor=Actor(ActorType.HUMAN, f"web:{transfer.device_id}"),
+                        correlation_id=transfer.request_id,
+                        expected_connection_generation=transfer.generation,
+                        metadata={
+                            "paste_request_id": str(transfer.request_id),
+                            "paste_line": line_number,
+                            "paste_total_lines": transfer.prepared.line_count,
+                        },
+                    )
+                except (UnknownSessionError, RuntimeError, ValueError):
+                    reason = "submission_failed"
+                    break
+                transfer.sent_lines = line_number
+                if not await self._send_bounded(
+                    transfer.socket,
+                    {
+                        "type": "paste_progress",
+                        "protocol": WEB_PROTOCOL_VERSION,
+                        "request_id": str(transfer.request_id),
+                        "sent_lines": transfer.sent_lines,
+                        "total_lines": transfer.prepared.line_count,
+                    },
+                ):
+                    reason = "disconnected"
+                    break
+            else:
+                completed = True
+        except asyncio.CancelledError:
+            reason = transfer.cancel_reason
+        finally:
+            current = self._paste_transfers.get(transfer.device_id)
+            if current is transfer:
+                self._paste_transfers.pop(transfer.device_id, None)
+            message = {
+                "type": "paste_complete" if completed else "paste_cancelled",
+                "protocol": WEB_PROTOCOL_VERSION,
+                "request_id": str(transfer.request_id),
+                "sent_lines": transfer.sent_lines,
+                "total_lines": transfer.prepared.line_count,
+            }
+            if not completed:
+                message["reason"] = reason
+            await self._send_bounded(transfer.socket, message)
+
+    async def _cancel_paste(
+        self,
+        device_id: UUID,
+        *,
+        reason: str,
+        socket: web.WebSocketResponse | None = None,
+    ) -> bool:
+        transfer = self._paste_transfers.get(device_id)
+        if transfer is None or (socket is not None and transfer.socket is not socket):
+            return False
+        transfer.cancel_reason = reason
+        task = transfer.task
+        if task is None:
+            self._paste_transfers.pop(device_id, None)
+            return True
+        if task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        return True
+
     async def _submit_command(
         self,
         socket: web.WebSocketResponse,
@@ -1652,7 +1908,13 @@ class WebGatewayServer:
         async with self._command_locks[device.device_id]:
             history = self._command_history[device.device_id]
             previous = history.get(request_id)
-            if previous is not None:
+            if request_id in self._paste_request_ids[device.device_id]:
+                response = self._ack(
+                    request_id,
+                    ok=False,
+                    error="request_id was already used for a paste transfer",
+                )
+            elif previous is not None:
                 if previous[0] != fingerprint:
                     response = self._ack(
                         request_id,

@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
     <meta name="theme-color" content="#0d1717">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -94,13 +94,15 @@
 
       <section id="history-notice" class="history-notice" hidden></section>
       <section id="transcript" class="transcript" aria-live="polite" aria-label="World transcript">
+        <div class="transcript-overlay" aria-hidden="true">
+          <div id="combo-notice" class="combo-notice" hidden></div>
+        </div>
         <ol id="event-list" class="event-list"></ol>
         <div id="empty-state" class="empty-state">
           <span class="empty-glyph" aria-hidden="true">∿</span>
           <p>Waiting for a signal.</p>
         </div>
       </section>
-      <div id="combo-notice" class="combo-notice" aria-hidden="true" hidden></div>
       <div id="combo-fireworks" class="combo-fireworks" aria-hidden="true"></div>
 
       <button id="return-live" class="return-live" type="button" hidden>
@@ -157,6 +159,10 @@
             <span>Native spelling suggestions</span>
             <input id="spelling-suggestions" type="checkbox" role="switch" checked>
           </label>
+          <label class="setting-row" for="automatic-say">
+            <span>Treat ordinary text as speech</span>
+            <input id="automatic-say" type="checkbox" role="switch">
+          </label>
           <button id="effects-lab-button" type="button">Open Effects Lab</button>
           <button id="diagnostics-button" type="button">Open Diagnostics</button>
         </fieldset>
@@ -170,6 +176,28 @@
         <button id="unpair-device" class="unpair-device" type="button">Unpair this phone</button>
         <button id="uninstall-device" class="unpair-device" type="button">Reset and uninstall</button>
       </form>
+    </dialog>
+
+    <dialog id="paste-dialog" class="paste-dialog" aria-labelledby="paste-dialog-title">
+      <section class="paste-sheet">
+        <header>
+          <div>
+            <p id="paste-dialog-world" class="eyebrow">Current world</p>
+            <h2 id="paste-dialog-title">Send pasted lines</h2>
+          </div>
+        </header>
+        <p id="paste-summary"></p>
+        <pre id="paste-preview"></pre>
+        <p id="paste-preview-note" class="fine-print" hidden>Preview limited to the first 10 lines.</p>
+        <p id="paste-status" class="paste-status" role="status">
+          Each line will be sent as literal output, not executed as a pasted command.
+        </p>
+        <div class="paste-actions">
+          <button id="paste-cancel" type="button">Cancel</button>
+          <button id="paste-stop" type="button" hidden>Stop transfer</button>
+          <button id="paste-confirm" type="button">Send pasted lines</button>
+        </div>
+      </section>
     </dialog>
 
     <dialog id="uninstall-dialog" class="settings-dialog" aria-labelledby="uninstall-title">

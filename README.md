@@ -541,8 +541,25 @@ and emphasis, world switching, unread counts, per-world drafts and bounded
 command history, command submission, safe links, and reconnect/backfill. It
 uses native iOS/browser spelling suggestions in the world composer by default;
 the device-local Settings toggle controls browser `spellcheck`/`autocorrect` and
-does not run or synchronize TFR's Python spellchecker. Effects Lab command input
-keeps native spelling disabled. The PWA supports the first bounded portable
+does not run or synchronize TFR's Python spellchecker. The composer also offers
+a device-local, off-by-default setting that prefixes ordinary text with `say `;
+explicit `:`, `;`, and `@` commands and the first tokens `p`, `po`, `pos`,
+`pose`, `sa`, and `say` are left unchanged. Effects Lab command input keeps
+native spelling disabled.
+
+A single pasted line remains editable composer text and is never sent
+automatically. A multiline paste opens a preview tied to the selected world and
+requires explicit confirmation. The browser sends the source once; the Gateway
+normalizes its newlines, escapes every line as literal `@emit` output, and sends
+at most 100 lines and 64 KiB at a fixed pace. This is supported for `bare`,
+`tinymush`, and `tinymux` worlds. The progress sheet can stop an active transfer.
+Closing the initiating socket, revoking the device, disconnecting or replacing
+the world connection, or stopping the Gateway cancels it. Lines already accepted
+may have reached the world, and interrupted transfers never resume automatically;
+retrying can duplicate those lines. The scoped browser protocol cannot submit
+arbitrary command arrays or choose escaping, pacing, actors, or audit metadata.
+
+The PWA supports the first bounded portable
 plugin effects: foreground-color timelines
 with static and reduced-motion fallbacks. It intentionally does not yet provide
 agent controls, world connection controls, local shell access, transform-rich

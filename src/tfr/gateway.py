@@ -920,12 +920,20 @@ class GatewayRuntime:
         text: str,
         client_id: str,
         request_id: UUID,
+        actor: Actor | None = None,
+        correlation_id: UUID | None = None,
+        expected_connection_generation: int | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> None:
         request = self._command_request(
             world=world,
             text=text,
             client_id=client_id,
             request_id=request_id,
+            actor=actor,
+            correlation_id=correlation_id,
+            expected_connection_generation=expected_connection_generation,
+            metadata=metadata,
         )
         self.command_bus.submit_nowait(request)
 

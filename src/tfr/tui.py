@@ -70,6 +70,7 @@ from tfr.image_art import (
     render_image,
 )
 from tfr.managed_updates import activate_managed_update, stage_managed_update
+from tfr.multiline import prepare_emit_lines, prepare_multiline_text
 from tfr.pager import (
     DisplayBuffer,
     FormattedRow,
@@ -97,7 +98,6 @@ from tfr.updates import (
     current_build,
     format_update_status,
 )
-from tfr.world_text import escape_world_text
 
 _MULTILINE_PASTE_DELAY_SECONDS = 0.5
 _MULTILINE_PASTE_MAXIMUM_BYTES = 1_048_576
@@ -476,42 +476,27 @@ def _emit_commands(
     encoding: str,
     source: str,
 ) -> tuple[str, ...]:
-    if server not in {"bare", "tinymush", "tinymux"}:
-        raise ValueError(f"{source} requires a bare, tinymush, or tinymux world")
-    text = "\n".join(lines)
-    if "\x00" in text:
-        raise ValueError(f"{source} contains a NUL character")
-    if len(text.encode("utf-8")) > _MULTILINE_PASTE_MAXIMUM_BYTES:
-        raise ValueError(f"{source} exceeds the {_MULTILINE_PASTE_MAXIMUM_BYTES} byte limit")
-    if len(lines) > _MULTILINE_PASTE_MAXIMUM_LINES:
-        raise ValueError(f"{source} exceeds the {_MULTILINE_PASTE_MAXIMUM_LINES} line limit")
-    commands = tuple(f"@emit {escape_world_text(line, server)}" for line in lines)
-    for line_number, command in enumerate(commands, start=1):
-        try:
-            command_size = len(command.encode(encoding, errors="strict"))
-        except (LookupError, UnicodeEncodeError) as exc:
-            raise ValueError(
-                f"{source} line {line_number} cannot be encoded as {encoding}"
-            ) from exc
-        if command_size > _MULTILINE_PASTE_MAXIMUM_COMMAND_BYTES:
-            raise ValueError(
-                f"{source} line {line_number} exceeds the "
-                f"{_MULTILINE_PASTE_MAXIMUM_COMMAND_BYTES} byte command limit"
-            )
-    return commands
-
-
-def _multiline_paste_commands(text: str, *, server: str, encoding: str) -> tuple[str, ...]:
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = normalized.split("\n")
-    if lines and not lines[-1]:
-        lines.pop()
-    return _emit_commands(
+    return prepare_emit_lines(
         lines,
         server=server,
         encoding=encoding,
+        source=source,
+        maximum_source_bytes=_MULTILINE_PASTE_MAXIMUM_BYTES,
+        maximum_lines=_MULTILINE_PASTE_MAXIMUM_LINES,
+        maximum_command_bytes=_MULTILINE_PASTE_MAXIMUM_COMMAND_BYTES,
+    ).commands
+
+
+def _multiline_paste_commands(text: str, *, server: str, encoding: str) -> tuple[str, ...]:
+    return prepare_multiline_text(
+        text,
+        server=server,
+        encoding=encoding,
         source="multiline paste",
-    )
+        maximum_source_bytes=_MULTILINE_PASTE_MAXIMUM_BYTES,
+        maximum_lines=_MULTILINE_PASTE_MAXIMUM_LINES,
+        maximum_command_bytes=_MULTILINE_PASTE_MAXIMUM_COMMAND_BYTES,
+    ).commands
 
 
 def _format_elapsed(seconds: float) -> str:
