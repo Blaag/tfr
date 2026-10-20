@@ -64,13 +64,23 @@ def test_event_message_round_trips_source_grouped_presentations() -> None:
     ]
 
     cursor, restored = event_from_message(
-        json.loads(encode_message(event_message(7, original, presentations=presentations)))
+        json.loads(
+            encode_message(
+                event_message(
+                    7,
+                    original,
+                    presentations=presentations,
+                    presentation_text='Alice says, "Hello"',
+                )
+            )
+        )
     )
 
     assert cursor == 7
     restored_presentations = restored.metadata["gateway_presentations"]
     assert restored_presentations[0]["source"] == "speaker_effects"
     assert restored_presentations[0]["presentation"]["version"] == 1
+    assert restored.metadata["gateway_presentation_text"] == 'Alice says, "Hello"'
 
 
 async def test_rejects_an_unsupported_protocol_version() -> None:

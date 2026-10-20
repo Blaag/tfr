@@ -62,7 +62,7 @@ from tfr.plugin_api import (
 )
 from tfr.plugin_sources import PluginSourceNotice, PluginUpdateChecker, PluginUpdateResult
 from tfr.plugins import BossViewEvent, PluginManager
-from tfr.presentation import effect_programs_as_dict
+from tfr.presentation import EffectProgram, effect_programs_as_dict
 from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.tui import (
     _MAX_OBSERVED_SPEAKER_LENGTH,
@@ -2871,17 +2871,49 @@ def test_remote_tui_renders_gateway_portable_presentations() -> None:
     assert presentations[0].program.fallback.foreground == "#112233"
 
 
-async def test_remote_tui_local_portable_plugin_overrides_only_its_gateway_source() -> None:
+def test_remote_tui_rejects_presentations_for_a_different_text_projection() -> None:
+    tui = make_tui()
+    tui.gateway_reconnect = lambda: None  # type: ignore[assignment]
+    program = color_pulse(0, 5, base_color="#112233", accent_color="#ffffff")
+    event = Event(
+        session_id=tui.active_view.session.session_id,
+        world="alpha",
+        connection_generation=1,
+        sequence=1,
+        direction=Direction.INBOUND,
+        kind=EventKind.SAY,
+        canonical_text="[prefix] Alice says hello",
+        plain_text="Alice says hello",
+        display_text="[prefix] Alice says hello",
+        metadata={
+            "gateway_presentation_text": "Alice says hello",
+            "gateway_presentations": [
+                {
+                    "source": "speaker_effects",
+                    "presentation": effect_programs_as_dict((program,)),
+                }
+            ],
+        },
+    )
+
+    tui.handle_event(event)
+
+    assert tui.active_view.display._entry_presentations[-1] == ()
+
+
+async def test_remote_tui_uses_only_gateway_portable_presentations() -> None:
     class LocalPresentation:
         api_version = 1
 
         def register(self, registrar: Any, _config: object) -> None:
-            registrar.register_presentation_decorator(
-                "local",
-                lambda _event, _text: (
-                    color_pulse(0, 5, base_color="#445566", accent_color="#ffffff"),
-                ),
-            )
+            def fail_decoration(_event: Event, _text: str) -> tuple[object, ...]:
+                raise AssertionError("remote UIs must not evaluate imperative text decorators")
+
+            def fail_if_called(_event: Event, _text: str) -> tuple[EffectProgram, ...]:
+                raise AssertionError("remote UIs must not evaluate portable presentation policy")
+
+            registrar.register_display_decorator("local", fail_decoration)
+            registrar.register_presentation_decorator("local", fail_if_called)
 
     manager = await PluginManager.load(
         enabled=("speaker_effects",),
@@ -2924,7 +2956,7 @@ async def test_remote_tui_local_portable_plugin_overrides_only_its_gateway_sourc
 
     presentations = tui.active_view.display._entry_presentations[-1]
     assert [item.program.fallback.foreground for item in presentations] == [
-        "#445566",
+        "#112233",
         "#778899",
     ]
 

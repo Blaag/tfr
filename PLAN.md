@@ -980,12 +980,12 @@ Acceptance criteria:
   translation, opacity, and overlay primitives remain follow-up work and must not
   constrain the PWA to terminal capabilities. Keep client commands and actions
   outside the presentation language.
-- [ ] Finish migrating display plugins from named terminal-only effects to the
-  bounded portable presentation mini-DSL. Inventory remaining plugins, express
-  every portable effect with typed programs and explicit reduced-motion and
-  unsupported-client fallbacks, implement the corresponding safe PWA renderers,
-  and retain terminal-only behavior only where the shared language cannot
-  represent it without weakening its bounds.
+- [x] Finish migrating portable transcript plugins from named terminal-only
+  effects to the bounded presentation mini-DSL. Every current public speaker
+  effect and terminal reveal now uses typed programs with explicit fallbacks;
+  remotely attached UIs consume Gateway policy without local overrides. Keep
+  screen clears, borders, boss views, and other local viewport or interaction
+  effects outside the transcript DSL.
 - [x] Fix speaker effects not working on poses.
 - [x] Harden protected release orchestration with prompt-aware exact-tag
   confirmations, guarded resume of version-only release PRs, exact-head check

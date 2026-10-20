@@ -29,7 +29,6 @@ from tfr.gateway_client import (
     GatewayDisconnectedError,
     GatewayUiRuntime,
     RemoteWorldSession,
-    portable_plugin_migration_warning,
     run_gateway_ui,
 )
 from tfr.gateway_protocol import GatewayProtocolError, read_message, write_message
@@ -54,19 +53,6 @@ def make_event(sequence: int) -> Event:
         canonical_text=f"line {sequence}",
         display_text=f"line {sequence}",
     )
-
-
-def test_portable_plugin_migration_warning_lists_only_affected_plugins() -> None:
-    warning = portable_plugin_migration_warning(("speaker_effects", "terminal_reveal"))
-
-    assert warning is not None
-    assert "speaker_effects, terminal_reveal" in warning
-    assert "these portable plugins only" in warning
-    assert "do not move all local plugins" in warning
-    assert "Local settings still override" in warning
-    assert "upcoming release will ignore them" in warning
-    assert "Client-only plugins remain local" in warning
-    assert portable_plugin_migration_warning(()) is None
 
 
 async def test_missing_gateway_socket_reports_the_path() -> None:

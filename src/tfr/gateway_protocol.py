@@ -83,6 +83,7 @@ def event_message(
     event: Event,
     *,
     presentations: list[dict[str, Any]] | None = None,
+    presentation_text: str | None = None,
 ) -> dict[str, Any]:
     if cursor < 1:
         raise GatewayProtocolError("event cursor must be positive")
@@ -94,6 +95,8 @@ def event_message(
     }
     if presentations:
         message["presentations"] = presentations
+        if presentation_text is not None:
+            message["presentation_text"] = presentation_text
     return message
 
 
@@ -114,9 +117,18 @@ def event_from_message(message: Mapping[str, Any]) -> tuple[int, Event]:
         if presentations is not None:
             if not isinstance(presentations, list) or len(presentations) > 16:
                 raise ValueError("event presentations must be a bounded list")
+            presentation_text = message.get("presentation_text")
+            if presentation_text is not None and not isinstance(presentation_text, str):
+                raise ValueError("event presentation text must be a string")
+            metadata: dict[str, Any] = {
+                **event.metadata,
+                "gateway_presentations": presentations,
+            }
+            if presentation_text is not None:
+                metadata["gateway_presentation_text"] = presentation_text
             event = replace(
                 event,
-                metadata={**event.metadata, "gateway_presentations": presentations},
+                metadata=metadata,
             )
         return cursor, event
     except (KeyError, TypeError, ValueError) as exc:

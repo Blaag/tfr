@@ -2235,6 +2235,17 @@ class TfrTui:
             or len(raw_groups) > 16
         ):
             return ()
+        source_text = event.metadata.get("gateway_presentation_text")
+        if source_text is not None and source_text != text:
+            self.plugins.diagnostics.record(
+                severity="warning",
+                component="presentation",
+                code="gateway_projection_mismatch",
+                message="Gateway presentation targets a different visible-text projection",
+                operation="native-ui",
+                event_id=str(event.event_id),
+            )
+            return ()
         groups: list[tuple[str, tuple[EffectProgram, ...]]] = []
         try:
             for raw_group in raw_groups:
@@ -2641,43 +2652,29 @@ class TfrTui:
                     spoof_span = message_start + start, message_start + end
             display_text = (
                 self.plugins.transform_display(display_event)
-                if self.plugins is not None
+                if self.plugins is not None and self.gateway_reconnect is None
                 else event_text
             )
             if display_text is not None:
                 effect_event = self._inferred_display_speaker(display_event, event_text)
                 decorations = (
                     self.plugins.decorate_display(effect_event, display_text)
-                    if self.plugins is not None
+                    if self.plugins is not None and self.gateway_reconnect is None
                     else ()
                 )
                 plain_display_text = terminal_plain_text(display_text)
-                local_groups = (
-                    self.plugins.presentation_programs_by_plugin(
-                        effect_event,
-                        plain_display_text,
+                selected_groups = (
+                    self._gateway_presentation_programs(event, plain_display_text)
+                    if self.gateway_reconnect is not None
+                    else (
+                        self.plugins.presentation_programs_by_plugin(
+                            effect_event,
+                            plain_display_text,
+                        )
+                        if self.plugins is not None
+                        else ()
                     )
-                    if self.plugins is not None
-                    else ()
                 )
-                local_overrides = (
-                    set(self.plugins.configured_portable_plugins())
-                    if self.gateway_reconnect is not None and self.plugins is not None
-                    else set()
-                )
-                gateway_groups = self._gateway_presentation_programs(
-                    event,
-                    plain_display_text,
-                )
-                gateway_sources = {source for source, _programs in gateway_groups}
-                local_by_source = dict(local_groups)
-                selected_groups = tuple(
-                    (source, local_by_source[source])
-                    if source in local_overrides and source in local_by_source
-                    else (source, programs)
-                    for source, programs in gateway_groups
-                    if source not in local_overrides or source in local_by_source
-                ) + tuple(item for item in local_groups if item[0] not in gateway_sources)
                 presentations = tuple(
                     program for _source, programs in selected_groups for program in programs
                 )

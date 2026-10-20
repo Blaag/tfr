@@ -10,6 +10,12 @@ character color sweeps, hue waves, and palette fronts. Version 2 adds reusable
 character style/case sweeps, deterministic sparkles, filled fronts, bounded
 long-running transitions, reverse video, and character reveal/substitution.
 
+Version 2 is feature-complete for TFR's current portable transcript effects.
+Every text effect currently published by `tfr-plugins-public` that belongs on a
+Gateway event can be expressed with these primitives. Feature-complete does not
+mean permanently frozen: a future portable transcript effect may justify a
+versioned primitive, but local viewport and interaction effects do not.
+
 Named speaker effects compile to these shared primitives instead of adding a
 renderer branch for every preset. The contract remains deliberately bounded;
 additional primitives must preserve its validation, fallback, accessibility,
@@ -37,12 +43,14 @@ TFR-owned renderers interpret that program using their own platform primitives.
                                             PWA interpreter
 ```
 
-In a terminal UI process, plugin policy and interpretation can occur locally. A
-PWA cannot execute a trusted local Python package, so the Gateway executes the
+In a standalone terminal UI process, plugin policy and interpretation occur in
+the same process. For every remotely attached UI, the Gateway alone executes
 portable plugin policy, validates and serializes its bounded result, and sends
-that result with the approved browser event projection. The Gateway does not
-draw the effect. The PWA remains responsible for interpretation, accessibility,
-layout, animation, cleanup, and local motion preferences.
+that result with the approved event projection. A remote UI must not reevaluate,
+replace, or reconstruct omitted portable policy from a locally installed copy of
+the plugin. The Gateway does not draw the effect. Each UI remains responsible
+for interpretation, accessibility, layout, animation, cleanup, local motion
+preferences, and bounded resource degradation.
 
 The DSL is the typed presentation model and its composition rules. It does not
 need to be a textual language, and it must not contain arbitrary expressions,
@@ -83,9 +91,11 @@ animation objects, screen-reader state, or rendering timers through the portable
 contract.
 
 The plugin system is not being retired. Enrichers, commands, key bindings,
-lifecycle handlers, boss views, display transforms, border effects, screen-clear
-effects, and UI-specific extensions remain separate capabilities. A plugin may
-offer both portable presentation and client-specific functionality.
+lifecycle handlers, boss views, border effects, screen-clear effects, and
+UI-specific extensions remain separate capabilities. Gateway event projection
+must not depend on a remote UI display transform. A plugin may offer both
+portable presentation and client-specific functionality, but the two paths have
+different authority and installation scopes.
 
 ### Renderers
 
@@ -117,6 +127,11 @@ For browser presentation, the Gateway:
 - Projects only approved primitives and fields.
 - Applies event, program, variant, track, keyframe, range, and size limits.
 - Sends no executable plugin code and no arbitrary style language.
+
+The same authority rule applies to the native Gateway protocol. Presentation
+ranges are bound to the exact visible-text projection used when policy ran. A
+client that uses a different projection rejects the programs and renders readable
+ordinary text; it does not run local policy as a fallback.
 
 The Gateway does not choose a variant based on a browser's motion setting and
 does not render presentation. Local client policy can change while a page is
@@ -196,11 +211,14 @@ This transform example is not accepted by the current version 1 schema.
 
 ### Current Plugin API
 
-Plugins register portable policy in every process scope with
-`register_presentation_decorator()`. A decorator must be a pure function of the
-immutable event and exact visible text because the Gateway or an attached UI may
-first evaluate retained events during replay. TFR caches results by event and
-visible projection within each process, but plugins must not depend on invocation
+Plugins register portable policy with `register_presentation_decorator()`. The
+Gateway evaluates that registration for remote sessions; a standalone TUI
+evaluates it in its combined policy-and-renderer process. An attached UI may load
+the same plugin package for unrelated client-only capabilities, but it does not
+evaluate the portable decorator for remote events. A decorator must be a pure
+function of the immutable event and exact visible text because retained events
+may be evaluated during replay. TFR caches results by event and visible projection
+within the authoritative process, but plugins must not depend on invocation
 count, client count, or evaluation order.
 
 ```python
@@ -270,9 +288,9 @@ Named helpers such as `color_pulse()`, `bounce()`, or `jiggle()` may remain in
 the public Python API. They are constructors that compile to primitives, not
 wire-level operations that every renderer recognizes by name.
 
-## Initial Primitive Set
+## Implemented Primitive Set
 
-The implemented first vertical slice supports:
+The implemented versions support:
 
 - A grapheme-aligned character-range target.
 - Static foreground color, bold, and underline.
@@ -281,34 +299,35 @@ The implemented first vertical slice supports:
   interpolation.
 - Bounded per-character color tracks: directional highlight sweeps, cyclic HSV
   hue waves, and two-to-eight-color traveling palette fronts.
-- Event-time phase, 1–3 second active duration, 1–60 second repeat interval,
-  1–20 repetitions, at most 20 sampled frames per second, and at most five
+- Character style/case sweeps, deterministic sparkles, reverse video, filled
+  fronts, and bounded character reveal/substitution.
+- Event-time phase, 0.1–30 second active duration, 0.1–60 second repeat interval,
+  1–20 repetitions, at most 30 sampled frames per second, and at most five
   minutes total lifetime.
 - An explicit reduced-motion/static fallback.
 - Deterministic behavior from event time rather than receipt-time drift where
   retained and live events must agree.
 
-Version 1 accepts one grapheme-aligned target of at most 2,048 Unicode code
-points per event. Character tracks target at most 64 graphemes. Highlight
+Version 2 accepts at most four grapheme-aligned programs with targets of at most
+4,096 Unicode code points. Character tracks target at most 100 graphemes. Highlight
 sweeps use a width of 0.5–8, optional start/end padding of 0–8 graphemes, and an
 enumerated symmetric, behind, or ahead trail. Hue-wave saturation, brightness,
 and spatial/temporal cycles and palette-front spread/direction are independently
-bounded. It rejects overlapping or multiple programs. The PWA starts at
+bounded. The PWA starts at
 most 64 presentation animation-budget units in a rendered transcript; character
 sweeps and color tracks consume four units and simple timelines consume one. Older targets fall
 back to the program's static style. Invalid or oversized presentation is omitted
 without dropping readable event text.
 
-After this works in both clients, a graphical extension can add opacity, scale,
-rotation, and bounded translation. Those primitives are sufficient to compose
-many larger-text, spin, jiggle, and bounce effects without adding named effect
-implementations to the PWA.
+An optional future graphical extension may add opacity, scale, rotation, and
+bounded translation for a concrete portable transcript effect. Those primitives
+are not required to complete the current authority migration.
 
-Per-character substitution, reveal effects, overlays, appended indicators,
-screen transitions, border animation, and particle systems should be added only
-after their targeting, layout, accessibility, and resource semantics are clear.
-They should not be forced into the first text-effect schema merely because the
-current TUI supports similarly named behavior.
+Overlays and appended indicators should be added only after their targeting,
+layout, accessibility, and resource semantics are clear. Screen transitions,
+border animation, and viewport particle systems are local UI capabilities and
+must not be forced into the text-effect schema merely because a TUI supports
+them.
 
 ## Composition And Targeting
 
@@ -318,8 +337,8 @@ by static browser runs and terminal display projection. Semantic targets such as
 `speaker` are preferable when TFR can validate them from trusted parsed data;
 otherwise a plugin emits a bounded visible-text range.
 
-Before multiple programs can overlap, the model must define deterministic
-composition rules. At minimum:
+Multiple programs use validated transport order. Their composition must preserve
+these rules:
 
 - Text content must remain reconstructable and stable unless a future primitive
   explicitly declares visual-only substitution.
@@ -329,9 +348,29 @@ composition rules. At minimum:
 - Unsupported properties must not invalidate unrelated text.
 - Program order must not depend on dictionary ordering or asynchronous arrival.
 
-The first implementation rejects overlapping or multiple portable programs.
-Supporting fewer combinations with clear semantics is preferable to accidental
-layering.
+The current implementation accepts at most four programs. Renderers preserve
+their validated order when ranges overlap; later nested presentation layers take
+precedence for properties they set. Supporting fewer combinations with clear
+semantics remains preferable to accidental layering.
+
+## Local UI Effects
+
+Presentation attached to a Gateway event is distinct from presentation caused by
+local UI state. Screen clearing, animated borders, boss views, selection, focus,
+typing glow, spellcheck feedback, effects-lab previews, scrolling, and viewport
+overlays are outside this DSL.
+
+In particular, a local `Ctrl-L` clear is handled entirely by the initiating UI.
+Its screen-clear plugin may inspect that UI's viewport, choose a locally
+configured animation, apply local motion policy, and clear only that UI. It does
+not send a request through the Gateway and does not name `doom_fire`, `water`, or
+another client renderer in an `EffectProgram`. A future request to control a
+different client would require a separately designed, targeted client-action
+protocol rather than an extension to transcript presentation.
+
+Combo semantics may be supplied by the Gateway as a typed cue. Combo notices,
+fireworks, and other viewport visuals remain local UI behavior unless a future
+decision defines a portable transcript effect for them.
 
 ## Motion And Accessibility
 
@@ -398,7 +437,8 @@ a general browser plugin runtime.
 
 ## Migration Plan
 
-Migration remains incremental. The first four steps are complete:
+The portable vocabulary is complete for current published transcript effects.
+Migration now focuses on authority and compatibility cleanup:
 
 1. [x] Define immutable Python types, strict validation, and a versioned browser
    DTO for the initial primitive set.
@@ -407,18 +447,18 @@ Migration remains incremental. The first four steps are complete:
 3. [x] Implement TUI and PWA interpreters with semantic tests for timing, color,
    targeting, variant selection, and fallback behavior.
 4. [x] Add a bounded `color_pulse()` helper that compiles to primitives.
-5. Add graphical transform primitives and prove a PWA-rich effect with an
-   explicit terminal fallback.
-6. Migrate other suitable named `TextEffectKind` recipes as their required
-   primitives become available.
-7. Deprecate the old hard-coded rendering contract only after external plugins
-   have a documented migration path and released compatibility window.
+5. [x] Add the bounded character tracks required by all current public speaker
+   effects and terminal reveal.
+6. [x] Make the Gateway the sole portable-policy authority for remotely attached
+   UIs and remove local override behavior.
+7. [x] Retire imperative transcript decorators from migrated public plugins while
+   retaining client-only border and screen-clear APIs.
 
-During migration, `TextDecoration` and `EffectProgram` coexist. Existing
-TUI plugins must continue to work until an intentional plugin API transition.
-Compatibility adapters should be added only where their semantics are exact;
-client-specific effects can remain client-specific rather than receiving a
-misleading portable translation.
+`TextDecoration` remains available to standalone TUI plugins and core local UI
+effects, but a remotely attached UI does not evaluate imperative transcript
+decorators or portable policy. Compatibility adapters should be added only where
+their semantics are exact; client-specific effects remain client-specific rather
+than receiving a misleading portable translation.
 
 ## Testing Requirements
 
