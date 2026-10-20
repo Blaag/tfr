@@ -70,6 +70,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="pair mode: label for the mobile device",
     )
     parser.add_argument(
+        "--gateway",
+        metavar="HOST:PORT",
+        help="pair mode: confirm the direct-transport PWA address the device should use",
+    )
+    parser.add_argument(
         "--device-id",
         help="revoke-device mode: paired device UUID",
     )
@@ -274,6 +279,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             or network_arguments
             or (args.device_name is not None) != expected_device_name
             or (args.device_id is not None) != expected_device_id
+            or (args.gateway is not None and args.mode != "pair")
         ):
             print(
                 "tfr: web device administration accepts only --socket plus its required "
@@ -281,6 +287,17 @@ def run(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+        gateway_target: str | None = None
+        if args.gateway is not None:
+            from tfr.gateway_transport import normalize_web_gateway_target
+
+            gateway_target = normalize_web_gateway_target(args.gateway)
+            if gateway_target is None:
+                print(
+                    f"tfr: invalid --gateway address {args.gateway!r}; expected HOST:PORT",
+                    file=sys.stderr,
+                )
+                return 2
         try:
             from tfr.gateway_admin import (
                 create_device_pairing_url,
@@ -289,7 +306,21 @@ def run(argv: Sequence[str] | None = None) -> int:
             )
 
             if args.mode == "pair":
-                print(asyncio.run(create_device_pairing_url(args.socket, args.device_name)))
+                pairing_url = asyncio.run(
+                    create_device_pairing_url(args.socket, args.device_name)
+                )
+                if gateway_target is not None:
+                    expected_origin = f"https://{gateway_target}"
+                    actual_origin = pairing_url.split("/#", 1)[0].rstrip("/")
+                    if actual_origin != expected_origin:
+                        print(
+                            f"tfr: the Gateway's direct origin is {actual_origin}, not "
+                            f"{expected_origin}; configure web_gateway.transport 'direct' with "
+                            "direct_host/direct_port to match",
+                            file=sys.stderr,
+                        )
+                        return 2
+                print(pairing_url)
             elif args.mode == "devices":
                 devices = asyncio.run(list_web_devices(args.socket))
                 if not devices:

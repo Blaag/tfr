@@ -252,9 +252,23 @@ class UpdateConfig(StrictModel):
 class WebGatewayConfig(StrictModel):
     enabled: bool = False
     mode: Literal["on-demand", "disabled"] = "on-demand"
+    # "tailscale" (default): the backend binds loopback and Tailscale Serve
+    # provides the HTTPS origin and the Tailscale-User-Login identity header.
+    # "direct": the Gateway terminates TLS itself and binds a specific public
+    # or private address, for a cloud-hosted Gateway that does not use
+    # Tailscale. Direct mode replaces the Serve identity binding with
+    # possession of the per-device bearer credential over authenticated TLS.
+    transport: Literal["tailscale", "direct"] = "tailscale"
     origin: AnyHttpUrl | None = None
     listen_host: Literal["127.0.0.1", "::1"] = "127.0.0.1"
     listen_port: int = Field(default=7348, ge=1, le=65_535)
+    # Direct-mode only: the externally reachable host (DNS name recommended so
+    # the browser can verify the TLS certificate) and the TLS key pair the
+    # Gateway presents. The port defaults to listen_port when omitted.
+    direct_host: str | None = Field(default=None, min_length=1, max_length=253)
+    direct_port: int | None = Field(default=None, ge=1, le=65_535)
+    tls_cert: Path | None = None
+    tls_key: Path | None = None
     state_directory: Path = Path("~/.local/state/tfr/web")
     snapshot_events: int = Field(default=2_000, ge=1, le=5_000)
 
@@ -262,22 +276,80 @@ class WebGatewayConfig(StrictModel):
     def valid_browser_origin(self) -> WebGatewayConfig:
         if self.mode == "disabled" and self.enabled:
             raise ValueError("web_gateway.enabled cannot be true when web_gateway.mode is disabled")
+        if self.transport == "direct":
+            return self._validate_direct()
+        # Tailscale transport: direct-only fields must not be set.
+        for field_name in ("direct_host", "direct_port", "tls_cert", "tls_key"):
+            if getattr(self, field_name) is not None:
+                raise ValueError(
+                    f"web_gateway.{field_name} requires web_gateway.transport to be 'direct'"
+                )
         if self.enabled and self.origin is None:
             raise ValueError("web_gateway.origin is required when the web gateway is enabled")
         if self.origin is None:
             return self
-        parsed = urlsplit(str(self.origin))
+        self._validate_https_origin(str(self.origin))
+        return self
+
+    def _validate_direct(self) -> WebGatewayConfig:
+        if self.origin is not None:
+            raise ValueError(
+                "web_gateway.origin must not be set in direct transport; it is derived "
+                "from web_gateway.direct_host and direct_port"
+            )
+        if self.direct_host is None:
+            raise ValueError("web_gateway.transport 'direct' requires web_gateway.direct_host")
+        # tls_cert and tls_key are optional here: when omitted, direct mode
+        # falls back to the Gateway's own --tls-cert/--tls-key. That fallback is
+        # resolved and enforced where the listener is wired, because the CLI
+        # arguments are not visible to this model. If one of the pair is given,
+        # the other must be too.
+        if (self.tls_cert is None) != (self.tls_key is None):
+            raise ValueError(
+                "web_gateway.tls_cert and web_gateway.tls_key must be set together"
+            )
+        host = str(self.direct_host).strip()
+        if not host:
+            raise ValueError("web_gateway.direct_host cannot be empty")
+        if host in {"0.0.0.0", "::", "*"}:
+            raise ValueError("web_gateway.direct_host must not be a wildcard address")
+        if "/" in host or "@" in host or ":" in host:
+            raise ValueError(
+                "web_gateway.direct_host must be a bare hostname or IP without scheme or port"
+            )
+        # Deriving and re-validating the origin ensures the same HTTPS rules
+        # that Tailscale-mode origins must satisfy.
+        self._validate_https_origin(self.canonical_origin)
+        return self
+
+    @staticmethod
+    def _validate_https_origin(origin: str) -> None:
+        parsed = urlsplit(origin)
         if parsed.scheme != "https":
             raise ValueError("web_gateway.origin must use HTTPS")
         if parsed.username is not None or parsed.password is not None:
             raise ValueError("web_gateway.origin cannot contain credentials")
         if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
             raise ValueError("web_gateway.origin must not contain a path, query, or fragment")
-        return self
 
     @property
     def canonical_origin(self) -> str | None:
+        if self.transport == "direct":
+            if self.direct_host is None:
+                return None
+            port = self.direct_port if self.direct_port is not None else self.listen_port
+            host = str(self.direct_host).strip()
+            authority = host if port == 443 else f"{host}:{port}"
+            return f"https://{authority}"
         return str(self.origin).rstrip("/") if self.origin is not None else None
+
+    @property
+    def direct_bind(self) -> tuple[str, int] | None:
+        """The (host, port) the direct-mode PWA listener should bind."""
+        if self.transport != "direct" or self.direct_host is None:
+            return None
+        port = self.direct_port if self.direct_port is not None else self.listen_port
+        return str(self.direct_host).strip(), port
 
 
 class ManagedSettingsConfig(StrictModel):

@@ -2136,14 +2136,38 @@ async def run_gateway(
     if bundle.main.web_gateway.mode != "disabled":
         from tfr.gateway_web import WebGatewayManager
 
+        web_config = bundle.main.web_gateway
+        web_transport = web_config.transport
+        web_ssl_context: ssl.SSLContext | None = None
+        web_host = web_config.listen_host
+        web_port = web_config.listen_port
+        if web_transport == "direct":
+            # Resolve the TLS key pair the PWA listener presents. Prefer the
+            # web_gateway-specific certificate, otherwise reuse the Gateway's
+            # own --tls-cert/--tls-key so an operator already running a network
+            # Gateway does not have to provision a second certificate.
+            certificate = web_config.tls_cert or tls_certificate
+            private_key = web_config.tls_key or tls_private_key
+            if certificate is None or private_key is None:
+                raise ValueError(
+                    "web_gateway.transport 'direct' requires web_gateway.tls_cert and "
+                    "web_gateway.tls_key, or the Gateway's --tls-cert and --tls-key"
+                )
+            web_ssl_context = create_gateway_server_tls_context(certificate, private_key)
+            direct_bind = web_config.direct_bind
+            assert direct_bind is not None  # guaranteed by direct-mode validation
+            web_host, web_port = direct_bind
+
         web_manager = WebGatewayManager(
             runtime,
-            configured_origin=bundle.main.web_gateway.canonical_origin,
-            host=bundle.main.web_gateway.listen_host,
-            port=bundle.main.web_gateway.listen_port,
-            state_directory=bundle.main.web_gateway.state_directory,
-            snapshot_events=bundle.main.web_gateway.snapshot_events,
+            configured_origin=web_config.canonical_origin,
+            host=web_host,
+            port=web_port,
+            state_directory=web_config.state_directory,
+            snapshot_events=web_config.snapshot_events,
             speaking_streaks_enabled=bundle.main.ui.speaking_streaks.enabled,
+            transport=web_transport,
+            ssl_context=web_ssl_context,
         )
     server = GatewayServer(
         runtime,

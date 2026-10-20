@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import secrets
+import ssl
 import stat
 import time
 from collections import Counter, OrderedDict, defaultdict, deque
@@ -28,12 +29,19 @@ from tfr.diagnostics import DiagnosticBuffer
 from tfr.events import ActorType, Confidence, Direction, Event, EventKind, Provenance
 from tfr.gateway import GatewayRuntime, HistorySubscription, SequencedEvent
 from tfr.gateway_devices import DeviceRecord, DeviceStore
+from tfr.gateway_transport import validate_tcp_endpoint
 from tfr.plugins import PluginManager
 from tfr.presentation import effect_programs_as_dict
 
 WEB_PROTOCOL_VERSION = 1
 SESSION_COOKIE = "__Host-tfr_session"
 TAILSCALE_LOGIN_HEADER = "Tailscale-User-Login"
+# Sentinel "identity" recorded for devices paired in direct transport, where
+# there is no Tailscale Serve identity header. Device credentials are instead
+# bound to possession of the per-device bearer token over authenticated TLS.
+# Using a fixed value keeps DeviceStore.redeem/authenticate binding logic
+# unchanged across both transports.
+DIRECT_IDENTITY = "direct"
 MAX_WEB_MESSAGE_BYTES = 65_536
 MAX_WEB_EFFECT_DEMOS_BYTES = 131_072
 MAX_COMMANDS_PER_MINUTE = 30
@@ -173,8 +181,19 @@ class WebGatewayManager:
         state_directory: Path | str,
         snapshot_events: int,
         speaking_streaks_enabled: bool,
+        transport: str = "tailscale",
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
+        if transport not in {"tailscale", "direct"}:
+            raise ValueError("web gateway transport must be 'tailscale' or 'direct'")
+        if transport == "direct":
+            if configured_origin is None:
+                raise ValueError("direct transport requires a configured origin")
+            if ssl_context is None:
+                raise ValueError("direct transport requires a TLS context")
         self.runtime = runtime
+        self.transport = transport
+        self._ssl_context = ssl_context
         self.configured_origin = configured_origin
         self.host = host
         self.port = port
@@ -205,6 +224,8 @@ class WebGatewayManager:
 
     async def pair_device(self, label: str) -> dict[str, Any]:
         async with self._lock:
+            if self.transport == "direct":
+                return await self._pair_device_direct(label)
             origin = self.configured_origin or await self._discover_origin()
             started = self._server is None
             previous_state = self._stored_state
@@ -246,6 +267,35 @@ class WebGatewayManager:
                     await self.stop()
                 raise
 
+    async def _pair_device_direct(self, label: str) -> dict[str, Any]:
+        """Pair a device when the Gateway terminates TLS itself.
+
+        No Tailscale discovery or Serve configuration occurs: the origin is the
+        configured ``direct_host``/``direct_port`` and the listener binds that
+        address directly with the Gateway's TLS certificate.
+        """
+        assert self.configured_origin is not None
+        origin = self.configured_origin
+        started = self._server is None
+        previous_state = self._stored_state
+        await self._start_server(origin)
+        try:
+            assert self._server is not None
+            pairing_url = self._server.create_pairing_url(label)
+            self._save_state(WebProvisioningState(origin=origin))
+            return {
+                "pairing_url": pairing_url,
+                "origin": origin,
+                "setup": {
+                    "backend_started": started,
+                    "serve_configured": False,
+                },
+            }
+        except BaseException:
+            if started and previous_state is None:
+                await self.stop()
+            raise
+
     def status(self) -> dict[str, Any]:
         devices = self.device_descriptors()
         return {
@@ -253,6 +303,7 @@ class WebGatewayManager:
             "active": self.active,
             "origin": self.origin,
             "device_count": len(devices),
+            "transport": self.transport,
         }
 
     def device_descriptors(self) -> list[dict[str, object]]:
@@ -285,7 +336,7 @@ class WebGatewayManager:
         if self._server is not None:
             if self._server.origin != origin.rstrip("/"):
                 raise ValueError(
-                    "the running PWA origin differs from the discovered Tailscale origin"
+                    "the running PWA origin differs from the requested origin"
                 )
             return
         server = WebGatewayServer(
@@ -296,6 +347,8 @@ class WebGatewayManager:
             state_directory=self.state_directory,
             snapshot_events=self.snapshot_events,
             speaking_streaks_enabled=self.speaking_streaks_enabled,
+            transport=self.transport,
+            ssl_context=self._ssl_context,
         )
         await server.start()
         self._server = server
@@ -680,15 +733,32 @@ class WebGatewayServer:
         state_directory: Any,
         snapshot_events: int,
         speaking_streaks_enabled: bool = True,
+        transport: str = "tailscale",
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
-        if host not in {"127.0.0.1", "::1"}:
-            raise ValueError("web gateway must listen only on loopback")
-        if not 1 <= port <= 65_535:
-            raise ValueError("web gateway port must be between 1 and 65535")
+        if transport not in {"tailscale", "direct"}:
+            raise ValueError("web gateway transport must be 'tailscale' or 'direct'")
+        if transport == "tailscale":
+            if host not in {"127.0.0.1", "::1"}:
+                raise ValueError("web gateway must listen only on loopback")
+            if ssl_context is not None:
+                raise ValueError("tailscale transport terminates TLS at Tailscale Serve")
+            if not 1 <= port <= 65_535:
+                raise ValueError("web gateway port must be between 1 and 65535")
+        else:
+            # Direct transport: the Gateway terminates TLS itself and may bind a
+            # specific public or private address. A wildcard bind is rejected so
+            # the operator must name the interface, matching the native TCP
+            # gateway listener's policy.
+            validate_tcp_endpoint(host, port)
+            if ssl_context is None:
+                raise ValueError("direct transport requires a TLS context")
         parsed_origin = urlsplit(origin)
         if parsed_origin.scheme != "https" or not parsed_origin.netloc:
             raise ValueError("web gateway origin must be an HTTPS origin")
         self.runtime = runtime
+        self.transport = transport
+        self._ssl_context = ssl_context
         self.origin = origin.rstrip("/")
         self.expected_host = parsed_origin.netloc
         self.websocket_origin = f"wss://{parsed_origin.netloc}"
@@ -781,7 +851,7 @@ class WebGatewayServer:
         runner = web.AppRunner(application, access_log=None)
         await runner.setup()
         try:
-            site = web.TCPSite(runner, self.host, self.port)
+            site = web.TCPSite(runner, self.host, self.port, ssl_context=self._ssl_context)
             await site.start()
         except BaseException:
             await runner.cleanup()
@@ -884,7 +954,19 @@ class WebGatewayServer:
             raise web.HTTPForbidden(text="Unexpected origin")
         if allow_missing_origin and origins not in ([], [self.origin], ["null"]):
             raise web.HTTPForbidden(text="Unexpected origin")
-        self._tailscale_login(request)
+        self._request_identity(request)
+
+    def _request_identity(self, request: web.Request) -> str:
+        """The identity a device credential is bound to for this request.
+
+        In tailscale transport this is the Tailscale Serve identity header,
+        which is required. In direct transport there is no such header, so a
+        fixed sentinel is used and the credential is protected by the bearer
+        token over authenticated TLS instead.
+        """
+        if self.transport == "direct":
+            return DIRECT_IDENTITY
+        return self._tailscale_login(request)
 
     @staticmethod
     def _tailscale_login(request: web.Request) -> str:
@@ -895,7 +977,7 @@ class WebGatewayServer:
 
     def _authenticate(self, request: web.Request) -> DeviceRecord | None:
         device = self.devices.authenticate(request.cookies.get(SESSION_COOKIE))
-        if device is None or device.tailscale_login != self._tailscale_login(request):
+        if device is None or device.tailscale_login != self._request_identity(request):
             return None
         return device
 
@@ -974,7 +1056,7 @@ class WebGatewayServer:
             raise web.HTTPBadRequest(text="Invalid diagnostic report") from None
         return self._json_response({"accepted": True})
 
-    def _record_pairing_attempt(self, tailscale_login: str) -> bool:
+    def _record_pairing_attempt(self, rate_limit_key: str) -> bool:
         now = time.monotonic()
         for identity, identity_attempts in tuple(self._pairing_attempts.items()):
             while identity_attempts and identity_attempts[0] <= now - 60:
@@ -983,16 +1065,30 @@ class WebGatewayServer:
                 self._pairing_attempts.pop(identity, None)
         while self._global_pairing_attempts and self._global_pairing_attempts[0] <= now - 60:
             self._global_pairing_attempts.popleft()
-        attempts = self._pairing_attempts.get(tailscale_login)
+        attempts = self._pairing_attempts.get(rate_limit_key)
         if (attempts is not None and len(attempts) >= MAX_PAIRING_ATTEMPTS_PER_MINUTE) or len(
             self._global_pairing_attempts
         ) >= MAX_GLOBAL_PAIRING_ATTEMPTS_PER_MINUTE:
             return False
         if attempts is None:
-            attempts = self._pairing_attempts[tailscale_login]
+            attempts = self._pairing_attempts[rate_limit_key]
         attempts.append(now)
         self._global_pairing_attempts.append(now)
         return True
+
+    def _pairing_identity(self, request: web.Request) -> tuple[str, str]:
+        """Return (bound_identity, rate_limit_key) for a pairing request.
+
+        ``bound_identity`` is persisted on the device credential. In direct
+        transport it is a fixed sentinel, so per-identity pairing rate limiting
+        would collapse into one shared bucket; the client IP is used as the
+        rate-limit key instead. In tailscale transport both are the Serve
+        identity header.
+        """
+        if self.transport == "direct":
+            return DIRECT_IDENTITY, (request.remote or "unknown")
+        identity = self._tailscale_login(request)
+        return identity, identity
 
     @staticmethod
     def _set_session_cookie(
@@ -1014,8 +1110,8 @@ class WebGatewayServer:
 
     async def _pair(self, request: web.Request) -> web.Response:
         self._validate_public_request(request, require_origin=True)
-        tailscale_login = self._tailscale_login(request)
-        if not self._record_pairing_attempt(tailscale_login):
+        bound_identity, rate_limit_key = self._pairing_identity(request)
+        if not self._record_pairing_attempt(rate_limit_key):
             return self._json_response({"error": "Pairing rate limit exceeded"}, status=429)
         try:
             value = await request.json(loads=json.loads)
@@ -1031,7 +1127,7 @@ class WebGatewayServer:
         try:
             device, token = await self.devices.redeem(
                 value["code"],
-                tailscale_login,
+                bound_identity,
             )
         except ValueError as exc:
             return self._json_response({"error": str(exc)}, status=401)
@@ -1054,8 +1150,8 @@ class WebGatewayServer:
             require_origin=False,
             allow_missing_origin=True,
         )
-        tailscale_login = self._tailscale_login(request)
-        if not self._record_pairing_attempt(tailscale_login):
+        bound_identity, rate_limit_key = self._pairing_identity(request)
+        if not self._record_pairing_attempt(rate_limit_key):
             return web.Response(
                 status=303,
                 headers={
@@ -1074,7 +1170,7 @@ class WebGatewayServer:
         if set(value) != {"code"} or len(codes) != 1 or not isinstance(codes[0], str):
             return web.Response(text="Invalid pairing request", status=400)
         try:
-            device, token = await self.devices.redeem(codes[0], tailscale_login)
+            device, token = await self.devices.redeem(codes[0], bound_identity)
         except ValueError:
             return web.Response(
                 status=303,

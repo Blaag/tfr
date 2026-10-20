@@ -480,6 +480,59 @@ requires the `Tailscale-User-Login` identity header added by Serve and binds eac
 device credential to the identity that redeemed its pairing link; Funnel traffic
 does not carry this header and is rejected.
 
+### Direct access without Tailscale
+
+A Gateway that already has a public hostname, such as a cloud-hosted instance,
+can serve the PWA directly over its own TLS instead of through Tailscale. Set
+`web_gateway.transport` to `"direct"` and give the externally reachable hostname
+the Gateway's certificate covers:
+
+```jsonc
+"web_gateway": {
+  "mode": "on-demand",
+  "transport": "direct",
+  "direct_host": "bsd.shutdown.com",
+  "direct_port": 7347,
+  // tls_cert/tls_key are optional; when omitted, direct mode reuses the
+  // Gateway's own --tls-cert/--tls-key.
+  // "tls_cert": "~/.config/tfr/gateway.crt",
+  // "tls_key": "~/.config/tfr/gateway.key",
+},
+```
+
+In this mode the PWA listener terminates TLS itself and binds the given address.
+Then pair from any attached native UI, naming that address to confirm it:
+
+```text
+/web pair "My iPhone" --gateway bsd.shutdown.com:7347
+```
+
+TFR verifies the `--gateway` address matches the Gateway's configured direct
+origin before pairing. The same listener runs inside the Gateway process; no
+separate web server, Tailscale, or reverse proxy is involved.
+
+Requirements and caveats for direct mode:
+
+- **Use a DNS hostname the certificate covers.** The browser validates TLS
+  against `direct_host`, so it must appear in the certificate's subject
+  alternative names. A bare IP address generally will not validate with a
+  public certificate authority.
+- **Pick a free port.** The PWA listener is a separate socket from the native
+  remote-UI TLS listener (`tfr gateway --listen-host ... --listen-port`, default
+  `7347`). If that listener runs on the same host, `direct_port` must differ
+  from its `--listen-port`; two sockets cannot share one port. When no native
+  network listener is enabled, reusing `7347` for the PWA is fine.
+- **The firewall is the outer boundary.** There is no Tailscale ACL in front of
+  the listener, so restrict inbound access to `direct_port` to the intended
+  devices with your host or cloud firewall.
+- **Wildcard binds are rejected.** `direct_host` must name a specific address,
+  never `0.0.0.0` or `::`.
+
+Direct mode replaces Tailscale Serve's identity header with possession of the
+per-device bearer credential over authenticated TLS, the same trust model as the
+Gateway's token-authenticated remote UI. See [SECURITY.md](SECURITY.md) for the
+full boundary discussion.
+
 From any attached native UI, create a ten-minute pairing link and scannable QR
 code without logging into the Gateway host:
 

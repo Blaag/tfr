@@ -9,6 +9,7 @@ from tfr.config import (
     ConfigurationError,
     TypingGlowConfig,
     UiConfig,
+    WebGatewayConfig,
     WorldConfig,
     WorldsConfig,
     credential_permission_warning,
@@ -614,3 +615,81 @@ def test_accepts_private_credential_permissions(tmp_path: Path) -> None:
     path.chmod(0o600)
 
     assert credential_permission_warning(path, contains_credentials=True) is None
+
+
+def test_web_gateway_tailscale_defaults_reject_direct_fields() -> None:
+    config = WebGatewayConfig()
+    assert config.transport == "tailscale"
+    assert config.canonical_origin is None
+    assert config.direct_bind is None
+    with pytest.raises(ValueError, match="requires web_gateway.transport to be 'direct'"):
+        WebGatewayConfig(direct_host="bsd.shutdown.com")
+
+
+def test_web_gateway_direct_requires_host_and_derives_origin() -> None:
+    config = WebGatewayConfig(
+        transport="direct",
+        direct_host="bsd.shutdown.com",
+        direct_port=7347,
+        tls_cert=Path("~/gw.crt"),
+        tls_key=Path("~/gw.key"),
+    )
+    assert config.canonical_origin == "https://bsd.shutdown.com:7347"
+    assert config.direct_bind == ("bsd.shutdown.com", 7347)
+
+    with pytest.raises(ValueError, match="requires web_gateway.direct_host"):
+        WebGatewayConfig(transport="direct", direct_port=7347)
+
+
+def test_web_gateway_direct_allows_omitted_cert_for_fallback() -> None:
+    # tls_cert/tls_key may be omitted so the Gateway's own --tls-cert/--tls-key
+    # can be reused; the config layer accepts that and the wiring enforces it.
+    config = WebGatewayConfig(
+        transport="direct",
+        direct_host="bsd.shutdown.com",
+        direct_port=7347,
+    )
+    assert config.tls_cert is None
+    assert config.tls_key is None
+    assert config.direct_bind == ("bsd.shutdown.com", 7347)
+
+
+def test_web_gateway_direct_port_defaults_to_listen_port() -> None:
+    config = WebGatewayConfig(
+        transport="direct",
+        direct_host="bsd.shutdown.com",
+        listen_port=7348,
+    )
+    assert config.direct_bind == ("bsd.shutdown.com", 7348)
+    assert config.canonical_origin == "https://bsd.shutdown.com:7348"
+
+
+def test_web_gateway_direct_omits_default_https_port() -> None:
+    config = WebGatewayConfig(
+        transport="direct",
+        direct_host="bsd.shutdown.com",
+        direct_port=443,
+    )
+    assert config.canonical_origin == "https://bsd.shutdown.com"
+
+
+def test_web_gateway_direct_rejects_wildcard_scheme_and_explicit_origin() -> None:
+    with pytest.raises(ValueError, match="wildcard"):
+        WebGatewayConfig(transport="direct", direct_host="0.0.0.0", direct_port=7347)
+    with pytest.raises(ValueError, match="bare hostname or IP"):
+        WebGatewayConfig(transport="direct", direct_host="https://bsd.shutdown.com:7347")
+    with pytest.raises(ValueError, match="origin must not be set in direct"):
+        WebGatewayConfig(
+            transport="direct",
+            direct_host="bsd.shutdown.com",
+            origin="https://bsd.shutdown.com",
+        )
+
+
+def test_web_gateway_direct_requires_cert_and_key_together() -> None:
+    with pytest.raises(ValueError, match="must be set together"):
+        WebGatewayConfig(
+            transport="direct",
+            direct_host="bsd.shutdown.com",
+            tls_cert=Path("~/gw.crt"),
+        )

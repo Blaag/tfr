@@ -109,14 +109,32 @@
     "state_directory": "~/.local/state/tfr/updates",
   },
 
-  // Private iPhone PWA served through Tailscale Serve. The default on-demand
-  // mode is provisioned by /web pair; use mode "disabled" to opt out.
+  // Private iPhone PWA. The default on-demand Tailscale mode is provisioned by
+  // /web pair; use mode "disabled" to opt out.
+  //
+  // "transport" selects how the browser reaches the Gateway:
+  //   "tailscale" (default) serves a loopback backend behind Tailscale Serve,
+  //     which provides the HTTPS origin and user identity. Good for a
+  //     home-server Gateway reached over a tailnet.
+  //   "direct" makes the Gateway terminate TLS itself and bind a public or
+  //     private address, for a cloud-hosted Gateway without Tailscale. Set
+  //     direct_host (a DNS name the TLS certificate covers) and optionally
+  //     direct_port. tls_cert/tls_key are optional: when omitted, direct mode
+  //     reuses the Gateway's own --tls-cert/--tls-key. Pair with
+  //     /web pair "My iPhone" --gateway direct_host:direct_port.
   "web_gateway": {
     "enabled": false,
     "mode": "on-demand",
-    // "origin": "https://gateway.example.ts.net",
+    "transport": "tailscale",
+    // "origin": "https://gateway.example.ts.net", // tailscale transport only
     "listen_host": "127.0.0.1",
     "listen_port": 7348,
+    // Direct transport only:
+    // "transport": "direct",
+    // "direct_host": "gateway.example.com",
+    // "direct_port": 27047,
+    // "tls_cert": "~/.config/tfr/gateway.crt",
+    // "tls_key": "~/.config/tfr/gateway.key",
     "state_directory": "~/.local/state/tfr/web",
     "snapshot_events": 2000,
   },

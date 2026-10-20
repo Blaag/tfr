@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import ssl
 import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -2141,3 +2142,214 @@ async def test_websocket_enforces_per_device_connection_limit(tmp_path: Path) ->
             await socket.close()
         await client.close()
         await bus.close()
+
+
+# --- Direct transport (no Tailscale) -----------------------------------------
+
+DIRECT_ORIGIN = "https://bsd.shutdown.com:7347"
+DIRECT_PUBLIC_HEADERS = {
+    "Host": "bsd.shutdown.com:7347",
+    "Origin": DIRECT_ORIGIN,
+}
+DIRECT_NAVIGATION_HEADERS = {"Host": "bsd.shutdown.com:7347"}
+
+
+def _dummy_server_tls_context() -> ssl.SSLContext:
+    return ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+
+
+def test_direct_server_requires_tls_and_rejects_wildcard(tmp_path: Path) -> None:
+    runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 5}))
+    with pytest.raises(ValueError, match="direct transport requires a TLS context"):
+        WebGatewayServer(
+            runtime,  # type: ignore[arg-type]
+            origin=DIRECT_ORIGIN,
+            host="bsd.shutdown.com",
+            port=7347,
+            state_directory=tmp_path / "web",
+            snapshot_events=5,
+            transport="direct",
+        )
+    with pytest.raises(ValueError, match="wildcard"):
+        WebGatewayServer(
+            runtime,  # type: ignore[arg-type]
+            origin=DIRECT_ORIGIN,
+            host="0.0.0.0",
+            port=7347,
+            state_directory=tmp_path / "web",
+            snapshot_events=5,
+            transport="direct",
+            ssl_context=_dummy_server_tls_context(),
+        )
+
+
+def test_direct_server_allows_public_bind_with_tls(tmp_path: Path) -> None:
+    runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 5}))
+    gateway = WebGatewayServer(
+        runtime,  # type: ignore[arg-type]
+        origin=DIRECT_ORIGIN,
+        host="bsd.shutdown.com",
+        port=7347,
+        state_directory=tmp_path / "web",
+        snapshot_events=5,
+        transport="direct",
+        ssl_context=_dummy_server_tls_context(),
+    )
+    assert gateway.transport == "direct"
+    assert gateway.origin == DIRECT_ORIGIN
+
+
+def test_tailscale_server_rejects_ssl_context(tmp_path: Path) -> None:
+    runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 5}))
+    with pytest.raises(ValueError, match="Tailscale Serve"):
+        WebGatewayServer(
+            runtime,  # type: ignore[arg-type]
+            origin=ORIGIN,
+            host="127.0.0.1",
+            port=7348,
+            state_directory=tmp_path / "web",
+            snapshot_events=5,
+            transport="tailscale",
+            ssl_context=_dummy_server_tls_context(),
+        )
+
+
+async def _direct_paired_client(
+    tmp_path: Path,
+    runtime: FakeRuntime,
+) -> tuple[WebGatewayServer, TestClient, str]:
+    gateway = WebGatewayServer(
+        runtime,  # type: ignore[arg-type]
+        origin=DIRECT_ORIGIN,
+        host="bsd.shutdown.com",
+        port=7347,
+        state_directory=tmp_path / "web",
+        snapshot_events=20,
+        transport="direct",
+        ssl_context=_dummy_server_tls_context(),
+    )
+    # The aiohttp application logic is exercised over a plain TestServer; TLS is
+    # terminated at the socket layer in production and is not needed to verify
+    # the identity and pairing behavior.
+    client = TestClient(TestServer(gateway.application()))
+    await client.start_server()
+    url = gateway.create_pairing_url("Direct iPhone")
+    assert url.startswith(DIRECT_ORIGIN + "/#pair=")
+    code = parse_qs(urlsplit(url).fragment)["pair"][0]
+    response = await client.post("/api/pair", json={"code": code}, headers=DIRECT_PUBLIC_HEADERS)
+    assert response.status == 200
+    cookie = SimpleCookie()
+    cookie.load(response.headers["Set-Cookie"])
+    return gateway, client, cookie[SESSION_COOKIE].value
+
+
+async def test_direct_pairing_needs_no_identity_header_and_binds_sentinel(
+    tmp_path: Path,
+) -> None:
+    bus = EventBus()
+    runtime = FakeRuntime(EventHistory(bus, {"alpha": 5}))
+    gateway, client, token = await _direct_paired_client(tmp_path, runtime)
+    try:
+        # No Tailscale-User-Login header is present, yet the session is valid.
+        headers = {**DIRECT_NAVIGATION_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+        response = await client.get("/api/session", headers=headers)
+        assert response.status == 200
+        assert (await response.json())["paired"] is True
+        # The credential is bound to the direct sentinel identity.
+        device = next(iter(gateway.devices._devices.values()))
+        assert device.tailscale_login == gateway_web.DIRECT_IDENTITY
+    finally:
+        await client.close()
+        await bus.close()
+
+
+async def test_direct_pairing_rate_limit_keys_on_client_ip(tmp_path: Path) -> None:
+    bus = EventBus()
+    runtime = FakeRuntime(EventHistory(bus, {"alpha": 5}))
+    gateway = WebGatewayServer(
+        runtime,  # type: ignore[arg-type]
+        origin=DIRECT_ORIGIN,
+        host="bsd.shutdown.com",
+        port=7347,
+        state_directory=tmp_path / "web",
+        snapshot_events=5,
+        transport="direct",
+        ssl_context=_dummy_server_tls_context(),
+    )
+    client = TestClient(TestServer(gateway.application()))
+    await client.start_server()
+    try:
+        # Exhaust the per-key budget; in direct mode the key is the client IP,
+        # so these invalid attempts share one bucket and eventually 429.
+        statuses = set()
+        for _ in range(gateway_web.MAX_PAIRING_ATTEMPTS_PER_MINUTE + 1):
+            response = await client.post(
+                "/api/pair", json={"code": "nope"}, headers=DIRECT_PUBLIC_HEADERS
+            )
+            statuses.add(response.status)
+        assert 429 in statuses
+    finally:
+        await client.close()
+        await bus.close()
+
+
+async def test_direct_manager_pairs_without_tailscale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def start_server(self: WebGatewayManager, origin: str) -> None:
+        captured["origin"] = origin
+        captured["transport"] = self.transport
+        self._server = StubManagedWebServer(origin)  # type: ignore[assignment]
+
+    async def tailscale(_self: WebGatewayManager, *arguments: str) -> str:
+        raise AssertionError(f"direct mode must not call tailscale: {arguments}")
+
+    manager = WebGatewayManager(
+        object(),  # type: ignore[arg-type]
+        configured_origin=DIRECT_ORIGIN,
+        host="bsd.shutdown.com",
+        port=7347,
+        state_directory=tmp_path / "web",
+        snapshot_events=20,
+        speaking_streaks_enabled=True,
+        transport="direct",
+        ssl_context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER),
+    )
+    monkeypatch.setattr(WebGatewayManager, "_start_server", start_server)
+    monkeypatch.setattr(WebGatewayManager, "_tailscale", tailscale)
+    result = await manager.pair_device("Phone")
+
+    assert result["pairing_url"] == f"{DIRECT_ORIGIN}/#pair=Phone"
+    assert result["origin"] == DIRECT_ORIGIN
+    assert result["setup"] == {"backend_started": True, "serve_configured": False}
+    assert captured == {"origin": DIRECT_ORIGIN, "transport": "direct"}
+    assert manager.transport == "direct"
+
+
+def test_direct_manager_requires_origin_and_tls() -> None:
+    with pytest.raises(ValueError, match="requires a configured origin"):
+        WebGatewayManager(
+            object(),  # type: ignore[arg-type]
+            configured_origin=None,
+            host="bsd.shutdown.com",
+            port=7347,
+            state_directory="/tmp/does-not-matter",
+            snapshot_events=20,
+            speaking_streaks_enabled=True,
+            transport="direct",
+            ssl_context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER),
+        )
+    with pytest.raises(ValueError, match="requires a TLS context"):
+        WebGatewayManager(
+            object(),  # type: ignore[arg-type]
+            configured_origin=DIRECT_ORIGIN,
+            host="bsd.shutdown.com",
+            port=7347,
+            state_directory="/tmp/does-not-matter",
+            snapshot_events=20,
+            speaking_streaks_enabled=True,
+            transport="direct",
+            ssl_context=None,
+        )

@@ -5,6 +5,7 @@ import base64
 import contextlib
 import inspect
 import os
+import re
 import secrets
 import shlex
 import signal
@@ -151,6 +152,58 @@ _MAX_OBSERVED_SPEAKERS = 1_000
 _MAX_OBSERVED_SPEAKER_LENGTH = 64
 _MAX_PENDING_SPELLCHECK_ECHOES = 32
 _SPELLCHECK_ECHO_TIMEOUT_SECONDS = 10.0
+
+
+def _parse_web_pair_arguments(
+    tokens: list[str],
+) -> tuple[list[str], str | None, str | None]:
+    """Split /web pair arguments into (label_tokens, gateway_target, error).
+
+    Accepts an explicit ``--gateway HOST:PORT`` / ``--gateway=HOST:PORT`` option
+    anywhere in the arguments, or a bare ``HOST:PORT`` as the final token (the
+    ``/web pair "My iPhone" 52.53.4.93:27047`` form). ``gateway_target`` is a
+    validated ``host:port`` string, or ``None`` when no address was given.
+    """
+    label_tokens: list[str] = []
+    gateway_raw: str | None = None
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--gateway":
+            if index + 1 >= len(tokens):
+                return [], None, "Usage: /web pair \"Device name\" --gateway HOST:PORT"
+            gateway_raw = tokens[index + 1]
+            index += 2
+            continue
+        if token.startswith("--gateway="):
+            gateway_raw = token[len("--gateway=") :]
+            index += 1
+            continue
+        label_tokens.append(token)
+        index += 1
+    # Fall back to a bare trailing HOST:PORT only when no explicit option was
+    # given, so device names are never silently consumed.
+    if gateway_raw is None and label_tokens:
+        candidate = label_tokens[-1]
+        if _WEB_GATEWAY_TARGET.match(candidate):
+            gateway_raw = candidate
+            label_tokens = label_tokens[:-1]
+    if gateway_raw is None:
+        return label_tokens, None, None
+    from tfr.gateway_transport import normalize_web_gateway_target
+
+    target = normalize_web_gateway_target(gateway_raw)
+    if target is None:
+        return (
+            [],
+            None,
+            f"Invalid --gateway address {gateway_raw!r}; expected HOST:PORT "
+            "(for example gateway.example.com:27047)",
+        )
+    return label_tokens, target, None
+
+
+_WEB_GATEWAY_TARGET = re.compile(r"^[^\s/@]+:\d{1,5}$")
 
 
 def pairing_qr_code(value: str) -> str:
@@ -3746,7 +3799,10 @@ class TfrTui:
         return "\n".join(lines)
 
     async def _handle_web_command(self, alias: str, parameters: list[str]) -> None:
-        usage = 'Usage: /web status|repair|devices|pair "Device name"|revoke DEVICE_ID'
+        usage = (
+            'Usage: /web status|repair|devices|'
+            'pair "Device name" [--gateway HOST:PORT]|revoke DEVICE_ID'
+        )
         if self.service_runtime is None:
             self.add_notice(alias, "Web administration is available only in an attached UI")
             return
@@ -3788,7 +3844,16 @@ class TfrTui:
                 )
                 return
             if action == "pair" and len(parameters) >= 2:
-                label = " ".join(parameters[1:]).strip()
+                pair_args, gateway_target, gateway_error = _parse_web_pair_arguments(
+                    parameters[1:]
+                )
+                if gateway_error is not None:
+                    self.add_notice(alias, gateway_error)
+                    return
+                label = " ".join(pair_args).strip()
+                if not label:
+                    self.add_notice(alias, usage)
+                    return
                 status = await self.service_runtime.web_status()
                 if status.get("enabled") is not True:
                     self.add_notice(
@@ -3798,19 +3863,51 @@ class TfrTui:
                         "Gateway.",
                     )
                     return
+                transport = status.get("transport")
+                if gateway_target is not None:
+                    if transport != "direct":
+                        self.add_notice(
+                            alias,
+                            "A --gateway address requires direct transport. Set "
+                            "web_gateway.transport to \"direct\" with direct_host, direct_port, "
+                            "and a TLS certificate in the Gateway's config.jsonc, then restart "
+                            "the Gateway.",
+                        )
+                        return
+                    expected_origin = status.get("origin")
+                    requested_origin = f"https://{gateway_target}"
+                    if (
+                        isinstance(expected_origin, str)
+                        and expected_origin.rstrip("/") != requested_origin
+                    ):
+                        self.add_notice(
+                            alias,
+                            f"The Gateway's configured direct origin is {expected_origin}, "
+                            f"not {requested_origin}. Pair without --gateway, or update "
+                            "web_gateway.direct_host/direct_port to match.",
+                        )
+                        return
                 result = await self.service_runtime.pair_web_device(label)
                 pairing_url = result if isinstance(result, str) else result.get("pairing_url")
                 if not isinstance(pairing_url, str):
                     raise ValueError("Gateway returned an invalid pairing URL")
                 setup = result.get("setup") if isinstance(result, dict) else None
                 setup_lines: list[str] = []
+                direct = transport == "direct"
                 if isinstance(setup, dict):
                     if setup.get("backend_started") is True:
-                        setup_lines.append("Started the private loopback PWA backend.")
+                        if direct:
+                            setup_lines.append("Started the PWA backend with Gateway TLS.")
+                        else:
+                            setup_lines.append("Started the private loopback PWA backend.")
                     if setup.get("serve_configured") is True:
                         setup_lines.append("Configured the private Tailscale Serve HTTPS route.")
                 setup_text = "\n".join(setup_lines)
-                if setup_text:
+                if direct:
+                    setup_text = (
+                        (setup_text + "\n\n") if setup_text else ""
+                    ) + "Direct TLS access is ready; Tailscale is not required.\n\n"
+                elif setup_text:
                     setup_text += "\nFunnel was not enabled.\n\n"
                 else:
                     setup_text = "Private Tailscale access is ready; Funnel was not enabled.\n\n"

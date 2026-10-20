@@ -33,6 +33,32 @@ def validate_tcp_endpoint(
     return host, port
 
 
+def normalize_web_gateway_target(value: str) -> str | None:
+    """Normalize a user-supplied ``HOST:PORT`` PWA address.
+
+    Returns a canonical ``host:port`` string, or ``None`` when the value is not
+    a bare host and port (rejecting schemes, credentials, paths, wildcard
+    addresses, and out-of-range ports). Shared by the TUI ``/web pair`` command
+    and the ``tfr pair`` CLI so both validate direct-transport addresses the
+    same way.
+    """
+    value = value.strip()
+    if "://" in value or "@" in value or "/" in value:
+        return None
+    host, separator, port_text = value.rpartition(":")
+    if not separator or not host or not port_text.isdigit():
+        return None
+    if host in {"0.0.0.0", "::", "*"}:
+        return None
+    try:
+        port = int(port_text)
+    except ValueError:
+        return None
+    if not 1 <= port <= 65_535:
+        return None
+    return f"{host}:{port}"
+
+
 def _open_private_file(path: Path, label: str) -> int:
     flags = os.O_RDONLY
     flags |= getattr(os, "O_CLOEXEC", 0)

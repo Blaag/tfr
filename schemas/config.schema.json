@@ -732,6 +732,34 @@
     "WebGatewayConfig": {
       "additionalProperties": false,
       "properties": {
+        "direct_host": {
+          "anyOf": [
+            {
+              "maxLength": 253,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Direct Host"
+        },
+        "direct_port": {
+          "anyOf": [
+            {
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Direct Port"
+        },
         "enabled": {
           "default": false,
           "title": "Enabled",
@@ -787,6 +815,41 @@
           "default": "~/.local/state/tfr/web",
           "format": "path",
           "title": "State Directory",
+          "type": "string"
+        },
+        "tls_cert": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tls Cert"
+        },
+        "tls_key": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tls Key"
+        },
+        "transport": {
+          "default": "tailscale",
+          "enum": [
+            "tailscale",
+            "direct"
+          ],
+          "title": "Transport",
           "type": "string"
         }
       },
