@@ -193,9 +193,7 @@ class UiConfig(StrictModel):
     theme: ThemeConfig = Field(default_factory=ThemeConfig)
     spellcheck: SpellcheckConfig = Field(default_factory=SpellcheckConfig)
     typing_glow: TypingGlowConfig = Field(default_factory=TypingGlowConfig)
-    speaking_streaks: SpeakingStreaksConfig = Field(
-        default_factory=SpeakingStreaksConfig
-    )
+    speaking_streaks: SpeakingStreaksConfig = Field(default_factory=SpeakingStreaksConfig)
     show_nospoof_prefix: bool = False
     animations_enabled: bool = True
     low_bandwidth: bool = False
@@ -214,9 +212,7 @@ class LoggingConfig(StrictModel):
 _STABLE_UPDATE_MANIFEST_URL = (
     "https://github.com/Blaag/tfr/releases/latest/download/update-manifest.json"
 )
-_CANDIDATE_UPDATE_MANIFEST_URL = (
-    "https://api.github.com/repos/Blaag/tfr/releases?per_page=20"
-)
+_CANDIDATE_UPDATE_MANIFEST_URL = "https://api.github.com/repos/Blaag/tfr/releases?per_page=20"
 
 
 class UpdateConfig(StrictModel):
@@ -255,6 +251,7 @@ class UpdateConfig(StrictModel):
 
 class WebGatewayConfig(StrictModel):
     enabled: bool = False
+    mode: Literal["on-demand", "disabled"] = "on-demand"
     origin: AnyHttpUrl | None = None
     listen_host: Literal["127.0.0.1", "::1"] = "127.0.0.1"
     listen_port: int = Field(default=7348, ge=1, le=65_535)
@@ -263,6 +260,8 @@ class WebGatewayConfig(StrictModel):
 
     @model_validator(mode="after")
     def valid_browser_origin(self) -> WebGatewayConfig:
+        if self.mode == "disabled" and self.enabled:
+            raise ValueError("web_gateway.enabled cannot be true when web_gateway.mode is disabled")
         if self.enabled and self.origin is None:
             raise ValueError("web_gateway.origin is required when the web gateway is enabled")
         if self.origin is None:

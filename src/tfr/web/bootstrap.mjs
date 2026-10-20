@@ -5,6 +5,13 @@ export function iphoneInstallMode({ userAgent, maxTouchPoints, standalone, displ
   return ios ? "browser" : "other";
 }
 
+export function iosBrowserName(userAgent) {
+  if (/CriOS/i.test(userAgent)) return "Chrome";
+  if (/EdgiOS/i.test(userAgent)) return "Edge";
+  if (/FxiOS/i.test(userAgent)) return "Firefox";
+  return /Safari/i.test(userAgent) ? "Safari" : "your browser";
+}
+
 function showStartupFailure(message) {
   const status = document.querySelector("#startup-status");
   const actions = document.querySelector("#startup-actions");
@@ -16,6 +23,7 @@ async function bootstrap() {
   const startup = document.querySelector("#startup");
   const installHelp = document.querySelector("#ios-install-help");
   const installNotice = document.querySelector("#ios-install-notice");
+  const browser = iosBrowserName(navigator.userAgent);
   const mode = iphoneInstallMode({
     userAgent: navigator.userAgent,
     maxTouchPoints: navigator.maxTouchPoints || 0,
@@ -23,6 +31,29 @@ async function bootstrap() {
     displayModeStandalone: window.matchMedia("(display-mode: standalone)").matches,
   });
   if (installHelp) installHelp.hidden = mode !== "browser";
+  const installSteps = document.querySelector("#ios-install-steps");
+  if (installSteps) {
+    installSteps.replaceChildren();
+    for (const text of [
+      `Open this page in ${browser}.`,
+      "Open the Share menu, then choose Add to Home Screen.",
+      "Tap Add, then open TFR from its new Home Screen icon.",
+    ]) {
+      const item = document.createElement("li");
+      item.textContent = text;
+      installSteps.append(item);
+    }
+    if (browser !== "Safari") {
+      const fallback = document.createElement("li");
+      fallback.textContent = "If Add to Home Screen is unavailable, open this page in Safari.";
+      installSteps.append(fallback);
+    }
+  }
+  const installNoticeText = document.querySelector("#ios-install-notice-text");
+  if (installNoticeText) {
+    installNoticeText.textContent =
+      `Install TFR from ${browser}: open Share, then choose Add to Home Screen.`;
+  }
   let installHintDismissed = false;
   try {
     installHintDismissed = localStorage.getItem("tfr.installHintDismissed") === "yes";

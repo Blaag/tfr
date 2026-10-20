@@ -109,10 +109,11 @@
     "state_directory": "~/.local/state/tfr/updates",
   },
 
-  // Private iPhone PWA served through Tailscale Serve. Set enabled to true and
-  // use this Gateway host's exact HTTPS MagicDNS origin.
+  // Private iPhone PWA served through Tailscale Serve. The default on-demand
+  // mode is provisioned by /web pair; use mode "disabled" to opt out.
   "web_gateway": {
     "enabled": false,
+    "mode": "on-demand",
     // "origin": "https://gateway.example.ts.net",
     "listen_host": "127.0.0.1",
     "listen_port": 7348,

@@ -35,7 +35,14 @@ from tfr.events import (
     SpoofStatus,
 )
 from tfr.gateway import EventHistory
-from tfr.gateway_web import SESSION_COOKIE, WebGatewayServer, browser_event
+from tfr.gateway_web import (
+    SESSION_COOKIE,
+    WebGatewayManager,
+    WebGatewayServer,
+    _serve_root_proxy,
+    _tailscale_origin,
+    browser_event,
+)
 from tfr.plugins import PluginManager
 from tfr.presentation import color_pulse
 from tfr.updates import BuildIdentity
@@ -50,6 +57,41 @@ NAVIGATION_HEADERS = {
     "Host": "gateway.example.ts.net",
     "Tailscale-User-Login": "black@example.com",
 }
+
+
+def test_tailscale_origin_requires_running_magicdns_identity() -> None:
+    assert (
+        _tailscale_origin(
+            {"BackendState": "Running", "Self": {"DNSName": "gateway.example.ts.net."}}
+        )
+        == ORIGIN
+    )
+
+    with pytest.raises(ValueError, match="not running or logged in"):
+        _tailscale_origin({"BackendState": "Stopped"})
+    with pytest.raises(ValueError, match="MagicDNS"):
+        _tailscale_origin({"BackendState": "Running", "Self": {}})
+
+
+def test_serve_root_detection_preserves_paths_and_reports_conflicts() -> None:
+    status = {
+        "Web": {
+            "gateway.example.ts.net:443": {
+                "Handlers": {
+                    "/admin": {"Proxy": "http://127.0.0.1:9000"},
+                }
+            }
+        }
+    }
+    assert _serve_root_proxy(status, ORIGIN) is None
+
+    status["Web"]["gateway.example.ts.net:443"]["Handlers"]["/"] = {
+        "Proxy": "http://127.0.0.1:7348"
+    }
+    assert _serve_root_proxy(status, ORIGIN) == "http://127.0.0.1:7348"
+
+    status["Web"]["gateway.example.ts.net:443"]["Handlers"]["/"] = {"Text": "occupied"}
+    assert _serve_root_proxy(status, ORIGIN) == "<non-proxy handler>"
 
 
 def test_browser_event_serializes_bounded_semantic_combo_cue() -> None:
@@ -100,7 +142,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v56";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v57";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
 
 
@@ -458,6 +500,109 @@ class FakeRuntime:
         if not text or any(character in text for character in "\r\n\0"):
             raise ValueError("invalid command")
         self.commands.append((world, text, client_id, request_id))
+
+
+class StubManagedWebServer:
+    def __init__(self, origin: str) -> None:
+        self.origin = origin
+        self.stopped = False
+
+    def create_pairing_url(self, label: str) -> str:
+        return f"{self.origin}/#pair={label}"
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
+async def test_on_demand_manager_configures_only_an_unused_serve_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = WebGatewayManager(
+        object(),  # type: ignore[arg-type]
+        configured_origin=None,
+        host="127.0.0.1",
+        port=7348,
+        state_directory=tmp_path / "web",
+        snapshot_events=100,
+        speaking_streaks_enabled=True,
+    )
+    serve_status: dict[str, object] = {"Web": {}}
+    calls: list[tuple[str, ...]] = []
+
+    async def start_server(self: WebGatewayManager, origin: str) -> None:
+        self._server = StubManagedWebServer(origin)  # type: ignore[assignment]
+
+    async def tailscale(_self: WebGatewayManager, *arguments: str) -> str:
+        calls.append(arguments)
+        if arguments == ("status", "--json"):
+            return json.dumps(
+                {
+                    "BackendState": "Running",
+                    "Self": {"DNSName": "gateway.example.ts.net."},
+                }
+            )
+        if arguments == ("serve", "status", "--json"):
+            return json.dumps(serve_status)
+        if arguments == (
+            "serve",
+            "--bg",
+            "--yes",
+            "http://127.0.0.1:7348",
+        ):
+            serve_status["Web"] = {
+                "gateway.example.ts.net:443": {
+                    "Handlers": {"/": {"Proxy": "http://127.0.0.1:7348"}}
+                }
+            }
+            return ""
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(WebGatewayManager, "_start_server", start_server)
+    monkeypatch.setattr(WebGatewayManager, "_tailscale", tailscale)
+
+    result = await manager.pair_device("Phone")
+
+    assert result["pairing_url"] == f"{ORIGIN}/#pair=Phone"
+    assert result["setup"] == {"backend_started": True, "serve_configured": True}
+    assert ("serve", "--bg", "--yes", "http://127.0.0.1:7348") in calls
+    assert json.loads((tmp_path / "web" / "provisioning.json").read_text())["origin"] == ORIGIN
+
+
+async def test_on_demand_manager_refuses_a_conflicting_serve_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = WebGatewayManager(
+        object(),  # type: ignore[arg-type]
+        configured_origin=ORIGIN,
+        host="127.0.0.1",
+        port=7348,
+        state_directory=tmp_path / "web",
+        snapshot_events=100,
+        speaking_streaks_enabled=True,
+    )
+
+    async def start_server(self: WebGatewayManager, origin: str) -> None:
+        self._server = StubManagedWebServer(origin)  # type: ignore[assignment]
+
+    async def tailscale(_self: WebGatewayManager, *arguments: str) -> str:
+        assert arguments == ("serve", "status", "--json")
+        return json.dumps(
+            {
+                "Web": {
+                    "gateway.example.ts.net:443": {
+                        "Handlers": {"/": {"Proxy": "http://127.0.0.1:9000"}}
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr(WebGatewayManager, "_start_server", start_server)
+    monkeypatch.setattr(WebGatewayManager, "_tailscale", tailscale)
+
+    with pytest.raises(ValueError, match="already used.*did not replace"):
+        await manager.pair_device("Phone")
+
+    assert manager.active is False
 
 
 def test_browser_projection_is_plain_and_excludes_agent_events() -> None:

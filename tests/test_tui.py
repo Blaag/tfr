@@ -920,8 +920,8 @@ async def test_web_pair_explains_disabled_gateway_configuration_before_pairing()
 
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
     assert "Web device pairing is disabled on the Gateway" in text
-    assert "web_gateway.enabled" in text
-    assert "web_gateway.origin" in text
+    assert "web_gateway.mode" in text
+    assert "on-demand" in text.replace("\n", "")
     assert "active config.jsonc" in text
     assert runtime.pair_called is False
 

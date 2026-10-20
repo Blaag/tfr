@@ -434,15 +434,28 @@ The Gateway can serve an installable, iPhone-oriented web client through
 [Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve). The PWA uses a
 separate chat-only protocol and revocable device credentials; it never receives
 the shared full-control Gateway token. The backend listens only on loopback and
-expects Tailscale Serve to provide the configured HTTPS origin.
+expects Tailscale Serve to provide its HTTPS origin.
 
-Choose the Gateway machine's HTTPS MagicDNS URL and add this top-level block to
-`config.jsonc`:
+The normal setup is a single command from an attached native UI:
+
+```text
+/web pair "My iPhone"
+```
+
+This explicitly authorizes TFR to discover the Gateway machine's MagicDNS
+origin, start its loopback-only PWA backend, and add a private Tailscale Serve
+root route when that route is unused. TFR reuses an exact existing route,
+preserves unrelated path routes, refuses to replace a conflicting root route,
+and never enables Funnel. Tailscale must already be installed, running, and
+logged in; TFR does not start it or perform login.
+
+No `web_gateway` configuration is required for on-demand setup. Advanced
+deployments may specify an origin or disable the feature explicitly:
 
 ```jsonc
 "web_gateway": {
-  "enabled": true,
-  "origin": "https://gateway.example.ts.net",
+  "mode": "on-demand", // or "disabled"
+  // "origin": "https://gateway.example.ts.net",
   "listen_host": "127.0.0.1",
   "listen_port": 7348,
   "state_directory": "~/.local/state/tfr/web",
@@ -450,9 +463,9 @@ Choose the Gateway machine's HTTPS MagicDNS URL and add this top-level block to
 },
 ```
 
-Start or restart `tfr gateway` normally. It will report the loopback web
-listener in addition to the private Unix socket. Publish that loopback service
-inside the tailnet with Tailscale Serve:
+The legacy `enabled: true` setting still eagerly starts the listener and
+requires an explicit origin. For manual provisioning, publish that loopback
+service inside the tailnet with Tailscale Serve:
 
 ```console
 tailscale serve --bg http://127.0.0.1:7348
@@ -467,8 +480,8 @@ requires the `Tailscale-User-Login` identity header added by Serve and binds eac
 device credential to the identity that redeemed its pairing link; Funnel traffic
 does not carry this header and is rejected.
 
-From any attached native UI, create a ten-minute, single-credential pairing
-link and scannable QR code without logging into the Gateway host:
+From any attached native UI, create a ten-minute pairing link and scannable QR
+code without logging into the Gateway host:
 
 ```text
 /web pair "My iPhone"
@@ -498,7 +511,11 @@ Open the printed URL on the phone while Tailscale is connected. The pairing
 secret is in the URL fragment, removed from browser history before submission,
 and retained only in tab-scoped session storage for bounded recovery attempts.
 The URL should still be treated as a short-lived secret and kept out of shell
-transcripts and messages. In Safari, use Share > Add to Home Screen after pairing.
+transcripts and messages. After pairing, TFR shows instructions for the current
+iOS browser. Use its Share menu and choose Add to Home Screen; if that action is
+unavailable, open the page in Safari. **Reset and uninstall** revokes the device,
+clears TFR-controlled browser data, unregisters its service worker, and then
+explains the final iOS-required step for removing the Home Screen icon.
 If an already-installed Home Screen app later needs to be paired again, open the
 app and paste a new pairing link into its pairing screen. Safari and the installed
 app can use separate cookie storage, so this avoids removing and reinstalling it.
