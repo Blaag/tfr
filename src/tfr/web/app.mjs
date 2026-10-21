@@ -97,6 +97,7 @@ const elements = {
   gatewayVersion: document.querySelector("#gateway-version"),
   eventDialog: document.querySelector("#event-dialog"),
   eventDialogWorld: document.querySelector("#event-dialog-world"),
+  eventSheetBody: document.querySelector("#event-dialog .event-sheet-body"),
   eventDetails: document.querySelector("#event-details"),
   textSmaller: document.querySelector("#text-smaller"),
   textReset: document.querySelector("#text-reset"),
@@ -1349,6 +1350,7 @@ function openEventDetails(item, { pointerActivated = false } = {}) {
   });
   elements.eventDetails.replaceChildren(...rows);
   elements.eventDialog.showModal();
+  elements.eventSheetBody.scrollTop = 0;
   scheduleViewportUpdate();
 }
 

@@ -784,6 +784,22 @@ select {
   letter-spacing: -0.025em;
 }
 
+.event-sheet {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.event-sheet header {
+  flex: 0 0 auto;
+}
+
+.event-sheet-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .paste-sheet > p {
   font-size: 0.76rem;
   line-height: 1.45;
