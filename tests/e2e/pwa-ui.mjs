@@ -414,6 +414,58 @@ try {
     await page.locator("#event-list .event").first().getAttribute("data-event-id"),
     "event-200",
   );
+  await page.setViewportSize({ width: 390, height: 520 });
+  await page.evaluate(() => {
+    window.__fakeSocket.message({
+      type: "event",
+      protocol: 1,
+      cursor: "details-scroll",
+      event: {
+        id: "details-scroll-event",
+        timestamp: new Date().toISOString(),
+        world: "dev-local",
+        connection_generation: "1",
+        direction: "inbound",
+        kind: "say",
+        text: "A detailed event for testing the mobile event sheet",
+        redacted: false,
+        text_truncated: false,
+        spoof_status: "spoofed",
+        spoof_sender: "A likely sender with a deliberately long display name",
+        spoof_sender_confidence: "inferred",
+        provenance: {
+          sender_name: "A sender with a deliberately long display name",
+          owner_name: "An owner with a deliberately long display name",
+          server_source: "A deliberately long server source that wraps in portrait",
+          confidence: "high",
+        },
+      },
+    });
+  });
+  const detailedEvent = page.locator('[data-event-id="details-scroll-event"]');
+  await detailedEvent.waitFor();
+  await detailedEvent.click();
+  await page.locator("#event-dialog[open]").waitFor();
+  const eventSheetBody = page.locator("#event-dialog .event-sheet-body");
+  assert.equal(
+    await eventSheetBody.evaluate((node) => node.scrollHeight > node.clientHeight),
+    true,
+  );
+  await eventSheetBody.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+  assert.equal(
+    await page.locator("#event-dialog .close-button").evaluate((node) => {
+      const bounds = node.getBoundingClientRect();
+      return bounds.top >= 0 && bounds.bottom <= window.innerHeight;
+    }),
+    true,
+  );
+  await page.locator("#event-dialog .close-button").click();
+  assert.equal(await page.locator("#event-dialog").evaluate((node) => node.open), false);
+  await detailedEvent.click();
+  await page.locator("#event-dialog[open]").waitFor();
+  assert.equal(await eventSheetBody.evaluate((node) => node.scrollTop), 0);
+  await page.locator("#event-dialog .close-button").click();
+  await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.locator("#command-input").getAttribute("spellcheck"), "true");
   assert.equal(await page.locator("#command-input").getAttribute("autocorrect"), "on");
   await page.evaluate(() => {
