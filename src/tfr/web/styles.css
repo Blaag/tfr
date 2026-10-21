@@ -54,6 +54,13 @@ button {
   color: inherit;
 }
 
+button,
+[role="button"],
+input[type="button"],
+input[type="submit"] {
+  touch-action: manipulation;
+}
+
 button:focus-visible,
 input:focus-visible,
 a:focus-visible {
@@ -693,6 +700,18 @@ a:focus-visible {
 }
 
 .command-field input::placeholder { color: #667a73; }
+
+input[type="text"],
+input[type="url"],
+input[type="email"],
+input[type="search"],
+input[type="password"],
+input[type="tel"],
+textarea,
+select {
+  font-size: 16px;
+  font-size: max(1rem, 16px);
+}
 
 .send-button {
   height: 2.7rem;

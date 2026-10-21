@@ -144,7 +144,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v59";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v60";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
 
 
@@ -361,13 +361,21 @@ def test_mobile_keyboard_preserves_live_edge_and_compacts_landscape() -> None:
     assert "-webkit-text-size-adjust: 100%;" in styles
 
 
-def test_pwa_locks_page_zoom_but_retains_transcript_size_controls() -> None:
+def test_pwa_uses_accessible_viewport_and_prevents_ios_focus_zoom() -> None:
     asset_directory = files("tfr").joinpath("web")
     page = asset_directory.joinpath("index.html").read_text(encoding="utf-8")
+    repair = asset_directory.joinpath("repair.html").read_text(encoding="utf-8")
     styles = asset_directory.joinpath("styles.css").read_text(encoding="utf-8")
 
-    assert "maximum-scale=1, user-scalable=no" in page
-    assert "pinch-zoom" not in styles
+    viewport = "width=device-width, initial-scale=1, viewport-fit=cover"
+    assert f'content="{viewport}"' in page
+    assert f'content="{viewport}"' in repair
+    assert "maximum-scale" not in page
+    assert "user-scalable" not in page
+    assert 'input[type="text"]' in styles
+    assert 'input[type="url"]' in styles
+    assert "font-size: max(1rem, 16px);" in styles
+    assert "touch-action: manipulation;" in styles
     assert 'id="text-larger"' in page
 
 
