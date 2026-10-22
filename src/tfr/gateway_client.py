@@ -46,7 +46,12 @@ from tfr.managed_updates import (
     stage_managed_update,
 )
 from tfr.plugin_sources import PluginUpdateChecker, load_plugin_sources
-from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
+from tfr.plugins import (
+    PluginLifecycleEvent,
+    PluginManager,
+    PluginWorldInfo,
+    ProjectedEffectDemo,
+)
 from tfr.sessions import SessionManager, SessionState
 from tfr.updates import (
     BuildIdentity,
@@ -66,6 +71,83 @@ _UPDATE_RESTART = "TFR_UPDATE_RESTART"
 
 class GatewayDisconnectedError(ConnectionError):
     pass
+
+
+def remote_speaker_effects_warning(
+    plugins: PluginManager,
+    *,
+    gateway_loaded: bool | None,
+    gateway_speakers: tuple[str, ...],
+) -> str | None:
+    rules = plugins.configured_speaker_effect_rules()
+    if not rules:
+        return None
+    header = (
+        "speaker_effects is configured in this remote UI's local config.jsonc, but in "
+        "remote mode that configuration is Gateway-owned."
+    )
+    if gateway_loaded is None:
+        return "\n\n".join(
+            (
+                header,
+                "This Gateway cannot report the speaker effects configured in its config.jsonc. "
+                "Check the Gateway's config.jsonc and move any missing speaker_effects settings "
+                "there.\n\nThe speaker_effects configuration in this remote UI's local "
+                "config.jsonc is ignored.",
+            )
+        )
+    if not gateway_loaded:
+        return "\n\n".join(
+            (
+                header,
+                "speaker_effects is not enabled in the Gateway's config.jsonc.",
+                "Move the following from this remote UI's config.jsonc to the Gateway's "
+                'config.jsonc:\n  • The "speaker_effects" entry in plugins.enabled\n'
+                "  • plugins.config.speaker_effects\n\nThe configuration in this remote "
+                "UI's config.jsonc is ignored.",
+            )
+        )
+    gateway_names = {speaker.casefold() for speaker in gateway_speakers}
+    missing = tuple(
+        (index, speaker)
+        for index, speaker in rules
+        if speaker.casefold() not in gateway_names
+    )
+    configured = tuple(
+        dict.fromkeys(
+            speaker for _index, speaker in rules if speaker.casefold() in gateway_names
+        )
+    )
+    local_names = tuple(dict.fromkeys(speaker for _index, speaker in rules))
+    if not missing:
+        names = ", ".join(local_names)
+        return "\n\n".join(
+            (
+                header,
+                f"The Gateway's config.jsonc reports effects for {names}. Remove the local "
+                "speaker_effects configuration from this remote UI's config.jsonc; it is "
+                "ignored in remote mode.",
+            )
+        )
+    move = "\n".join(
+        f"  • plugins.config.speaker_effects.rules[{index}]: {speaker}"
+        for index, speaker in missing
+    )
+    sections = [
+        header,
+        "Move these rules from this remote UI's config.jsonc to the Gateway's config.jsonc:\n"
+        + move
+        + "\n\nThe copies in this remote UI's config.jsonc are ignored.",
+    ]
+    if configured:
+        present = "\n".join(f"  • {speaker}" for speaker in configured)
+        sections.append(
+            "Already configured in the Gateway's config.jsonc:\n"
+            + present
+            + "\n\nRemove the local configuration for these speakers from this remote UI's "
+            "config.jsonc; it is ignored in remote mode."
+        )
+    return "\n\n".join(sections)
 
 
 ReconnectFactory = Callable[[UUID, int], Awaitable["GatewayClient"]]
@@ -240,6 +322,9 @@ class GatewayClient:
         agent_worlds: set[str],
         spellcheck_enabled: bool = False,
         speaking_streaks_enabled: bool = True,
+        effect_demos: tuple[ProjectedEffectDemo, ...] = (),
+        gateway_speaker_effects_loaded: bool | None = None,
+        gateway_speaker_effects: tuple[str, ...] = (),
         gateway_build: BuildIdentity | None = None,
     ) -> None:
         self.reader = reader
@@ -256,6 +341,9 @@ class GatewayClient:
         self.agent_worlds = agent_worlds
         self.spellcheck_enabled = spellcheck_enabled
         self.speaking_streaks_enabled = speaking_streaks_enabled
+        self.effect_demos = effect_demos
+        self.gateway_speaker_effects_loaded = gateway_speaker_effects_loaded
+        self.gateway_speaker_effects = gateway_speaker_effects
         self.gateway_build = gateway_build
         self.command_bus = RemoteCommandBus(self)
         self.agents: RemoteAgentRuntime | None = None
@@ -441,6 +529,10 @@ class GatewayClient:
                 for name in ("spellcheck_enabled", "speaking_streaks_enabled")
             ):
                 raise GatewayProtocolError("gateway UI settings are invalid")
+            effect_demos = cls._effect_demos(hello.get("effect_demos", []))
+            speaker_effects_loaded, gateway_speaker_effects = cls._speaker_effects(
+                hello.get("speaker_effects")
+            )
             try:
                 gateway_build = (
                     BuildIdentity.from_mapping(hello["build"]) if "build" in hello else None
@@ -467,6 +559,9 @@ class GatewayClient:
                 },
                 spellcheck_enabled=ui_settings["spellcheck_enabled"],
                 speaking_streaks_enabled=ui_settings["speaking_streaks_enabled"],
+                effect_demos=effect_demos,
+                gateway_speaker_effects_loaded=speaker_effects_loaded,
+                gateway_speaker_effects=gateway_speaker_effects,
                 gateway_build=gateway_build,
             )
             try:
@@ -500,6 +595,75 @@ class GatewayClient:
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
             raise
+
+    @staticmethod
+    def _effect_demos(value: object) -> tuple[ProjectedEffectDemo, ...]:
+        if not isinstance(value, list) or len(value) > 100:
+            raise GatewayProtocolError("gateway effect demos must be a bounded list")
+        output = []
+        for descriptor in value:
+            if not isinstance(descriptor, dict) or set(descriptor) != {
+                "id",
+                "label",
+                "category",
+                "samples",
+                "worlds",
+            }:
+                raise GatewayProtocolError("gateway effect demo descriptor is invalid")
+            demo_id = descriptor["id"]
+            label = descriptor["label"]
+            category = descriptor["category"]
+            samples = descriptor["samples"]
+            worlds = descriptor["worlds"]
+            if (
+                not isinstance(demo_id, str)
+                or not 0 < len(demo_id) <= 100
+                or not isinstance(label, str)
+                or not 0 < len(label) <= 100
+                or category not in {"speaker", "text", "border", "screen", "combo"}
+                or not isinstance(samples, list)
+                or not 1 <= len(samples) <= 10
+                or not isinstance(worlds, list)
+                or len(worlds) > 100
+                or any(not isinstance(world, str) or not 0 < len(world) <= 100 for world in worlds)
+            ):
+                raise GatewayProtocolError("gateway effect demo descriptor is invalid")
+            events = []
+            for sample in samples:
+                if not isinstance(sample, dict):
+                    raise GatewayProtocolError("gateway effect demo sample is invalid")
+                _cursor, event = event_from_message(sample)
+                events.append(event)
+            output.append(
+                ProjectedEffectDemo(
+                    id=demo_id,
+                    label=label,
+                    category=category,
+                    samples=tuple(events),
+                    worlds=tuple(worlds),
+                )
+            )
+        return tuple(output)
+
+    @staticmethod
+    def _speaker_effects(value: object) -> tuple[bool | None, tuple[str, ...]]:
+        if value is None:
+            return None, ()
+        if not isinstance(value, dict) or set(value) != {"loaded", "speakers"}:
+            raise GatewayProtocolError("gateway speaker effects summary is invalid")
+        loaded = value["loaded"]
+        speakers = value["speakers"]
+        if (
+            not isinstance(loaded, bool)
+            or not isinstance(speakers, list)
+            or len(speakers) > 1_000
+            or any(
+                not isinstance(speaker, str) or not 0 < len(speaker) <= 100
+                for speaker in speakers
+            )
+        ):
+            raise GatewayProtocolError("gateway speaker effects summary is invalid")
+        return loaded, tuple(dict.fromkeys(speakers))
 
     def start(self) -> None:
         if self._pump is None or self._pump.done():
@@ -589,6 +753,9 @@ class GatewayClient:
             self.agent_worlds = replacement.agent_worlds
             self.spellcheck_enabled = replacement.spellcheck_enabled
             self.speaking_streaks_enabled = replacement.speaking_streaks_enabled
+            self.effect_demos = replacement.effect_demos
+            self.gateway_speaker_effects_loaded = replacement.gateway_speaker_effects_loaded
+            self.gateway_speaker_effects = replacement.gateway_speaker_effects
             self.gateway_build = replacement.gateway_build
             self._write_lock = asyncio.Lock()
             await replacement.event_bus.close()
@@ -1489,6 +1656,7 @@ async def run_gateway_ui(
         agents=client.agents,  # type: ignore[arg-type]
         service_runtime=runtime,
         gateway_reconnect=runtime.reconnect,
+        gateway_effect_demos=lambda: getattr(client, "effect_demos", ()),
         restart_supported=True,
         update_checker=update_checker,
         plugin_update_checker=plugin_update_checker,
@@ -1509,6 +1677,17 @@ async def run_gateway_ui(
         tui.switch_world(resume_world)
     for message in plugin_source_messages:
         tui.queue_startup_notice(tui.active_alias, message)
+    speaker_effects_warning = (
+        remote_speaker_effects_warning(
+            plugins,
+            gateway_loaded=getattr(client, "gateway_speaker_effects_loaded", None),
+            gateway_speakers=getattr(client, "gateway_speaker_effects", ()),
+        )
+        if hasattr(plugins, "configured_speaker_effect_rules")
+        else None
+    )
+    if speaker_effects_warning is not None:
+        tui.queue_startup_notice(tui.active_alias, speaker_effects_warning)
     if client.history_reset:
         tui.queue_startup_notice(
             tui.active_alias,

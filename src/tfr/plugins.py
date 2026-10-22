@@ -312,6 +312,15 @@ class EffectDemo:
             raise ValueError("effect demo worlds must contain bounded world names")
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectedEffectDemo:
+    id: str
+    label: str
+    category: str
+    samples: tuple[Event, ...]
+    worlds: tuple[str, ...] = ()
+
+
 class CommandHandler(Protocol):
     def __call__(
         self,
@@ -884,6 +893,24 @@ class PluginManager:
             if isinstance(speaker, str) and 0 < len(speaker) <= 100 and speaker not in speakers:
                 speakers.append(speaker)
         return tuple(speakers)
+
+    def configured_speaker_effect_rules(self) -> tuple[tuple[int, str], ...]:
+        if "speaker_effects" not in self.requested_plugins:
+            return ()
+        value = self.config.get("speaker_effects", {})
+        if not isinstance(value, Mapping):
+            return ()
+        rules = value.get("rules", ())
+        if not isinstance(rules, (list, tuple)):
+            return ()
+        output = []
+        for index, rule in enumerate(rules[:1_000]):
+            if not isinstance(rule, Mapping):
+                continue
+            speaker = rule.get("speaker")
+            if isinstance(speaker, str) and 0 < len(speaker) <= 100:
+                output.append((index, speaker))
+        return tuple(output)
 
     def configured_portable_plugins(self) -> tuple[str, ...]:
         sources = {plugin for plugin, _decorator in self.registry.presentation_decorators.values()}
