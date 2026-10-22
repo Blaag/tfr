@@ -61,7 +61,7 @@ from tfr.plugin_api import (
     color_pulse,
 )
 from tfr.plugin_sources import PluginSourceNotice, PluginUpdateChecker, PluginUpdateResult
-from tfr.plugins import BossViewEvent, PluginManager
+from tfr.plugins import BossViewEvent, PluginManager, ProjectedEffectDemo
 from tfr.presentation import EffectProgram, effect_programs_as_dict
 from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.tui import (
@@ -2375,6 +2375,61 @@ async def test_effects_lab_commands_are_local_and_use_real_renderers() -> None:
 
     await tui.submit_text("alpha", "/effects close")
     assert tui.effects_lab_open is False
+
+
+async def test_remote_effects_lab_uses_gateway_projected_speaker_demo() -> None:
+    tui = make_tui()
+    text = 'Dan says, "Gateway preview."'
+    event = Event(
+        session_id=tui.active_view.session.session_id,
+        world="alpha",
+        connection_generation=0,
+        sequence=1,
+        direction=Direction.INBOUND,
+        kind=EventKind.SAY,
+        canonical_text=text,
+        plain_text=text,
+        display_text=text,
+        provenance=Provenance(sender_name="Dan"),
+    )
+    program = color_pulse(
+        0,
+        3,
+        base_color="#005faf",
+        accent_color="#ffffff",
+        duration_seconds=1,
+        repeat_seconds=10,
+        repeat_count=1,
+    )
+    _cursor, projected = event_from_message(
+        event_message(
+            1,
+            event,
+            presentations=[
+                {
+                    "source": "speaker_effects",
+                    "presentation": effect_programs_as_dict((program,)),
+                }
+            ],
+            presentation_text=text,
+        )
+    )
+    demo = ProjectedEffectDemo(
+        id="speaker:dan",
+        label="Dan",
+        category="speaker",
+        samples=(projected,),
+    )
+    tui.gateway_reconnect = lambda: None  # type: ignore[assignment]
+    tui.gateway_effect_demos = lambda: (demo,)
+
+    await tui.submit_text("alpha", "/effects")
+    await tui.submit_text("alpha", "/testspeaker Dan")
+
+    rendered = fragment_list_to_text(tui.effects_display.formatted_text())
+    assert "Configured speaker preview: Dan" in rendered
+    assert 'Dan says, "Gateway preview."' in rendered
+    assert tui.effects_display._entry_presentations[-1][0].program == program
 
 
 async def test_effects_lab_is_a_local_navigable_world_with_its_own_input() -> None:

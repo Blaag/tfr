@@ -674,6 +674,12 @@ from a locally installed copy. Copy only those portable plugins' enabled entries
 and matching `plugins.config` objects to the Gateway, not the entire local
 `plugins` section. Borders, screen-clear effects, boss views, keybindings, status
 segments, and other client-only plugins remain configured on the UI host.
+If `speaker_effects` remains configured in a remote UI's local `config.jsonc`,
+the UI warns that the configuration is ignored and uses the Gateway's bounded
+speaker summary to identify rules that are missing from the Gateway's
+`config.jsonc`. The remote native Effects Lab also uses Gateway-projected demos,
+so its speaker previews match live remote presentation policy rather than the
+ignored local rules.
 Standalone mode is unaffected because its process acts as both policy authority
 and renderer.
 

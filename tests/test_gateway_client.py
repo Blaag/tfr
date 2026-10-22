@@ -29,16 +29,17 @@ from tfr.gateway_client import (
     GatewayDisconnectedError,
     GatewayUiRuntime,
     RemoteWorldSession,
+    remote_speaker_effects_warning,
     run_gateway_ui,
 )
-from tfr.gateway_protocol import GatewayProtocolError, read_message, write_message
+from tfr.gateway_protocol import GatewayProtocolError, event_message, read_message, write_message
 from tfr.gateway_transport import (
     create_gateway_client_tls_context,
     create_gateway_server_tls_context,
 )
 from tfr.managed_updates import StagedManagedUpdate
 from tfr.plugin_sources import PluginSourceFailure, PluginSourceNotice
-from tfr.plugins import PluginLifecycleEvent, PluginManager
+from tfr.plugins import EffectDemo, EffectDemoSample, PluginLifecycleEvent, PluginManager
 from tfr.updates import ReleaseArtifact, ReleaseManifest, UpdateResult, current_build
 
 
@@ -116,6 +117,94 @@ async def test_client_accepts_compatible_hello_without_additive_ui_settings(
     socket_path.parent.rmdir()
 
 
+def speaker_effect_plugins(*speakers: str) -> PluginManager:
+    manager = PluginManager(
+        event_bus=EventBus(),
+        command_bus=Mock(),
+        targets={},
+        scope="ui",
+    )
+    manager.requested_plugins = ("speaker_effects",)
+    manager.config = {
+        "speaker_effects": {
+            "rules": [
+                {"speaker": speaker, "effect": "shimmer", "color": "#ffffff"}
+                for speaker in speakers
+            ]
+        }
+    }
+    return manager
+
+
+def test_remote_speaker_effects_warning_lists_missing_and_configured_rules() -> None:
+    warning = remote_speaker_effects_warning(
+        speaker_effect_plugins("Dan", "Alice"),
+        gateway_loaded=True,
+        gateway_speakers=("alice",),
+    )
+
+    assert warning is not None
+    assert "this remote UI's local config.jsonc" in warning
+    assert "Gateway's config.jsonc" in warning
+    assert "plugins.config.speaker_effects.rules[0]: Dan" in warning
+    assert "The copies in this remote UI's config.jsonc are ignored." in warning
+    assert "Already configured in the Gateway's config.jsonc:\n  • Alice" in warning
+    assert (
+        "Remove the local configuration for these speakers from this remote UI's "
+        "config.jsonc; it is ignored in remote mode."
+    ) in warning
+
+
+def test_remote_speaker_effects_warning_says_complete_local_config_is_ignored() -> None:
+    warning = remote_speaker_effects_warning(
+        speaker_effect_plugins("Dan", "Alice"),
+        gateway_loaded=True,
+        gateway_speakers=("Alice", "Dan"),
+    )
+
+    assert warning is not None
+    assert "The Gateway's config.jsonc reports effects for Dan, Alice." in warning
+    assert (
+        "Remove the local speaker_effects configuration from this remote UI's config.jsonc; "
+        "it is ignored in remote mode."
+    ) in warning
+
+
+def test_remote_speaker_effects_warning_handles_gateway_without_summary() -> None:
+    warning = remote_speaker_effects_warning(
+        speaker_effect_plugins("Dan"),
+        gateway_loaded=None,
+        gateway_speakers=(),
+    )
+
+    assert warning is not None
+    assert "cannot report the speaker effects configured in its config.jsonc" in warning
+    assert (
+        "speaker_effects configuration in this remote UI's local config.jsonc is ignored"
+        in warning
+    )
+
+
+def test_client_validates_projected_effect_demos_and_speaker_summary() -> None:
+    demos = GatewayClient._effect_demos(
+        [
+            {
+                "id": "speaker:dan",
+                "label": "Dan",
+                "category": "speaker",
+                "samples": [event_message(1, make_event(1))],
+                "worlds": ["alpha"],
+            }
+        ]
+    )
+
+    assert demos[0].label == "Dan"
+    assert demos[0].samples[0].display_text == "line 1"
+    assert GatewayClient._speaker_effects(
+        {"loaded": True, "speakers": ["Dan", "Dan"]}
+    ) == (True, ("Dan",))
+
+
 class FakeRuntime:
     def __init__(self, history: EventHistory) -> None:
         self.gateway_id = UUID("92716400-4bb9-43d2-845f-b8a0e51c9994")
@@ -158,6 +247,14 @@ class FakeRuntime:
                 "model": "example",
             }
         ]
+
+    def session_for(self, world: str) -> SimpleNamespace:
+        if world != "alpha":
+            raise KeyError(world)
+        return SimpleNamespace(
+            session_id=UUID("63f755aa-e407-4f78-ae05-f9d62c23f765"),
+            connection_generation=1,
+        )
 
     async def manage_gag(
         self,
@@ -269,6 +366,58 @@ def update_manifest() -> ReleaseManifest:
             sha256="b" * 64,
         ),
     )
+
+
+async def test_gateway_handshake_supplies_authoritative_effect_demos_and_summary() -> None:
+    class SpeakerEffects:
+        def register(self, registrar: object, _config: object) -> None:
+            registrar.register_effect_demo(  # type: ignore[attr-defined]
+                EffectDemo(
+                    id="speaker:dan",
+                    label="Dan",
+                    category="speaker",
+                    samples=(
+                        EffectDemoSample(EventKind.SAY, 'Dan says, "Gateway preview."'),
+                    ),
+                )
+            )
+
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    runtime.plugins = await PluginManager.load(
+        enabled=("speaker_effects",),
+        config={
+            "speaker_effects": {
+                "rules": [
+                    {"speaker": "Dan", "effect": "shimmer", "color": "#ffffff"}
+                ]
+            }
+        },
+        event_bus=bus,
+        command_bus=Mock(),
+        targets={},
+        discovered=(
+            SimpleNamespace(name="speaker_effects", load=lambda: SpeakerEffects()),
+        ),
+        scope="gateway",
+    )
+    socket_path = Path("/tmp") / f"tfr-effects-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    try:
+        assert client.gateway_speaker_effects_loaded is True
+        assert client.gateway_speaker_effects == ("Dan",)
+        assert client.effect_demos[0].label == "Dan"
+        assert client.effect_demos[0].samples[0].display_text == 'Dan says, "Gateway preview."'
+    finally:
+        await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+        socket_path.parent.rmdir()
 
 
 async def test_coordinated_update_prepares_and_commits_every_connected_ui(

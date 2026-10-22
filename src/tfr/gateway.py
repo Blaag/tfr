@@ -6,6 +6,7 @@ import errno
 import heapq
 import hmac
 import inspect
+import json
 import os
 import signal
 import socket
@@ -26,7 +27,16 @@ from tfr.ansi import terminal_plain_text
 from tfr.config import ConfigurationBundle
 from tfr.core import CommandBus, EventBus, UnknownSessionError
 from tfr.eventlog import EventSink, JsonlEventSink
-from tfr.events import Actor, ActorType, CommandRequest, Event, EventKind
+from tfr.events import (
+    Actor,
+    ActorType,
+    CommandRequest,
+    Confidence,
+    Direction,
+    Event,
+    EventKind,
+    Provenance,
+)
 from tfr.gag import GagPolicy
 from tfr.gateway_protocol import (
     MAX_MESSAGE_BYTES,
@@ -78,6 +88,7 @@ from tfr.world_connector import (
 
 MAX_COMMAND_CHARACTERS = 65_536
 MAX_ACTOR_ID_CHARACTERS = 256
+MAX_NATIVE_EFFECT_DEMOS_BYTES = 131_072
 MAX_HELLO_BYTES = 16_384
 HELLO_TIMEOUT_SECONDS = 5
 UPDATE_PREPARE_TIMEOUT_SECONDS = 900
@@ -1345,6 +1356,8 @@ class GatewayServer:
                             "speaking_streaks_enabled": True,
                         }
                     ),
+                    "effect_demos": self._native_effect_demos(),
+                    "speaker_effects": self._speaker_effects_summary(),
                     "build": getattr(self.runtime, "build", current_build()).as_dict(),
                 },
                 lock=write_lock,
@@ -1458,6 +1471,71 @@ class GatewayServer:
         except GatewayProtocolError:
             return event_message(cursor, event)
         return message
+
+    def _speaker_effects_summary(self) -> dict[str, Any] | None:
+        plugins = getattr(self.runtime, "plugins", None)
+        if not isinstance(plugins, PluginManager):
+            return None
+        loaded = "speaker_effects" in plugins.loaded_plugins
+        return {
+            "loaded": loaded,
+            "speakers": list(plugins.configured_speaker_effects()) if loaded else [],
+        }
+
+    def _native_effect_demos(self) -> list[dict[str, Any]]:
+        plugins = getattr(self.runtime, "plugins", None)
+        if not isinstance(plugins, PluginManager) or not hasattr(self.runtime, "session_for"):
+            return []
+        worlds = [str(item["world"]) for item in self.runtime.world_descriptors()]
+        output: list[dict[str, Any]] = []
+        encoded_bytes = 2
+        for demo in plugins.effect_demos()[:100]:
+            world = next(
+                (
+                    candidate
+                    for candidate in demo.worlds
+                    if candidate in worlds
+                ),
+                worlds[0] if worlds and not demo.worlds else None,
+            )
+            if world is None:
+                continue
+            session = self.runtime.session_for(world)
+            samples = []
+            for sample in demo.samples:
+                event = Event(
+                    session_id=session.session_id,
+                    world=world,
+                    connection_generation=session.connection_generation,
+                    sequence=0,
+                    direction=Direction.INBOUND,
+                    kind=sample.kind,
+                    event_id=uuid4(),
+                    timestamp=datetime.now(UTC),
+                    canonical_text=sample.text,
+                    plain_text=sample.text,
+                    display_text=sample.text,
+                    parser_name="effects-lab",
+                    confidence=Confidence.INFERRED,
+                    provenance=Provenance(
+                        sender_name=demo.label if demo.category == "speaker" else None,
+                        confidence=Confidence.INFERRED,
+                    ),
+                )
+                samples.append(self._native_event_message(1, event))
+            descriptor = {
+                "id": demo.id,
+                "label": demo.label,
+                "category": demo.category,
+                "samples": samples,
+                "worlds": list(demo.worlds),
+            }
+            descriptor_bytes = len(json.dumps(descriptor, ensure_ascii=True).encode("utf-8"))
+            if encoded_bytes + descriptor_bytes > MAX_NATIVE_EFFECT_DEMOS_BYTES:
+                break
+            output.append(descriptor)
+            encoded_bytes += descriptor_bytes
+        return output
 
     async def _receive_requests(
         self,

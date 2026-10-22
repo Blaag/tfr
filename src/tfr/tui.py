@@ -85,7 +85,13 @@ from tfr.plugin_sources import (
     PluginUpdateResult,
     format_plugin_update_status,
 )
-from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
+from tfr.plugins import (
+    EffectDemo,
+    PluginLifecycleEvent,
+    PluginManager,
+    PluginWorldInfo,
+    ProjectedEffectDemo,
+)
 from tfr.presentation import ActiveEffectProgram, EffectProgram, effect_programs_from_dict
 from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.spellcheck import Correction, LocalSpellChecker, speech_payload
@@ -902,6 +908,7 @@ class TfrTui:
         agents: AgentRuntime | None = None,
         service_runtime: ServiceRuntime | None = None,
         gateway_reconnect: Callable[[], Coroutine[Any, Any, str]] | None = None,
+        gateway_effect_demos: Callable[[], Sequence[ProjectedEffectDemo]] | None = None,
         restart_supported: bool = False,
         update_checker: UpdateChecker | None = None,
         plugin_update_checker: PluginUpdateChecker | None = None,
@@ -955,6 +962,7 @@ class TfrTui:
         self.service_runtime = service_runtime
         self.local_ui_settings = local_ui_settings
         self.gateway_reconnect = gateway_reconnect
+        self.gateway_effect_demos = gateway_effect_demos
         self.restart_supported = restart_supported
         self.update_checker = update_checker
         self.plugin_update_checker = plugin_update_checker
@@ -3501,7 +3509,7 @@ class TfrTui:
 
     def _effects_lab_help_text(self) -> str:
         speakers = tuple(
-            demo.label for demo in self.plugins.effect_demos() if demo.category == "speaker"
+            demo.label for demo in self._effect_demos() if demo.category == "speaker"
         )
         return "\n".join(
             (
@@ -3538,12 +3546,12 @@ class TfrTui:
             await self._handle_teststreak(["all"])
         elif operation == "speakers":
             for speaker in (
-                demo.label for demo in self.plugins.effect_demos() if demo.category == "speaker"
+                demo.label for demo in self._effect_demos() if demo.category == "speaker"
             ):
                 self._handle_testspeaker([speaker])
         elif operation == "all":
             for speaker in (
-                demo.label for demo in self.plugins.effect_demos() if demo.category == "speaker"
+                demo.label for demo in self._effect_demos() if demo.category == "speaker"
             ):
                 self._handle_testspeaker([speaker])
             await self._handle_teststreak(["all"])
@@ -3590,12 +3598,28 @@ class TfrTui:
             provenance=Provenance(sender_name=speaker, confidence=Confidence.INFERRED),
         )
 
-    def _append_effect_demo(self, event: Event) -> None:
-        text = self.plugins.transform_display(event) or event.display_text
+    def _effect_demos(self) -> Sequence[EffectDemo | ProjectedEffectDemo]:
+        if self.gateway_reconnect is not None and self.gateway_effect_demos is not None:
+            return self.gateway_effect_demos()
+        return self.plugins.effect_demos()
+
+    def _append_effect_demo(self, event: Event, *, gateway_owned: bool = False) -> None:
+        text = event.display_text if gateway_owned else self.plugins.transform_display(event)
+        text = text or event.display_text
         if text is None:
             return
-        decorations = self.plugins.decorate_display(event, text)
-        programs = self.plugins.presentation_programs(event, terminal_plain_text(text))
+        decorations = () if gateway_owned else self.plugins.decorate_display(event, text)
+        programs = (
+            tuple(
+                program
+                for _source, group in self._gateway_presentation_programs(
+                    event, terminal_plain_text(text)
+                )
+                for program in group
+            )
+            if gateway_owned
+            else self.plugins.presentation_programs(event, terminal_plain_text(text))
+        )
         elapsed = self._effects_animation_elapsed_seconds()
         decorations = tuple(replace(item, phase_offset_seconds=-elapsed) for item in decorations)
         presentations = tuple(
@@ -3617,7 +3641,7 @@ class TfrTui:
         self._open_effects_lab()
         if not parameters:
             speakers = tuple(
-                demo.label for demo in self.plugins.effect_demos() if demo.category == "speaker"
+                demo.label for demo in self._effect_demos() if demo.category == "speaker"
             )
             self.effects_display.append(
                 "Configured speakers: " + (", ".join(speakers) if speakers else "none"),
@@ -3628,7 +3652,7 @@ class TfrTui:
         demo = next(
             (
                 candidate
-                for candidate in self.plugins.effect_demos()
+                for candidate in self._effect_demos()
                 if candidate.label.casefold() == speaker.casefold()
             ),
             None,
@@ -3643,14 +3667,17 @@ class TfrTui:
         )
         world = next((candidate for candidate in demo.worlds if candidate in self.views), None)
         for sample in demo.samples:
-            self._append_effect_demo(
-                self._effect_demo_event(
-                    speaker,
-                    sample.kind,
-                    sample.text,
-                    world=world,
+            if isinstance(demo, ProjectedEffectDemo):
+                self._append_effect_demo(sample, gateway_owned=True)
+            else:
+                self._append_effect_demo(
+                    self._effect_demo_event(
+                        speaker,
+                        sample.kind,
+                        sample.text,
+                        world=world,
+                    )
                 )
-            )
 
     def _show_text_effect_demo(self, name: str, *, speaker: str | None = None) -> None:
         try:
