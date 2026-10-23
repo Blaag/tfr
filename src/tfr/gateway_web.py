@@ -73,6 +73,20 @@ MAX_TAILSCALE_OUTPUT_BYTES = 1_048_576
 _PORTABLE_SCREEN_CLEAR_EFFECTS = {
     "water_ripple": (2.6, 24.0),
     "doom_fire": (3.2, 24.0),
+    "acid_rain": (3.0, 24.0),
+    "film_burn": (4.2, 24.0),
+    "flame": (2.1, 24.0),
+    "sandstorm": (2.8, 24.0),
+    "vortex": (2.8, 24.0),
+    "water": (5.0, 30.0),
+}
+
+_PORTABLE_SCREEN_CLEAR_OPTIONS = {
+    "acid_rain": ("density", "streak_length"),
+    "film_burn": ("minimum_holes", "maximum_holes"),
+    "sandstorm": ("direction", "gust_strength"),
+    "vortex": ("direction", "turns"),
+    "water": ("color_mode", "slosh_strength"),
 }
 
 _PWA_DIAGNOSTIC_CODES = {
@@ -635,6 +649,10 @@ def portable_screen_clear_config(runtime: GatewayRuntime) -> dict[str, Any]:
         if not isinstance(configured, Mapping):
             configured = {}
         duration = configured.get("duration_seconds", default_duration)
+        if name == "film_burn":
+            duration = float(configured.get("minimum_growth_duration_seconds", 3.5)) + float(
+                configured.get("burn_duration_seconds", 0.7)
+            )
         frames_per_second = configured.get("frames_per_second", default_fps)
         if (
             isinstance(duration, bool)
@@ -650,13 +668,16 @@ def portable_screen_clear_config(runtime: GatewayRuntime) -> dict[str, Any]:
             or not 1 <= frames_per_second <= 30
         ):
             frames_per_second = default_fps
-        effects.append(
-            {
-                "name": name,
-                "duration_ms": round(float(duration) * 1000),
-                "frames_per_second": float(frames_per_second),
-            }
-        )
+        effect: dict[str, Any] = {
+            "name": name,
+            "duration_ms": round(float(duration) * 1000),
+            "frames_per_second": float(frames_per_second),
+        }
+        option_names = _PORTABLE_SCREEN_CLEAR_OPTIONS.get(name, ())
+        options = {option: configured[option] for option in option_names if option in configured}
+        if options:
+            effect["options"] = options
+        effects.append(effect)
     mode = getattr(runtime, "screen_clear_mode", "cycle")
     locked = getattr(runtime, "screen_clear_effect", None)
     if mode not in {"cycle", "random", "locked"}:

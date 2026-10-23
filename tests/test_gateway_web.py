@@ -145,7 +145,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v62";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v63";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
 
 
@@ -555,6 +555,37 @@ def test_portable_screen_clear_config_exposes_supported_loaded_effects() -> None
         "effect": "water_ripple",
         "effects": [{"name": "water_ripple", "duration_ms": 4000, "frames_per_second": 20.0}],
     }
+
+
+def test_portable_screen_clear_config_exposes_allowlisted_effect_options() -> None:
+    runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 10}))
+    runtime.plugins._loaded_plugins.extend(["acid_rain", "sandstorm", "water"])
+    runtime.plugins.config = {
+        "acid_rain": {"density": 0.8, "streak_length": 7},
+        "sandstorm": {"direction": "right-to-left", "gust_strength": 2},
+        "water": {"color_mode": "dynamic", "slosh_strength": 0.4, "gravity": 50},
+    }
+
+    assert portable_screen_clear_config(runtime)["effects"] == [
+        {
+            "name": "acid_rain",
+            "duration_ms": 3000,
+            "frames_per_second": 24.0,
+            "options": {"density": 0.8, "streak_length": 7},
+        },
+        {
+            "name": "sandstorm",
+            "duration_ms": 2800,
+            "frames_per_second": 24.0,
+            "options": {"direction": "right-to-left", "gust_strength": 2},
+        },
+        {
+            "name": "water",
+            "duration_ms": 5000,
+            "frames_per_second": 30.0,
+            "options": {"color_mode": "dynamic", "slosh_strength": 0.4},
+        },
+    ]
 
 
 async def test_on_demand_manager_configures_only_an_unused_serve_root(
