@@ -42,6 +42,14 @@ import {
   presentationValidationResult,
 } from "./presentation.mjs";
 import { restoreTranscriptPosition } from "./scroll-restoration.mjs";
+import {
+  animateScreenClear,
+  captureTranscriptCells,
+  eventsAfterClearCutoff,
+  isRestoreSwipe,
+  selectScreenClearEffect,
+  validatedScreenClearConfig,
+} from "./screen-clear.mjs";
 import { swipeDirection } from "./swipe.mjs";
 import { installTextRunColors, textRunClassNames, validatedTextRuns } from "./text-runs.mjs";
 import { isTranscriptEvent } from "./transcript-events.mjs";
@@ -66,6 +74,7 @@ const PRESENTATION_CHARACTER_PRESSURE = 2000;
 const TRANSCRIPT_NODE_PRESSURE = 10000;
 const MIN_TEXT_SIZE = -2;
 const MAX_TEXT_SIZE = 4;
+const SCREEN_CLEAR_PULL_DISTANCE = 96;
 
 const elements = {
   pairing: document.querySelector("#pairing"),
@@ -82,6 +91,8 @@ const elements = {
   transcript: document.querySelector("#transcript"),
   eventList: document.querySelector("#event-list"),
   emptyState: document.querySelector("#empty-state"),
+  screenClearOverlay: document.querySelector("#screen-clear-overlay"),
+  screenClearHandle: document.querySelector("#screen-clear-handle"),
   returnLive: document.querySelector("#return-live"),
   returnLiveCount: document.querySelector("#return-live-count"),
   composer: document.querySelector("#composer"),
@@ -169,6 +180,9 @@ const state = {
   comboStreaks: new Map(),
   speakingStreaksEnabled: true,
   effectDemos: [],
+  screenClearConfig: validatedScreenClearConfig(null),
+  screenClearCutoffs: new Map(),
+  lastScreenClearEffects: new Map(),
   paste: null,
 };
 const pairingSubmission = createPairingSubmission(
@@ -193,6 +207,9 @@ const installedTextRunColors = new Set();
 const activePresentationAnimations = new Set();
 let comboNoticeAnimation = null;
 const comboTimers = new Set();
+let activeScreenClearAnimation = null;
+let screenClearPull = null;
+let screenClearSeed = 0;
 
 function responsivenessMessage(prefix) {
   const events = elements.eventList?.children.length || 0;
@@ -1130,6 +1147,7 @@ function renderWorlds() {
 }
 
 function selectWorld(worldName, { focusInput = true } = {}) {
+  cancelScreenClearAnimation();
   if (state.selectedWorld) {
     state.drafts.set(
       state.selectedWorld,
@@ -1354,13 +1372,105 @@ function openEventDetails(item, { pointerActivated = false } = {}) {
   scheduleViewportUpdate();
 }
 
+function cancelScreenClearAnimation() {
+  const animation = activeScreenClearAnimation;
+  activeScreenClearAnimation = null;
+  animation?.cancel();
+}
+
+function screenClearEvents(world = state.selectedWorld) {
+  const events = state.events.get(world) || [];
+  return eventsAfterClearCutoff(events, state.screenClearCutoffs.get(world));
+}
+
+function showScreenRestoreHint() {
+  try {
+    if (sessionStorage.getItem("tfr.screenClearRestoreHintShown")) return;
+    sessionStorage.setItem("tfr.screenClearRestoreHintShown", "true");
+  } catch {
+    // The one-time hint can still be shown when browser storage is unavailable.
+  }
+  const hint = document.createElement("div");
+  hint.className = "screen-clear-hint";
+  hint.textContent = "Swipe down to restore cleared output";
+  elements.console.append(hint);
+  window.setTimeout(() => hint.remove(), 3500);
+}
+
+function clearSelectedScreen() {
+  const world = state.selectedWorld;
+  if (!world || !readingState(world).atLive) return;
+  const visibleEvents = screenClearEvents(world);
+  const cutoff = visibleEvents.at(-1);
+  if (!cutoff) return;
+  const cells = captureTranscriptCells(elements.eventList, elements.transcript);
+  const animationsEnabled = motionAllowsAnimation(
+    elements.motionPreference.value,
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
+  const effect = selectScreenClearEffect(
+    state.screenClearConfig,
+    state.lastScreenClearEffects.get(world),
+  );
+  if (effect) state.lastScreenClearEffects.set(world, effect.name);
+  state.screenClearCutoffs.set(world, cutoff.id);
+  cancelScreenClearAnimation();
+  renderTranscript({ scrollToLive: true });
+  showScreenRestoreHint();
+  if (!animationsEnabled || !cells.length || !effect) return;
+  const animation = animateScreenClear({
+    canvas: elements.screenClearOverlay,
+    transcript: elements.transcript,
+    cells,
+    effect,
+    seed: ++screenClearSeed,
+    onFinish: () => {
+      if (activeScreenClearAnimation === animation) activeScreenClearAnimation = null;
+    },
+  });
+  activeScreenClearAnimation = animation;
+}
+
+function restoreSelectedScreen() {
+  const world = state.selectedWorld;
+  if (!world || !state.screenClearCutoffs.has(world)) return false;
+  state.screenClearCutoffs.delete(world);
+  cancelScreenClearAnimation();
+  renderTranscript({ scrollToLive: true });
+  if (
+    motionAllowsAnimation(
+      elements.motionPreference.value,
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+    ) && typeof elements.eventList.animate === "function"
+  ) {
+    elements.eventList.animate(
+      [
+        { transform: "translateY(-1.5rem)", opacity: 0 },
+        { transform: "translateY(0)", opacity: 1 },
+      ],
+      { duration: 180, easing: "ease-out" },
+    );
+  }
+  return true;
+}
+
+function updateScreenClearHandle() {
+  const cleared = state.screenClearCutoffs.has(state.selectedWorld);
+  const label = cleared ? "Restore cleared output" : "Pull up to clear screen";
+  elements.screenClearHandle.setAttribute("aria-label", label);
+  elements.screenClearHandle.title = label;
+  elements.screenClearHandle.disabled = !cleared && (
+    !readingState().atLive || !screenClearEvents().length
+  );
+}
+
 function renderTranscript({ scrollToLive = false, smoothScroll = false, restorePosition = false } = {}) {
   const renderStarted = performance.now();
   cancelPresentationAnimations();
   if (liveRenderFrame !== null) window.cancelAnimationFrame(liveRenderFrame);
   liveRenderFrame = null;
   pendingLiveEvents = [];
-  const events = state.events.get(state.selectedWorld) || [];
+  const events = screenClearEvents();
   const visible = events.slice(-MAX_RENDERED_EVENTS);
   const reading = readingState();
   const nodes = [];
@@ -1372,7 +1482,8 @@ function renderTranscript({ scrollToLive = false, smoothScroll = false, restoreP
     nodes.unshift(node);
   }
   elements.eventList.replaceChildren(...nodes);
-  elements.emptyState.hidden = visible.length > 0;
+  elements.emptyState.hidden = visible.length > 0 || state.screenClearCutoffs.has(state.selectedWorld);
+  updateScreenClearHandle();
   const renderDuration = performance.now() - renderStarted;
   if (renderDuration >= SLOW_TRANSCRIPT_RENDER_MS) {
     reportResponsiveness(
@@ -1552,12 +1663,15 @@ function addEvent(message) {
 }
 
 function resetGatewayState() {
+  cancelScreenClearAnimation();
   state.events.clear();
   state.eventIds.clear();
   state.unread.clear();
   state.reading.clear();
   state.shownHistoryNotices.clear();
   state.comboStreaks.clear();
+  state.screenClearCutoffs.clear();
+  state.lastScreenClearEffects.clear();
   state.cursor = null;
   safeRemove("tfr.cursor");
 }
@@ -1591,6 +1705,7 @@ function handleMessage(message) {
         : "Unknown";
     state.worlds = Array.isArray(message.worlds) ? message.worlds : [];
     state.effectDemos = validatedEffectDemos(message.effect_demos);
+    state.screenClearConfig = validatedScreenClearConfig(message.screen_clear);
     state.speakingStreaksEnabled = message.speaking_streaks_enabled !== false;
     if (!state.speakingStreaksEnabled) {
       state.comboStreaks.clear();
@@ -2311,6 +2426,38 @@ elements.returnLive.addEventListener("click", () => {
   preserveLiveDuringViewportChange = document.activeElement === elements.commandInput;
   renderTranscript({ scrollToLive: true, smoothScroll: true });
 });
+elements.screenClearHandle.addEventListener("pointerdown", (event) => {
+  if (!readingState().atLive || !screenClearEvents().length || event.button !== 0) return;
+  screenClearPull = { pointerId: event.pointerId, startY: event.clientY, armed: false };
+  elements.screenClearHandle.setPointerCapture(event.pointerId);
+  elements.screenClearHandle.dataset.pulling = "true";
+  elements.screenClearHandle.style.setProperty("--screen-clear-pull", "0px");
+});
+elements.screenClearHandle.addEventListener("pointermove", (event) => {
+  if (!screenClearPull || event.pointerId !== screenClearPull.pointerId) return;
+  const distance = Math.max(0, screenClearPull.startY - event.clientY);
+  screenClearPull.armed = distance >= SCREEN_CLEAR_PULL_DISTANCE;
+  elements.screenClearHandle.toggleAttribute("data-armed", screenClearPull.armed);
+  elements.screenClearHandle.style.setProperty(
+    "--screen-clear-pull",
+    `${-Math.min(distance, SCREEN_CLEAR_PULL_DISTANCE + 24)}px`,
+  );
+});
+function finishScreenClearPull(event, cancelled = false) {
+  if (!screenClearPull || event.pointerId !== screenClearPull.pointerId) return;
+  const armed = screenClearPull.armed && !cancelled;
+  screenClearPull = null;
+  elements.screenClearHandle.removeAttribute("data-pulling");
+  elements.screenClearHandle.removeAttribute("data-armed");
+  elements.screenClearHandle.style.removeProperty("--screen-clear-pull");
+  if (armed) clearSelectedScreen();
+}
+elements.screenClearHandle.addEventListener("pointerup", (event) => finishScreenClearPull(event));
+elements.screenClearHandle.addEventListener("pointercancel", (event) => finishScreenClearPull(event, true));
+elements.screenClearHandle.addEventListener("click", (event) => {
+  if (event.detail !== 0) return;
+  if (!restoreSelectedScreen()) clearSelectedScreen();
+});
 elements.eventList.addEventListener("pointerdown", (event) => {
   setInputModality("pointer");
   transcriptPointerTarget = event.target.closest("a") ? null : event.target.closest(".event");
@@ -2350,7 +2497,13 @@ elements.transcript.addEventListener(
       return;
     }
     const touch = event.touches[0];
-    transcriptTouch = { x: touch.clientX, y: touch.clientY, time: performance.now() };
+    transcriptTouch = {
+      x: touch.clientX,
+      y: touch.clientY,
+      time: performance.now(),
+      atTop: elements.transcript.scrollTop <= 1,
+      canRestore: state.screenClearCutoffs.has(state.selectedWorld),
+    };
   },
   { passive: true },
 );
@@ -2361,11 +2514,17 @@ elements.transcript.addEventListener(
     transcriptTouch = null;
     if (!start || event.changedTouches.length !== 1 || window.getSelection()?.toString()) return;
     const touch = event.changedTouches[0];
-    const direction = swipeDirection(start, {
+    const end = {
       x: touch.clientX,
       y: touch.clientY,
       time: performance.now(),
-    });
+    };
+    if (start.canRestore && isRestoreSwipe(start, end, start.atTop)) {
+      suppressTranscriptClickUntil = performance.now() + 500;
+      restoreSelectedScreen();
+      return;
+    }
+    const direction = swipeDirection(start, end);
     const moved = Math.hypot(touch.clientX - start.x, touch.clientY - start.y) > 10;
     if (moved) suppressTranscriptClickUntil = performance.now() + 500;
     if (direction && lineWrapPreference()) {
@@ -2375,6 +2534,11 @@ elements.transcript.addEventListener(
   { passive: true },
 );
 document.addEventListener("keydown", () => setInputModality("keyboard"), { capture: true });
+document.addEventListener("keydown", (event) => {
+  if (!event.ctrlKey || event.altKey || event.metaKey || event.key.toLocaleLowerCase() !== "l") return;
+  event.preventDefault();
+  clearSelectedScreen();
+});
 document.addEventListener("pointerdown", () => setInputModality("pointer"), { capture: true });
 elements.transcript.addEventListener("touchcancel", () => {
   transcriptTouch = null;
@@ -2391,6 +2555,7 @@ elements.transcript.addEventListener("scroll", () => {
   }
   if (reading.atLive) reading.unseenLive = 0;
   updateReturnLive();
+  updateScreenClearHandle();
 });
 window.addEventListener("online", () => {
   resume();

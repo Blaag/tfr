@@ -418,6 +418,12 @@ a:focus-visible {
   pointer-events: none;
 }
 
+.screen-clear-overlay {
+  position: fixed;
+  z-index: 28;
+  pointer-events: none;
+}
+
 .combo-notice {
   position: absolute;
   z-index: 1;
@@ -625,6 +631,7 @@ a:focus-visible {
 
 .composer {
   grid-row: 4;
+  position: relative;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
@@ -632,6 +639,56 @@ a:focus-visible {
   padding: 0.62rem 0.68rem calc(0.62rem + var(--safe-bottom));
   border-top: 1px solid var(--line);
   background: rgba(8, 18, 17, 0.97);
+}
+
+.screen-clear-handle {
+  position: absolute;
+  z-index: 31;
+  top: 0;
+  left: 50%;
+  width: 4.5rem;
+  height: 2.25rem;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  touch-action: none;
+  transform: translate(-50%, -50%);
+}
+
+.screen-clear-handle span {
+  width: 2.2rem;
+  height: 0.24rem;
+  border-radius: 1rem;
+  background: var(--line-bright);
+  box-shadow: 0 0 0.7rem rgba(181, 236, 114, 0.18);
+  transition: width 120ms ease, background 120ms ease, transform 120ms ease;
+}
+
+.screen-clear-handle[data-pulling] span {
+  width: 3rem;
+  transform: translateY(var(--screen-clear-pull, 0));
+}
+
+.screen-clear-handle[data-armed] span {
+  background: var(--signal);
+}
+
+.screen-clear-handle:disabled span {
+  opacity: 0.42;
+}
+
+.screen-clear-hint {
+  position: fixed;
+  z-index: 32;
+  right: 1rem;
+  bottom: calc(4.8rem + var(--safe-bottom));
+  left: 1rem;
+  pointer-events: none;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-align: center;
 }
 
 :root[data-input-focused] .composer {

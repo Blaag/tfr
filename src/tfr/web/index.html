@@ -103,6 +103,7 @@
           <p>Waiting for a signal.</p>
         </div>
       </section>
+      <canvas id="screen-clear-overlay" class="screen-clear-overlay" aria-hidden="true" hidden></canvas>
       <div id="combo-fireworks" class="combo-fireworks" aria-hidden="true"></div>
 
       <button id="return-live" class="return-live" type="button" hidden>
@@ -111,6 +112,10 @@
       </button>
 
       <form id="composer" class="composer">
+        <button id="screen-clear-handle" class="screen-clear-handle" type="button"
+                aria-label="Pull up to clear screen" title="Pull up to clear screen">
+          <span aria-hidden="true"></span>
+        </button>
         <button id="history-button" class="history-button" type="button">History</button>
         <label class="command-field">
           <span class="sr-only">Command</span>

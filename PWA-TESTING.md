@@ -10,8 +10,8 @@ Use Playwright for every PWA test that does not require physical hardware. Use
 WebKit with a mobile viewport by default because Safari on iPhone is the primary
 target. Browser automation should cover pairing, the live WebSocket protocol,
 command submission, transcript projection, portable presentation effects,
-reduced motion, hostile text handling, mobile layout, keyboard-sized viewports,
-reconnects, and bounded transcript behavior.
+portable screen clearing and restoration, reduced motion, hostile text handling,
+mobile layout, keyboard-sized viewports, reconnects, and bounded transcript behavior.
 
 Keep the Python and Node unit suites as fast protocol and logic coverage; they
 do not replace Playwright for browser behavior. Manual desktop browser testing
