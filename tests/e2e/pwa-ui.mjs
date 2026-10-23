@@ -139,6 +139,11 @@ await context.addInitScript(() => {
           ],
           history_reset: false,
           history_truncated: false,
+          screen_clear: {
+            mode: "locked",
+            effect: "water_ripple",
+            effects: [{ name: "water_ripple", duration_ms: 200, frames_per_second: 24 }],
+          },
           effect_demos: [
             {
               id: "speaker:bob",
@@ -414,6 +419,21 @@ try {
     await page.locator("#event-list .event").first().getAttribute("data-event-id"),
     "event-200",
   );
+  const clearHandle = await page.locator("#screen-clear-handle").boundingBox();
+  assert.ok(clearHandle, "screen-clear pull handle is visible");
+  await page.mouse.move(clearHandle.x + clearHandle.width / 2, clearHandle.y + clearHandle.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(
+    clearHandle.x + clearHandle.width / 2,
+    clearHandle.y + clearHandle.height / 2 - 120,
+    { steps: 4 },
+  );
+  await page.mouse.up();
+  await page.waitForFunction(() => document.querySelectorAll("#event-list .event").length === 0);
+  assert.equal(await page.locator("#empty-state").isHidden(), true);
+  await page.locator("#screen-clear-handle").focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.querySelectorAll("#event-list .event").length === 500);
   await page.setViewportSize({ width: 390, height: 520 });
   await page.evaluate(() => {
     window.__fakeSocket.message({

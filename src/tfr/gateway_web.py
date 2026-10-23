@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import math
 import os
 import secrets
 import ssl
@@ -69,6 +70,11 @@ WEB_WRITE_TIMEOUT_SECONDS = 5
 TAILSCALE_COMMAND_TIMEOUT_SECONDS = 10
 MAX_TAILSCALE_OUTPUT_BYTES = 1_048_576
 
+_PORTABLE_SCREEN_CLEAR_EFFECTS = {
+    "water_ripple": (2.6, 24.0),
+    "doom_fire": (3.2, 24.0),
+}
+
 _PWA_DIAGNOSTIC_CODES = {
     ("startup", "application_import_failed"): "The PWA application module failed to initialize",
     ("connection", "ready_timeout"): "The PWA Gateway connection did not become ready",
@@ -113,6 +119,7 @@ _ASSETS = {
     "/paste.mjs": ("paste.mjs", "text/javascript; charset=utf-8"),
     "/presentation.mjs": ("presentation.mjs", "text/javascript; charset=utf-8"),
     "/scroll-restoration.mjs": ("scroll-restoration.mjs", "text/javascript; charset=utf-8"),
+    "/screen-clear.mjs": ("screen-clear.mjs", "text/javascript; charset=utf-8"),
     "/swipe.mjs": ("swipe.mjs", "text/javascript; charset=utf-8"),
     "/text-runs.mjs": ("text-runs.mjs", "text/javascript; charset=utf-8"),
     "/transcript-events.mjs": ("transcript-events.mjs", "text/javascript; charset=utf-8"),
@@ -617,6 +624,49 @@ def browser_event(
     return value
 
 
+def portable_screen_clear_config(runtime: GatewayRuntime) -> dict[str, Any]:
+    effects: list[dict[str, Any]] = []
+    for name in runtime.plugins.loaded_plugins:
+        defaults = _PORTABLE_SCREEN_CLEAR_EFFECTS.get(name)
+        if defaults is None:
+            continue
+        default_duration, default_fps = defaults
+        configured = runtime.plugins.config.get(name, {})
+        if not isinstance(configured, Mapping):
+            configured = {}
+        duration = configured.get("duration_seconds", default_duration)
+        frames_per_second = configured.get("frames_per_second", default_fps)
+        if (
+            isinstance(duration, bool)
+            or not isinstance(duration, (int, float))
+            or not math.isfinite(duration)
+            or not 0 < duration <= 60
+        ):
+            duration = default_duration
+        if (
+            isinstance(frames_per_second, bool)
+            or not isinstance(frames_per_second, (int, float))
+            or not math.isfinite(frames_per_second)
+            or not 1 <= frames_per_second <= 30
+        ):
+            frames_per_second = default_fps
+        effects.append(
+            {
+                "name": name,
+                "duration_ms": round(float(duration) * 1000),
+                "frames_per_second": float(frames_per_second),
+            }
+        )
+    mode = getattr(runtime, "screen_clear_mode", "cycle")
+    locked = getattr(runtime, "screen_clear_effect", None)
+    if mode not in {"cycle", "random", "locked"}:
+        mode = "cycle"
+    if mode == "locked" and not any(effect["name"] == locked for effect in effects):
+        mode = "cycle"
+        locked = None
+    return {"mode": mode, "effect": locked, "effects": effects}
+
+
 def _truncate_browser_spans(
     spans: tuple[BrowserTextSpan, ...],
     truncated_text: str,
@@ -904,7 +954,7 @@ class WebGatewayServer:
                 web.get(
                     "/{asset:index.html|app.mjs|bootstrap.mjs|command.mjs|connection-lifecycle.mjs|"
                     "diagnostics.mjs|event-details.mjs|effects-lab.mjs|history-notice.mjs|linkify.mjs|motion.mjs|pairing.mjs|paste.mjs|"
-                    "presentation.mjs|scroll-restoration.mjs|combo.mjs|swipe.mjs|text-runs.mjs|"
+                    "presentation.mjs|scroll-restoration.mjs|screen-clear.mjs|combo.mjs|swipe.mjs|text-runs.mjs|"
                     "transcript-events.mjs|styles.css|manifest.webmanifest|"
                     "repair.html|repair.css|repair.mjs|sw.js|icon.svg|icon-512.png|"
                     "apple-touch-icon.png}",
@@ -1526,6 +1576,7 @@ class WebGatewayServer:
                     if descriptor["world"] in self._authorized_worlds(device)
                 ],
                 "effect_demos": self._effect_demos(device),
+                "screen_clear": portable_screen_clear_config(self.runtime),
                 "speaking_streaks_enabled": (
                     self.runtime.shared_ui_settings()["speaking_streaks_enabled"]
                     if hasattr(self.runtime, "shared_ui_settings")

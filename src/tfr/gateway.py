@@ -545,6 +545,8 @@ class GatewayRuntime:
         connector_bridge: ConnectorSessionBridge | None = None,
         managed_settings: ManagedSettingsStore | None = None,
         gag_policy: GagPolicy | None = None,
+        screen_clear_mode: str = "cycle",
+        screen_clear_effect: str | None = None,
     ) -> None:
         self.event_bus = event_bus
         self.command_bus = command_bus
@@ -561,6 +563,8 @@ class GatewayRuntime:
         self.connector_bridge = connector_bridge
         self.managed_settings = managed_settings
         self.gag_policy = gag_policy
+        self.screen_clear_mode = screen_clear_mode
+        self.screen_clear_effect = screen_clear_effect
         self.gateway_id = uuid4()
         self._started = False
         self._update_task: asyncio.Task[None] | None = None
@@ -693,6 +697,8 @@ class GatewayRuntime:
             connector_bridge=connector_bridge,
             managed_settings=managed_settings,
             gag_policy=gag_policy,
+            screen_clear_mode=bundle.main.ui.screen_clear.mode,
+            screen_clear_effect=bundle.main.ui.screen_clear.effect,
         )
 
     async def start(self) -> None:

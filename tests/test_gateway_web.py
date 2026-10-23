@@ -43,6 +43,7 @@ from tfr.gateway_web import (
     _serve_root_proxy,
     _tailscale_origin,
     browser_event,
+    portable_screen_clear_config,
 )
 from tfr.plugins import PluginManager
 from tfr.presentation import color_pulse
@@ -144,7 +145,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v61";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v62";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
 
 
@@ -540,6 +541,20 @@ class StubManagedWebServer:
 
     async def stop(self) -> None:
         self.stopped = True
+
+
+def test_portable_screen_clear_config_exposes_supported_loaded_effects() -> None:
+    runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 10}))
+    runtime.plugins._loaded_plugins.extend(["water_ripple", "unportable_effect"])
+    runtime.plugins.config = {"water_ripple": {"duration_seconds": 4, "frames_per_second": 20}}
+    runtime.screen_clear_mode = "locked"
+    runtime.screen_clear_effect = "water_ripple"
+
+    assert portable_screen_clear_config(runtime) == {
+        "mode": "locked",
+        "effect": "water_ripple",
+        "effects": [{"name": "water_ripple", "duration_ms": 4000, "frames_per_second": 20.0}],
+    }
 
 
 async def test_on_demand_manager_configures_only_an_unused_serve_root(
