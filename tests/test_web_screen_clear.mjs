@@ -35,6 +35,7 @@ test("all bundled portable screen clear effects are accepted", () => {
     "film_burn",
     "flame",
     "sandstorm",
+    "spotlight",
     "vortex",
     "water",
   ];
@@ -90,6 +91,50 @@ test("each portable effect renders a bounded intermediate frame and an empty fin
     renderScreenClearFrame(context, snapshot, effect, 1);
     assert.equal(calls.length, 0, `${effect.name} finishes empty`);
   }
+});
+
+test("spotlight validates its count and renders full and feathered light", () => {
+  const [effect] = validatedScreenClearConfig({
+    effects: [{
+      name: "spotlight",
+      duration_ms: 3600,
+      frames_per_second: 24,
+      options: { spotlight_count: 99 },
+    }],
+  }).effects;
+  assert.equal(effect.options.spotlight_count, 5);
+
+  const cells = [];
+  for (let y = 0; y < 100; y += 10) {
+    for (let x = 0; x < 160; x += 10) {
+      cells.push({
+        text: "X",
+        x,
+        y,
+        width: 10,
+        height: 10,
+        color: "#ffffff",
+        fontFamily: "monospace",
+        fontSize: "10px",
+        fontStyle: "normal",
+        fontWeight: "400",
+      });
+    }
+  }
+  const opacities = [];
+  const context = {
+    fillStyle: "",
+    font: "",
+    globalAlpha: 1,
+    fillText: () => opacities.push(context.globalAlpha),
+  };
+  const snapshot = { cells, width: 160, height: 100, seed: 7, effectState: null };
+  for (const progress of [0.3, 0.4, 0.5, 0.6, 0.7]) {
+    renderScreenClearFrame(context, snapshot, effect, progress);
+  }
+
+  assert.ok(opacities.some((opacity) => opacity === 1));
+  assert.ok(opacities.some((opacity) => opacity > 0 && opacity < 1));
 });
 
 test("cycle selection advances without repeating the previous effect", () => {

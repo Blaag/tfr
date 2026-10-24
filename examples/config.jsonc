@@ -159,6 +159,7 @@
       "gag",
       "sandstorm",
       "speaker_effects",
+      "spotlight",
       "terminal_reveal",
       "vortex",
       "water",
@@ -246,6 +247,11 @@
         "duration_seconds": 2.8,
         "frames_per_second": 24,
         "gust_strength": 1.4,
+      },
+      "spotlight": {
+        "duration_seconds": 3.6,
+        "frames_per_second": 24,
+        "spotlight_count": 3,
       },
       // Rules match attributed speaker names case-insensitively. The first
       // matching rule wins. Replace these names and worlds with your own.

@@ -5,6 +5,7 @@ const DEFAULT_EFFECTS = Object.freeze([
   { name: "film_burn", duration_ms: 4200, frames_per_second: 24 },
   { name: "flame", duration_ms: 2100, frames_per_second: 24 },
   { name: "sandstorm", duration_ms: 2800, frames_per_second: 24 },
+  { name: "spotlight", duration_ms: 3600, frames_per_second: 24 },
   { name: "vortex", duration_ms: 3000, frames_per_second: 24 },
   { name: "water", duration_ms: 5000, frames_per_second: 30 },
 ]);
@@ -41,6 +42,11 @@ function validatedEffectOptions(name, value) {
     return {
       direction: options.direction === "right-to-left" ? "right-to-left" : "left-to-right",
       gust_strength: boundedNumber(options.gust_strength, 1.4, 0, 4),
+    };
+  }
+  if (name === "spotlight") {
+    return {
+      spotlight_count: Math.round(boundedNumber(options.spotlight_count, 3, 2, 5)),
     };
   }
   if (name === "vortex") {
@@ -192,10 +198,101 @@ function prepareCanvas(canvas, rect) {
   return context;
 }
 
-function drawCell(context, cell, { text = cell.text, color = cell.color, x = cell.x, y = cell.y, bold = false } = {}) {
+function drawCell(context, cell, {
+  text = cell.text,
+  color = cell.color,
+  x = cell.x,
+  y = cell.y,
+  bold = false,
+  opacity = 1,
+} = {}) {
   context.fillStyle = color;
   context.font = `${cell.fontStyle} ${bold ? "700" : cell.fontWeight} ${cell.fontSize} ${cell.fontFamily}`;
+  context.globalAlpha = Math.min(1, Math.max(0, opacity));
   context.fillText(text, x, y + Math.max(0, (cell.height - parseFloat(cell.fontSize)) / 2));
+  context.globalAlpha = 1;
+}
+
+function spotlightState(snapshot, options) {
+  const count = Math.round(boundedNumber(options?.spotlight_count, 3, 2, 5));
+  const minimumDimension = Math.max(1, Math.min(snapshot.width, snapshot.height));
+  const rayExitDistance = (x, y, directionX, directionY, radius) => {
+    const candidates = [];
+    if (directionX > 0) candidates.push([(snapshot.width - x) / directionX, Math.abs(directionX)]);
+    else if (directionX < 0) candidates.push([-x / directionX, Math.abs(directionX)]);
+    if (directionY > 0) candidates.push([(snapshot.height - y) / directionY, Math.abs(directionY)]);
+    else if (directionY < 0) candidates.push([-y / directionY, Math.abs(directionY)]);
+    const [distance, boundaryComponent] = candidates.reduce(
+      (nearest, candidate) => candidate[0] < nearest[0] ? candidate : nearest,
+    );
+    return distance + radius / boundaryComponent;
+  };
+  const lights = [];
+  for (let index = 0; index < count; index += 1) {
+    const salt = index * 101;
+    let angle = hash(snapshot.seed, salt, 1) * Math.PI * 2;
+    let directionX = Math.cos(angle);
+    let directionY = Math.sin(angle);
+    if (Math.min(Math.abs(directionX), Math.abs(directionY)) < 0.16) {
+      angle += 0.21;
+      directionX = Math.cos(angle);
+      directionY = Math.sin(angle);
+    }
+    const radius = Math.max(18, minimumDimension * (0.14 + hash(snapshot.seed, salt, 2) * 0.18));
+    const waypointX = snapshot.width * (0.2 + hash(snapshot.seed, salt, 3) * 0.6);
+    const waypointY = snapshot.height * (0.2 + hash(snapshot.seed, salt, 4) * 0.6);
+    lights.push({
+      waypointX,
+      waypointY,
+      directionX,
+      directionY,
+      startDistance: rayExitDistance(waypointX, waypointY, -directionX, -directionY, radius),
+      endDistance: rayExitDistance(waypointX, waypointY, directionX, directionY, radius),
+      radius,
+      phase: hash(snapshot.seed, salt, 5) * 0.08,
+    });
+  }
+  return { lights };
+}
+
+function spotlightCenter(light, progress) {
+  const sweep = Math.min(1, Math.max(0, (progress - 0.14) / 0.86));
+  const staggered = Math.min(1, Math.max(0, (sweep - light.phase) / (1 - light.phase)));
+  const offset = -light.startDistance + staggered * (light.startDistance + light.endDistance);
+  return {
+    x: light.waypointX + light.directionX * offset,
+    y: light.waypointY + light.directionY * offset,
+  };
+}
+
+function spotlightFrame(context, snapshot, progress) {
+  if (progress < 0.14) {
+    const opacity = Math.max(0, 1 - progress / 0.14);
+    for (const cell of snapshot.cells) drawCell(context, cell, { opacity });
+    return;
+  }
+  const centers = snapshot.effectState.lights.map((light) => ({
+    ...spotlightCenter(light, progress),
+    radius: light.radius,
+  }));
+  for (const cell of snapshot.cells) {
+    const cellX = cell.x + cell.width / 2;
+    const cellY = cell.y + cell.height / 2;
+    let opacity = 0;
+    for (const light of centers) {
+      const distance = Math.hypot(cellX - light.x, cellY - light.y);
+      const feather = Math.max(cell.width * 1.25, light.radius * 0.24);
+      if (distance <= light.radius - feather) {
+        opacity = 1;
+        break;
+      }
+      if (distance < light.radius) {
+        const edge = (light.radius - distance) / feather;
+        opacity = Math.max(opacity, 0.15 + edge * 0.65);
+      }
+    }
+    if (opacity > 0) drawCell(context, cell, { opacity });
+  }
 }
 
 function rippleFrame(context, snapshot, progress) {
@@ -505,12 +602,13 @@ function waterFrame(context, snapshot, progress, options) {
 function prepareEffectState(snapshot, effect) {
   if (effect.name === "acid_rain") return acidRainState(snapshot);
   if (effect.name === "film_burn") return filmBurnState(snapshot, effect.options);
+  if (effect.name === "spotlight") return spotlightState(snapshot, effect.options);
   return null;
 }
 
 export function renderScreenClearFrame(context, snapshot, effect, progress) {
   if (progress >= 1) return;
-  if (snapshot.effectState === null && ["acid_rain", "film_burn"].includes(effect.name)) {
+  if (snapshot.effectState === null && ["acid_rain", "film_burn", "spotlight"].includes(effect.name)) {
     snapshot.effectState = prepareEffectState(snapshot, effect);
   }
   if (effect.name === "doom_fire") doomFireFrame(context, snapshot, progress);
@@ -518,6 +616,7 @@ export function renderScreenClearFrame(context, snapshot, effect, progress) {
   else if (effect.name === "film_burn") filmBurnFrame(context, snapshot, progress);
   else if (effect.name === "flame") flameFrame(context, snapshot, progress);
   else if (effect.name === "sandstorm") sandstormFrame(context, snapshot, progress, effect.options);
+  else if (effect.name === "spotlight") spotlightFrame(context, snapshot, progress);
   else if (effect.name === "vortex") vortexFrame(context, snapshot, progress, effect.options);
   else if (effect.name === "water") waterFrame(context, snapshot, progress, effect.options);
   else rippleFrame(context, snapshot, progress);
