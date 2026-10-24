@@ -77,6 +77,7 @@ _PORTABLE_SCREEN_CLEAR_EFFECTS = {
     "film_burn": (4.2, 24.0),
     "flame": (2.1, 24.0),
     "sandstorm": (2.8, 24.0),
+    "spotlight": (3.6, 24.0),
     "vortex": (2.8, 24.0),
     "water": (5.0, 30.0),
 }
@@ -85,6 +86,7 @@ _PORTABLE_SCREEN_CLEAR_OPTIONS = {
     "acid_rain": ("density", "streak_length"),
     "film_burn": ("minimum_holes", "maximum_holes"),
     "sandstorm": ("direction", "gust_strength"),
+    "spotlight": ("spotlight_count",),
     "vortex": ("direction", "turns"),
     "water": ("color_mode", "slosh_strength"),
 }

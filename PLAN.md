@@ -885,6 +885,8 @@ Acceptance criteria:
   falling and sloshing `water` particle effect.
 - [x] Add an `acid_rain` screen-clear plugin whose falling corrosive streaks
   progressively dissolve the visible text while preserving retained scrollback.
+- [x] Add a `spotlight` screen-clear plugin that fades the visible text and
+  reveals it through seeded, feathered circles sweeping across arbitrary paths.
 - [x] Add a `gag` plugin that loads persistent regular expressions per exact
   world alias from plugin configuration, exposes `/gag [list]` to show the
   active world's expressions, and suppresses matching inbound output from the

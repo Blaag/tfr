@@ -145,7 +145,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v63";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v64";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
 
 
@@ -559,10 +559,11 @@ def test_portable_screen_clear_config_exposes_supported_loaded_effects() -> None
 
 def test_portable_screen_clear_config_exposes_allowlisted_effect_options() -> None:
     runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 10}))
-    runtime.plugins._loaded_plugins.extend(["acid_rain", "sandstorm", "water"])
+    runtime.plugins._loaded_plugins.extend(["acid_rain", "sandstorm", "spotlight", "water"])
     runtime.plugins.config = {
         "acid_rain": {"density": 0.8, "streak_length": 7},
         "sandstorm": {"direction": "right-to-left", "gust_strength": 2},
+        "spotlight": {"spotlight_count": 4, "edge_softness": 99},
         "water": {"color_mode": "dynamic", "slosh_strength": 0.4, "gravity": 50},
     }
 
@@ -578,6 +579,12 @@ def test_portable_screen_clear_config_exposes_allowlisted_effect_options() -> No
             "duration_ms": 2800,
             "frames_per_second": 24.0,
             "options": {"direction": "right-to-left", "gust_strength": 2},
+        },
+        {
+            "name": "spotlight",
+            "duration_ms": 3600,
+            "frames_per_second": 24.0,
+            "options": {"spotlight_count": 4},
         },
         {
             "name": "water",
