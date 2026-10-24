@@ -1821,7 +1821,7 @@ wheels = [
 
 [[package]]
 name = "tfr"
-version = "0.1.66"
+version = "0.1.63"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
