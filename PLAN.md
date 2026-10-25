@@ -9,6 +9,11 @@ connected LLM characters.
 
 The installed command is `tfr`.
 
+## Active Work Plans
+
+- [Gateway-managed configuration](GATEWAY-MANAGED-CONFIGURATION.md) — active phased
+  implementation tracker for centralized configuration and stable UI identity.
+
 ## Product Decisions
 
 - Use Python with `uv` for project and dependency management.

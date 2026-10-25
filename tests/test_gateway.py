@@ -671,15 +671,22 @@ async def test_gateway_preserves_sensitive_human_commands() -> None:
         history=EventHistory(EventBus(), {"alpha": 1}),
     )
 
+    ui_id = uuid4()
     await runtime.submit_command(
         world="alpha",
         text="custom secret command",
         client_id=str(uuid4()),
         request_id=uuid4(),
         sensitive=True,
+        ui_id=ui_id,
+        ui_name="Writing desk",
     )
 
-    assert command_bus.requests[0].sensitive is True  # type: ignore[union-attr]
+    request = command_bus.requests[0]
+    assert request.sensitive is True  # type: ignore[union-attr]
+    assert request.actor.id == "ui:Writing desk"  # type: ignore[union-attr]
+    assert request.metadata["gateway_ui_id"] == str(ui_id)  # type: ignore[union-attr]
+    assert request.metadata["gateway_ui_name"] == "Writing desk"  # type: ignore[union-attr]
 
 
 async def test_gateway_serializes_concurrent_world_controls() -> None:

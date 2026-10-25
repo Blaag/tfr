@@ -23,6 +23,7 @@ class DiagnosticEntry:
     event_id: str | None = None
     device_id_suffix: str | None = None
     shell_version: str | None = None
+    ui_name: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {key: value for key, value in asdict(self).items() if value is not None}
@@ -46,6 +47,7 @@ class DiagnosticBuffer:
         event_id: str | None = None,
         device_id_suffix: str | None = None,
         shell_version: str | None = None,
+        ui_name: str | None = None,
     ) -> DiagnosticEntry:
         if severity not in {"info", "warning", "error"}:
             raise ValueError("diagnostic severity is invalid")
@@ -60,7 +62,7 @@ class DiagnosticBuffer:
             raise ValueError("diagnostic message is invalid")
         if any(character in message for character in "\r\n\x00"):
             raise ValueError("diagnostic message must be one bounded line")
-        for value in (operation, event_id, device_id_suffix, shell_version):
+        for value in (operation, event_id, device_id_suffix, shell_version, ui_name):
             if value is not None and (
                 not isinstance(value, str)
                 or len(value) > 100
@@ -78,6 +80,7 @@ class DiagnosticBuffer:
             event_id=event_id,
             device_id_suffix=device_id_suffix,
             shell_version=shell_version,
+            ui_name=ui_name,
         )
         self._entries.append(entry)
         return entry

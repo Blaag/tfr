@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import inspect
 import itertools
+import json
 import math
 import re
 import secrets
@@ -35,6 +36,7 @@ from tfr.clear_effects import (
     screen_clear_fragment_limit,
     validate_screen_clear_frame,
 )
+from tfr.configuration_registry import NO_DEFAULT, SettingDescriptor, SettingScope
 from tfr.core import CommandBus, EventBus
 from tfr.diagnostics import DiagnosticBuffer
 from tfr.events import (
@@ -57,6 +59,8 @@ _MAX_BOSS_EVENTS = 200
 _MAX_BOSS_EVENT_TEXT = 500
 _MAX_BOSS_METADATA_NODES = 200
 _MAX_BOSS_RENDER_CHARACTERS = 100_000
+MAX_PLUGIN_CONFIGURATION_SETTINGS = 64
+MAX_PLUGIN_CONFIGURATION_SCHEMA_BYTES = 65_536
 _BOSS_STYLE = re.compile(r"^(?:class:[A-Za-z0-9_.-]+(?:\s+class:[A-Za-z0-9_.-]+)*)?$")
 
 
@@ -313,6 +317,24 @@ class EffectDemo:
 
 
 @dataclass(frozen=True, slots=True)
+class PluginConfiguration:
+    plugin: str
+    summary: str
+    category: str
+    version: str
+    settings: tuple[SettingDescriptor, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "plugin": self.plugin,
+            "summary": self.summary,
+            "category": self.category,
+            "version": self.version,
+            "settings": [setting.as_dict() for setting in self.settings],
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ProjectedEffectDemo:
     id: str
     label: str
@@ -476,12 +498,20 @@ class PluginRegistry:
         self.key_bindings: dict[str, tuple[PluginKeyBinding, KeyHandler]] = {}
         self.lifecycle_handlers: dict[str, tuple[str, LifecycleHandler]] = {}
         self.effect_demos: dict[str, tuple[str, EffectDemo]] = {}
+        self.configurations: dict[str, PluginConfiguration] = {}
 
     @staticmethod
     def _add(registrations: dict[str, Any], name: str, value: Any) -> None:
         if name in registrations:
             raise DuplicatePluginRegistration(f"duplicate plugin registration: {name}")
         registrations[name] = value
+
+    def configuration_descriptors(self) -> tuple[SettingDescriptor, ...]:
+        return tuple(
+            setting
+            for plugin in sorted(self.configurations)
+            for setting in self.configurations[plugin].settings
+        )
 
 
 class PluginRegistrar:
@@ -555,6 +585,72 @@ class PluginRegistrar:
         if type(demo) is not EffectDemo:
             raise PluginRegistrationError("effect demo registration requires EffectDemo")
         PluginRegistry._add(self._registry.effect_demos, demo.id, (self.plugin, demo))
+
+    def register_configuration(
+        self,
+        *,
+        summary: str,
+        version: str,
+        settings: Sequence[SettingDescriptor],
+        category: str = "other",
+    ) -> PluginConfiguration:
+        for label, value, maximum in (
+            ("summary", summary, 240),
+            ("version", version, 80),
+            ("category", category, 64),
+        ):
+            if (
+                not isinstance(value, str)
+                or not 1 <= len(value) <= maximum
+                or not value.isprintable()
+                or value != value.strip()
+            ):
+                raise PluginRegistrationError(f"plugin configuration {label} is invalid")
+        if _COMMAND_NAME.fullmatch(category) is None:
+            raise PluginRegistrationError("plugin configuration category is invalid")
+        bounded_settings = tuple(settings)
+        if not 1 <= len(bounded_settings) <= MAX_PLUGIN_CONFIGURATION_SETTINGS:
+            raise PluginRegistrationError(
+                "plugin configuration must define 1-64 setting descriptors"
+            )
+        prefix = f"plugins.config.{self.plugin}."
+        keys: set[str] = set()
+        for descriptor in bounded_settings:
+            if not isinstance(descriptor, SettingDescriptor):
+                raise PluginRegistrationError(
+                    "plugin configuration settings must be typed descriptors"
+                )
+            if descriptor.scope is not SettingScope.PLUGIN:
+                raise PluginRegistrationError("plugin setting scope must be plugin")
+            if not descriptor.key.startswith(prefix):
+                raise PluginRegistrationError(f"plugin setting keys must begin with {prefix}")
+            if descriptor.key in keys:
+                raise DuplicatePluginRegistration(
+                    f"duplicate plugin setting descriptor: {descriptor.key}"
+                )
+            if (
+                descriptor.sensitivity
+                and descriptor.default is not NO_DEFAULT
+                and descriptor.default is not None
+            ):
+                raise PluginRegistrationError(
+                    "sensitive plugin settings cannot publish a plaintext default"
+                )
+            keys.add(descriptor.key)
+        registration = PluginConfiguration(
+            plugin=self.plugin,
+            summary=summary,
+            category=category,
+            version=version,
+            settings=bounded_settings,
+        )
+        encoded = json.dumps(
+            registration.as_dict(), ensure_ascii=True, separators=(",", ":")
+        ).encode()
+        if len(encoded) > MAX_PLUGIN_CONFIGURATION_SCHEMA_BYTES:
+            raise PluginRegistrationError("plugin configuration schema exceeds 65536 bytes")
+        PluginRegistry._add(self._registry.configurations, self.plugin, registration)
+        return registration
 
     def register_border_effect(
         self,

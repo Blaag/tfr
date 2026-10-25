@@ -31,6 +31,7 @@ async def test_pairing_creates_persistent_private_device_session(tmp_path: Path)
     assert store.authenticate(token) == device
     assert store.authenticate("wrong") is None
     assert device.allowed_worlds == ("alpha",)
+    assert device.ui_id != device.device_id
     assert device.expires_at > device.created_at
     assert device.tailscale_login == "black@example.com"
     assert "#pair=" in store.create_pairing_url("Second phone", ("alpha",))
@@ -122,6 +123,25 @@ async def test_device_state_without_last_use_migrates_from_creation_time(tmp_pat
     migrated = DeviceStore(state_directory, store.origin).device_descriptors()[0]
 
     assert migrated["last_used_at"] == migrated["created_at"]
+
+
+async def test_device_state_without_ui_id_migrates_to_stable_credential_id(
+    tmp_path: Path,
+) -> None:
+    state_directory = tmp_path / "web"
+    store = DeviceStore(state_directory, "https://gateway.example.ts.net")
+    device, _token = await store.redeem(
+        pairing_code(store.create_pairing_url("Phone", ("alpha",))),
+        "black@example.com",
+    )
+    value = json.loads(store.path.read_text(encoding="utf-8"))
+    del value["devices"][0]["ui_id"]
+    store.path.write_text(json.dumps(value), encoding="utf-8")
+    store.path.chmod(0o600)
+
+    migrated = DeviceStore(state_directory, store.origin).device_descriptors()[0]
+
+    assert migrated["ui_id"] == str(device.device_id)
 
 
 async def test_pairing_retry_secret_expires_and_is_cleared_on_revoke(

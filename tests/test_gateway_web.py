@@ -36,6 +36,7 @@ from tfr.events import (
     SpoofStatus,
 )
 from tfr.gateway import EventHistory
+from tfr.gateway_uis import UiStore
 from tfr.gateway_web import (
     SESSION_COOKIE,
     WebGatewayManager,
@@ -177,6 +178,49 @@ async def test_all_declared_pwa_assets_are_routable(tmp_path: Path) -> None:
         for path in gateway_web._ASSETS:
             response = await client.get(path, headers=NAVIGATION_HEADERS)
             assert response.status == 200, path
+    finally:
+        await client.close()
+
+
+async def test_pairing_registers_stable_pwa_identity_separate_from_credential(
+    tmp_path: Path,
+) -> None:
+    runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 20}))
+    ui_store = UiStore(tmp_path / "managed")
+    gateway = WebGatewayServer(
+        runtime,  # type: ignore[arg-type]
+        origin=ORIGIN,
+        host="127.0.0.1",
+        port=7348,
+        state_directory=tmp_path / "web",
+        snapshot_events=20,
+        ui_store=ui_store,
+    )
+    client = TestClient(TestServer(gateway.application()))
+    await client.start_server()
+    code = parse_qs(urlsplit(gateway.create_pairing_url("Black's iPhone")).fragment)["pair"][0]
+    try:
+        paired = await client.post(
+            "/api/pair",
+            json={"code": code},
+            headers=PUBLIC_HEADERS,
+        )
+        paired_value = await paired.json()
+        credential = gateway.devices.device_descriptors()[0]
+        status_descriptor = gateway.device_descriptors()[0]
+        record = ui_store.records()[0]
+
+        assert paired.status == 200
+        assert credential["ui_id"] == str(record.ui_id)
+        assert credential["device_id"] != credential["ui_id"]
+        assert status_descriptor["ui_name"] == "Black's iPhone · PWA"
+        assert paired_value["ui"] == {
+            "id": str(record.ui_id),
+            "name": "Black's iPhone · PWA",
+        }
+        assert record.client_type == "pwa"
+        assert record.platform == "Black's iPhone"
+        assert dict(record.versions) == {"web_protocol": "1"}
     finally:
         await client.close()
 
@@ -1164,6 +1208,7 @@ async def paired_client(
         state_directory=tmp_path / "web",
         snapshot_events=snapshot_events,
         speaking_streaks_enabled=speaking_streaks_enabled,
+        ui_store=UiStore(tmp_path / "managed"),
     )
     client = TestClient(TestServer(gateway.application()))
     await client.start_server()
@@ -1210,6 +1255,7 @@ async def test_pwa_reports_bounded_authenticated_diagnostics(tmp_path: Path) -> 
         entries = gateway.diagnostic_entries("presentations")
         assert entries[0]["code"] == "palette_front_rejected"
         assert entries[0]["client"] == "pwa"
+        assert entries[0]["ui_name"] == "Test iPhone · PWA"
         assert "device_id_suffix" in entries[0]
 
         hostile = await client.post(
@@ -1222,6 +1268,37 @@ async def test_pwa_reports_bounded_authenticated_diagnostics(tmp_path: Path) -> 
             },
         )
         assert hostile.status == 400
+    finally:
+        await client.close()
+        await bus.close()
+
+
+async def test_pwa_credential_cannot_rename_or_forget_ui_records(tmp_path: Path) -> None:
+    bus = EventBus()
+    runtime = FakeRuntime(EventHistory(bus, {"alpha": 5}))
+    gateway, client, token = await paired_client(tmp_path, runtime)
+    assert gateway.ui_store is not None
+    original = gateway.ui_store.records()[0]
+    headers = {
+        **PUBLIC_HEADERS,
+        "Cookie": f"{SESSION_COOKIE}={token}",
+        "Content-Type": "application/json",
+    }
+    try:
+        renamed = await client.post(
+            "/api/ui/rename",
+            headers=headers,
+            json={"target": original.display_name, "name": "Compromised"},
+        )
+        forgotten = await client.post(
+            "/api/ui/forget",
+            headers=headers,
+            json={"target": original.display_name, "confirm": True},
+        )
+
+        assert renamed.status == 404
+        assert forgotten.status == 404
+        assert gateway.ui_store.get(original.ui_id) == original
     finally:
         await client.close()
         await bus.close()
@@ -1715,6 +1792,8 @@ async def test_websocket_paste_escapes_paces_and_reports_progress(
             "@emit %bhostile\\;\\[x\\]\\{y\\}\\\\\\%\\#\\,\\(z\\)%t☃",
         ]
         assert runtime.command_details[0]["expected_connection_generation"] == 1
+        assert runtime.command_details[0]["ui_name"] == "Test iPhone · PWA"
+        assert "ui_id" in runtime.command_details[0]
         assert runtime.command_details[1]["metadata"] == {
             "paste_request_id": request_id,
             "paste_line": 2,
