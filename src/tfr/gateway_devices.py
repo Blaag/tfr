@@ -25,6 +25,7 @@ DEVICE_ACTIVITY_WRITE_INTERVAL_SECONDS = 24 * 60 * 60
 @dataclass(frozen=True, slots=True)
 class DeviceRecord:
     device_id: UUID
+    ui_id: UUID
     label: str
     token_digest: str
     created_at: datetime
@@ -37,6 +38,7 @@ class DeviceRecord:
     def as_dict(self) -> dict[str, object]:
         return {
             "device_id": str(self.device_id),
+            "ui_id": str(self.ui_id),
             "label": self.label,
             "token_digest": self.token_digest,
             "created_at": self.created_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
@@ -49,26 +51,52 @@ class DeviceRecord:
 
     @classmethod
     def from_dict(cls, value: object) -> DeviceRecord:
-        if not isinstance(value, dict) or set(value) not in ({
-            "device_id",
-            "label",
-            "token_digest",
-            "created_at",
-            "expires_at",
-            "allowed_worlds",
-            "tailscale_login",
-            "scope",
-        }, {
-            "device_id",
-            "label",
-            "token_digest",
-            "created_at",
-            "last_used_at",
-            "expires_at",
-            "allowed_worlds",
-            "tailscale_login",
-            "scope",
-        }):
+        if not isinstance(value, dict) or set(value) not in (
+            {
+                "device_id",
+                "label",
+                "token_digest",
+                "created_at",
+                "expires_at",
+                "allowed_worlds",
+                "tailscale_login",
+                "scope",
+            },
+            {
+                "device_id",
+                "label",
+                "token_digest",
+                "created_at",
+                "last_used_at",
+                "expires_at",
+                "allowed_worlds",
+                "tailscale_login",
+                "scope",
+            },
+            {
+                "device_id",
+                "ui_id",
+                "label",
+                "token_digest",
+                "created_at",
+                "expires_at",
+                "allowed_worlds",
+                "tailscale_login",
+                "scope",
+            },
+            {
+                "device_id",
+                "ui_id",
+                "label",
+                "token_digest",
+                "created_at",
+                "last_used_at",
+                "expires_at",
+                "allowed_worlds",
+                "tailscale_login",
+                "scope",
+            },
+        ):
             raise ValueError("web device record has invalid fields")
         label = value["label"]
         digest = value["token_digest"]
@@ -111,8 +139,16 @@ class DeviceRecord:
             device_id = UUID(str(value["device_id"]))
         except (TypeError, ValueError, AttributeError) as exc:
             raise ValueError("web device ID is invalid") from exc
+        try:
+            # Version-one records predate the shared UI identity model. Reusing
+            # their credential ID gives each existing installation a stable,
+            # deterministic UI ID without coupling IDs for newly paired PWAs.
+            ui_id = UUID(str(value.get("ui_id", device_id)))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("web device UI ID is invalid") from exc
         return cls(
             device_id=device_id,
+            ui_id=ui_id,
             label=label,
             token_digest=digest,
             created_at=created_at,
@@ -169,10 +205,7 @@ class DeviceStore:
 
     def create_pairing_url(self, label: str, allowed_worlds: tuple[str, ...]) -> str:
         label = label.strip()
-        if (
-            not 1 <= len(label) <= MAX_DEVICE_LABEL_CHARACTERS
-            or not label.isprintable()
-        ):
+        if not 1 <= len(label) <= MAX_DEVICE_LABEL_CHARACTERS or not label.isprintable():
             raise ValueError(
                 f"device label must contain 1-{MAX_DEVICE_LABEL_CHARACTERS} characters"
             )
@@ -228,6 +261,7 @@ class DeviceStore:
             created_at = datetime.now(UTC)
             record = DeviceRecord(
                 device_id=uuid4(),
+                ui_id=uuid4(),
                 label=challenge.label,
                 token_digest=self._digest(token),
                 created_at=created_at,
@@ -321,16 +355,13 @@ class DeviceStore:
         return [
             {
                 "device_id": str(device.device_id),
+                "ui_id": str(device.ui_id),
                 "label": device.label,
-                "created_at": device.created_at.astimezone(UTC).isoformat().replace(
-                    "+00:00", "Z"
-                ),
-                "last_used_at": device.last_used_at.astimezone(UTC).isoformat().replace(
-                    "+00:00", "Z"
-                ),
-                "expires_at": device.expires_at.astimezone(UTC).isoformat().replace(
-                    "+00:00", "Z"
-                ),
+                "created_at": device.created_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+                "last_used_at": device.last_used_at.astimezone(UTC)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "expires_at": device.expires_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
                 "allowed_worlds": list(device.allowed_worlds),
                 "tailscale_login": device.tailscale_login,
                 "scope": device.scope,
@@ -462,9 +493,7 @@ class DeviceStore:
             if os.name == "posix":
                 directory_descriptor = os.open(
                     self.state_directory,
-                    os.O_RDONLY
-                    | getattr(os, "O_CLOEXEC", 0)
-                    | getattr(os, "O_DIRECTORY", 0),
+                    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0),
                 )
                 try:
                     os.fsync(directory_descriptor)

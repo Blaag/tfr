@@ -120,6 +120,7 @@ _CORE_CLIENT_COMMANDS = frozenset(
         "animations",
         "clear",
         "connect",
+        "config",
         "disconnect",
         "demoeffects",
         "end",
@@ -149,6 +150,7 @@ _CORE_CLIENT_COMMANDS = frozenset(
         "testspeaker",
         "teststreak",
         "update",
+        "ui",
         "version",
         "web",
         "world",
@@ -177,7 +179,7 @@ def _parse_web_pair_arguments(
         token = tokens[index]
         if token == "--gateway":
             if index + 1 >= len(tokens):
-                return [], None, "Usage: /web pair \"Device name\" --gateway HOST:PORT"
+                return [], None, 'Usage: /web pair "Device name" --gateway HOST:PORT'
             gateway_raw = tokens[index + 1]
             index += 2
             continue
@@ -246,9 +248,27 @@ class ServiceRuntime(Protocol):
 
     async def web_status(self) -> dict[str, Any]: ...
 
+    async def config_summary(self) -> dict[str, object]: ...
+
+    async def config_list(self, filter_value: str | None = None) -> list[dict[str, object]]: ...
+
+    async def config_show(self, key: str, *, ui: str | None = None) -> dict[str, object]: ...
+
+    async def config_status(self) -> dict[str, object]: ...
+
     async def pair_web_device(self, label: str) -> str | dict[str, Any]: ...
 
     async def list_web_devices(self) -> list[dict[str, Any]]: ...
+
+    async def list_uis(self) -> list[dict[str, object]]: ...
+
+    async def show_ui(self, name: str) -> dict[str, object]: ...
+
+    async def rename_ui(self, name: str) -> dict[str, object]: ...
+
+    async def rename_other_ui(self, target: str, name: str) -> dict[str, object]: ...
+
+    async def forget_ui(self, target: str, *, confirm: bool) -> dict[str, object]: ...
 
     async def revoke_web_device(self, device_id: UUID) -> None: ...
 
@@ -3308,6 +3328,10 @@ class TfrTui:
             await self._handle_update_command(alias, parameters)
         elif command == "web":
             await self._handle_web_command(alias, parameters)
+        elif command == "config":
+            await self._handle_config_command(alias, parameters)
+        elif command == "ui":
+            await self._handle_ui_command(alias, parameters)
         elif command == "diagnostics":
             await self._handle_diagnostics_command(alias, parameters)
         elif command == "plugins":
@@ -3417,6 +3441,8 @@ class TfrTui:
             f"  /update status|check - inspect {update_channel} TFR and plugin releases",
             "  /update force - candidate channel only; force every host to stage locally",
             "  /web status|repair|pair|devices|revoke - manage the private iPhone PWA",
+            "  /config [status|list [CATEGORY|SCOPE]|show KEY [--ui NAME]] - inspect configuration",
+            "  /ui list|show|rename|forget - inspect and administer user interfaces",
             "  /diagnostics [web|presentations|plugins|clear] - inspect runtime diagnostics",
             "  /plugins - show configured, loaded, and failed plugins",
             "  /version - show the UI and gateway TFR versions",
@@ -3508,9 +3534,7 @@ class TfrTui:
         self.application.invalidate()
 
     def _effects_lab_help_text(self) -> str:
-        speakers = tuple(
-            demo.label for demo in self._effect_demos() if demo.category == "speaker"
-        )
+        speakers = tuple(demo.label for demo in self._effect_demos() if demo.category == "speaker")
         return "\n".join(
             (
                 "Effects Lab",
@@ -3809,7 +3833,7 @@ class TfrTui:
 
     async def _handle_web_command(self, alias: str, parameters: list[str]) -> None:
         usage = (
-            'Usage: /web status|repair|devices|'
+            "Usage: /web status|repair|devices|"
             'pair "Device name" [--gateway HOST:PORT]|revoke DEVICE_ID'
         )
         if self.service_runtime is None:
@@ -3828,7 +3852,7 @@ class TfrTui:
                     self.add_notice(
                         alias,
                         "PWA: ready for on-demand setup\n"
-                        "Run /web pair \"Device name\" to configure private access.",
+                        'Run /web pair "Device name" to configure private access.',
                     )
                     return
                 if not isinstance(origin, str) or not isinstance(count, int):
@@ -3853,9 +3877,7 @@ class TfrTui:
                 )
                 return
             if action == "pair" and len(parameters) >= 2:
-                pair_args, gateway_target, gateway_error = _parse_web_pair_arguments(
-                    parameters[1:]
-                )
+                pair_args, gateway_target, gateway_error = _parse_web_pair_arguments(parameters[1:])
                 if gateway_error is not None:
                     self.add_notice(alias, gateway_error)
                     return
@@ -3878,7 +3900,7 @@ class TfrTui:
                         self.add_notice(
                             alias,
                             "A --gateway address requires direct transport. Set "
-                            "web_gateway.transport to \"direct\" with direct_host, direct_port, "
+                            'web_gateway.transport to "direct" with direct_host, direct_port, '
                             "and a TLS certificate in the Gateway's config.jsonc, then restart "
                             "the Gateway.",
                         )
@@ -3940,7 +3962,8 @@ class TfrTui:
                         else f"last used: {device.get('last_used_at', 'unknown')}"
                     )
                     lines.append(
-                        f"  {device.get('device_id')}  {device.get('label')}  "
+                        f"  {device.get('device_id')}  "
+                        f"{device.get('ui_name', device.get('label'))}  "
                         f"{device.get('tailscale_login')}\n"
                         f"    {activity}; created: {device.get('created_at', 'unknown')}\n"
                         f"    worlds: {worlds or 'none'}; expires: {device.get('expires_at')}"
@@ -3960,6 +3983,210 @@ class TfrTui:
             self.add_notice(alias, f"Web administration failed: {exc}")
             return
         self.add_notice(alias, usage)
+
+    async def _handle_config_command(self, alias: str, parameters: list[str]) -> None:
+        action = parameters[0].casefold() if parameters else ""
+        valid_status = action == "status" and len(parameters) == 1
+        valid_list = action == "list" and len(parameters) <= 2
+        valid_show = action == "show" and (
+            len(parameters) == 2 or (len(parameters) == 4 and parameters[2].casefold() == "--ui")
+        )
+        if parameters and not (valid_status or valid_list or valid_show):
+            self.add_notice(
+                alias,
+                "Usage: /config [status|list [CATEGORY|SCOPE]|show KEY [--ui NAME]]",
+            )
+            return
+        if self.service_runtime is None:
+            self.add_notice(alias, "Configuration inventory is available only in an attached UI")
+            return
+        try:
+            if valid_status:
+                status = await self.service_runtime.config_status()
+                counts = status.get("counts", {})
+                lines = [
+                    f"Configuration convergence — revision {status.get('revision', 'unknown')}",
+                    "  "
+                    + "; ".join(
+                        f"{state}: {counts.get(state, 0)}"
+                        for state in ("current", "behind", "ahead", "unreported")
+                    ),
+                ]
+                for ui in status.get("uis", []):
+                    if not isinstance(ui, dict):
+                        continue
+                    applied = ui.get("applied_revision")
+                    applied_text = "not reported" if applied is None else str(applied)
+                    lines.append(
+                        f"  {ui.get('display_name', 'unknown')} "
+                        f"[{ui.get('client_type', 'unknown')}]: "
+                        f"{ui.get('convergence', 'unknown')} (applied {applied_text})"
+                    )
+                self.add_notice(alias, "\n".join(lines))
+                return
+            if valid_list:
+                filter_value = parameters[1] if len(parameters) == 2 else None
+                settings = await self.service_runtime.config_list(filter_value)
+                lines = [
+                    "Configuration settings"
+                    + (f" — {filter_value}" if filter_value is not None else "")
+                ]
+                for setting in settings:
+                    flags = [str(setting.get("scope", "unknown"))]
+                    if setting.get("sensitive") is True:
+                        flags.append("sensitive")
+                    restart = setting.get("restart")
+                    if restart != "live":
+                        flags.append(str(restart))
+                    lines.append(
+                        f"  {setting.get('key', 'unknown')} "
+                        f"({setting.get('type', 'unknown')}; {', '.join(flags)})"
+                    )
+                self.add_notice(alias, "\n".join(lines))
+                return
+            if valid_show:
+                ui_name = parameters[3] if len(parameters) == 4 else None
+                setting = await self.service_runtime.config_show(parameters[1], ui=ui_name)
+                consumers = ", ".join(str(item) for item in setting.get("consumers", []))
+                value_text = (
+                    "<redacted>"
+                    if setting.get("sensitive") is True
+                    else "<unset>"
+                    if setting.get("source") == "unset"
+                    else repr(setting.get("value"))
+                )
+                ui_value = setting.get("ui")
+                ui_text = (
+                    f"\n  UI: {ui_value.get('name')} ({ui_value.get('id')})"
+                    if isinstance(ui_value, dict)
+                    else ""
+                )
+                self.add_notice(
+                    alias,
+                    f"Configuration: {setting.get('key')}\n"
+                    f"  Value: {value_text}\n"
+                    f"  Source: {setting.get('source')} "
+                    f"({setting.get('source_detail')})\n"
+                    f"  Type: {setting.get('type')}; scope: {setting.get('scope')}\n"
+                    f"  Consumers: {consumers or 'none'}\n"
+                    f"  Restart: {setting.get('restart')}"
+                    f"{ui_text}",
+                )
+                return
+            summary = await self.service_runtime.config_summary()
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            self.add_notice(alias, f"Configuration inventory failed: {exc}")
+            return
+        sources = summary.get("sources", {})
+        scopes = summary.get("scopes", {})
+        source_text = ", ".join(f"{name}: {count}" for name, count in sources.items())
+        scope_text = ", ".join(f"{name}: {count}" for name, count in scopes.items())
+        self.add_notice(
+            alias,
+            "Gateway configuration inventory\n"
+            f"  Settings: {summary.get('setting_count', 'unknown')} "
+            f"(+ {summary.get('template_count', 'unknown')} dynamic templates)\n"
+            f"  Sensitive: {summary.get('sensitive_count', 'unknown')}; "
+            f"required but unset: {summary.get('unset_required_count', 'unknown')}\n"
+            f"  Sources: {source_text or 'none'}\n"
+            f"  Scopes: {scope_text or 'none'}",
+        )
+
+    async def _handle_ui_command(self, alias: str, parameters: list[str]) -> None:
+        if self.service_runtime is None:
+            self.add_notice(alias, "UI inventory is available only in an attached UI")
+            return
+        action = parameters[0].casefold() if parameters else ""
+        try:
+            if action == "list" and len(parameters) == 1:
+                records = await self.service_runtime.list_uis()
+            elif action == "show" and len(parameters) >= 2:
+                record = await self.service_runtime.show_ui(" ".join(parameters[1:]))
+                self.add_notice(alias, self._ui_record_text(record))
+                return
+            elif action == "rename" and len(parameters) == 2:
+                record = await self.service_runtime.rename_ui(parameters[1])
+                self.add_notice(alias, f"Renamed this UI to {record['display_name']}")
+                return
+            elif action == "rename" and len(parameters) == 3:
+                record = await self.service_runtime.rename_other_ui(parameters[1], parameters[2])
+                self.add_notice(
+                    alias,
+                    f"Renamed {parameters[1]} to {record['display_name']}",
+                )
+                return
+            elif action == "forget" and len(parameters) == 2:
+                target = parameters[1]
+                self.add_notice(
+                    alias,
+                    f"Forget UI {target!r}? This removes its identity record but does not "
+                    "revoke a PWA credential.\n"
+                    f"Confirm with: /ui forget {shlex.quote(target)} confirm",
+                )
+                return
+            elif (
+                action == "forget"
+                and len(parameters) == 3
+                and parameters[2].casefold() == "confirm"
+            ):
+                record = await self.service_runtime.forget_ui(parameters[1], confirm=True)
+                self.add_notice(alias, f"Forgot UI {record['display_name']}")
+                return
+            else:
+                self.add_notice(
+                    alias,
+                    'Usage: /ui list|show NAME|rename "NAME"|rename "TARGET" "NAME"|'
+                    'forget "TARGET" [confirm]',
+                )
+                return
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            self.add_notice(alias, f"UI inventory failed: {exc}")
+            return
+        if not records:
+            self.add_notice(alias, "No Gateway-known UIs")
+            return
+        lines = ["Gateway-known UIs"]
+        for record in records:
+            revision = record.get("applied_config_revision")
+            revision_text = "not reported" if revision is None else str(revision)
+            display_name = record.get("display_name", "unknown")
+            client_type = record.get("client_type", "unknown")
+            lines.append(
+                f"  {display_name}  [{client_type}]\n"
+                f"    ID: {record.get('ui_id', 'unknown')}; "
+                f"platform: {record.get('platform', 'unknown')}\n"
+                f"    last seen: {record.get('last_seen_at', 'unknown')}; "
+                f"config revision: {revision_text}"
+            )
+        self.add_notice(alias, "\n".join(lines))
+
+    @staticmethod
+    def _ui_record_text(record: dict[str, object]) -> str:
+        versions = record.get("versions")
+        version_text = (
+            ", ".join(f"{name} {value}" for name, value in versions.items())
+            if isinstance(versions, dict) and versions
+            else "none reported"
+        )
+        capabilities = record.get("capabilities")
+        capability_text = (
+            ", ".join(str(value) for value in capabilities)
+            if isinstance(capabilities, list) and capabilities
+            else "none reported"
+        )
+        revision = record.get("applied_config_revision")
+        revision_text = "not reported" if revision is None else str(revision)
+        return (
+            f"UI: {record.get('display_name', 'unknown')}\n"
+            f"  ID: {record.get('ui_id', 'unknown')}\n"
+            f"  Type: {record.get('client_type', 'unknown')}\n"
+            f"  Platform: {record.get('platform', 'unknown')}\n"
+            f"  Created: {record.get('created_at', 'unknown')}\n"
+            f"  Last seen: {record.get('last_seen_at', 'unknown')}\n"
+            f"  Applied config revision: {revision_text}\n"
+            f"  Versions: {version_text}\n"
+            f"  Capabilities: {capability_text}"
+        )
 
     async def _handle_diagnostics_command(self, alias: str, parameters: list[str]) -> None:
         usage = "Usage: /diagnostics [web|presentations|plugins|clear]"
@@ -4007,7 +4234,10 @@ class TfrTui:
             if not entries:
                 lines.append("  No recent diagnostic entries")
         for entry in entries[-25:]:
-            source = f"{entry.get('client', 'gateway')}/{entry.get('component', 'unknown')}"
+            client = str(entry.get("client", "gateway"))
+            if entry.get("ui_name"):
+                client = f"{client}:{entry['ui_name']}"
+            source = f"{client}/{entry.get('component', 'unknown')}"
             lines.append(
                 f"  {entry.get('timestamp', 'unknown')}  {entry.get('severity', 'warning')}  "
                 f"{source}  {entry.get('code', 'unknown')}\n"
@@ -4306,9 +4536,7 @@ class TfrTui:
         for view in self.views.values():
             view.display.clear_combo_effects()
 
-    async def _handle_speaking_streaks_command(
-        self, alias: str, parameters: list[str]
-    ) -> None:
+    async def _handle_speaking_streaks_command(self, alias: str, parameters: list[str]) -> None:
         operation = parameters[0].casefold() if len(parameters) == 1 else ""
         if operation not in {"on", "off", "status", ""} or len(parameters) > 1:
             self.add_notice(alias, "Usage: /streaks on|off|status")
@@ -4327,8 +4555,7 @@ class TfrTui:
         state = "on" if self.speaking_streaks_enabled else "off"
         self.add_notice(
             alias,
-            f"Speaking streak effects are {state} "
-            f"(Gateway-managed revision {current['revision']})",
+            f"Speaking streak effects are {state} (Gateway-managed revision {current['revision']})",
         )
 
     async def _handle_spellcheck_command(self, alias: str, parameters: list[str]) -> None:
@@ -4407,9 +4634,7 @@ class TfrTui:
             current = await self.service_runtime.manage_gag(alias, "list")
             if operation == "list":
                 patterns = current["patterns"]
-                lines = [
-                    f"Gag patterns for {alias} (managed revision {current['revision']}):"
-                ]
+                lines = [f"Gag patterns for {alias} (managed revision {current['revision']}):"]
                 lines.extend(f"  {item!r}" for item in patterns)
                 if not patterns:
                     lines.append("  none")
@@ -4739,9 +4964,7 @@ async def run_client(bundle: ConfigurationBundle) -> int:
     runtime = await GatewayRuntime.from_configuration(bundle, plugin_scope="all")
     managed_config = getattr(bundle.main, "managed_settings", None)
     local_ui_settings = (
-        LocalUiSettingsStore(managed_config.state_directory)
-        if managed_config is not None
-        else None
+        LocalUiSettingsStore(managed_config.state_directory) if managed_config is not None else None
     )
     mouse_mode = (
         local_ui_settings.mouse_mode if local_ui_settings is not None else None

@@ -19,7 +19,9 @@ from tfr.config import (
     UiConfiguration,
     UpdateConfig,
 )
+from tfr.configuration_values import ConfigurationValues
 from tfr.core import EventBus
+from tfr.core_settings import core_configuration_registry
 from tfr.events import Actor, ActorType, CommandRequest, Direction, Event, EventKind
 from tfr.gateway import EventHistory, GatewayServer
 from tfr.gateway_client import (
@@ -37,6 +39,7 @@ from tfr.gateway_transport import (
     create_gateway_client_tls_context,
     create_gateway_server_tls_context,
 )
+from tfr.gateway_uis import UiRegistration, UiStore
 from tfr.managed_updates import StagedManagedUpdate
 from tfr.plugin_sources import PluginSourceFailure, PluginSourceNotice
 from tfr.plugins import EffectDemo, EffectDemoSample, PluginLifecycleEvent, PluginManager
@@ -63,8 +66,7 @@ async def test_missing_gateway_socket_reports_the_path() -> None:
         await GatewayClient.connect(socket_path)
 
 
-async def test_client_accepts_compatible_hello_without_additive_ui_settings(
-) -> None:
+async def test_client_accepts_compatible_hello_without_additive_ui_settings() -> None:
     socket_path = Path("/tmp") / f"tfr-compat-{uuid4().hex[:8]}" / "gateway.sock"
     socket_path.parent.mkdir()
 
@@ -180,8 +182,7 @@ def test_remote_speaker_effects_warning_handles_gateway_without_summary() -> Non
     assert warning is not None
     assert "cannot report the speaker effects configured in its config.jsonc" in warning
     assert (
-        "speaker_effects configuration in this remote UI's local config.jsonc is ignored"
-        in warning
+        "speaker_effects configuration in this remote UI's local config.jsonc is ignored" in warning
     )
 
 
@@ -200,9 +201,10 @@ def test_client_validates_projected_effect_demos_and_speaker_summary() -> None:
 
     assert demos[0].label == "Dan"
     assert demos[0].samples[0].display_text == "line 1"
-    assert GatewayClient._speaker_effects(
-        {"loaded": True, "speakers": ["Dan", "Dan"]}
-    ) == (True, ("Dan",))
+    assert GatewayClient._speaker_effects({"loaded": True, "speakers": ["Dan", "Dan"]}) == (
+        True,
+        ("Dan",),
+    )
 
 
 class FakeRuntime:
@@ -328,6 +330,7 @@ class FakeRuntime:
         causation_id: UUID | None = None,
         expected_connection_generation: int | None = None,
         metadata: object = None,
+        **_details: object,
     ) -> None:
         self.commands.append(
             CommandRequest(
@@ -376,9 +379,7 @@ async def test_gateway_handshake_supplies_authoritative_effect_demos_and_summary
                     id="speaker:dan",
                     label="Dan",
                     category="speaker",
-                    samples=(
-                        EffectDemoSample(EventKind.SAY, 'Dan says, "Gateway preview."'),
-                    ),
+                    samples=(EffectDemoSample(EventKind.SAY, 'Dan says, "Gateway preview."'),),
                 )
             )
 
@@ -390,17 +391,13 @@ async def test_gateway_handshake_supplies_authoritative_effect_demos_and_summary
         enabled=("speaker_effects",),
         config={
             "speaker_effects": {
-                "rules": [
-                    {"speaker": "Dan", "effect": "shimmer", "color": "#ffffff"}
-                ]
+                "rules": [{"speaker": "Dan", "effect": "shimmer", "color": "#ffffff"}]
             }
         },
         event_bus=bus,
         command_bus=Mock(),
         targets={},
-        discovered=(
-            SimpleNamespace(name="speaker_effects", load=lambda: SpeakerEffects()),
-        ),
+        discovered=(SimpleNamespace(name="speaker_effects", load=lambda: SpeakerEffects()),),
         scope="gateway",
     )
     socket_path = Path("/tmp") / f"tfr-effects-{uuid4().hex[:8]}" / "gateway.sock"
@@ -414,6 +411,138 @@ async def test_gateway_handshake_supplies_authoritative_effect_demos_and_summary
         assert client.effect_demos[0].samples[0].display_text == 'Dan says, "Gateway preview."'
     finally:
         await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+        socket_path.parent.rmdir()
+
+
+async def test_native_ui_registration_reuses_gateway_record(tmp_path: Path) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    runtime.configuration_values = ConfigurationValues(core_configuration_registry())
+    ui_store = UiStore(tmp_path / "gateway-state")
+    socket_path = Path("/tmp") / f"tfr-ui-registration-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path, ui_store=ui_store)  # type: ignore[arg-type]
+    await server.start()
+    with pytest.raises(GatewayProtocolError, match="invalid UI registration"):
+        await GatewayClient.connect(
+            socket_path,
+            client_id=UUID("33333333-3333-4333-8333-333333333333"),
+            ui_registration=UiRegistration(
+                client_type="browser",
+                platform="hostile-client",
+                versions=(),
+                capabilities=(),
+            ),
+        )
+    assert ui_store.records() == ()
+    ui_id = UUID("11111111-1111-4111-8111-111111111111")
+    registration = UiRegistration(
+        client_type="terminal",
+        platform="office-mac",
+        versions=(("protocol", "2"), ("tfr", "0.1.67")),
+        capabilities=("color", "timeline"),
+    )
+    first = await GatewayClient.connect(
+        socket_path,
+        client_id=ui_id,
+        ui_registration=registration,
+    )
+    first.start()
+    try:
+        assert first.ui_record is not None
+        assert first.ui_record.display_name == "office-mac · Terminal"
+        summary = await first.config_summary()
+        assert summary["setting_count"] > 50  # type: ignore[operator]
+        assert "values" not in summary
+        secrets = await first.config_list("secret")
+        assert secrets
+        assert all(setting["scope"] == "secret" for setting in secrets)
+        assert all("default" not in setting for setting in secrets)
+        with pytest.raises(ValueError, match="unknown configuration category or scope"):
+            await first.config_list("missing")
+        shown_setting = await first.config_show("ui.mouse_mode", ui="OFFICE-MAC · TERMINAL")
+        assert shown_setting["value"] == "tfr"
+        assert shown_setting["source"] == "default"
+        assert shown_setting["ui"] == {
+            "id": str(ui_id),
+            "name": "office-mac · Terminal",
+        }
+        secret_setting = await first.config_show("worlds.alpha.login.password")
+        assert secret_setting["value"] is None
+        assert secret_setting["sensitive"] is True
+        assert "default" not in secret_setting
+        with pytest.raises(ValueError, match="unknown UI"):
+            await first.config_show("ui.mouse_mode", ui="missing")
+        with pytest.raises(
+            ValueError,
+            match=r"Did you mean: ui\.mouse_mode.*Use /config list ui",
+        ):
+            await first.config_show("ui.mouse_mod")
+        listed = await first.list_uis()
+        assert len(listed) == 1
+        assert listed[0]["ui_id"] == str(ui_id)
+        assert listed[0]["display_name"] == "office-mac · Terminal"
+        assert listed[0]["client_type"] == "terminal"
+        shown = await first.show_ui("OFFICE-MAC · TERMINAL")
+        assert shown["ui_id"] == str(ui_id)
+        assert shown["versions"] == {"protocol": "2", "tfr": "0.1.67"}
+        assert shown["capabilities"] == ["color", "timeline"]
+        with pytest.raises(ValueError, match="unknown UI"):
+            await first.show_ui("missing · Terminal")
+        renamed = await first.rename_ui("Writing desk")
+        assert renamed["display_name"] == "Writing desk"
+        assert first.ui_record is not None
+        assert first.ui_record.display_name == "Writing desk"
+        assert ui_store.get(ui_id) == first.ui_record
+        pwa = await ui_store.register(
+            ui_id=UUID("22222222-2222-4222-8222-222222222222"),
+            client_type="pwa",
+            platform="Chris iPhone",
+            versions={"web_protocol": "1"},
+            capabilities=[],
+        )
+        admin_renamed = await first.rename_other_ui(pwa.display_name, "Chris phone")
+        assert admin_renamed["ui_id"] == str(pwa.ui_id)
+        assert admin_renamed["display_name"] == "Chris phone"
+        assert first.ui_record.display_name == "Writing desk"
+        with pytest.raises(ValueError, match="explicit confirmation"):
+            await first.forget_ui("Chris phone", confirm=False)
+        forgotten = await first.forget_ui("Chris phone", confirm=True)
+        assert forgotten["ui_id"] == str(pwa.ui_id)
+        assert ui_store.get(pwa.ui_id) is None
+    finally:
+        await first.stop()
+
+    unregistered = await GatewayClient.connect(socket_path)
+    unregistered.start()
+    try:
+        with pytest.raises(ValueError, match="current UI identity is unavailable"):
+            await unregistered.rename_ui("Not allowed")
+    finally:
+        await unregistered.stop()
+
+    second = await GatewayClient.connect(
+        socket_path,
+        client_id=ui_id,
+        ui_registration=UiRegistration(
+            client_type="terminal",
+            platform="renamed-host",
+            versions=(("protocol", "2"), ("tfr", "0.1.68")),
+            capabilities=("color",),
+        ),
+    )
+    try:
+        assert second.ui_record is not None
+        assert second.ui_record.ui_id == ui_id
+        assert second.ui_record.display_name == "Writing desk"
+        assert second.ui_record.platform == "renamed-host"
+        assert UiStore(tmp_path / "gateway-state").get(ui_id) == second.ui_record
+    finally:
+        await second.stop()
         await server.stop()
         await history.stop()
         await bus.close()
@@ -445,11 +574,39 @@ async def test_coordinated_update_prepares_and_commits_every_connected_ui(
     monkeypatch.setattr("tfr.gateway.stage_managed_update", stage)
     monkeypatch.setattr("tfr.gateway.activate_managed_update", activate)
     socket_path = Path("/tmp") / f"tfr-update-{uuid4().hex[:8]}" / "gateway.sock"
-    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    notices: list[str] = []
+
+    async def notice(message: str) -> None:
+        notices.append(message)
+
+    server = GatewayServer(  # type: ignore[arg-type]
+        runtime,
+        socket_path,
+        ui_store=UiStore(tmp_path / "gateway-state"),
+        update_notice=notice,
+    )
     await server.start()
     clients = [
-        await GatewayClient.connect(socket_path),
-        await GatewayClient.connect(socket_path),
+        await GatewayClient.connect(
+            socket_path,
+            client_id=UUID("11111111-1111-4111-8111-111111111111"),
+            ui_registration=UiRegistration(
+                client_type="terminal",
+                platform="office-one",
+                versions=(("tfr", "0.1.67"),),
+                capabilities=(),
+            ),
+        ),
+        await GatewayClient.connect(
+            socket_path,
+            client_id=UUID("22222222-2222-4222-8222-222222222222"),
+            ui_registration=UiRegistration(
+                client_type="terminal",
+                platform="office-two",
+                versions=(("tfr", "0.1.67"),),
+                capabilities=(),
+            ),
+        ),
     ]
     events: list[tuple[int, str]] = []
     for index, client in enumerate(clients):
@@ -485,6 +642,10 @@ async def test_coordinated_update_prepares_and_commits_every_connected_ui(
         assert max(events.index((0, "prepare")), events.index((1, "prepare"))) < min(
             events.index((0, "commit")), events.index((1, "commit"))
         )
+        assert any(
+            "office-one · Terminal" in message and "office-two · Terminal" in message
+            for message in notices
+        )
         stage.assert_awaited_once()
         activate.assert_called_once_with(staged.release_id)
     finally:
@@ -492,6 +653,61 @@ async def test_coordinated_update_prepares_and_commits_every_connected_ui(
         await server.stop()
         await history.stop()
         await bus.close()
+
+
+async def test_configuration_status_reports_named_ui_convergence(tmp_path: Path) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    runtime.configuration_values = ConfigurationValues(core_configuration_registry())
+    runtime.managed_settings = SimpleNamespace(revision=4)
+    ui_store = UiStore(tmp_path / "gateway-state")
+    for ui_id, platform, revision in (
+        ("11111111-1111-4111-8111-111111111111", "current", 4),
+        ("22222222-2222-4222-8222-222222222222", "behind", 2),
+        ("33333333-3333-4333-8333-333333333333", "ahead", 5),
+        ("44444444-4444-4444-8444-444444444444", "unknown", None),
+    ):
+        await ui_store.register(
+            ui_id=UUID(ui_id),
+            client_type="terminal",
+            platform=platform,
+            versions={},
+            capabilities=[],
+            applied_config_revision=revision,
+        )
+    socket_path = Path("/tmp") / f"tfr-config-status-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(  # type: ignore[arg-type]
+        runtime,
+        socket_path,
+        ui_store=ui_store,
+    )
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    client.start()
+    try:
+        status = await client.config_status()
+
+        assert status["revision"] == 4
+        assert status["counts"] == {
+            "current": 1,
+            "behind": 1,
+            "ahead": 1,
+            "unreported": 1,
+        }
+        assert [item["convergence"] for item in status["uis"]] == [
+            "ahead",
+            "behind",
+            "current",
+            "unreported",
+        ]
+    finally:
+        await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+        socket_path.parent.rmdir()
 
 
 async def test_candidate_force_update_stages_every_host_from_local_manifest(
@@ -722,9 +938,7 @@ async def test_native_client_manages_gateway_gag_settings() -> None:
     try:
         listed = await client.manage_gag("alpha", "list")
         assert listed == {"revision": 0, "patterns": [], "changed": False}
-        added = await client.manage_gag(
-            "alpha", "add", pattern="^bing", expected_revision=0
-        )
+        added = await client.manage_gag("alpha", "add", pattern="^bing", expected_revision=0)
         assert added["patterns"] == ["^bing"]
         assert added["revision"] == 1
     finally:
@@ -748,9 +962,7 @@ async def test_native_client_receives_and_manages_shared_ui_settings() -> None:
     client.start()
     observer.start()
     updates: list[tuple[bool, bool]] = []
-    observer.ui_settings_handler = lambda spellcheck, streaks: updates.append(
-        (spellcheck, streaks)
-    )
+    observer.ui_settings_handler = lambda spellcheck, streaks: updates.append((spellcheck, streaks))
     try:
         assert client.spellcheck_enabled is False
         assert client.speaking_streaks_enabled is True

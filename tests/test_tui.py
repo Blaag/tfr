@@ -831,12 +831,90 @@ async def test_web_commands_manage_devices_through_attached_gateway() -> None:
     class WebRuntime:
         def __init__(self) -> None:
             self.revoked: list[UUID] = []
+            self.forgotten: list[str] = []
 
         async def web_status(self) -> dict[str, object]:
             return {
                 "enabled": True,
                 "origin": "https://gateway.example.ts.net",
                 "device_count": 1,
+            }
+
+        async def config_summary(self) -> dict[str, object]:
+            return {
+                "setting_count": 80,
+                "template_count": 20,
+                "sensitive_count": 4,
+                "unset_required_count": 0,
+                "sources": {"default": 60, "jsonc": 18, "managed": 2},
+                "scopes": {"gateway": 30, "shared": 10, "ui": 40},
+            }
+
+        async def config_list(self, filter_value: str | None = None) -> list[dict[str, object]]:
+            assert filter_value == "shared"
+            return [
+                {
+                    "key": "ui.spellcheck.enabled",
+                    "type": "boolean",
+                    "scope": "shared",
+                    "category": "ui",
+                    "sensitive": False,
+                    "restart": "live",
+                },
+                {
+                    "key": "plugins.enabled",
+                    "type": "string-list",
+                    "scope": "shared",
+                    "category": "plugins",
+                    "sensitive": False,
+                    "restart": "client-reload",
+                },
+            ]
+
+        async def config_show(self, key: str, *, ui: str | None = None) -> dict[str, object]:
+            assert key == "ui.mouse_mode"
+            assert ui == "office-mac · Terminal"
+            return {
+                "key": key,
+                "descriptor_key": key,
+                "type": "string",
+                "scope": "ui",
+                "consumers": ["native-ui"],
+                "restart": "live",
+                "sensitive": False,
+                "value": "terminal",
+                "source": "jsonc",
+                "source_detail": "/config.jsonc",
+                "ui": {
+                    "id": "11111111-1111-4111-8111-111111111111",
+                    "name": "office-mac · Terminal",
+                },
+            }
+
+        async def config_status(self) -> dict[str, object]:
+            return {
+                "revision": 4,
+                "counts": {"current": 1, "behind": 1, "ahead": 0, "unreported": 1},
+                "uis": [
+                    {
+                        "display_name": "office-mac · Terminal",
+                        "client_type": "terminal",
+                        "applied_revision": 4,
+                        "convergence": "current",
+                    },
+                    {
+                        "display_name": "Chris iPhone · PWA",
+                        "client_type": "pwa",
+                        "applied_revision": 2,
+                        "convergence": "behind",
+                    },
+                    {
+                        "display_name": "old laptop · Terminal",
+                        "client_type": "terminal",
+                        "applied_revision": None,
+                        "convergence": "unreported",
+                    },
+                ],
             }
 
         async def pair_web_device(self, label: str) -> str:
@@ -856,6 +934,54 @@ async def test_web_commands_manage_devices_through_attached_gateway() -> None:
                     "expires_at": "2027-01-01T00:00:00Z",
                 }
             ]
+
+        async def list_uis(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "ui_id": "11111111-1111-4111-8111-111111111111",
+                    "display_name": "office-mac · Terminal",
+                    "client_type": "terminal",
+                    "platform": "office-mac",
+                    "last_seen_at": "2026-10-16T00:00:00Z",
+                    "applied_config_revision": 4,
+                },
+                {
+                    "ui_id": "22222222-2222-4222-8222-222222222222",
+                    "display_name": "Chris iPhone · PWA",
+                    "client_type": "pwa",
+                    "platform": "Chris iPhone",
+                    "last_seen_at": "2026-10-15T00:00:00Z",
+                    "applied_config_revision": None,
+                },
+            ]
+
+        async def show_ui(self, name: str) -> dict[str, object]:
+            assert name == "office-mac · Terminal"
+            return {
+                "ui_id": "11111111-1111-4111-8111-111111111111",
+                "display_name": "office-mac · Terminal",
+                "client_type": "terminal",
+                "platform": "office-mac",
+                "versions": {"protocol": "2", "tfr": "0.1.67"},
+                "capabilities": ["color", "timeline"],
+                "created_at": "2026-10-14T00:00:00Z",
+                "last_seen_at": "2026-10-16T00:00:00Z",
+                "applied_config_revision": 4,
+            }
+
+        async def rename_ui(self, name: str) -> dict[str, object]:
+            assert name == "Writing desk"
+            return {"display_name": name}
+
+        async def rename_other_ui(self, target: str, name: str) -> dict[str, object]:
+            assert target == "Chris iPhone · PWA"
+            assert name == "Chris phone"
+            return {"display_name": name}
+
+        async def forget_ui(self, target: str, *, confirm: bool) -> dict[str, object]:
+            assert confirm is True
+            self.forgotten.append(target)
+            return {"display_name": target}
 
         async def revoke_web_device(self, received: UUID) -> None:
             self.revoked.append(received)
@@ -877,13 +1003,23 @@ async def test_web_commands_manage_devices_through_attached_gateway() -> None:
 
     runtime = WebRuntime()
     tui = make_tui(service_runtime=runtime)
-    tui.active_view.display.resize(width=120, height=100)
+    tui.active_view.display.resize(width=120, height=220)
 
     for command in (
         "/web status",
+        "/config",
+        "/config list shared",
+        '/config show ui.mouse_mode --ui "office-mac · Terminal"',
+        "/config status",
         "/web repair",
         '/web pair "Chris iPhone"',
         "/web devices",
+        "/ui list",
+        "/ui show office-mac · Terminal",
+        '/ui rename "Writing desk"',
+        '/ui rename "Chris iPhone · PWA" "Chris phone"',
+        '/ui forget "Chris phone"',
+        '/ui forget "Chris phone" confirm',
         f"/web revoke {device_id}",
         "/diagnostics presentations",
     ):
@@ -891,6 +1027,23 @@ async def test_web_commands_manage_devices_through_attached_gateway() -> None:
 
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
     assert "PWA origin: https://gateway.example.ts.net" in text
+    assert "Gateway configuration inventory" in text
+    assert "Settings: 80 (+ 20 dynamic templates)" in text
+    assert "Sources: default: 60, jsonc: 18, managed: 2" in text
+    assert "Configuration settings — shared" in text
+    assert "ui.spellcheck.enabled (boolean; shared)" in text
+    assert "plugins.enabled (string-list; shared, client-reload)" in text
+    assert "Configuration: ui.mouse_mode" in text
+    assert "Value: 'terminal'" in text
+    assert "Source: jsonc (/config.jsonc)" in text
+    assert "Type: string; scope: ui" in text
+    assert "Consumers: native-ui" in text
+    assert "Restart: live" in text
+    assert "UI: office-mac · Terminal" in text
+    assert "Configuration convergence — revision 4" in text
+    assert "current: 1; behind: 1; ahead: 0; unreported: 1" in text
+    assert "Chris iPhone · PWA [pwa]: behind (applied 2)" in text
+    assert "old laptop · Terminal [terminal]: unreported (applied not reported)" in text
     assert "PWA repair page:\nhttps://gateway.example.ts.net/repair.html" in text
     assert "https://gateway.example.ts.net/#pair=test-secret" in text
     assert any(glyph in text for glyph in "▀▄█")
@@ -898,7 +1051,78 @@ async def test_web_commands_manage_devices_through_attached_gateway() -> None:
     assert "active now; created: 2026-10-15T00:00:00Z" in text
     assert f"Revoked web device {device_id}" in text
     assert runtime.revoked == [device_id]
+    assert "Gateway-known UIs" in text
+    assert "office-mac · Terminal  [terminal]" in text
+    assert "config revision: 4" in text
+    assert "Chris iPhone · PWA  [pwa]" in text
+    assert "config revision: not reported" in text
+    assert "UI: office-mac · Terminal" in text
+    assert "Versions: protocol 2, tfr 0.1.67" in text
+    assert "Capabilities: color, timeline" in text
+    assert "Renamed this UI to Writing desk" in text
+    assert "Renamed Chris iPhone · PWA to Chris phone" in text
+    assert "Confirm with: /ui forget 'Chris phone' confirm" in text
+    assert "Forgot UI Chris phone" in text
+    assert runtime.forgotten == ["Chris phone"]
     assert "pwa/presentation  client_rejected" in text
+
+
+async def test_config_show_never_displays_secret_value() -> None:
+    class SecretRuntime:
+        async def config_show(self, key: str, *, ui: str | None = None) -> dict[str, object]:
+            assert key == "worlds.alpha.login.password"
+            assert ui is None
+            return {
+                "key": key,
+                "descriptor_key": "worlds.*.login.password",
+                "type": "string",
+                "scope": "secret",
+                "consumers": ["gateway"],
+                "restart": "live",
+                "sensitive": True,
+                "value": None,
+                "redacted": True,
+                "source": "jsonc",
+                "source_detail": "/worlds.jsonc",
+            }
+
+    tui = make_tui(service_runtime=SecretRuntime())
+    tui.active_view.display.resize(width=100, height=20)
+
+    await tui._handle_client_command("alpha", "/config show worlds.alpha.login.password")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Configuration: worlds.alpha.login.password" in text
+    assert "Value: <redacted>" in text
+    assert "super-private-value" not in text
+
+
+async def test_config_show_identifies_managed_override_revision() -> None:
+    class ManagedRuntime:
+        async def config_show(self, key: str, *, ui: str | None = None) -> dict[str, object]:
+            assert key == "ui.spellcheck.enabled"
+            assert ui is None
+            return {
+                "key": key,
+                "descriptor_key": key,
+                "type": "boolean",
+                "scope": "shared",
+                "consumers": ["native-ui", "pwa"],
+                "restart": "live",
+                "sensitive": False,
+                "value": True,
+                "source": "managed",
+                "source_detail": "managed override revision 7",
+            }
+
+    tui = make_tui(service_runtime=ManagedRuntime())
+    tui.active_view.display.resize(width=100, height=20)
+
+    await tui._handle_client_command("alpha", "/config show ui.spellcheck.enabled")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Value: True" in text
+    assert "Source: managed (managed override revision 7)" in text
 
 
 async def test_web_pair_explains_disabled_gateway_configuration_before_pairing() -> None:
@@ -4842,9 +5066,11 @@ def test_parse_web_pair_arguments_handles_gateway_forms() -> None:
     from tfr.tui import _parse_web_pair_arguments
 
     assert _parse_web_pair_arguments(["My", "iPhone"]) == (["My", "iPhone"], None, None)
-    assert _parse_web_pair_arguments(
-        ["My", "iPhone", "--gateway", "bsd.shutdown.com:27047"]
-    ) == (["My", "iPhone"], "bsd.shutdown.com:27047", None)
+    assert _parse_web_pair_arguments(["My", "iPhone", "--gateway", "bsd.shutdown.com:27047"]) == (
+        ["My", "iPhone"],
+        "bsd.shutdown.com:27047",
+        None,
+    )
     assert _parse_web_pair_arguments(["My", "iPhone", "--gateway=bsd.shutdown.com:27047"]) == (
         ["My", "iPhone"],
         "bsd.shutdown.com:27047",
@@ -4863,9 +5089,7 @@ def test_parse_web_pair_arguments_reports_errors() -> None:
 
     label, target, error = _parse_web_pair_arguments(["My", "iPhone", "--gateway"])
     assert target is None and error is not None
-    label, target, error = _parse_web_pair_arguments(
-        ["My", "iPhone", "--gateway", "0.0.0.0:7347"]
-    )
+    label, target, error = _parse_web_pair_arguments(["My", "iPhone", "--gateway", "0.0.0.0:7347"])
     assert target is None and error is not None and "Invalid --gateway" in error
 
 

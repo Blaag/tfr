@@ -14,7 +14,7 @@ import ssl
 import stat
 import sys
 from collections import Counter, deque
-from collections.abc import Awaitable, Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,7 +25,13 @@ from uuid import UUID, uuid4
 from tfr.agents import AgentRuntime
 from tfr.ansi import terminal_plain_text
 from tfr.config import ConfigurationBundle
+from tfr.configuration_values import (
+    ConfigurationValues,
+    SettingProvenance,
+    configuration_values_from_bundle,
+)
 from tfr.core import CommandBus, EventBus, UnknownSessionError
+from tfr.core_settings import core_configuration_registry
 from tfr.eventlog import EventSink, JsonlEventSink
 from tfr.events import (
     Actor,
@@ -55,6 +61,7 @@ from tfr.gateway_transport import (
     validate_gateway_token,
     validate_tcp_endpoint,
 )
+from tfr.gateway_uis import UiRecord, UiStore
 from tfr.installations import InstallationError, managed_restart_command
 from tfr.managed_settings import ManagedSettingsStore, apply_managed_settings
 from tfr.managed_updates import (
@@ -104,6 +111,7 @@ class SequencedEvent:
 @dataclass(slots=True)
 class _GatewayUpdateParticipant:
     connection_id: str
+    ui_id: UUID | None
     writer: asyncio.StreamWriter
     write_lock: asyncio.Lock
     build: BuildIdentity | None
@@ -547,6 +555,7 @@ class GatewayRuntime:
         gag_policy: GagPolicy | None = None,
         screen_clear_mode: str = "cycle",
         screen_clear_effect: str | None = None,
+        configuration_values: ConfigurationValues | None = None,
     ) -> None:
         self.event_bus = event_bus
         self.command_bus = command_bus
@@ -565,6 +574,7 @@ class GatewayRuntime:
         self.gag_policy = gag_policy
         self.screen_clear_mode = screen_clear_mode
         self.screen_clear_effect = screen_clear_effect
+        self.configuration_values = configuration_values
         self.gateway_id = uuid4()
         self._started = False
         self._update_task: asyncio.Task[None] | None = None
@@ -580,6 +590,7 @@ class GatewayRuntime:
         plugin_scope: Literal["all", "gateway"] = "gateway",
         connector_bridge: ConnectorSessionBridge | None = None,
     ) -> GatewayRuntime:
+        source_bundle = bundle
         bundle, managed_settings = apply_managed_settings(bundle)
         gag_policy = GagPolicy.from_configuration(bundle.worlds)
         sinks: list[EventSink] = []
@@ -636,6 +647,38 @@ class GatewayRuntime:
             scope=plugin_scope,
             event_visibility=gag_policy.allows,
         )
+        configuration_registry = core_configuration_registry()
+        for descriptor in plugins.registry.configuration_descriptors():
+            configuration_registry.register(descriptor)
+        configuration_values = configuration_values_from_bundle(
+            source_bundle,
+            configuration_registry,
+            managed=managed_settings.document,
+        )
+        for session in sessions:
+            runtime_values = {
+                f"worlds.{session.world}.encoding": session.encoding,
+                f"worlds.{session.world}.reconnect": session.reconnect,
+                f"worlds.{session.world}.scrollback_lines": scrollback_for(bundle, session.world),
+                f"worlds.{session.world}.provenance.show_prefix": (session.show_nospoof_prefix),
+            }
+            for key, value in runtime_values.items():
+                current = configuration_values.resolve(key)
+                if current is None or current.value != value:
+                    configuration_values.record_runtime(
+                        key,
+                        value,
+                        detail="effective world session configuration",
+                    )
+        manifest_key = "updates.manifest_url"
+        manifest_value = str(bundle.main.updates.manifest_url)
+        current_manifest = configuration_values.resolve(manifest_key)
+        if current_manifest is None or current_manifest.value != manifest_value:
+            configuration_values.record_runtime(
+                manifest_key,
+                manifest_value,
+                detail="validated update channel configuration",
+            )
         gag_policy.set_diagnostic_handler(
             lambda code, world, index: plugins.diagnostics.record(
                 severity="warning",
@@ -699,6 +742,7 @@ class GatewayRuntime:
             gag_policy=gag_policy,
             screen_clear_mode=bundle.main.ui.screen_clear.mode,
             screen_clear_effect=bundle.main.ui.screen_clear.effect,
+            configuration_values=configuration_values,
         )
 
     async def start(self) -> None:
@@ -739,6 +783,12 @@ class GatewayRuntime:
         if expected_revision is None:
             raise ValueError("gag mutation requires expected_revision")
         async with self._managed_settings_lock:
+            inventory_key = f"worlds.{world}.gag.patterns"
+            previous_inventory = (
+                self.configuration_values.resolve(inventory_key)
+                if self.configuration_values is not None
+                else None
+            )
             if operation == "add":
                 if pattern is None:
                     raise ValueError("add gag operation requires a pattern")
@@ -782,6 +832,24 @@ class GatewayRuntime:
                             "restart the Gateway to apply it"
                         )[:240],
                     )
+            if self.configuration_values is not None:
+                if world in self.managed_settings.document.worlds:
+                    self.configuration_values.record(
+                        inventory_key,
+                        list(result.patterns),
+                        SettingProvenance.MANAGED,
+                        source_detail=f"managed override revision {result.revision}",
+                    )
+                else:
+                    self.configuration_values.clear(inventory_key, SettingProvenance.MANAGED)
+                if restart_required and previous_inventory is not None:
+                    self.configuration_values.record_runtime(
+                        inventory_key,
+                        previous_inventory.value,
+                        detail="active runtime configuration; Gateway restart required",
+                    )
+                else:
+                    self.configuration_values.clear(inventory_key, SettingProvenance.RUNTIME)
             return {
                 **result.model_dump(mode="json"),
                 "restart_required": restart_required,
@@ -825,6 +893,13 @@ class GatewayRuntime:
         )
         async with self._managed_settings_lock:
             result = await asyncio.to_thread(setter, enabled, expected_revision)
+        if self.configuration_values is not None:
+            self.configuration_values.record(
+                f"ui.{setting}.enabled",
+                result.enabled,
+                SettingProvenance.MANAGED,
+                source_detail=f"managed override revision {result.revision}",
+            )
         return result.model_dump(mode="json")
 
     async def stop(self, *, preserve_worlds: bool = False) -> None:
@@ -915,6 +990,8 @@ class GatewayRuntime:
         causation_id: UUID | None = None,
         expected_connection_generation: int | None = None,
         metadata: Mapping[str, Any] | None = None,
+        ui_id: UUID | None = None,
+        ui_name: str | None = None,
     ) -> None:
         request = self._command_request(
             world=world,
@@ -927,6 +1004,8 @@ class GatewayRuntime:
             causation_id=causation_id,
             expected_connection_generation=expected_connection_generation,
             metadata=metadata,
+            ui_id=ui_id,
+            ui_name=ui_name,
         )
         await self.command_bus.submit(request)
 
@@ -941,6 +1020,8 @@ class GatewayRuntime:
         correlation_id: UUID | None = None,
         expected_connection_generation: int | None = None,
         metadata: Mapping[str, Any] | None = None,
+        ui_id: UUID | None = None,
+        ui_name: str | None = None,
     ) -> None:
         request = self._command_request(
             world=world,
@@ -951,6 +1032,8 @@ class GatewayRuntime:
             correlation_id=correlation_id,
             expected_connection_generation=expected_connection_generation,
             metadata=metadata,
+            ui_id=ui_id,
+            ui_name=ui_name,
         )
         self.command_bus.submit_nowait(request)
 
@@ -967,6 +1050,8 @@ class GatewayRuntime:
         causation_id: UUID | None = None,
         expected_connection_generation: int | None = None,
         metadata: Mapping[str, Any] | None = None,
+        ui_id: UUID | None = None,
+        ui_name: str | None = None,
     ) -> CommandRequest:
         session = self.session_for(world)
         if len(text) > MAX_COMMAND_CHARACTERS:
@@ -978,13 +1063,19 @@ class GatewayRuntime:
             and expected_connection_generation != session.connection_generation
         ):
             raise ValueError("world connection changed before command submission")
-        request_actor = actor or Actor(ActorType.HUMAN, f"ui:{client_id}")
+        actor_identity = ui_name or client_id
+        request_actor = actor or Actor(ActorType.HUMAN, f"ui:{actor_identity}")
         if len(request_actor.id) > MAX_ACTOR_ID_CHARACTERS:
             raise ValueError("remote actor ID exceeds the gateway limit")
         if request_actor.type not in {ActorType.HUMAN, ActorType.PLUGIN}:
             raise ValueError("remote commands must have a human or plugin actor")
         if request_actor.type is ActorType.HUMAN:
-            request_actor = Actor(ActorType.HUMAN, f"ui:{client_id}")
+            request_actor = Actor(ActorType.HUMAN, f"ui:{actor_identity}")
+        request_metadata = {**dict(metadata or {}), "gateway_connection_id": client_id}
+        if ui_id is not None:
+            request_metadata["gateway_ui_id"] = str(ui_id)
+        if ui_name is not None:
+            request_metadata["gateway_ui_name"] = ui_name
         return CommandRequest(
             session_id=session.session_id,
             world=world,
@@ -995,7 +1086,7 @@ class GatewayRuntime:
             correlation_id=correlation_id,
             causation_id=causation_id,
             expected_connection_generation=expected_connection_generation,
-            metadata={**dict(metadata or {}), "gateway_connection_id": client_id},
+            metadata=request_metadata,
         )
 
     async def control(self, *, world: str, action: str) -> None:
@@ -1057,6 +1148,7 @@ class GatewayServer:
         diagnostic_clear_factory: Callable[[], None] | None = None,
         update_notice: Callable[[str], Awaitable[None]] | None = None,
         ui_settings_notice: Callable[[Mapping[str, bool]], Awaitable[None]] | None = None,
+        ui_store: UiStore | None = None,
     ) -> None:
         if (
             maximum_clients < 1
@@ -1098,6 +1190,7 @@ class GatewayServer:
         self.diagnostic_clear_factory = diagnostic_clear_factory
         self.update_notice = update_notice
         self.ui_settings_notice = ui_settings_notice
+        self.ui_store = ui_store
         self._server: asyncio.Server | None = None
         self._tcp_server: asyncio.Server | None = None
         self._socket_identity: tuple[int, int] | None = None
@@ -1339,33 +1432,46 @@ class GatewayServer:
             snapshot = subscription.snapshot
             if len(snapshot.events) > MAX_SNAPSHOT_EVENTS:
                 raise GatewayProtocolError("retained history exceeds the protocol snapshot limit")
+            ui_record: UiRecord | None = None
+            if "ui" in hello:
+                if admin:
+                    raise GatewayProtocolError("administrative clients cannot register as a UI")
+                if self.ui_store is None:
+                    raise GatewayProtocolError("gateway UI registration is unavailable")
+                try:
+                    ui_record = await self.ui_store.register_metadata(UUID(client_id), hello["ui"])
+                except ValueError as exc:
+                    raise GatewayProtocolError(f"invalid UI registration: {exc}") from exc
+            hello_response: dict[str, Any] = {
+                "type": "hello",
+                "protocol": PROTOCOL_VERSION,
+                "gateway_id": str(self.runtime.gateway_id),
+                "client_id": client_id,
+                "connection_id": connection_id,
+                "cursor": snapshot.cursor,
+                "oldest_cursor": snapshot.oldest_cursor,
+                "snapshot_count": len(snapshot.events),
+                "history_truncated": snapshot.truncated,
+                "history_reset": history_reset,
+                "worlds": self.runtime.world_descriptors(),
+                "agents": self.runtime.agent_descriptors(),
+                "ui_settings": (
+                    self.runtime.shared_ui_settings()
+                    if hasattr(self.runtime, "shared_ui_settings")
+                    else {
+                        "spellcheck_enabled": False,
+                        "speaking_streaks_enabled": True,
+                    }
+                ),
+                "effect_demos": self._native_effect_demos(),
+                "speaker_effects": self._speaker_effects_summary(),
+                "build": getattr(self.runtime, "build", current_build()).as_dict(),
+            }
+            if ui_record is not None:
+                hello_response["ui"] = ui_record.as_dict()
             await write_message(
                 writer,
-                {
-                    "type": "hello",
-                    "protocol": PROTOCOL_VERSION,
-                    "gateway_id": str(self.runtime.gateway_id),
-                    "client_id": client_id,
-                    "connection_id": connection_id,
-                    "cursor": snapshot.cursor,
-                    "oldest_cursor": snapshot.oldest_cursor,
-                    "snapshot_count": len(snapshot.events),
-                    "history_truncated": snapshot.truncated,
-                    "history_reset": history_reset,
-                    "worlds": self.runtime.world_descriptors(),
-                    "agents": self.runtime.agent_descriptors(),
-                    "ui_settings": (
-                        self.runtime.shared_ui_settings()
-                        if hasattr(self.runtime, "shared_ui_settings")
-                        else {
-                            "spellcheck_enabled": False,
-                            "speaking_streaks_enabled": True,
-                        }
-                    ),
-                    "effect_demos": self._native_effect_demos(),
-                    "speaker_effects": self._speaker_effects_summary(),
-                    "build": getattr(self.runtime, "build", current_build()).as_dict(),
-                },
+                hello_response,
                 lock=write_lock,
             )
             for item in snapshot.events:
@@ -1377,6 +1483,7 @@ class GatewayServer:
             if not admin:
                 participant = _GatewayUpdateParticipant(
                     connection_id=connection_id,
+                    ui_id=ui_record.ui_id if ui_record is not None else None,
                     writer=writer,
                     write_lock=write_lock,
                     build=client_build,
@@ -1399,6 +1506,7 @@ class GatewayServer:
                     writer,
                     write_lock,
                     allow_admin=True,
+                    ui_id=ui_record.ui_id if ui_record is not None else None,
                 ),
                 name=f"tfr-gateway-requests-{connection_id}",
             )
@@ -1497,11 +1605,7 @@ class GatewayServer:
         encoded_bytes = 2
         for demo in plugins.effect_demos()[:100]:
             world = next(
-                (
-                    candidate
-                    for candidate in demo.worlds
-                    if candidate in worlds
-                ),
+                (candidate for candidate in demo.worlds if candidate in worlds),
                 worlds[0] if worlds and not demo.worlds else None,
             )
             if world is None:
@@ -1551,6 +1655,7 @@ class GatewayServer:
         write_lock: asyncio.Lock,
         *,
         allow_admin: bool,
+        ui_id: UUID | None,
     ) -> None:
         update_requests: set[asyncio.Task[None]] = set()
         try:
@@ -1561,6 +1666,7 @@ class GatewayServer:
                     writer,
                     write_lock,
                     allow_admin=allow_admin,
+                    ui_id=ui_id,
                 )
                 if message.get("type") != "update":
                     await request
@@ -1587,6 +1693,7 @@ class GatewayServer:
         write_lock: asyncio.Lock,
         *,
         allow_admin: bool,
+        ui_id: UUID | None,
     ) -> None:
         request_id_value = message.get("request_id")
         result: dict[str, Any] | None = None
@@ -1633,6 +1740,11 @@ class GatewayServer:
                 metadata = message.get("metadata", {})
                 if not isinstance(metadata, dict):
                     raise ValueError("metadata must be an object")
+                current_ui = (
+                    self.ui_store.get(ui_id)
+                    if self.ui_store is not None and ui_id is not None
+                    else None
+                )
                 await self.runtime.submit_command(
                     world=world,
                     text=text,
@@ -1644,6 +1756,8 @@ class GatewayServer:
                     causation_id=causation_id,
                     expected_connection_generation=expected_generation,
                     metadata=metadata,
+                    ui_id=ui_id,
+                    ui_name=current_ui.display_name if current_ui is not None else None,
                 )
             elif message_type == "control":
                 world = self._world(message)
@@ -1824,6 +1938,156 @@ class GatewayServer:
                 if set(message) != {"type", "protocol", "request_id"}:
                     raise ValueError("list_devices has invalid fields")
                 result = {"devices": self.device_list_factory()}
+            elif message_type == "list_uis":
+                if not allow_admin or self.ui_store is None:
+                    raise ValueError("UI inventory is unavailable")
+                if set(message) != {"type", "protocol", "request_id"}:
+                    raise ValueError("list_uis has invalid fields")
+                result = {"uis": [record.as_dict() for record in self.ui_store.records()]}
+            elif message_type == "config_summary":
+                if self.runtime.configuration_values is None:
+                    raise ValueError("configuration inventory is unavailable")
+                if set(message) != {"type", "protocol", "request_id"}:
+                    raise ValueError("config_summary has invalid fields")
+                result = self.runtime.configuration_values.summary()
+            elif message_type == "config_list":
+                if self.runtime.configuration_values is None:
+                    raise ValueError("configuration inventory is unavailable")
+                if set(message) not in (
+                    {"type", "protocol", "request_id"},
+                    {"type", "protocol", "request_id", "filter"},
+                ):
+                    raise ValueError("config_list has invalid fields")
+                filter_value = message.get("filter")
+                if filter_value is not None and (
+                    not isinstance(filter_value, str)
+                    or not 1 <= len(filter_value) <= 64
+                    or not filter_value.isprintable()
+                ):
+                    raise ValueError("configuration filter is invalid")
+                settings = self.runtime.configuration_values.list_descriptors(filter_value)
+                if filter_value is not None and not settings:
+                    raise ValueError(f"unknown configuration category or scope: {filter_value}")
+                result = {"settings": settings}
+            elif message_type == "config_show":
+                if self.runtime.configuration_values is None:
+                    raise ValueError("configuration inventory is unavailable")
+                if set(message) not in (
+                    {"type", "protocol", "request_id", "key"},
+                    {"type", "protocol", "request_id", "key", "ui"},
+                ):
+                    raise ValueError("config_show has invalid fields")
+                key = message.get("key")
+                if not isinstance(key, str) or not 1 <= len(key) <= 240 or not key.isprintable():
+                    raise ValueError("configuration key is invalid")
+                ui_name = message.get("ui")
+                if ui_name is not None:
+                    if not isinstance(ui_name, str):
+                        raise ValueError("UI name must be a string")
+                    if self.ui_store is None:
+                        raise ValueError("UI inventory is unavailable")
+                    ui_record = self.ui_store.find_by_name(ui_name)
+                    if ui_record is None:
+                        raise ValueError(f"unknown UI: {ui_name}")
+                else:
+                    ui_record = None
+                result = self.runtime.configuration_values.show(key)
+                if ui_record is not None:
+                    result["ui"] = {
+                        "id": str(ui_record.ui_id),
+                        "name": ui_record.display_name,
+                    }
+            elif message_type == "config_status":
+                if self.runtime.configuration_values is None:
+                    raise ValueError("configuration inventory is unavailable")
+                if set(message) != {"type", "protocol", "request_id"}:
+                    raise ValueError("config_status has invalid fields")
+                managed_settings = getattr(self.runtime, "managed_settings", None)
+                revision = managed_settings.revision if managed_settings is not None else 0
+                records = self.ui_store.records() if self.ui_store is not None else ()
+                uis = []
+                for record in records:
+                    applied = record.applied_config_revision
+                    convergence = (
+                        "unreported"
+                        if applied is None
+                        else "current"
+                        if applied == revision
+                        else "behind"
+                        if applied < revision
+                        else "ahead"
+                    )
+                    uis.append(
+                        {
+                            "ui_id": str(record.ui_id),
+                            "display_name": record.display_name,
+                            "client_type": record.client_type,
+                            "applied_revision": applied,
+                            "convergence": convergence,
+                        }
+                    )
+                result = {
+                    "revision": revision,
+                    "uis": uis,
+                    "counts": {
+                        state: sum(item["convergence"] == state for item in uis)
+                        for state in ("current", "behind", "ahead", "unreported")
+                    },
+                }
+            elif message_type == "show_ui":
+                if not allow_admin or self.ui_store is None:
+                    raise ValueError("UI inventory is unavailable")
+                if set(message) != {"type", "protocol", "request_id", "name"}:
+                    raise ValueError("show_ui has invalid fields")
+                name = message.get("name")
+                if not isinstance(name, str):
+                    raise ValueError("UI name must be a string")
+                record = self.ui_store.find_by_name(name)
+                if record is None:
+                    raise ValueError(f"unknown UI: {name}")
+                result = {"ui": record.as_dict()}
+            elif message_type == "rename_ui":
+                if self.ui_store is None or ui_id is None:
+                    raise ValueError("current UI identity is unavailable")
+                if set(message) != {"type", "protocol", "request_id", "name"}:
+                    raise ValueError("rename_ui has invalid fields")
+                name = message.get("name")
+                if not isinstance(name, str):
+                    raise ValueError("UI name must be a string")
+                result = {"ui": (await self.ui_store.rename(ui_id, name)).as_dict()}
+            elif message_type == "rename_ui_target":
+                if not allow_admin or self.ui_store is None:
+                    raise ValueError("UI administration is unavailable")
+                if set(message) != {
+                    "type",
+                    "protocol",
+                    "request_id",
+                    "target",
+                    "name",
+                }:
+                    raise ValueError("rename_ui_target has invalid fields")
+                target = message.get("target")
+                name = message.get("name")
+                if not isinstance(target, str) or not isinstance(name, str):
+                    raise ValueError("UI target and name must be strings")
+                result = {"ui": (await self.ui_store.rename_named(target, name)).as_dict()}
+            elif message_type == "forget_ui":
+                if not allow_admin or self.ui_store is None:
+                    raise ValueError("UI administration is unavailable")
+                if set(message) != {
+                    "type",
+                    "protocol",
+                    "request_id",
+                    "target",
+                    "confirm",
+                }:
+                    raise ValueError("forget_ui has invalid fields")
+                target = message.get("target")
+                if not isinstance(target, str):
+                    raise ValueError("UI target must be a string")
+                if message.get("confirm") is not True:
+                    raise ValueError("forget_ui requires explicit confirmation")
+                result = {"ui": (await self.ui_store.forget_named(target)).as_dict()}
             elif message_type == "revoke_device":
                 if not allow_admin or self.device_revoke_factory is None:
                     raise ValueError("web device administration is unavailable")
@@ -1905,7 +2169,7 @@ class GatewayServer:
                     self._update_transaction_participants = ()
                 raise ValueError(
                     "all connected native UIs must report their build; "
-                    f"{len(incompatible)} UI(s) cannot be evaluated"
+                    f"cannot evaluate {self._participant_names(incompatible)}"
                 )
             try:
                 update_result = await self.runtime.update_checker.check()
@@ -1935,7 +2199,7 @@ class GatewayServer:
                 if unsupported:
                     raise ValueError(
                         "all current native UIs must support update availability checks; "
-                        f"{len(unsupported)} UI(s) cannot be checked"
+                        f"cannot check {self._participant_names(unsupported)}"
                     )
                 plugin_checker = getattr(self.runtime, "plugin_update_checker", None)
                 gateway_plugin_check: Awaitable[bool] | None = (
@@ -1986,7 +2250,7 @@ class GatewayServer:
                     raise ValueError(
                         "all connected native UIs must support managed updates when they require "
                         "an update; "
-                        f"{len(unmanaged)} UI(s) cannot participate"
+                        f"cannot update {self._participant_names(unmanaged)}"
                     )
                 update_gateway = gateway_core_update or gateway_plugin_update
                 if not update_gateway and not selected_participants:
@@ -2019,7 +2283,7 @@ class GatewayServer:
                     self._update_transaction_participants = ()
                 raise ValueError(
                     "all connected native UIs must be protocol-compatible; "
-                    f"{len(incompatible)} UI(s) cannot participate"
+                    f"cannot update {self._participant_names(incompatible)}"
                 )
             self._staged_update = staged
             self._update_transaction_participants = selected_participants
@@ -2033,7 +2297,8 @@ class GatewayServer:
         participants = self._update_transaction_participants
         if self.update_notice is not None:
             await self.update_notice(
-                f"Gateway update {staged.version} is being prepared. {staged.release_url}"
+                f"Gateway update {staged.version} is being prepared for "
+                f"{self._participant_names(participants)}. {staged.release_url}"
             )
         try:
             prepare_results = await asyncio.gather(
@@ -2049,14 +2314,16 @@ class GatewayServer:
                 )
             )
             mismatched = [
-                result
-                for result in prepare_results
+                participant
+                for participant, result in zip(participants, prepare_results, strict=True)
                 if not isinstance(result, dict)
                 or result.get("version") != staged.version
                 or result.get("commit") != staged.commit
             ]
             if mismatched:
-                raise ValueError("one or more UI hosts staged a different candidate release")
+                raise ValueError(
+                    f"{self._participant_names(mismatched)} staged a different candidate release"
+                )
         except (ConnectionError, OSError, RuntimeError, TimeoutError, ValueError) as exc:
             await self._broadcast_update_message(
                 participants, "update_abort", error=f"Update aborted: {exc}"
@@ -2084,10 +2351,11 @@ class GatewayServer:
             ),
             return_exceptions=True,
         )
-        for result in commit_results:
+        for participant, result in zip(participants, commit_results, strict=True):
             if isinstance(result, BaseException):
                 print(
-                    f"tfr: UI update commit acknowledgement failed: {result}",
+                    f"tfr: {self._participant_name(participant)} update commit "
+                    f"acknowledgement failed: {result}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -2137,6 +2405,24 @@ class GatewayServer:
             return await asyncio.wait_for(future, timeout=timeout)
         finally:
             participant.pending.pop(request_id, None)
+
+    def _participant_name(self, participant: _GatewayUpdateParticipant) -> str:
+        record = (
+            self.ui_store.get(participant.ui_id)
+            if self.ui_store is not None and participant.ui_id is not None
+            else None
+        )
+        return (
+            record.display_name
+            if record is not None
+            else f"unregistered UI {participant.connection_id[-8:]}"
+        )
+
+    def _participant_names(self, participants: Sequence[_GatewayUpdateParticipant]) -> str:
+        return (
+            ", ".join(self._participant_name(participant) for participant in participants)
+            or "no UIs"
+        )
 
     def _handle_update_ack(
         self, connection_id: str, request_id: UUID, message: Mapping[str, Any]
@@ -2229,6 +2515,7 @@ async def run_gateway(
             raise ValueError("network gateway requires --token-file, --tls-cert, and --tls-key")
         tcp_auth_token = load_gateway_token(token_file)
         tcp_ssl_context = create_gateway_server_tls_context(tls_certificate, tls_private_key)
+    ui_store = UiStore(bundle.main.managed_settings.state_directory)
     web_manager = None
     if bundle.main.web_gateway.mode != "disabled":
         from tfr.gateway_web import WebGatewayManager
@@ -2263,6 +2550,7 @@ async def run_gateway(
             state_directory=web_config.state_directory,
             snapshot_events=web_config.snapshot_events,
             speaking_streaks_enabled=bundle.main.ui.speaking_streaks.enabled,
+            ui_store=ui_store,
             transport=web_transport,
             ssl_context=web_ssl_context,
         )
@@ -2286,6 +2574,7 @@ async def run_gateway(
         ),
         update_notice=(web_manager.notify_update if web_manager is not None else None),
         ui_settings_notice=(web_manager.notify_ui_settings if web_manager is not None else None),
+        ui_store=ui_store,
     )
     stop = asyncio.Event()
     application_restart = asyncio.Event()

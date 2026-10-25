@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import os
+import socket
 import ssl
 import sys
 from collections.abc import Awaitable, Callable, Mapping
@@ -39,6 +40,7 @@ from tfr.gateway_transport import (
     validate_gateway_token,
     validate_tcp_endpoint,
 )
+from tfr.gateway_uis import UiRecord, UiRegistration
 from tfr.installations import InstallationError, managed_restart_command
 from tfr.managed_updates import (
     StagedManagedUpdate,
@@ -52,7 +54,9 @@ from tfr.plugins import (
     PluginWorldInfo,
     ProjectedEffectDemo,
 )
+from tfr.presentation import TUI_PRESENTATION_CAPABILITIES
 from tfr.sessions import SessionManager, SessionState
+from tfr.ui_identity import load_or_create_native_ui_id
 from tfr.updates import (
     BuildIdentity,
     ReleaseManifest,
@@ -109,14 +113,10 @@ def remote_speaker_effects_warning(
         )
     gateway_names = {speaker.casefold() for speaker in gateway_speakers}
     missing = tuple(
-        (index, speaker)
-        for index, speaker in rules
-        if speaker.casefold() not in gateway_names
+        (index, speaker) for index, speaker in rules if speaker.casefold() not in gateway_names
     )
     configured = tuple(
-        dict.fromkeys(
-            speaker for _index, speaker in rules if speaker.casefold() in gateway_names
-        )
+        dict.fromkeys(speaker for _index, speaker in rules if speaker.casefold() in gateway_names)
     )
     local_names = tuple(dict.fromkeys(speaker for _index, speaker in rules))
     if not missing:
@@ -326,6 +326,7 @@ class GatewayClient:
         gateway_speaker_effects_loaded: bool | None = None,
         gateway_speaker_effects: tuple[str, ...] = (),
         gateway_build: BuildIdentity | None = None,
+        ui_record: UiRecord | None = None,
     ) -> None:
         self.reader = reader
         self.writer = writer
@@ -345,6 +346,7 @@ class GatewayClient:
         self.gateway_speaker_effects_loaded = gateway_speaker_effects_loaded
         self.gateway_speaker_effects = gateway_speaker_effects
         self.gateway_build = gateway_build
+        self.ui_record = ui_record
         self.command_bus = RemoteCommandBus(self)
         self.agents: RemoteAgentRuntime | None = None
         self._write_lock = asyncio.Lock()
@@ -371,6 +373,7 @@ class GatewayClient:
         client_id: UUID | None = None,
         gateway_id: UUID | None = None,
         after_cursor: int | None = None,
+        ui_registration: UiRegistration | None = None,
     ) -> GatewayClient:
         resolved_client_id = client_id or uuid4()
         socket_path = Path(path).expanduser()
@@ -394,6 +397,7 @@ class GatewayClient:
             client_id=resolved_client_id,
             gateway_id=gateway_id,
             after_cursor=after_cursor,
+            ui_registration=ui_registration,
         )
 
         async def reconnect_factory(gateway: UUID, cursor: int) -> GatewayClient:
@@ -403,6 +407,7 @@ class GatewayClient:
                 client_id=resolved_client_id,
                 gateway_id=gateway,
                 after_cursor=cursor,
+                ui_registration=ui_registration,
             )
 
         client._reconnect_factory = reconnect_factory
@@ -421,6 +426,7 @@ class GatewayClient:
         client_id: UUID | None = None,
         gateway_id: UUID | None = None,
         after_cursor: int | None = None,
+        ui_registration: UiRegistration | None = None,
     ) -> GatewayClient:
         host, port = validate_tcp_endpoint(host, port)
         validate_gateway_token(auth_token)
@@ -446,6 +452,7 @@ class GatewayClient:
             gateway_id=gateway_id,
             after_cursor=after_cursor,
             auth_token=auth_token,
+            ui_registration=ui_registration,
         )
 
         async def reconnect_factory(gateway: UUID, cursor: int) -> GatewayClient:
@@ -459,6 +466,7 @@ class GatewayClient:
                 client_id=resolved_client_id,
                 gateway_id=gateway,
                 after_cursor=cursor,
+                ui_registration=ui_registration,
             )
 
         client._reconnect_factory = reconnect_factory
@@ -475,6 +483,7 @@ class GatewayClient:
         gateway_id: UUID | None,
         after_cursor: int | None,
         auth_token: str | None = None,
+        ui_registration: UiRegistration | None = None,
     ) -> GatewayClient:
         try:
             hello_request: dict[str, Any] = {
@@ -488,6 +497,8 @@ class GatewayClient:
             }
             if auth_token is not None:
                 hello_request["auth_token"] = auth_token
+            if ui_registration is not None:
+                hello_request["ui"] = ui_registration.as_dict()
             await write_message(
                 writer,
                 hello_request,
@@ -539,6 +550,14 @@ class GatewayClient:
                 )
             except UpdateError as exc:
                 raise GatewayProtocolError(f"invalid gateway build identity: {exc}") from exc
+            ui_record: UiRecord | None = None
+            if "ui" in hello:
+                try:
+                    ui_record = UiRecord.from_dict(hello["ui"])
+                except ValueError as exc:
+                    raise GatewayProtocolError(f"gateway UI record is invalid: {exc}") from exc
+                if ui_record.ui_id != client_id:
+                    raise GatewayProtocolError("gateway returned a different UI ID")
             event_bus = EventBus()
             client = cls(
                 reader=reader,
@@ -563,6 +582,7 @@ class GatewayClient:
                 gateway_speaker_effects_loaded=speaker_effects_loaded,
                 gateway_speaker_effects=gateway_speaker_effects,
                 gateway_build=gateway_build,
+                ui_record=ui_record,
             )
             try:
                 client.sessions.extend(
@@ -658,8 +678,7 @@ class GatewayClient:
             or not isinstance(speakers, list)
             or len(speakers) > 1_000
             or any(
-                not isinstance(speaker, str) or not 0 < len(speaker) <= 100
-                for speaker in speakers
+                not isinstance(speaker, str) or not 0 < len(speaker) <= 100 for speaker in speakers
             )
         ):
             raise GatewayProtocolError("gateway speaker effects summary is invalid")
@@ -838,6 +857,136 @@ class GatewayClient:
             raise GatewayProtocolError("Gateway returned no web status")
         return result
 
+    async def config_summary(self) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "config_summary", "request_id": str(request_id)}, request_id
+        )
+        if result is None:
+            raise GatewayProtocolError("Gateway returned no configuration summary")
+        counts = (
+            result.get("setting_count"),
+            result.get("template_count"),
+            result.get("sensitive_count"),
+            result.get("unset_required_count"),
+        )
+        if (
+            any(
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+                for value in counts
+            )
+            or not isinstance(result.get("sources"), dict)
+            or not isinstance(result.get("scopes"), dict)
+        ):
+            raise GatewayProtocolError("Gateway returned an invalid configuration summary")
+        return result
+
+    async def config_list(self, filter_value: str | None = None) -> list[dict[str, object]]:
+        request_id = uuid4()
+        message: dict[str, object] = {
+            "type": "config_list",
+            "request_id": str(request_id),
+        }
+        if filter_value is not None:
+            message["filter"] = filter_value
+        result = await self._request(message, request_id)
+        settings = result.get("settings") if result is not None else None
+        if not isinstance(settings, list) or not all(
+            isinstance(setting, dict)
+            and isinstance(setting.get("key"), str)
+            and isinstance(setting.get("type"), str)
+            and isinstance(setting.get("scope"), str)
+            and isinstance(setting.get("category"), str)
+            and isinstance(setting.get("sensitive"), bool)
+            for setting in settings
+        ):
+            raise GatewayProtocolError("Gateway returned an invalid configuration list")
+        if any(setting["sensitive"] and "default" in setting for setting in settings):
+            raise GatewayProtocolError("Gateway exposed a sensitive configuration default")
+        return settings
+
+    async def config_show(self, key: str, *, ui: str | None = None) -> dict[str, object]:
+        request_id = uuid4()
+        message: dict[str, object] = {
+            "type": "config_show",
+            "request_id": str(request_id),
+            "key": key,
+        }
+        if ui is not None:
+            message["ui"] = ui
+        result = await self._request(message, request_id)
+        if (
+            result is None
+            or result.get("key") != key
+            or not isinstance(result.get("descriptor_key"), str)
+            or not isinstance(result.get("type"), str)
+            or not isinstance(result.get("scope"), str)
+            or not isinstance(result.get("consumers"), list)
+            or not isinstance(result.get("restart"), str)
+            or not isinstance(result.get("sensitive"), bool)
+            or not isinstance(result.get("source"), str)
+            or not isinstance(result.get("source_detail"), str)
+        ):
+            raise GatewayProtocolError("Gateway returned an invalid configuration record")
+        if result["sensitive"] is True and result.get("value") is not None:
+            raise GatewayProtocolError("Gateway exposed a sensitive configuration value")
+        if ui is not None:
+            ui_value = result.get("ui")
+            if (
+                not isinstance(ui_value, dict)
+                or not isinstance(ui_value.get("id"), str)
+                or not isinstance(ui_value.get("name"), str)
+            ):
+                raise GatewayProtocolError("Gateway returned an invalid configuration UI context")
+        return result
+
+    async def config_status(self) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "config_status", "request_id": str(request_id)}, request_id
+        )
+        revision = result.get("revision") if result is not None else None
+        uis = result.get("uis") if result is not None else None
+        counts = result.get("counts") if result is not None else None
+        states = {"current", "behind", "ahead", "unreported"}
+        if (
+            not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 0
+            or not isinstance(uis, list)
+            or not isinstance(counts, dict)
+            or set(counts) != states
+            or any(
+                not isinstance(counts[state], int)
+                or isinstance(counts[state], bool)
+                or counts[state] < 0
+                for state in states
+            )
+            or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("ui_id"), str)
+                or not isinstance(item.get("display_name"), str)
+                or item.get("client_type") not in {"terminal", "pwa"}
+                or item.get("convergence") not in states
+                or (
+                    item.get("applied_revision") is not None
+                    and (
+                        not isinstance(item["applied_revision"], int)
+                        or isinstance(item["applied_revision"], bool)
+                        or item["applied_revision"] < 0
+                    )
+                )
+                for item in uis
+            )
+            or sum(counts.values()) != len(uis)
+            or any(
+                counts[state] != sum(item.get("convergence") == state for item in uis)
+                for state in states
+            )
+        ):
+            raise GatewayProtocolError("Gateway returned an invalid configuration status")
+        return result
+
     async def pair_web_device(self, label: str) -> str:
         request_id = uuid4()
         result = await self._request(
@@ -858,6 +1007,86 @@ class GatewayClient:
         if not isinstance(devices, list) or not all(isinstance(item, dict) for item in devices):
             raise GatewayProtocolError("Gateway returned an invalid web device list")
         return devices
+
+    async def list_uis(self) -> list[dict[str, object]]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "list_uis", "request_id": str(request_id)}, request_id
+        )
+        values = result.get("uis") if result is not None else None
+        if not isinstance(values, list):
+            raise GatewayProtocolError("Gateway returned an invalid UI list")
+        try:
+            return [UiRecord.from_dict(value).as_dict() for value in values]
+        except ValueError as exc:
+            raise GatewayProtocolError(f"Gateway returned an invalid UI list: {exc}") from exc
+
+    async def show_ui(self, name: str) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "show_ui", "request_id": str(request_id), "name": name},
+            request_id,
+        )
+        value = result.get("ui") if result is not None else None
+        try:
+            return UiRecord.from_dict(value).as_dict()
+        except ValueError as exc:
+            raise GatewayProtocolError(f"Gateway returned an invalid UI record: {exc}") from exc
+
+    async def rename_ui(self, name: str) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "rename_ui", "request_id": str(request_id), "name": name},
+            request_id,
+        )
+        value = result.get("ui") if result is not None else None
+        try:
+            record = UiRecord.from_dict(value)
+        except ValueError as exc:
+            raise GatewayProtocolError(f"Gateway returned an invalid UI record: {exc}") from exc
+        if self.ui_record is None or record.ui_id != self.ui_record.ui_id:
+            raise GatewayProtocolError("Gateway renamed a different UI")
+        self.ui_record = record
+        return record.as_dict()
+
+    async def rename_other_ui(self, target: str, name: str) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {
+                "type": "rename_ui_target",
+                "request_id": str(request_id),
+                "target": target,
+                "name": name,
+            },
+            request_id,
+        )
+        value = result.get("ui") if result is not None else None
+        try:
+            return UiRecord.from_dict(value).as_dict()
+        except ValueError as exc:
+            raise GatewayProtocolError(f"Gateway returned an invalid UI record: {exc}") from exc
+
+    async def forget_ui(self, target: str, *, confirm: bool) -> dict[str, object]:
+        if not confirm:
+            raise ValueError("forgetting a UI requires explicit confirmation")
+        request_id = uuid4()
+        result = await self._request(
+            {
+                "type": "forget_ui",
+                "request_id": str(request_id),
+                "target": target,
+                "confirm": True,
+            },
+            request_id,
+        )
+        value = result.get("ui") if result is not None else None
+        try:
+            record = UiRecord.from_dict(value)
+        except ValueError as exc:
+            raise GatewayProtocolError(f"Gateway returned an invalid UI record: {exc}") from exc
+        if self.ui_record is not None and record.ui_id == self.ui_record.ui_id:
+            self.ui_record = None
+        return record.as_dict()
 
     async def revoke_web_device(self, device_id: UUID) -> None:
         request_id = uuid4()
@@ -941,8 +1170,10 @@ class GatewayClient:
         if expected_revision is not None:
             message["expected_revision"] = expected_revision
         result = await self._request(message, request_id)
-        if result is None or not isinstance(result.get("revision"), int) or not isinstance(
-            result.get("enabled"), bool
+        if (
+            result is None
+            or not isinstance(result.get("revision"), int)
+            or not isinstance(result.get("enabled"), bool)
         ):
             raise GatewayProtocolError("Gateway returned invalid managed UI settings")
         return result
@@ -1263,11 +1494,38 @@ class GatewayUiRuntime:
     async def web_status(self) -> dict[str, Any]:
         return await self.client.web_status()
 
+    async def config_summary(self) -> dict[str, object]:
+        return await self.client.config_summary()
+
+    async def config_list(self, filter_value: str | None = None) -> list[dict[str, object]]:
+        return await self.client.config_list(filter_value)
+
+    async def config_show(self, key: str, *, ui: str | None = None) -> dict[str, object]:
+        return await self.client.config_show(key, ui=ui)
+
+    async def config_status(self) -> dict[str, object]:
+        return await self.client.config_status()
+
     async def pair_web_device(self, label: str) -> str:
         return await self.client.pair_web_device(label)
 
     async def list_web_devices(self) -> list[dict[str, Any]]:
         return await self.client.list_web_devices()
+
+    async def list_uis(self) -> list[dict[str, object]]:
+        return await self.client.list_uis()
+
+    async def show_ui(self, name: str) -> dict[str, object]:
+        return await self.client.show_ui(name)
+
+    async def rename_ui(self, name: str) -> dict[str, object]:
+        return await self.client.rename_ui(name)
+
+    async def rename_other_ui(self, target: str, name: str) -> dict[str, object]:
+        return await self.client.rename_other_ui(target, name)
+
+    async def forget_ui(self, target: str, *, confirm: bool) -> dict[str, object]:
+        return await self.client.forget_ui(target, confirm=confirm)
 
     async def revoke_web_device(self, device_id: UUID) -> None:
         await self.client.revoke_web_device(device_id)
@@ -1515,8 +1773,32 @@ async def run_gateway_ui(
     from tfr.ui_settings import LocalUiSettingsStore
 
     resume_gateway_id, resume_world, update_restart = _restart_state_from_environment()
+    build = current_build()
+    platform_name = socket.gethostname().strip()
+    if not platform_name or not platform_name.isprintable():
+        platform_name = "Unknown device"
+    ui_registration = UiRegistration(
+        client_type="terminal",
+        platform=platform_name[:80],
+        versions=tuple(
+            sorted(
+                {
+                    "protocol": str(build.protocol),
+                    "tfr": build.version,
+                    **({"commit": build.commit} if build.commit is not None else {}),
+                }.items()
+            )
+        ),
+        capabilities=tuple(
+            sorted(capability.value for capability in TUI_PRESENTATION_CAPABILITIES)
+        ),
+    )
     connection_options = {
         "show_nospoof_prefix": configuration.main.ui.show_nospoof_prefix,
+        "client_id": load_or_create_native_ui_id(
+            configuration.main.managed_settings.state_directory
+        ),
+        "ui_registration": ui_registration,
         "gateway_id": resume_gateway_id,
         # A replacement UI needs retained history to rebuild its in-memory display.
         "after_cursor": None,
@@ -1613,9 +1895,7 @@ async def run_gateway_ui(
         update_config=configuration.main.updates,
         plugin_update_checker=plugin_update_checker,
     )
-    local_ui_settings = LocalUiSettingsStore(
-        configuration.main.managed_settings.state_directory
-    )
+    local_ui_settings = LocalUiSettingsStore(configuration.main.managed_settings.state_directory)
     mouse_mode = local_ui_settings.mouse_mode or configuration.main.ui.mouse_mode
     tui = TfrTui(
         sessions=client.sessions,  # type: ignore[arg-type]
@@ -1667,6 +1947,7 @@ async def run_gateway_ui(
     runtime.notify = lambda text: tui.add_notice(tui.active_alias, text)
     if hasattr(tui, "apply_shared_ui_settings"):
         client.ui_settings_handler = tui.apply_shared_ui_settings
+
     def restart_after_update() -> None:
         tui.update_restart_requested = True
         if tui.application.is_running:

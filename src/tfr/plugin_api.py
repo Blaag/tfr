@@ -7,6 +7,14 @@ from tfr.clear_effects import (
     ScreenClearContext,
     terminal_cell_width,
 )
+from tfr.configuration_registry import (
+    NO_DEFAULT,
+    RestartRequirement,
+    SettingDescriptor,
+    SettingScope,
+    SettingType,
+    SettingValidation,
+)
 from tfr.events import Direction, Event, EventKind, Provenance
 from tfr.plugins import (
     PLUGIN_API_VERSION,
@@ -19,6 +27,7 @@ from tfr.plugins import (
     EffectDemoSample,
     EventPatch,
     PluginCommandContext,
+    PluginConfiguration,
     PluginLifecycleEvent,
     PluginRegistrar,
     PluginRegistrationError,
@@ -80,7 +89,9 @@ __all__ = (
     "EventKind",
     "EventPatch",
     "ForegroundKeyframe",
+    "NO_DEFAULT",
     "PluginCommandContext",
+    "PluginConfiguration",
     "PluginLifecycleEvent",
     "PluginRegistrar",
     "PluginRegistrationError",
@@ -91,6 +102,11 @@ __all__ = (
     "PresentationVariant",
     "Provenance",
     "ScreenClearContext",
+    "RestartRequirement",
+    "SettingDescriptor",
+    "SettingScope",
+    "SettingType",
+    "SettingValidation",
     "TextDecoration",
     "TextEffectKind",
     "SweepTrailMode",

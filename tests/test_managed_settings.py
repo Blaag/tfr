@@ -14,8 +14,10 @@ from tfr.config import (
     LoggingConfig,
     MainConfig,
     ManagedSettingsConfig,
+    UiConfig,
     UpdateConfig,
     WorldConfig,
+    WorldDefaults,
     WorldsConfig,
 )
 from tfr.events import Direction, Event, EventKind
@@ -119,6 +121,46 @@ async def test_gateway_runtime_uses_managed_world_configuration(tmp_path: Path) 
         assert alpha.config.gag.patterns == ("from base", "managed")
         assert runtime.managed_settings is not None
         assert runtime.managed_settings.revision == 1
+        assert runtime.configuration_values is not None
+        effective_gags = runtime.configuration_values.show("worlds.alpha.gag.patterns")
+        assert effective_gags["value"] == ["from base", "managed"]
+        assert effective_gags["source"] == "managed"
+    finally:
+        await runtime.stop()
+
+
+async def test_inventory_matches_derived_world_and_update_runtime_values(
+    tmp_path: Path,
+) -> None:
+    bundle = configuration_bundle(tmp_path)
+    main = bundle.main.model_copy(
+        update={
+            "ui": UiConfig(scrollback_lines=777, show_nospoof_prefix=True),
+            "updates": UpdateConfig(enabled=False, channel="candidate"),
+        }
+    )
+    configured_worlds = bundle.worlds.model_copy(
+        update={"defaults": WorldDefaults(encoding="cp1252", reconnect=False)}
+    )
+    runtime = await GatewayRuntime.from_configuration(
+        bundle.model_copy(update={"main": main, "worlds": configured_worlds})
+    )
+    try:
+        assert runtime.configuration_values is not None
+        alpha = next(session for session in runtime.sessions if session.world == "alpha")
+        expected = {
+            "worlds.alpha.encoding": alpha.encoding,
+            "worlds.alpha.reconnect": alpha.reconnect,
+            "worlds.alpha.scrollback_lines": runtime.history.limits["alpha"],
+            "worlds.alpha.provenance.show_prefix": alpha.show_nospoof_prefix,
+        }
+        for key, runtime_value in expected.items():
+            setting = runtime.configuration_values.show(key)
+            assert setting["value"] == runtime_value
+            assert setting["source"] == "runtime"
+        manifest = runtime.configuration_values.show("updates.manifest_url")
+        assert manifest["value"] == str(main.updates.manifest_url)
+        assert manifest["source"] == "jsonc"
     finally:
         await runtime.stop()
 
@@ -140,17 +182,39 @@ async def test_gateway_gag_mutation_persists_then_hot_swaps_policy(tmp_path: Pat
         assert runtime.gag_policy is not None
         assert runtime.gag_policy.allows(hidden) is True
 
-        result = await runtime.manage_gag(
-            "alpha", "add", pattern=r"^bing", expected_revision=0
-        )
+        result = await runtime.manage_gag("alpha", "add", pattern=r"^bing", expected_revision=0)
 
         assert result["revision"] == 1
         assert result["restart_required"] is False
+        assert runtime.configuration_values is not None
+        inventory = runtime.configuration_values.show("worlds.alpha.gag.patterns")
+        assert inventory["value"] == ["from base", r"^bing"]
+        assert inventory["source"] == "managed"
         assert runtime.gag_policy.allows(hidden) is False
         reloaded = ManagedSettingsStore(
-            runtime.managed_settings.state_directory, worlds()  # type: ignore[union-attr]
+            runtime.managed_settings.state_directory,
+            worlds(),  # type: ignore[union-attr]
         )
         assert reloaded.list_gag_patterns("alpha").patterns == ("from base", r"^bing")
+        shared = await runtime.manage_shared_ui_setting(
+            "spellcheck", "set", enabled=True, expected_revision=1
+        )
+        assert shared["revision"] == 2
+        spellcheck = runtime.configuration_values.show("ui.spellcheck.enabled")
+        assert spellcheck["value"] is True
+        assert spellcheck["source"] == "managed"
+        reset = await runtime.manage_gag("alpha", "reset", expected_revision=2)
+        assert reset["revision"] == 3
+        restored = runtime.configuration_values.show("worlds.alpha.gag.patterns")
+        assert restored["value"] == ["from base"]
+        assert restored["source"] == "jsonc"
+        assert restored["source_detail"] == str(tmp_path / "worlds.jsonc")
+        assert runtime.gag_policy.allows(hidden) is True
+        reset_store = ManagedSettingsStore(
+            runtime.managed_settings.state_directory,
+            worlds(),  # type: ignore[union-attr]
+        )
+        assert reset_store.list_gag_patterns("alpha").patterns == ("from base",)
     finally:
         await runtime.stop()
 
@@ -166,9 +230,7 @@ async def test_gateway_reports_restart_when_persisted_policy_swap_fails(
 
     monkeypatch.setattr(runtime.gag_policy, "replace_configuration", fail_swap)
     try:
-        result = await runtime.manage_gag(
-            "alpha", "add", pattern="persisted", expected_revision=0
-        )
+        result = await runtime.manage_gag("alpha", "add", pattern="persisted", expected_revision=0)
 
         assert result["revision"] == 1
         assert result["restart_required"] is True
@@ -177,9 +239,13 @@ async def test_gateway_reports_restart_when_persisted_policy_swap_fails(
             "from base",
             "persisted",
         )
+        assert runtime.configuration_values is not None
+        active = runtime.configuration_values.show("worlds.alpha.gag.patterns")
+        assert active["value"] == ["from base"]
+        assert active["source"] == "runtime"
+        assert active["source_detail"] == ("active runtime configuration; Gateway restart required")
         assert any(
-            entry.code == "runtime_swap_failed"
-            for entry in runtime.plugins.diagnostics.entries()
+            entry.code == "runtime_swap_failed" for entry in runtime.plugins.diagnostics.entries()
         )
     finally:
         await runtime.stop()

@@ -4,6 +4,7 @@ import pytest
 
 from tfr.plugin_api import (
     MAX_SCREEN_CLEAR_DURATION_SECONDS,
+    NO_DEFAULT,
     PLUGIN_API_VERSION,
     BossViewContext,
     BossViewEvent,
@@ -11,6 +12,11 @@ from tfr.plugin_api import (
     BossWorldStatus,
     EffectDemo,
     EffectDemoSample,
+    RestartRequirement,
+    SettingDescriptor,
+    SettingScope,
+    SettingType,
+    SettingValidation,
     escape_world_text,
 )
 
@@ -26,6 +32,12 @@ def test_public_plugin_api_exposes_version_and_world_text_escaping() -> None:
     assert BossWorldStatus
     assert EffectDemo
     assert EffectDemoSample
+    assert NO_DEFAULT
+    assert RestartRequirement
+    assert SettingDescriptor
+    assert SettingScope
+    assert SettingType
+    assert SettingValidation
     assert escape_world_text(text, "bare") == text
     assert escape_world_text(text, "tinymux") == r"%ba%t\[\%\]\{x\}\(\)\,\;\#\\"
     assert escape_world_text(text, "tinymush") == r"%ba%t\[\%\]\{x\}(),\;#\\"

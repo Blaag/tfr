@@ -30,6 +30,7 @@ from tfr.diagnostics import DiagnosticBuffer
 from tfr.events import Actor, ActorType, Confidence, Direction, Event, EventKind, Provenance
 from tfr.gateway import GatewayRuntime, HistorySubscription, SequencedEvent
 from tfr.gateway_devices import DeviceRecord, DeviceStore
+from tfr.gateway_uis import UiRecord, UiStore
 from tfr.multiline import PreparedMultiline, prepare_multiline_text
 from tfr.plugins import PluginManager
 from tfr.presentation import effect_programs_as_dict
@@ -223,6 +224,7 @@ class WebGatewayManager:
         state_directory: Path | str,
         snapshot_events: int,
         speaking_streaks_enabled: bool,
+        ui_store: UiStore | None = None,
         transport: str = "tailscale",
         ssl_context: ssl.SSLContext | None = None,
     ) -> None:
@@ -242,6 +244,7 @@ class WebGatewayManager:
         self.state_directory = Path(state_directory).expanduser()
         self.snapshot_events = snapshot_events
         self.speaking_streaks_enabled = speaking_streaks_enabled
+        self.ui_store = ui_store
         self._server: WebGatewayServer | None = None
         self._lock = asyncio.Lock()
         self._state_path = self.state_directory / "provisioning.json"
@@ -377,9 +380,7 @@ class WebGatewayManager:
     async def _start_server(self, origin: str) -> None:
         if self._server is not None:
             if self._server.origin != origin.rstrip("/"):
-                raise ValueError(
-                    "the running PWA origin differs from the requested origin"
-                )
+                raise ValueError("the running PWA origin differs from the requested origin")
             return
         server = WebGatewayServer(
             self.runtime,
@@ -389,6 +390,7 @@ class WebGatewayManager:
             state_directory=self.state_directory,
             snapshot_events=self.snapshot_events,
             speaking_streaks_enabled=self.speaking_streaks_enabled,
+            ui_store=self.ui_store,
             transport=self.transport,
             ssl_context=self._ssl_context,
         )
@@ -825,6 +827,7 @@ class WebGatewayServer:
         state_directory: Any,
         snapshot_events: int,
         speaking_streaks_enabled: bool = True,
+        ui_store: UiStore | None = None,
         transport: str = "tailscale",
         ssl_context: ssl.SSLContext | None = None,
     ) -> None:
@@ -863,6 +866,7 @@ class WebGatewayServer:
         self.port = port
         self.snapshot_events = snapshot_events
         self.speaking_streaks_enabled = speaking_streaks_enabled
+        self.ui_store = ui_store
         self.devices = DeviceStore(state_directory, self.origin)
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -912,6 +916,14 @@ class WebGatewayServer:
                 descriptor["active"] = False
             else:
                 descriptor["active"] = bool(self._active_sockets.get(device_id))
+            try:
+                ui_id = UUID(str(descriptor["ui_id"]))
+            except (KeyError, TypeError, ValueError, AttributeError):
+                pass
+            else:
+                ui_record = self.ui_store.get(ui_id) if self.ui_store is not None else None
+                if ui_record is not None:
+                    descriptor["ui_name"] = ui_record.display_name
         return sorted(
             descriptors,
             key=lambda item: (bool(item["active"]), str(item.get("last_used_at", ""))),
@@ -1104,16 +1116,18 @@ class WebGatewayServer:
         refreshed = False
         if device is not None:
             device, refreshed = await self.devices.mark_used(device.device_id)
-        response = self._json_response(
-            {
-                "paired": device is not None,
-                "device": (
-                    {"id": str(device.device_id), "label": device.label, "scope": device.scope}
-                    if device is not None
-                    else None
-                ),
-            }
-        )
+        ui_record = await self._register_pwa_ui(device) if device is not None else None
+        session_value: dict[str, Any] = {
+            "paired": device is not None,
+            "device": (
+                {"id": str(device.device_id), "label": device.label, "scope": device.scope}
+                if device is not None
+                else None
+            ),
+        }
+        if ui_record is not None:
+            session_value["ui"] = self._ui_descriptor(ui_record)
+        response = self._json_response(session_value)
         if device is not None and refreshed and token is not None:
             self._set_session_cookie(response, token, device)
         return response
@@ -1149,6 +1163,7 @@ class WebGatewayServer:
         if safe_message is None:
             raise web.HTTPBadRequest(text="Unsupported diagnostic code")
         try:
+            ui_record = self.ui_store.get(device.ui_id) if self.ui_store is not None else None
             self.diagnostics.record(
                 severity=value.get("severity", "warning"),
                 component=component,
@@ -1159,6 +1174,7 @@ class WebGatewayServer:
                 event_id=value.get("event_id"),
                 device_id_suffix=str(device.device_id)[-8:],
                 shell_version=value.get("shell_version"),
+                ui_name=ui_record.display_name if ui_record is not None else None,
             )
         except ValueError:
             raise web.HTTPBadRequest(text="Invalid diagnostic report") from None
@@ -1239,9 +1255,14 @@ class WebGatewayServer:
             )
         except ValueError as exc:
             return self._json_response({"error": str(exc)}, status=401)
-        response = self._json_response(
-            {"paired": True, "device": {"id": str(device.device_id), "label": device.label}}
-        )
+        ui_record = await self._register_pwa_ui(device)
+        paired_value: dict[str, Any] = {
+            "paired": True,
+            "device": {"id": str(device.device_id), "label": device.label},
+        }
+        if ui_record is not None:
+            paired_value["ui"] = self._ui_descriptor(ui_record)
+        response = self._json_response(paired_value)
         self._set_session_cookie(response, token, device)
         return response
 
@@ -1284,12 +1305,30 @@ class WebGatewayServer:
                 status=303,
                 headers={"Location": "/?pairing=invalid", "Cache-Control": "no-store"},
             )
+        await self._register_pwa_ui(device)
         response = web.Response(
             status=303,
             headers={"Location": "/?pairing=complete", "Cache-Control": "no-store"},
         )
         self._set_session_cookie(response, token, device)
         return response
+
+    async def _register_pwa_ui(self, device: DeviceRecord) -> UiRecord | None:
+        if self.ui_store is None:
+            return None
+        return await self.ui_store.register(
+            ui_id=device.ui_id,
+            client_type="pwa",
+            platform=device.label,
+            versions={"web_protocol": str(WEB_PROTOCOL_VERSION)},
+            capabilities=(),
+        )
+
+    @staticmethod
+    def _ui_descriptor(record: UiRecord | None) -> dict[str, str] | None:
+        if record is None:
+            return None
+        return {"id": str(record.ui_id), "name": record.display_name}
 
     async def _logout(self, request: web.Request) -> web.Response:
         self._validate_public_request(request, require_origin=True)
@@ -1999,6 +2038,12 @@ class WebGatewayServer:
                     reason = status
                     break
                 try:
+                    device = self.devices.authenticate_by_id(transfer.device_id)
+                    ui_record = (
+                        self.ui_store.get(device.ui_id)
+                        if self.ui_store is not None and device is not None
+                        else None
+                    )
                     self.runtime.submit_command_nowait(
                         world=transfer.world,
                         text=command,
@@ -2012,6 +2057,8 @@ class WebGatewayServer:
                             "paste_line": line_number,
                             "paste_total_lines": transfer.prepared.line_count,
                         },
+                        ui_id=device.ui_id if device is not None else None,
+                        ui_name=ui_record.display_name if ui_record is not None else None,
                     )
                 except (UnknownSessionError, RuntimeError, ValueError):
                     reason = "submission_failed"
@@ -2113,11 +2160,20 @@ class WebGatewayServer:
                         )
                         if active:
                             try:
+                                ui_record = (
+                                    self.ui_store.get(device.ui_id)
+                                    if self.ui_store is not None
+                                    else None
+                                )
                                 self.runtime.submit_command_nowait(
                                     world=world,
                                     text=text,
                                     client_id=f"web:{device.device_id}",
                                     request_id=request_id,
+                                    ui_id=device.ui_id,
+                                    ui_name=(
+                                        ui_record.display_name if ui_record is not None else None
+                                    ),
                                 )
                             except UnknownSessionError:
                                 response = self._ack(
