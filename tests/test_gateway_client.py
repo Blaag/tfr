@@ -34,6 +34,7 @@ from tfr.gateway_client import (
     remote_speaker_effects_warning,
     run_gateway_ui,
 )
+from tfr.gateway_configuration import GatewayConfigurationStore
 from tfr.gateway_protocol import GatewayProtocolError, event_message, read_message, write_message
 from tfr.gateway_transport import (
     create_gateway_client_tls_context,
@@ -702,6 +703,83 @@ async def test_configuration_status_reports_named_ui_convergence(tmp_path: Path)
             "current",
             "unreported",
         ]
+    finally:
+        await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+        socket_path.parent.rmdir()
+
+
+async def test_gateway_configuration_mutation_preview_history_and_undo(tmp_path: Path) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    registry = core_configuration_registry()
+    runtime.configuration_values = ConfigurationValues(registry)
+    runtime.gateway_configuration = GatewayConfigurationStore(tmp_path / "gateway-state", registry)
+    ui_store = UiStore(tmp_path / "ui-state")
+    ui_id = UUID("11111111-1111-4111-8111-111111111111")
+    socket_path = Path("/tmp") / f"tfr-config-mutation-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path, ui_store=ui_store)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(
+        socket_path,
+        client_id=ui_id,
+        ui_registration=UiRegistration(
+            client_type="terminal",
+            platform="office",
+            versions={},
+            capabilities=(),
+        ),
+    )
+    client.start()
+    try:
+        preview = await client.config_mutate(
+            "set",
+            "ui.spellcheck.enabled",
+            value=True,
+            scope="shared",
+            target=None,
+            expected_revision=0,
+            confirm=False,
+        )
+        assert preview["requires_confirmation"] is True
+        assert preview["restart"] == "live"
+        assert runtime.gateway_configuration.revision == 0
+
+        committed = await client.config_mutate(
+            "set",
+            "ui.spellcheck.enabled",
+            value=True,
+            scope="shared",
+            target=None,
+            expected_revision=0,
+            confirm=True,
+        )
+        assert committed["revision"] == 1
+        assert (await client.config_show("ui.spellcheck.enabled"))["value"] is True
+        with pytest.raises(ValueError, match="revision is 1, not 0"):
+            await client.config_mutate(
+                "set",
+                "ui.speaking_streaks.enabled",
+                value=False,
+                scope="shared",
+                target=None,
+                expected_revision=0,
+                confirm=True,
+            )
+
+        changes = await client.config_changes()
+        assert changes["changes"][0]["actor_ui_name"] == "office · Terminal"
+        undo_preview = await client.config_undo(expected_revision=1, confirm=False)
+        assert undo_preview["requires_confirmation"] is True
+        undone = await client.config_undo(expected_revision=1, confirm=True)
+        assert undone["revision"] == 2
+        shown = await client.config_show("ui.spellcheck.enabled")
+        assert shown["value"] is False
+        assert shown["source"] == "default"
     finally:
         await client.stop()
         await server.stop()
@@ -1795,6 +1873,91 @@ async def test_client_connects_to_authenticated_tls_gateway(tmp_path: Path) -> N
         await history.stop()
         await bus.close()
     socket_path.parent.rmdir()
+
+
+async def test_remote_ui_can_change_only_its_own_ui_scoped_configuration(
+    tmp_path: Path,
+) -> None:
+    ca = trustme.CA()
+    certificate = ca.issue_cert("localhost")
+    ca_path = tmp_path / "ca.pem"
+    certificate_path = tmp_path / "gateway.pem"
+    key_path = tmp_path / "gateway.key"
+    ca.cert_pem.write_to_path(ca_path)
+    certificate.cert_chain_pems[0].write_to_path(certificate_path)
+    certificate.private_key_pem.write_to_path(key_path)
+    key_path.chmod(0o600)
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    registry = core_configuration_registry()
+    runtime.configuration_values = ConfigurationValues(registry)
+    runtime.gateway_configuration = GatewayConfigurationStore(tmp_path / "settings", registry)
+    ui_store = UiStore(tmp_path / "uis")
+    socket_path = Path("/tmp") / f"tfr-config-permission-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(
+        runtime,  # type: ignore[arg-type]
+        socket_path,
+        tcp_host="127.0.0.1",
+        tcp_port=0,
+        tcp_auth_token="a" * 64,
+        tcp_ssl_context=create_gateway_server_tls_context(certificate_path, key_path),
+        ui_store=ui_store,
+    )
+    await server.start()
+    port = int(server.tcp_addresses[0][1])
+    ui_id = UUID("11111111-1111-4111-8111-111111111111")
+    client = await GatewayClient.connect_tcp(
+        "127.0.0.1",
+        port,
+        auth_token="a" * 64,
+        tls_context=create_gateway_client_tls_context(ca_path),
+        server_hostname="localhost",
+        client_id=ui_id,
+        ui_registration=UiRegistration(
+            client_type="terminal",
+            platform="remote",
+            versions={},
+            capabilities=(),
+        ),
+    )
+    client.start()
+    try:
+        own = await client.config_mutate(
+            "set",
+            "ui.mouse_mode",
+            value="terminal",
+            scope="ui",
+            target=None,
+            expected_revision=0,
+            confirm=True,
+        )
+        assert own["revision"] == 1
+        assert runtime.gateway_configuration.get(
+            "ui.mouse_mode", scope="ui", target=str(ui_id)
+        ) == (True, "terminal")
+        shown = await client.config_show("ui.mouse_mode", ui="remote · Terminal")
+        assert shown["value"] == "terminal"
+        assert shown["source"] == "managed"
+        with pytest.raises(ValueError, match="requires owner/admin access"):
+            await client.config_mutate(
+                "set",
+                "ui.spellcheck.enabled",
+                value=True,
+                scope="shared",
+                target=None,
+                expected_revision=1,
+                confirm=True,
+            )
+        with pytest.raises(ValueError, match="history requires owner/admin access"):
+            await client.config_changes()
+    finally:
+        await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+        socket_path.parent.rmdir()
 
 
 async def test_tls_gateway_rejects_wrong_token_before_hello(tmp_path: Path) -> None:

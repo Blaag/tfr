@@ -1686,6 +1686,59 @@ function discardEventsBeforeSnapshotGap(world) {
   state.eventIds.set(world.world, new Set(retained.map((event) => event.id)));
 }
 
+function applyGatewayConfiguration(envelope) {
+  if (
+    !envelope ||
+    !Number.isSafeInteger(envelope.revision) ||
+    envelope.revision < 0 ||
+    !envelope.settings ||
+    typeof envelope.settings !== "object" ||
+    Array.isArray(envelope.settings) ||
+    !envelope.requirements ||
+    typeof envelope.requirements !== "object" ||
+    Array.isArray(envelope.requirements)
+  ) {
+    return;
+  }
+  const supported = new Set([
+    "ui.speaking_streaks.enabled",
+    "ui.spellcheck.enabled",
+    "ui.show_nospoof_prefix",
+    "updates.enabled",
+    "updates.channel",
+    "updates.manifest_url",
+    "updates.check_interval_seconds",
+    "updates.initial_delay_seconds",
+    "updates.jitter_seconds",
+    "updates.timeout_seconds",
+  ]);
+  const issues = Object.keys(envelope.settings)
+    .filter((key) => !supported.has(key))
+    .slice(0, 100)
+    .map((key) => `unsupported setting: ${key}`);
+  if (typeof envelope.settings["ui.speaking_streaks.enabled"] === "boolean") {
+    state.speakingStreaksEnabled = envelope.settings["ui.speaking_streaks.enabled"];
+    if (!state.speakingStreaksEnabled) {
+      state.comboStreaks.clear();
+      cancelComboVisuals();
+    }
+  }
+  if (typeof envelope.settings["ui.spellcheck.enabled"] === "boolean") {
+    elements.commandInput.spellcheck = envelope.settings["ui.spellcheck.enabled"];
+  }
+  if (connection.socket?.readyState === WebSocket.OPEN) {
+    connection.socket.send(
+      JSON.stringify({
+        type: "configuration_applied",
+        request_id: crypto.randomUUID(),
+        revision: envelope.revision,
+        status: issues.length ? "unsupported" : "applied",
+        issues,
+      }),
+    );
+  }
+}
+
 function handleMessage(message) {
   if (!message || message.protocol !== 1 || typeof message.type !== "string") return;
   if (message.type.startsWith("paste_") && handlePasteUpdate(message)) return;
@@ -1707,6 +1760,7 @@ function handleMessage(message) {
     state.effectDemos = validatedEffectDemos(message.effect_demos);
     state.screenClearConfig = validatedScreenClearConfig(message.screen_clear);
     state.speakingStreaksEnabled = message.speaking_streaks_enabled !== false;
+    applyGatewayConfiguration(message.configuration);
     if (!state.speakingStreaksEnabled) {
       state.comboStreaks.clear();
       cancelComboVisuals();
@@ -1730,6 +1784,10 @@ function handleMessage(message) {
       state.comboStreaks.clear();
       cancelComboVisuals();
     }
+    return;
+  }
+  if (message.type === "configuration") {
+    applyGatewayConfiguration(message);
     return;
   }
   if (message.type === "event") {

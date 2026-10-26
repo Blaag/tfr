@@ -213,6 +213,7 @@ class UiStore:
         self.path = self.state_directory / "uis.json"
         self._clock = clock or (lambda: datetime.now(UTC))
         self._records: dict[UUID, UiRecord] = {}
+        self._configuration_reports: dict[UUID, tuple[int, str, tuple[str, ...]]] = {}
         self._lock = asyncio.Lock()
         self._load()
 
@@ -221,6 +222,9 @@ class UiStore:
 
     def records(self) -> tuple[UiRecord, ...]:
         return tuple(sorted(self._records.values(), key=lambda item: item.display_name.casefold()))
+
+    def configuration_report(self, ui_id: UUID) -> tuple[int, str, tuple[str, ...]] | None:
+        return self._configuration_reports.get(ui_id)
 
     def find_by_name(self, display_name: str) -> UiRecord | None:
         normalized = _bounded_text(display_name, "display name", MAX_UI_NAME_CHARACTERS).casefold()
@@ -275,7 +279,11 @@ class UiStore:
                     versions=validated.versions,
                     capabilities=validated.capabilities,
                     last_seen_at=max(now, previous.last_seen_at),
-                    applied_config_revision=applied_config_revision,
+                    applied_config_revision=(
+                        applied_config_revision
+                        if applied_config_revision is not None
+                        else previous.applied_config_revision
+                    ),
                 )
             self._records[record.ui_id] = record
             try:
@@ -298,6 +306,41 @@ class UiStore:
             capabilities=registration.capabilities,
             applied_config_revision=registration.applied_config_revision,
         )
+
+    async def acknowledge_configuration(self, ui_id: UUID, revision: int) -> UiRecord:
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+            raise ValueError("UI applied configuration revision is invalid")
+        async with self._lock:
+            previous = self._records.get(ui_id)
+            if previous is None:
+                raise ValueError(f"unknown UI ID: {ui_id}")
+            if (
+                previous.applied_config_revision is not None
+                and revision < previous.applied_config_revision
+            ):
+                return previous
+            record = replace(previous, applied_config_revision=revision)
+            self._records[ui_id] = record
+            try:
+                self._save()
+            except BaseException:
+                self._records[ui_id] = previous
+                raise
+            return record
+
+    async def report_configuration(
+        self, ui_id: UUID, revision: int, status: str, issues: tuple[str, ...]
+    ) -> UiRecord:
+        if status == "applied":
+            record = await self.acknowledge_configuration(ui_id, revision)
+        else:
+            record = self._records.get(ui_id)
+            if record is None:
+                raise ValueError(f"unknown UI ID: {ui_id}")
+        previous_report = self._configuration_reports.get(ui_id)
+        if previous_report is None or revision >= previous_report[0]:
+            self._configuration_reports[ui_id] = (revision, status, issues)
+        return record
 
     async def rename(self, ui_id: UUID, display_name: str) -> UiRecord:
         validated_name = _bounded_text(display_name, "display name", MAX_UI_NAME_CHARACTERS)
