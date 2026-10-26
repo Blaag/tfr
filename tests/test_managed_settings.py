@@ -20,8 +20,10 @@ from tfr.config import (
     WorldDefaults,
     WorldsConfig,
 )
+from tfr.core_settings import core_configuration_registry
 from tfr.events import Direction, Event, EventKind
 from tfr.gateway import GatewayRuntime
+from tfr.gateway_configuration import GatewayConfigurationStore
 from tfr.managed_settings import (
     MAX_MANAGED_SETTINGS_BYTES,
     ManagedSettingsError,
@@ -121,6 +123,10 @@ async def test_gateway_runtime_uses_managed_world_configuration(tmp_path: Path) 
         assert alpha.config.gag.patterns == ("from base", "managed")
         assert runtime.managed_settings is not None
         assert runtime.managed_settings.revision == 1
+        assert runtime.gateway_configuration is not None
+        assert runtime.gateway_configuration.get(
+            "worlds.alpha.gag.patterns", scope="world", target="alpha"
+        ) == (True, ["from base", "managed"])
         assert runtime.configuration_values is not None
         effective_gags = runtime.configuration_values.show("worlds.alpha.gag.patterns")
         assert effective_gags["value"] == ["from base", "managed"]
@@ -161,6 +167,44 @@ async def test_inventory_matches_derived_world_and_update_runtime_values(
         manifest = runtime.configuration_values.show("updates.manifest_url")
         assert manifest["value"] == str(main.updates.manifest_url)
         assert manifest["source"] == "jsonc"
+    finally:
+        await runtime.stop()
+
+
+async def test_gateway_configuration_is_applied_before_runtime_construction(
+    tmp_path: Path,
+) -> None:
+    bundle = configuration_bundle(tmp_path)
+    desired = GatewayConfigurationStore(
+        bundle.main.managed_settings.state_directory,
+        core_configuration_registry(),
+    )
+    desired.set(
+        "worlds.alpha.encoding",
+        "cp1252",
+        scope="world",
+        target="alpha",
+        expected_revision=0,
+        actor_ui_id="owner",
+        actor_ui_name="Owner",
+    )
+    desired.set(
+        "ui.spellcheck.enabled",
+        True,
+        scope="shared",
+        target=None,
+        expected_revision=1,
+        actor_ui_id="owner",
+        actor_ui_name="Owner",
+    )
+
+    runtime = await GatewayRuntime.from_configuration(bundle)
+    try:
+        alpha = next(session for session in runtime.sessions if session.world == "alpha")
+        assert alpha.encoding == "cp1252"
+        assert runtime.shared_ui_settings()["spellcheck_enabled"] is True
+        assert runtime.gateway_configuration is not None
+        assert runtime.gateway_configuration.revision == 2
     finally:
         await runtime.stop()
 

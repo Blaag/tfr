@@ -1125,6 +1125,105 @@ async def test_config_show_identifies_managed_override_revision() -> None:
     assert "Source: managed (managed override revision 7)" in text
 
 
+async def test_config_mutations_preview_confirm_list_and_undo() -> None:
+    class MutationRuntime:
+        def __init__(self) -> None:
+            self.revision = 0
+
+        async def config_show(self, key: str, *, ui: str | None = None) -> dict[str, object]:
+            return {
+                "key": key,
+                "scope": "shared",
+                "restart": "live",
+                "consumers": ["native-ui", "pwa"],
+                "type": "boolean",
+                "sensitive": False,
+                "source": "default",
+                "source_detail": "built-in default",
+                "value": False,
+            }
+
+        async def config_status(self) -> dict[str, object]:
+            return {"revision": self.revision, "counts": {}, "uis": []}
+
+        async def config_mutate(
+            self,
+            operation: str,
+            key: str,
+            *,
+            value: object = None,
+            scope: str,
+            target: str | None,
+            expected_revision: int,
+            confirm: bool,
+        ) -> dict[str, object]:
+            assert operation in {"set", "reset"}
+            assert key == "ui.spellcheck.enabled"
+            assert value is (True if operation == "set" else None)
+            assert scope == "shared"
+            assert target is None
+            assert expected_revision == self.revision
+            if confirm:
+                self.revision += 1
+            return {
+                "revision": self.revision,
+                "operation": operation,
+                "restart": "live",
+                "requires_confirmation": not confirm,
+            }
+
+        async def config_changes(self, limit: int = 50) -> dict[str, object]:
+            assert limit == 5
+            return {
+                "revision": self.revision,
+                "changes": [
+                    {
+                        "revision": 1,
+                        "operation": "set",
+                        "key": "ui.spellcheck.enabled",
+                        "scope": "shared",
+                        "actor_ui_name": "Writing desk",
+                        "restart": "live",
+                    }
+                ],
+            }
+
+        async def config_undo(self, *, expected_revision: int, confirm: bool) -> dict[str, object]:
+            assert expected_revision == self.revision
+            if confirm:
+                self.revision += 1
+            return {
+                "revision": self.revision,
+                "key": "ui.spellcheck.enabled",
+                "restart": "live",
+                "requires_confirmation": not confirm,
+            }
+
+    runtime = MutationRuntime()
+    tui = make_tui(service_runtime=runtime)
+    tui.active_view.display.resize(width=120, height=40)
+
+    for command in (
+        "/config set ui.spellcheck.enabled true",
+        "/config set ui.spellcheck.enabled true --confirm",
+        "/config reset ui.spellcheck.enabled",
+        "/config reset ui.spellcheck.enabled --confirm",
+        "/config changes 5",
+        "/config undo",
+        "/config undo confirm",
+    ):
+        await tui._handle_client_command("alpha", command)
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Proposed set for ui.spellcheck.enabled; required action: live" in text
+    assert "Saved ui.spellcheck.enabled at revision 1; required action: live" in text
+    assert "Proposed reset for ui.spellcheck.enabled; required action: live" in text
+    assert "Saved ui.spellcheck.enabled at revision 2; required action: live" in text
+    assert "r1 set ui.spellcheck.enabled [shared] by Writing desk — live" in text
+    assert "Confirm with: /config undo confirm" in text
+    assert "Undid ui.spellcheck.enabled at revision 3; action: live" in text
+
+
 async def test_web_pair_explains_disabled_gateway_configuration_before_pairing() -> None:
     class DisabledWebRuntime:
         def __init__(self) -> None:

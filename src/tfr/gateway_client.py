@@ -987,6 +987,70 @@ class GatewayClient:
             raise GatewayProtocolError("Gateway returned an invalid configuration status")
         return result
 
+    async def config_mutate(
+        self,
+        operation: str,
+        key: str,
+        *,
+        value: object = None,
+        scope: str,
+        target: str | None,
+        expected_revision: int,
+        confirm: bool,
+    ) -> dict[str, object]:
+        if operation not in {"set", "reset"}:
+            raise ValueError("configuration operation must be set or reset")
+        request_id = uuid4()
+        message: dict[str, object] = {
+            "type": f"config_{operation}",
+            "request_id": str(request_id),
+            "key": key,
+            "scope": scope,
+            "target": target,
+            "expected_revision": expected_revision,
+            "confirm": confirm,
+        }
+        if operation == "set":
+            message["value"] = value
+        result = await self._request(message, request_id)
+        if (
+            result is None
+            or not isinstance(result.get("revision"), int)
+            or not isinstance(result.get("restart"), str)
+            or not isinstance(result.get("requires_confirmation"), bool)
+        ):
+            raise GatewayProtocolError("Gateway returned an invalid configuration mutation")
+        return result
+
+    async def config_changes(self, limit: int = 50) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "config_changes", "request_id": str(request_id), "limit": limit},
+            request_id,
+        )
+        if (
+            result is None
+            or not isinstance(result.get("revision"), int)
+            or not isinstance(result.get("changes"), list)
+        ):
+            raise GatewayProtocolError("Gateway returned invalid configuration history")
+        return result
+
+    async def config_undo(self, *, expected_revision: int, confirm: bool) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {
+                "type": "config_undo",
+                "request_id": str(request_id),
+                "expected_revision": expected_revision,
+                "confirm": confirm,
+            },
+            request_id,
+        )
+        if result is None or not isinstance(result.get("requires_confirmation"), bool):
+            raise GatewayProtocolError("Gateway returned an invalid configuration undo")
+        return result
+
     async def pair_web_device(self, label: str) -> str:
         request_id = uuid4()
         result = await self._request(
@@ -1505,6 +1569,36 @@ class GatewayUiRuntime:
 
     async def config_status(self) -> dict[str, object]:
         return await self.client.config_status()
+
+    async def config_mutate(
+        self,
+        operation: str,
+        key: str,
+        *,
+        value: object = None,
+        scope: str,
+        target: str | None,
+        expected_revision: int,
+        confirm: bool,
+    ) -> dict[str, object]:
+        return await self.client.config_mutate(
+            operation,
+            key,
+            value=value,
+            scope=scope,
+            target=target,
+            expected_revision=expected_revision,
+            confirm=confirm,
+        )
+
+    async def config_changes(self, limit: int = 50) -> dict[str, object]:
+        return await self.client.config_changes(limit)
+
+    async def config_undo(self, *, expected_revision: int, confirm: bool) -> dict[str, object]:
+        return await self.client.config_undo(
+            expected_revision=expected_revision,
+            confirm=confirm,
+        )
 
     async def pair_web_device(self, label: str) -> str:
         return await self.client.pair_web_device(label)

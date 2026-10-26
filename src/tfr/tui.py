@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import inspect
+import json
 import os
 import re
 import secrets
@@ -255,6 +256,22 @@ class ServiceRuntime(Protocol):
     async def config_show(self, key: str, *, ui: str | None = None) -> dict[str, object]: ...
 
     async def config_status(self) -> dict[str, object]: ...
+
+    async def config_mutate(
+        self,
+        operation: str,
+        key: str,
+        *,
+        value: object = None,
+        scope: str,
+        target: str | None,
+        expected_revision: int,
+        confirm: bool,
+    ) -> dict[str, object]: ...
+
+    async def config_changes(self, limit: int = 50) -> dict[str, object]: ...
+
+    async def config_undo(self, *, expected_revision: int, confirm: bool) -> dict[str, object]: ...
 
     async def pair_web_device(self, label: str) -> str | dict[str, Any]: ...
 
@@ -3441,7 +3458,7 @@ class TfrTui:
             f"  /update status|check - inspect {update_channel} TFR and plugin releases",
             "  /update force - candidate channel only; force every host to stage locally",
             "  /web status|repair|pair|devices|revoke - manage the private iPhone PWA",
-            "  /config [status|list [CATEGORY|SCOPE]|show KEY [--ui NAME]] - inspect configuration",
+            "  /config status|list|show|set|reset|changes|undo - inspect or change configuration",
             "  /ui list|show|rename|forget - inspect and administer user interfaces",
             "  /diagnostics [web|presentations|plugins|clear] - inspect runtime diagnostics",
             "  /plugins - show configured, loaded, and failed plugins",
@@ -3991,16 +4008,128 @@ class TfrTui:
         valid_show = action == "show" and (
             len(parameters) == 2 or (len(parameters) == 4 and parameters[2].casefold() == "--ui")
         )
-        if parameters and not (valid_status or valid_list or valid_show):
+        valid_set = action == "set" and len(parameters) >= 3
+        valid_reset = action == "reset" and len(parameters) >= 2
+        valid_changes = action == "changes" and len(parameters) <= 2
+        valid_undo = action == "undo" and len(parameters) <= 2
+        if parameters and not (
+            valid_status
+            or valid_list
+            or valid_show
+            or valid_set
+            or valid_reset
+            or valid_changes
+            or valid_undo
+        ):
             self.add_notice(
                 alias,
-                "Usage: /config [status|list [CATEGORY|SCOPE]|show KEY [--ui NAME]]",
+                "Usage: /config status|list|show|set|reset|changes|undo",
             )
             return
         if self.service_runtime is None:
             self.add_notice(alias, "Configuration inventory is available only in an attached UI")
             return
         try:
+            if valid_changes:
+                limit = int(parameters[1]) if len(parameters) == 2 else 50
+                history = await self.service_runtime.config_changes(limit)
+                lines = [f"Gateway configuration changes — revision {history['revision']}"]
+                for change in history.get("changes", []):
+                    if isinstance(change, dict):
+                        lines.append(
+                            f"  r{change.get('revision')} {change.get('operation')} "
+                            f"{change.get('key')} [{change.get('scope')}] by "
+                            f"{change.get('actor_ui_name')} — {change.get('restart')}"
+                        )
+                if len(lines) == 1:
+                    lines.append("  none")
+                self.add_notice(alias, "\n".join(lines))
+                return
+            if valid_undo:
+                confirm = len(parameters) == 2 and parameters[1].casefold() == "confirm"
+                status = await self.service_runtime.config_status()
+                result = await self.service_runtime.config_undo(
+                    expected_revision=int(status["revision"]),
+                    confirm=confirm,
+                )
+                if result.get("requires_confirmation") is True:
+                    self.add_notice(
+                        alias,
+                        "Undo the latest Gateway configuration change?\n"
+                        "Confirm with: /config undo confirm",
+                    )
+                else:
+                    self.add_notice(
+                        alias,
+                        f"Undid {result.get('key')} at revision {result.get('revision')}; "
+                        f"action: {result.get('restart')}",
+                    )
+                return
+            if valid_set or valid_reset:
+                key = parameters[1]
+                value: object = None
+                option_start = 2
+                if valid_set:
+                    raw_value = parameters[2]
+                    option_start = 3
+                    try:
+                        value = json.loads(raw_value)
+                    except json.JSONDecodeError:
+                        value = raw_value
+                options = parameters[option_start:]
+                scope: str | None = None
+                target: str | None = None
+                confirm = False
+                index = 0
+                while index < len(options):
+                    option = options[index].casefold()
+                    if option == "--confirm":
+                        confirm = True
+                        index += 1
+                        continue
+                    if option in {"--scope", "--ui", "--target"} and index + 1 < len(options):
+                        argument = options[index + 1]
+                        if option == "--scope":
+                            scope = argument.casefold()
+                        elif option == "--ui":
+                            scope, target = "ui", argument
+                        else:
+                            target = argument
+                        index += 2
+                        continue
+                    raise ValueError(f"invalid configuration option: {options[index]}")
+                descriptor = await self.service_runtime.config_show(key)
+                if scope is None:
+                    scope = str(descriptor["scope"])
+                    scope = {"ui-type": "ui", "bootstrap": "gateway"}.get(scope, scope)
+                if target is None and scope == "world" and key.startswith("worlds."):
+                    target = key.split(".", 2)[1]
+                if target is None and scope == "plugin" and key.startswith("plugins.config."):
+                    target = key.split(".", 3)[2]
+                status = await self.service_runtime.config_status()
+                result = await self.service_runtime.config_mutate(
+                    "set" if valid_set else "reset",
+                    key,
+                    value=value,
+                    scope=scope,
+                    target=target,
+                    expected_revision=int(status["revision"]),
+                    confirm=confirm,
+                )
+                if result.get("requires_confirmation") is True:
+                    command = shlex.join(["/config", *parameters, "--confirm"])
+                    self.add_notice(
+                        alias,
+                        f"Proposed {result.get('operation')} for {key}; "
+                        f"required action: {result.get('restart')}.\nConfirm with: {command}",
+                    )
+                else:
+                    self.add_notice(
+                        alias,
+                        f"Saved {key} at revision {result.get('revision')}; "
+                        f"required action: {result.get('restart')}",
+                    )
+                return
             if valid_status:
                 status = await self.service_runtime.config_status()
                 counts = status.get("counts", {})

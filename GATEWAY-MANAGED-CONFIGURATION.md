@@ -100,27 +100,27 @@ built-in default → shared value → UI-type default → individual UI override
 
 ### Storage
 
-- [ ] Expand or replace `ManagedSettingsStore` with one versioned Gateway document/database.
-- [ ] Use atomic writes, validation, revision checks, backups, and audit records.
-- [ ] Store shared, Gateway, UI-type, individual UI, world, plugin, and secret-reference sections.
-- [ ] Add schema migrations.
-- [ ] Add export with secrets omitted by default.
+- [x] Expand or replace `ManagedSettingsStore` with one versioned Gateway document/database.
+- [x] Use atomic writes, validation, revision checks, backups, and audit records.
+- [x] Store shared, Gateway, UI-type, individual UI, world, plugin, and secret-reference sections.
+- [x] Add schema migrations.
+- [x] Add export with secrets omitted by default.
 
 ### Mutation API
 
-- [ ] Add Gateway protocol requests for get/set/reset/undo.
-- [ ] Enforce owner/admin versus self-service permissions.
-- [ ] Add `/config set KEY VALUE [--scope ...] [--ui NAME]`.
-- [ ] Add `/config reset KEY [--ui NAME]`.
-- [ ] Add `/config changes` and `/config undo`.
-- [ ] Return required reload/restart actions before confirmation.
+- [x] Add Gateway protocol requests for get/set/reset/undo.
+- [x] Enforce owner/admin versus self-service permissions.
+- [x] Add `/config set KEY VALUE [--scope ...] [--ui NAME]`.
+- [x] Add `/config reset KEY [--ui NAME]`.
+- [x] Add `/config changes` and `/config undo`.
+- [x] Return required reload/restart actions before confirmation.
 
 ### Verification
 
-- [ ] Concurrent edits produce revision conflicts rather than lost updates.
-- [ ] Invalid documents never replace the active revision.
-- [ ] Rollback restores the previous effective configuration.
-- [ ] Audit logs identify the acting UI by stable ID and name.
+- [x] Concurrent edits produce revision conflicts rather than lost updates.
+- [x] Invalid documents never replace the active revision.
+- [x] Rollback restores the previous effective configuration.
+- [x] Audit logs identify the acting UI by stable ID and name.
 
 **Phase completion:** Gateway-managed settings can be safely changed from TFR.
 
@@ -309,3 +309,4 @@ built-in default → shared value → UI-type default → individual UI override
 - 2026-10-25: Provenance output identifies JSONC by source path and managed values by revision; removing a managed override reveals the original JSONC value and source again.
 - 2026-10-25: Unknown setting errors include deterministic close descriptor matches and direct users to the matching `/config list CATEGORY` view, or the complete list when the category is unknown.
 - 2026-10-25: Phase 2 completed with typed core/plugin inventory, layered provenance, redacted read-only summary/list/show/status commands, runtime consistency checks, and contextual unknown-key guidance.
+- 2026-10-25: Phase 3 uses a private atomic `gateway-configuration.json` document with scoped sections, optimistic revisions, previous-revision backup, bounded audit history, schema migration, secret references, preview/confirmation, reset, history, and undo. Legacy managed overrides are imported on first use while their compatibility path remains active.
