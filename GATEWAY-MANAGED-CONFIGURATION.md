@@ -128,22 +128,22 @@ built-in default → shared value → UI-type default → individual UI override
 
 ## Phase 4 — Client configuration synchronization
 
-- [ ] Send effective configuration and revision after UI registration.
-- [ ] Have clients acknowledge applied revisions.
-- [ ] Push changes to connected clients.
-- [ ] Queue current state for offline clients to receive on reconnect.
-- [ ] Report unsupported values or capabilities instead of silently ignoring them.
-- [ ] Apply safe settings live.
-- [ ] Coordinate reloads for plugin/config changes.
-- [ ] Coordinate restarts only when required.
-- [ ] Treat any local copy as a cache, never an authority.
+- [x] Send effective configuration and revision after UI registration.
+- [x] Have clients acknowledge applied revisions.
+- [x] Push changes to connected clients.
+- [x] Queue current state for offline clients to receive on reconnect.
+- [x] Report unsupported values or capabilities instead of silently ignoring them.
+- [x] Apply safe settings live.
+- [x] Coordinate reloads for plugin/config changes.
+- [x] Coordinate restarts only when required.
+- [x] Treat any local copy as a cache, never an authority.
 
 ### Verification
 
-- [ ] Shared changes converge across Gateway, native UIs, and PWA.
-- [ ] Per-UI overrides affect only the named UI.
-- [ ] Offline and outdated clients are clearly reported.
-- [ ] Restart interruption does not lose the desired revision.
+- [x] Shared changes converge across Gateway, native UIs, and PWA.
+- [x] Per-UI overrides affect only the named UI.
+- [x] Offline and outdated clients are clearly reported.
+- [x] Restart interruption does not lose the desired revision.
 
 **Phase completion:** named clients consume and report Gateway-owned configuration.
 
@@ -310,3 +310,8 @@ built-in default → shared value → UI-type default → individual UI override
 - 2026-10-25: Unknown setting errors include deterministic close descriptor matches and direct users to the matching `/config list CATEGORY` view, or the complete list when the category is unknown.
 - 2026-10-25: Phase 2 completed with typed core/plugin inventory, layered provenance, redacted read-only summary/list/show/status commands, runtime consistency checks, and contextual unknown-key guidance.
 - 2026-10-25: Phase 3 uses a private atomic `gateway-configuration.json` document with scoped sections, optimistic revisions, previous-revision backup, bounded audit history, schema migration, secret references, preview/confirmation, reset, history, and undo. Legacy managed overrides are imported on first use while their compatibility path remains active.
+- 2026-10-26: Phase 4 clients negotiate `configuration-sync-v1`; the Gateway sends a non-secret effective view after registration and after every committed mutation, with shared, UI-type, and individual-UI precedence resolved for the named client.
+- 2026-10-26: Native and PWA clients acknowledge applied, reload-required, restart-required, or unsupported revisions. Applied revisions remain persistent UI identity metadata, while bounded issue reports remain runtime status and are refreshed on reconnect.
+- 2026-10-26: Native clients overlay Gateway values only in memory before constructing plugins and the TUI. Safe shared spellcheck and speaking-streak changes apply live; other live values are explicitly reported unsupported, while declared reload/restart requirements produce user-visible coordination notices.
+- 2026-10-26: PWA clients apply supported shared settings live and report unknown future settings rather than ignoring them. The desired revision remains in the atomic Gateway document, so offline clients and interrupted restarts receive current state on their next registration.
+- 2026-10-26: Phase 4 completed with capability-negotiated native/PWA synchronization, scoped convergence, push delivery, bounded acknowledgements, unsupported-setting visibility, and no authoritative client-side configuration copy.

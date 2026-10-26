@@ -25,6 +25,11 @@ from uuid import UUID, uuid4
 from tfr.agents import AgentRuntime
 from tfr.ansi import terminal_plain_text
 from tfr.config import ConfigurationBundle, WorldsConfig
+from tfr.configuration_sync import (
+    CONFIGURATION_SYNC_CAPABILITY,
+    effective_client_configuration,
+    validate_configuration_ack,
+)
 from tfr.configuration_values import (
     ConfigurationValues,
     SettingProvenance,
@@ -123,6 +128,9 @@ class _GatewayUpdateParticipant:
     managed_updates: bool
     update_checks: bool
     pending: dict[UUID, asyncio.Future[dict[str, Any] | None]]
+    configuration_sync: bool = False
+    configuration_status: str | None = None
+    configuration_issues: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1239,6 +1247,7 @@ class GatewayServer:
         diagnostic_clear_factory: Callable[[], None] | None = None,
         update_notice: Callable[[str], Awaitable[None]] | None = None,
         ui_settings_notice: Callable[[Mapping[str, bool]], Awaitable[None]] | None = None,
+        configuration_notice: Callable[[], Awaitable[None]] | None = None,
         ui_store: UiStore | None = None,
     ) -> None:
         if (
@@ -1281,6 +1290,7 @@ class GatewayServer:
         self.diagnostic_clear_factory = diagnostic_clear_factory
         self.update_notice = update_notice
         self.ui_settings_notice = ui_settings_notice
+        self.configuration_notice = configuration_notice
         self.ui_store = ui_store
         self._server: asyncio.Server | None = None
         self._tcp_server: asyncio.Server | None = None
@@ -1560,6 +1570,13 @@ class GatewayServer:
             }
             if ui_record is not None:
                 hello_response["ui"] = ui_record.as_dict()
+                if CONFIGURATION_SYNC_CAPABILITY in ui_record.capabilities:
+                    hello_response["configuration"] = effective_client_configuration(
+                        self.runtime.configuration_values,
+                        self.runtime.gateway_configuration,
+                        client_type=ui_record.client_type,
+                        ui_id=ui_record.ui_id,
+                    ).as_dict()
             await write_message(
                 writer,
                 hello_response,
@@ -1581,6 +1598,10 @@ class GatewayServer:
                     managed_updates=managed_updates,
                     update_checks=update_checks,
                     pending={},
+                    configuration_sync=(
+                        ui_record is not None
+                        and CONFIGURATION_SYNC_CAPABILITY in ui_record.capabilities
+                    ),
                 )
                 async with self._update_participants_lock:
                     if not self._accepting_update_participants:
@@ -1802,7 +1823,36 @@ class GatewayServer:
             if message_type == "ack":
                 self._handle_update_ack(client_id, request_id, message)
                 return
-            if message_type == "command":
+            if message_type == "configuration_applied":
+                if ui_id is None or self.ui_store is None:
+                    raise ValueError("configuration acknowledgement requires a registered UI")
+                if set(message) != {
+                    "type",
+                    "protocol",
+                    "request_id",
+                    "revision",
+                    "status",
+                    "issues",
+                }:
+                    raise ValueError("configuration acknowledgement has invalid fields")
+                store = self.runtime.gateway_configuration
+                if store is None:
+                    raise ValueError("Gateway configuration is unavailable")
+                revision, status, issues = validate_configuration_ack(
+                    {
+                        "revision": message.get("revision"),
+                        "status": message.get("status"),
+                        "issues": message.get("issues"),
+                    },
+                    maximum_revision=store.revision,
+                )
+                participant = self._update_participants.get(client_id)
+                if participant is not None:
+                    participant.configuration_status = status
+                    participant.configuration_issues = issues
+                await self.ui_store.report_configuration(ui_id, revision, status, issues)
+                result = {"revision": revision, "status": status}
+            elif message_type == "command":
                 world = self._world(message)
                 text = message.get("text")
                 sensitive = message.get("sensitive", False)
@@ -2140,15 +2190,21 @@ class GatewayServer:
                         if applied < revision
                         else "ahead"
                     )
-                    uis.append(
-                        {
-                            "ui_id": str(record.ui_id),
-                            "display_name": record.display_name,
-                            "client_type": record.client_type,
-                            "applied_revision": applied,
-                            "convergence": convergence,
-                        }
+                    item: dict[str, object] = {
+                        "ui_id": str(record.ui_id),
+                        "display_name": record.display_name,
+                        "client_type": record.client_type,
+                        "applied_revision": applied,
+                        "convergence": convergence,
+                    }
+                    report = (
+                        self.ui_store.configuration_report(record.ui_id) if self.ui_store else None
                     )
+                    if report is not None:
+                        item["desired_revision"] = report[0]
+                        item["application_status"] = report[1]
+                        item["issues"] = list(report[2])
+                    uis.append(item)
                 result = {
                     "revision": revision,
                     "uis": uis,
@@ -2225,6 +2281,7 @@ class GatewayServer:
                     )
                     self._sync_gateway_configuration_value(mutation)
                     self._apply_live_gateway_configuration(mutation)
+                    await self._broadcast_configuration()
                     if key in {
                         "ui.spellcheck.enabled",
                         "ui.speaking_streaks.enabled",
@@ -2285,6 +2342,7 @@ class GatewayServer:
                     )
                     self._sync_gateway_configuration_value(mutation)
                     self._apply_live_gateway_configuration(mutation)
+                    await self._broadcast_configuration()
                     if mutation.key in {
                         "ui.spellcheck.enabled",
                         "ui.speaking_streaks.enabled",
@@ -2412,6 +2470,38 @@ class GatewayServer:
         if self.ui_settings_notice is not None:
             with contextlib.suppress(Exception):
                 await self.ui_settings_notice(settings)
+
+    async def _broadcast_configuration(self) -> None:
+        values = self.runtime.configuration_values
+        store = self.runtime.gateway_configuration
+        if values is None or store is None:
+            return
+        async with self._update_participants_lock:
+            participants = tuple(self._update_participants.values())
+        messages = []
+        for participant in participants:
+            if not participant.configuration_sync or participant.ui_id is None:
+                continue
+            record = self.ui_store.get(participant.ui_id) if self.ui_store is not None else None
+            if record is None:
+                continue
+            payload = effective_client_configuration(
+                values,
+                store,
+                client_type=record.client_type,
+                ui_id=record.ui_id,
+            ).as_dict()
+            messages.append(
+                write_message(
+                    participant.writer,
+                    {"type": "configuration", **payload},
+                    lock=participant.write_lock,
+                )
+            )
+        await asyncio.gather(*messages, return_exceptions=True)
+        if self.configuration_notice is not None:
+            with contextlib.suppress(Exception):
+                await self.configuration_notice()
 
     def _configuration_target(
         self, scope: str, target: str | None, *, ui_id: UUID | None
@@ -2909,6 +2999,9 @@ async def run_gateway(
         ),
         update_notice=(web_manager.notify_update if web_manager is not None else None),
         ui_settings_notice=(web_manager.notify_ui_settings if web_manager is not None else None),
+        configuration_notice=(
+            web_manager.notify_configuration if web_manager is not None else None
+        ),
         ui_store=ui_store,
     )
     stop = asyncio.Event()

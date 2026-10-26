@@ -7,7 +7,7 @@ import os
 import socket
 import ssl
 import sys
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -15,13 +15,17 @@ from uuid import UUID, uuid4
 from tfr.agents import AgentInspection
 from tfr.config import (
     GatewayReconnectConfig,
+    MainConfig,
     UiConfiguration,
     UpdateConfig,
     WorldCapabilitiesConfig,
     WorldConfig,
     WorldDefaults,
 )
+from tfr.configuration_registry import SettingDescriptor
+from tfr.configuration_sync import CONFIGURATION_SYNC_CAPABILITY, required_action
 from tfr.core import EventBus
+from tfr.core_settings import core_configuration_registry
 from tfr.events import CommandRequest, Event
 from tfr.gateway import default_gateway_socket
 from tfr.gateway_protocol import (
@@ -327,6 +331,9 @@ class GatewayClient:
         gateway_speaker_effects: tuple[str, ...] = (),
         gateway_build: BuildIdentity | None = None,
         ui_record: UiRecord | None = None,
+        configuration_revision: int | None = None,
+        effective_configuration: dict[str, object] | None = None,
+        configuration_requirements: dict[str, str] | None = None,
     ) -> None:
         self.reader = reader
         self.writer = writer
@@ -347,6 +354,9 @@ class GatewayClient:
         self.gateway_speaker_effects = gateway_speaker_effects
         self.gateway_build = gateway_build
         self.ui_record = ui_record
+        self.configuration_revision = configuration_revision
+        self.effective_configuration = effective_configuration or {}
+        self.configuration_requirements = configuration_requirements or {}
         self.command_bus = RemoteCommandBus(self)
         self.agents: RemoteAgentRuntime | None = None
         self._write_lock = asyncio.Lock()
@@ -363,6 +373,14 @@ class GatewayClient:
         self._reconnect_lock = asyncio.Lock()
         self._gateway_request_tasks: set[asyncio.Task[None]] = set()
         self.ui_settings_handler: Callable[[bool, bool], None] | None = None
+        self.configuration_handler: (
+            Callable[[dict[str, object], dict[str, str]], tuple[str, tuple[str, ...]]] | None
+        ) = None
+        self._initial_configuration_ack_pending = configuration_revision is not None
+        (
+            self._initial_configuration_status,
+            self._initial_configuration_issues,
+        ) = self._configuration_application_result(())
 
     @classmethod
     async def connect(
@@ -558,6 +576,9 @@ class GatewayClient:
                     raise GatewayProtocolError(f"gateway UI record is invalid: {exc}") from exc
                 if ui_record.ui_id != client_id:
                     raise GatewayProtocolError("gateway returned a different UI ID")
+            configuration_revision, effective_configuration, configuration_requirements = (
+                cls._configuration(hello.get("configuration"))
+            )
             event_bus = EventBus()
             client = cls(
                 reader=reader,
@@ -583,6 +604,9 @@ class GatewayClient:
                 gateway_speaker_effects=gateway_speaker_effects,
                 gateway_build=gateway_build,
                 ui_record=ui_record,
+                configuration_revision=configuration_revision,
+                effective_configuration=effective_configuration,
+                configuration_requirements=configuration_requirements,
             )
             try:
                 client.sessions.extend(
@@ -687,6 +711,36 @@ class GatewayClient:
     def start(self) -> None:
         if self._pump is None or self._pump.done():
             self._pump = asyncio.create_task(self._run(), name="tfr-gateway-client-events")
+        if self._initial_configuration_ack_pending and self.configuration_revision is not None:
+            self._initial_configuration_ack_pending = False
+            self._spawn_gateway_request(
+                self._acknowledge_configuration(
+                    self.configuration_revision,
+                    self._initial_configuration_status,
+                    self._initial_configuration_issues,
+                )
+            )
+
+    def _configuration_application_result(
+        self, plugin_descriptors: Sequence[SettingDescriptor]
+    ) -> tuple[str, tuple[str, ...]]:
+        registry = core_configuration_registry()
+        for descriptor in plugin_descriptors:
+            registry.register(descriptor)
+        issues = tuple(
+            f"unsupported setting: {key}"
+            for key in sorted(self.effective_configuration)
+            if registry.get(key) is None
+        )[:100]
+        return ("unsupported", issues) if issues else ("applied", ())
+
+    def prepare_initial_configuration_ack(
+        self, plugin_descriptors: Sequence[SettingDescriptor]
+    ) -> None:
+        (
+            self._initial_configuration_status,
+            self._initial_configuration_issues,
+        ) = self._configuration_application_result(plugin_descriptors)
 
     async def stop(self) -> None:
         if self._pump is not None:
@@ -1303,6 +1357,28 @@ class GatewayClient:
                     self.speaking_streaks_enabled = streaks
                     if self.ui_settings_handler is not None:
                         self.ui_settings_handler(spellcheck, streaks)
+                elif message_type == "configuration":
+                    revision, settings, requirements = self._configuration(message)
+                    if revision is None:
+                        raise GatewayProtocolError("Gateway configuration revision is missing")
+                    changed = {
+                        key: value
+                        for key, value in settings.items()
+                        if self.effective_configuration.get(key) != value
+                    }
+                    changed_requirements = {
+                        key: requirements[key] for key in changed if key in requirements
+                    }
+                    issues: tuple[str, ...] = ()
+                    status = required_action(changed_requirements)
+                    if self.configuration_handler is not None:
+                        status, issues = self.configuration_handler(changed, changed_requirements)
+                    self.configuration_revision = revision
+                    self.effective_configuration = settings
+                    self.configuration_requirements = requirements
+                    self._spawn_gateway_request(
+                        self._acknowledge_configuration(revision, status, issues)
+                    )
                 elif message_type == "error":
                     raise GatewayProtocolError(str(message.get("message", "gateway error")))
                 else:
@@ -1331,6 +1407,61 @@ class GatewayClient:
             future.set_result(result)
         else:
             future.set_exception(ValueError(str(message.get("error", "gateway request failed"))))
+
+    async def _acknowledge_configuration(
+        self, revision: int, status: str, issues: tuple[str, ...]
+    ) -> None:
+        request_id = uuid4()
+        await self._request(
+            {
+                "type": "configuration_applied",
+                "request_id": str(request_id),
+                "revision": revision,
+                "status": status,
+                "issues": list(issues),
+            },
+            request_id,
+        )
+
+    @staticmethod
+    def _configuration(
+        value: object,
+    ) -> tuple[int | None, dict[str, object], dict[str, str]]:
+        if value is None:
+            return None, {}, {}
+        if not isinstance(value, dict):
+            raise GatewayProtocolError("Gateway configuration envelope is invalid")
+        revision = value.get("revision")
+        settings = value.get("settings")
+        requirements = value.get("requirements")
+        allowed_requirements = {"live", "client-reload", "client-restart", "gateway-restart"}
+        if (
+            not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 0
+            or not isinstance(settings, dict)
+            or not all(isinstance(key, str) for key in settings)
+            or not isinstance(requirements, dict)
+            or set(requirements) != set(settings)
+            or not all(
+                isinstance(key, str) and requirement in allowed_requirements
+                for key, requirement in requirements.items()
+            )
+        ):
+            raise GatewayProtocolError("Gateway configuration envelope is invalid")
+        registry = core_configuration_registry()
+        for key, item in settings.items():
+            descriptor = registry.get(key)
+            if descriptor is None:
+                # Plugin descriptors are loaded after the transport handshake.
+                continue
+            if descriptor.sensitivity or "native-ui" not in descriptor.consumers:
+                raise GatewayProtocolError(f"Gateway sent unsupported configuration setting: {key}")
+            try:
+                descriptor.validate(item)
+            except ValueError as exc:
+                raise GatewayProtocolError(str(exc)) from exc
+        return revision, dict(settings), dict(requirements)
 
     async def _handle_update_prepare(self, message: Mapping[str, Any]) -> None:
         await self._handle_gateway_update_request(message, prepare=True)
@@ -1853,6 +1984,28 @@ class GatewayUiRuntime:
                     return
 
 
+def _apply_gateway_ui_configuration(
+    configuration: UiConfiguration, settings: Mapping[str, object]
+) -> UiConfiguration:
+    """Overlay the Gateway view without ever writing it to local configuration."""
+
+    value = configuration.main.model_dump(mode="python", by_alias=True, exclude_none=True)
+    allowed_roots = {"ui", "updates", "plugins"}
+    for key, item in settings.items():
+        parts = key.split(".")
+        if not parts or parts[0] not in allowed_roots:
+            continue
+        target: dict[str, Any] = value
+        for part in parts[:-1]:
+            child = target.get(part)
+            if not isinstance(child, dict):
+                child = {}
+                target[part] = child
+            target = child
+        target[parts[-1]] = item
+    return configuration.model_copy(update={"main": MainConfig.model_validate(value)})
+
+
 async def run_gateway_ui(
     configuration: UiConfiguration,
     path: Path | str | None = None,
@@ -1884,7 +2037,10 @@ async def run_gateway_ui(
             )
         ),
         capabilities=tuple(
-            sorted(capability.value for capability in TUI_PRESENTATION_CAPABILITIES)
+            sorted(
+                {capability.value for capability in TUI_PRESENTATION_CAPABILITIES}
+                | {CONFIGURATION_SYNC_CAPABILITY}
+            )
         ),
     )
     connection_options = {
@@ -1932,6 +2088,9 @@ async def run_gateway_ui(
                 raise
             await asyncio.sleep(1)
     manager = SessionManager(client.sessions)  # type: ignore[arg-type]
+    configuration = _apply_gateway_ui_configuration(
+        configuration, getattr(client, "effective_configuration", {})
+    )
     try:
         extra_plugins, plugin_source_failures, plugin_source_notices = await load_plugin_sources(
             configuration.main.plugins.sources,
@@ -1961,6 +2120,13 @@ async def run_gateway_ui(
             extra_discovered=extra_plugins,
             scope="ui",
         )
+        if hasattr(client, "prepare_initial_configuration_ack"):
+            descriptors = (
+                plugins.registry.configuration_descriptors()
+                if hasattr(plugins, "registry")
+                else ()
+            )
+            client.prepare_initial_configuration_ack(descriptors)
         plugins.initialize_boss_selection(
             configuration.main.ui.boss.mode,
             configuration.main.ui.boss.screen,
@@ -2041,6 +2207,36 @@ async def run_gateway_ui(
     runtime.notify = lambda text: tui.add_notice(tui.active_alias, text)
     if hasattr(tui, "apply_shared_ui_settings"):
         client.ui_settings_handler = tui.apply_shared_ui_settings
+
+    def apply_configuration_update(
+        changed: dict[str, object], requirements: dict[str, str]
+    ) -> tuple[str, tuple[str, ...]]:
+        live_shared = {"ui.spellcheck.enabled", "ui.speaking_streaks.enabled"}
+        unsupported = tuple(
+            f"live application is unsupported for {key}"
+            for key in sorted(changed)
+            if requirements.get(key) == "live" and key not in live_shared
+        )
+        if unsupported:
+            runtime.notify(
+                "Gateway configuration revision received, but this UI cannot apply: "
+                + "; ".join(unsupported)
+            )
+            return "unsupported", unsupported
+        if "ui.spellcheck.enabled" in changed:
+            client.spellcheck_enabled = bool(changed["ui.spellcheck.enabled"])
+        if "ui.speaking_streaks.enabled" in changed:
+            client.speaking_streaks_enabled = bool(changed["ui.speaking_streaks.enabled"])
+        if changed.keys() & live_shared and hasattr(tui, "apply_shared_ui_settings"):
+            tui.apply_shared_ui_settings(client.spellcheck_enabled, client.speaking_streaks_enabled)
+        action = required_action(requirements)
+        if action == "reload-required":
+            runtime.notify("Gateway configuration changed; use /reload to apply this revision.")
+        elif action == "restart-required":
+            runtime.notify("Gateway configuration changed; restart this UI to apply this revision.")
+        return action, ()
+
+    client.configuration_handler = apply_configuration_update
 
     def restart_after_update() -> None:
         tui.update_restart_requested = True

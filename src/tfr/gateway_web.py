@@ -25,6 +25,11 @@ from aiohttp import WSMsgType, web
 
 from tfr.ansi import BrowserTextSpan, ansi_visible_text, browser_text_spans, terminal_plain_text
 from tfr.combo import Combo, ComboTracker
+from tfr.configuration_sync import (
+    CONFIGURATION_SYNC_CAPABILITY,
+    effective_client_configuration,
+    validate_configuration_ack,
+)
 from tfr.core import UnknownSessionError
 from tfr.diagnostics import DiagnosticBuffer
 from tfr.events import Actor, ActorType, Confidence, Direction, Event, EventKind, Provenance
@@ -371,6 +376,10 @@ class WebGatewayManager:
     async def notify_ui_settings(self, settings: Mapping[str, bool]) -> None:
         if self._server is not None:
             await self._server.notify_ui_settings(settings)
+
+    async def notify_configuration(self) -> None:
+        if self._server is not None:
+            await self._server.notify_configuration()
 
     async def stop(self) -> None:
         server, self._server = self._server, None
@@ -1021,6 +1030,31 @@ class WebGatewayServer:
         self._site = None
         self._runner = None
 
+    async def notify_configuration(self) -> None:
+        values = self.runtime.configuration_values
+        store = self.runtime.gateway_configuration
+        if values is None or store is None:
+            return
+        sends = []
+        for device_id, sockets in tuple(self._active_sockets.items()):
+            device = self.devices.authenticate_by_id(device_id)
+            if device is None:
+                continue
+            payload = effective_client_configuration(
+                values,
+                store,
+                client_type="pwa",
+                ui_id=device.ui_id,
+            ).as_dict()
+            sends.extend(
+                self._send_bounded(
+                    socket,
+                    {"type": "configuration", "protocol": WEB_PROTOCOL_VERSION, **payload},
+                )
+                for socket in tuple(sockets)
+            )
+        await asyncio.gather(*sends, return_exceptions=True)
+
     async def notify_update(self, message: str) -> None:
         await asyncio.gather(
             *(
@@ -1321,7 +1355,11 @@ class WebGatewayServer:
             client_type="pwa",
             platform=device.label,
             versions={"web_protocol": str(WEB_PROTOCOL_VERSION)},
-            capabilities=(),
+            capabilities=(
+                CONFIGURATION_SYNC_CAPABILITY,
+                "config:ui.speaking_streaks.enabled",
+                "config:ui.spellcheck.enabled",
+            ),
         )
 
     @staticmethod
@@ -1615,6 +1653,16 @@ class WebGatewayServer:
             snapshot_bytes += projected_bytes
             snapshot_source_bytes += source_bytes
         visible.reverse()
+        configuration: dict[str, object] | None = None
+        configuration_values = getattr(self.runtime, "configuration_values", None)
+        gateway_configuration = getattr(self.runtime, "gateway_configuration", None)
+        if configuration_values is not None and gateway_configuration is not None:
+            configuration = effective_client_configuration(
+                configuration_values,
+                gateway_configuration,
+                client_type="pwa",
+                ui_id=device.ui_id,
+            ).as_dict()
         if not await self._send_if_active(
             socket,
             device,
@@ -1645,6 +1693,7 @@ class WebGatewayServer:
                     else self.speaking_streaks_enabled
                 ),
                 "snapshot_count": len(visible),
+                "configuration": configuration,
             },
         ):
             return
@@ -1865,6 +1914,31 @@ class WebGatewayServer:
         if message_type == "ping":
             if set(message) != {"type", "request_id"}:
                 await self._send_error(socket, request_id, "Ping has invalid fields")
+                return
+            await self._send_ack(socket, request_id, ok=True)
+            return
+        if message_type == "configuration_applied":
+            if set(message) != {"type", "request_id", "revision", "status", "issues"}:
+                await self._send_error(
+                    socket, request_id, "Configuration acknowledgement has invalid fields"
+                )
+                return
+            store = self.runtime.gateway_configuration
+            if store is None or self.ui_store is None:
+                await self._send_error(socket, request_id, "Gateway configuration is unavailable")
+                return
+            try:
+                revision, status, _issues = validate_configuration_ack(
+                    {
+                        "revision": message.get("revision"),
+                        "status": message.get("status"),
+                        "issues": message.get("issues"),
+                    },
+                    maximum_revision=store.revision,
+                )
+                await self.ui_store.report_configuration(device.ui_id, revision, status, _issues)
+            except ValueError as exc:
+                await self._send_error(socket, request_id, str(exc))
                 return
             await self._send_ack(socket, request_id, ok=True)
             return
