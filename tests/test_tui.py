@@ -1773,6 +1773,42 @@ async def test_central_plugin_commands_list_show_and_enable_spotlight() -> None:
     assert "enabled at revision 4" in text
 
 
+async def test_plugin_catalog_groups_states_and_omits_unknown_versions() -> None:
+    tui = make_tui()
+    tui.active_view.display.resize(width=100, height=100)
+    tui.service_runtime = SimpleNamespace(
+        plugins_catalog=AsyncMock(
+            return_value=[
+                {
+                    "name": "acid_rain",
+                    "version": "unknown",
+                    "loaded": True,
+                    "failed": False,
+                    "portable": True,
+                },
+                {
+                    "name": "spotlight",
+                    "version": "unknown",
+                    "loaded": False,
+                    "failed": False,
+                    "portable": True,
+                },
+            ]
+        )
+    )
+
+    await tui._handle_client_command("alpha", "/plugins available")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Command result: /plugins available" in text
+    assert "Plugins: available (2)" in text
+    assert "Loaded (1)\n  acid_rain  [portable]" in text
+    assert "Disabled (1)\n  spotlight  [portable]" in text
+    assert "Details: /plugins show NAME" in text
+    assert "unknown" not in text
+    assert "-- Plugins" not in text
+
+
 async def test_n_and_p_are_shortcuts_for_next_and_previous_world() -> None:
     tui = make_tui()
     assert tui.active_alias == "alpha"

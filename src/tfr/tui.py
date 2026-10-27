@@ -2280,6 +2280,14 @@ class TfrTui:
         )
         self.application.invalidate()
 
+    def add_command_report(self, alias: str, command: str, text: str) -> None:
+        self.views[alias].clear_selection()
+        self.views[alias].display.append(
+            self.theme.ansi_text("warning", f"\nCommand result: {command}\n\n{text}\n"),
+            recallable=False,
+        )
+        self.application.invalidate()
+
     def _gateway_presentation_programs(
         self,
         event: Event,
@@ -3359,7 +3367,7 @@ class TfrTui:
             await self._handle_web_command(alias, parameters)
         elif command == "config":
             if parameters == ["help"]:
-                self.add_notice(alias, self.help_text("config"))
+                self.add_help(alias, "config", self.help_text("config"))
             else:
                 await self._handle_config_command(alias, parameters)
         elif command == "ui":
@@ -3368,7 +3376,7 @@ class TfrTui:
             await self._handle_diagnostics_command(alias, parameters)
         elif command == "plugins":
             if parameters == ["help"]:
-                self.add_notice(alias, self.help_text("plugins"))
+                self.add_help(alias, "plugins", self.help_text("plugins"))
             elif not parameters and self.gateway_reconnect is None:
                 self.add_notice(alias, self._plugin_status_text())
             else:
@@ -3949,22 +3957,38 @@ class TfrTui:
             action = parameters[0].casefold() if parameters else "enabled"
             if action in {"available", "installed", "enabled", "failed"} and len(parameters) <= 1:
                 plugins = await self.service_runtime.plugins_catalog(action)
-                lines = [f"Plugins — {action}"]
+                groups: dict[str, list[dict[str, object]]] = {
+                    "Loaded": [],
+                    "Disabled": [],
+                    "Failed": [],
+                }
                 for item in plugins:
-                    state = (
-                        "loaded"
+                    heading = (
+                        "Loaded"
                         if item.get("loaded")
-                        else "failed"
+                        else "Failed"
                         if item.get("failed")
-                        else "disabled"
+                        else "Disabled"
                     )
-                    lines.append(
-                        f"  {item.get('name')} {item.get('version')} — {state}"
-                        + ("; portable" if item.get("portable") else "")
-                    )
-                if len(lines) == 1:
-                    lines.append("  none")
-                self.add_notice(alias, "\n".join(lines))
+                    groups[heading].append(item)
+                lines = [f"Plugins: {action} ({len(plugins)})"]
+                for heading, items in groups.items():
+                    if not items:
+                        continue
+                    lines.extend(("", f"{heading} ({len(items)})"))
+                    for item in items:
+                        details = []
+                        version = item.get("version")
+                        if isinstance(version, str) and version.casefold() != "unknown":
+                            details.append(f"version {version}")
+                        if item.get("portable"):
+                            details.append("portable")
+                        suffix = f"  [{', '.join(details)}]" if details else ""
+                        lines.append(f"  {item.get('name')}{suffix}")
+                if not plugins:
+                    lines.extend(("", "None"))
+                lines.extend(("", "Details: /plugins show NAME"))
+                self.add_command_report(alias, f"/plugins {action}", "\n".join(lines))
                 return
             if action == "show" and len(parameters) == 2:
                 result = await self.service_runtime.plugin_show(parameters[1])
@@ -3981,7 +4005,11 @@ class TfrTui:
                         lines.append(
                             f"  incompatible: {client.get('ui_name')} — {client.get('reason')}"
                         )
-                self.add_notice(alias, "\n".join(lines))
+                self.add_command_report(
+                    alias,
+                    f"/plugins show {parameters[1]}",
+                    "\n".join(lines),
+                )
                 return
             if action in {"enable", "disable"} and len(parameters) in {2, 3}:
                 confirm = len(parameters) == 3 and parameters[2].casefold() == "confirm"
