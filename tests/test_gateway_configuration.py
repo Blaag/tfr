@@ -7,16 +7,51 @@ from pathlib import Path
 
 import pytest
 
+from tfr.config import AgentsConfig, ConfigurationBundle, MainConfig, WorldsConfig
 from tfr.core_settings import core_configuration_registry
 from tfr.gateway_configuration import (
+    GatewayConfigurationDocument,
     GatewayConfigurationError,
     GatewayConfigurationRevisionConflict,
     GatewayConfigurationStore,
+    apply_gateway_configuration,
 )
 
 
 def store(tmp_path: Path) -> GatewayConfigurationStore:
     return GatewayConfigurationStore(tmp_path / "settings", core_configuration_registry())
+
+
+def test_secret_references_resolve_only_into_runtime_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TFR_TEST_WORLD_PASSWORD", "secret-value")
+    bundle = ConfigurationBundle(
+        main_path=tmp_path / "gateway.jsonc",
+        worlds_path=tmp_path / "worlds.jsonc",
+        agents_path=tmp_path / "agents.jsonc",
+        main=MainConfig(),
+        worlds=WorldsConfig.model_validate(
+            {"worlds": {"alpha": {"host": "example.test", "port": 4201}}}
+        ),
+        agents=AgentsConfig(),
+    )
+    document = GatewayConfigurationDocument(
+        worlds={
+            "alpha": {"worlds.alpha.login.character": "Alice"},
+        },
+        secret_references={
+            "worlds.alpha.login.password": "env:TFR_TEST_WORLD_PASSWORD",
+        },
+    )
+
+    effective = apply_gateway_configuration(bundle, document)
+
+    assert effective.worlds.worlds["alpha"].login is not None
+    assert effective.worlds.worlds["alpha"].login.password.get_secret_value() == "secret-value"
+    assert document.secret_references["worlds.alpha.login.password"] == (
+        "env:TFR_TEST_WORLD_PASSWORD"
+    )
 
 
 def test_store_persists_scoped_versioned_document_with_backup_and_audit(tmp_path: Path) -> None:

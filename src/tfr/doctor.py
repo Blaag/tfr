@@ -6,7 +6,14 @@ import stat
 from pathlib import Path
 from typing import Literal
 
-from tfr.config import ConfigurationError, load_configuration, load_ui_configuration
+from tfr.config import (
+    ConfigurationError,
+    MainConfig,
+    UiConfiguration,
+    load_configuration,
+    load_gateway_bootstrap,
+    load_ui_configuration,
+)
 from tfr.executables import find_uv as _find_uv
 from tfr.gateway_client import GatewayClient
 from tfr.gateway_transport import (
@@ -77,8 +84,30 @@ async def run_doctor(
 
     try:
         if profile == "remote-ui":
-            configuration = load_ui_configuration(config)
-            doctor.ok(f"UI configuration is valid: {configuration.main_path}")
+            configuration = (
+                load_ui_configuration(config)
+                if config.exists()
+                else UiConfiguration(main_path=config.resolve(), main=MainConfig())
+            )
+            doctor.ok(
+                "UI connection bootstrap is valid"
+                + (f": {configuration.main_path}" if config.exists() else " (profile-managed)")
+            )
+        elif profile in {"gateway", "local-split"}:
+            bootstrap = load_gateway_bootstrap(config)
+            from tfr.core_settings import core_configuration_registry
+            from tfr.gateway_configuration import GatewayConfigurationStore
+
+            store = GatewayConfigurationStore(
+                bootstrap.state_directory,
+                core_configuration_registry(),
+                defer_plugin_validation=True,
+            )
+            doctor.ok(
+                f"Gateway-managed configuration is valid at revision {store.revision}"
+            )
+            for warning in bootstrap.warnings:
+                print(f"[warning] {warning}")
         else:
             bundle = load_configuration(config)
             doctor.ok(

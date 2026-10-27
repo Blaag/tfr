@@ -644,6 +644,15 @@ class UiConfiguration(StrictModel):
     main: MainConfig
 
 
+class GatewayBootstrapConfiguration(StrictModel):
+    """The only file-backed settings needed before managed configuration opens."""
+
+    main_path: Path
+    state_directory: Path
+    warnings: tuple[str, ...] = ()
+    legacy: bool = False
+
+
 def default_config_directory() -> Path:
     configured = os.environ.get("XDG_CONFIG_HOME")
     base = Path(configured).expanduser() if configured else Path.home() / ".config"
@@ -652,6 +661,121 @@ def default_config_directory() -> Path:
 
 def default_config_path() -> Path:
     return default_config_directory() / "config.jsonc"
+
+
+def load_gateway_bootstrap(main_path: Path | str | None = None) -> GatewayBootstrapConfiguration:
+    """Load the minimal Gateway bootstrap, accepting old files only for migration.
+
+    The canonical document contains ``schema_version`` and ``state_directory``.
+    A legacy main configuration is parsed so its managed-store location remains
+    reachable, but its ordinary values are not returned as effective settings.
+    """
+
+    resolved = _resolve_path(Path(main_path) if main_path else default_config_path())
+    try:
+        with resolved.open(encoding="utf-8") as config_file:
+            data = jsonc.load(config_file)
+    except FileNotFoundError:
+        return GatewayBootstrapConfiguration(
+            main_path=resolved,
+            state_directory=_absolute_path_without_symlink_resolution(
+                ManagedSettingsConfig().state_directory,
+                relative_to=resolved.parent,
+            ),
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise ConfigurationError(f"cannot read {resolved}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigurationError(f"invalid {resolved}: <root>: expected an object")
+
+    bootstrap_fields = {"$schema", "schema_version", "state_directory"}
+    if set(data) <= bootstrap_fields:
+        unknown_version = data.get("schema_version", 1)
+        if unknown_version != 1:
+            raise ConfigurationError(
+                f"invalid {resolved}: schema_version: expected 1"
+            )
+        state = data.get("state_directory", ManagedSettingsConfig().state_directory)
+        if not isinstance(state, str) or not state:
+            raise ConfigurationError(
+                f"invalid {resolved}: state_directory: expected a non-empty path"
+            )
+        return GatewayBootstrapConfiguration(
+            main_path=resolved,
+            state_directory=_absolute_path_without_symlink_resolution(
+                Path(state), relative_to=resolved.parent
+            ),
+        )
+
+    # Compatibility is intentionally detection-only: this reads the location
+    # of the managed document without restoring old JSONC precedence.
+    try:
+        legacy = MainConfig.model_validate(data)
+    except ValidationError as exc:
+        errors = []
+        for error in exc.errors(include_input=False, include_url=False):
+            location = ".".join(str(part) for part in error["loc"]) or "<root>"
+            errors.append(f"{location}: {error['msg']}")
+        raise ConfigurationError(f"invalid {resolved}: {'; '.join(errors)}") from exc
+    managed_value = data.get("managed_settings")
+    has_explicit_state = isinstance(managed_value, dict) and "state_directory" in managed_value
+    legacy_state = (
+        legacy.managed_settings.state_directory
+        if has_explicit_state or resolved == _resolve_path(default_config_path())
+        else resolved.parent / ".tfr-gateway"
+    )
+    state_directory = _absolute_path_without_symlink_resolution(
+        legacy_state,
+        relative_to=resolved.parent,
+    )
+    marker = resolved.with_name(f"{resolved.name}.tfr-migrated")
+    warning = (
+        f"unmigrated legacy configuration found at {resolved}; its ordinary settings are "
+        "ignored. Review and import them with /config migrate"
+        if not marker.is_file()
+        else f"migrated legacy configuration at {resolved} is ignored"
+    )
+    return GatewayBootstrapConfiguration(
+        main_path=resolved,
+        state_directory=state_directory,
+        warnings=(warning,),
+        legacy=True,
+    )
+
+
+def gateway_bootstrap_bundle(
+    bootstrap: GatewayBootstrapConfiguration,
+) -> ConfigurationBundle:
+    """Create default normal configuration before the managed document is applied."""
+
+    main = MainConfig(
+        managed_settings=ManagedSettingsConfig(state_directory=bootstrap.state_directory)
+    )
+    main = main.model_copy(
+        update={
+            "logging": main.logging.model_copy(
+                update={"directory": _resolve_path(main.logging.directory)}
+            ),
+            "updates": main.updates.model_copy(
+                update={"state_directory": _resolve_path(main.updates.state_directory)}
+            ),
+            "web_gateway": main.web_gateway.model_copy(
+                update={"state_directory": _resolve_path(main.web_gateway.state_directory)}
+            ),
+            "plugins": main.plugins.model_copy(
+                update={"state_directory": _resolve_path(main.plugins.state_directory)}
+            ),
+        }
+    )
+    return ConfigurationBundle(
+        main_path=bootstrap.main_path,
+        worlds_path=bootstrap.main_path.with_name("worlds.jsonc"),
+        agents_path=bootstrap.main_path.with_name("agents.jsonc"),
+        main=main,
+        worlds=WorldsConfig(),
+        agents=AgentsConfig(),
+        warnings=bootstrap.warnings,
+    )
 
 
 def _resolve_path(path: Path, *, relative_to: Path | None = None) -> Path:

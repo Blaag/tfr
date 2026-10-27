@@ -25,7 +25,7 @@ from uuid import UUID, uuid4
 import qrcode
 from PIL import Image
 from prompt_toolkit import Application
-from prompt_toolkit.application import get_app
+from prompt_toolkit.application import get_app, run_in_terminal
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.document import Document
@@ -49,6 +49,7 @@ from tfr.ansi import ansi_visible_text, safe_ansi_formatted_text, terminal_plain
 from tfr.borders import BorderEdge, border_cell
 from tfr.clear_effects import ScreenClearContext
 from tfr.combo import Combo, ComboTracker
+from tfr.command_help import COMMAND_HELP, TOPIC_SUMMARIES, CommandHelp, suggest_help
 from tfr.config import ConfigurationBundle, SpellcheckConfig, ThemeConfig, TypingGlowConfig
 from tfr.core import CommandBus, EventBus, UnknownSessionError
 from tfr.events import (
@@ -945,6 +946,7 @@ class TfrTui:
         agents: AgentRuntime | None = None,
         service_runtime: ServiceRuntime | None = None,
         gateway_reconnect: Callable[[], Coroutine[Any, Any, str]] | None = None,
+        gateway_profiles: object | None = None,
         gateway_effect_demos: Callable[[], Sequence[ProjectedEffectDemo]] | None = None,
         restart_supported: bool = False,
         update_checker: UpdateChecker | None = None,
@@ -999,6 +1001,7 @@ class TfrTui:
         self.service_runtime = service_runtime
         self.local_ui_settings = local_ui_settings
         self.gateway_reconnect = gateway_reconnect
+        self.gateway_profiles = gateway_profiles
         self.gateway_effect_demos = gateway_effect_demos
         self.restart_supported = restart_supported
         self.update_checker = update_checker
@@ -3303,10 +3306,7 @@ class TfrTui:
             self._show_effects_lab_command_usage()
             return
         if command == "help":
-            if parameters:
-                self.add_notice(alias, "Usage: /help")
-            else:
-                self.add_notice(alias, self.help_text())
+            self.add_notice(alias, self.help_text(parameters[0] if len(parameters) == 1 else None))
         elif command == "image":
             await self.open_image_preview(alias, parameters)
         elif command == "sh":
@@ -3329,11 +3329,9 @@ class TfrTui:
                 self.restart_requested = True
                 get_app().exit(result=0)
         elif command == "gateway":
-            if parameters != ["reconnect"]:
-                self.add_notice(alias, "Usage: /gateway reconnect")
-            elif self.gateway_reconnect is None:
+            if parameters == ["reconnect"] and self.gateway_reconnect is None:
                 self.add_notice(alias, "Gateway reconnect is available only in an attached UI")
-            else:
+            elif parameters == ["reconnect"]:
                 self.add_notice(alias, "Reconnecting to Gateway...")
                 try:
                     result = await self.gateway_reconnect()
@@ -3341,21 +3339,30 @@ class TfrTui:
                     self.add_notice(alias, f"Gateway reconnect failed: {exc}")
                 else:
                     self.add_notice(alias, result)
+            elif self.gateway_profiles is None:
+                self.add_notice(alias, "Gateway profiles are unavailable for this connection")
+            else:
+                await self._handle_gateway_profile_command(alias, parameters)
         elif command == "update":
             await self._handle_update_command(alias, parameters)
         elif command == "web":
             await self._handle_web_command(alias, parameters)
         elif command == "config":
-            await self._handle_config_command(alias, parameters)
+            if parameters == ["help"]:
+                self.add_notice(alias, self.help_text("config"))
+            else:
+                await self._handle_config_command(alias, parameters)
         elif command == "ui":
             await self._handle_ui_command(alias, parameters)
         elif command == "diagnostics":
             await self._handle_diagnostics_command(alias, parameters)
         elif command == "plugins":
-            if parameters:
-                self.add_notice(alias, "Usage: /plugins")
-            else:
+            if parameters == ["help"]:
+                self.add_notice(alias, self.help_text("plugins"))
+            elif not parameters and self.gateway_reconnect is None:
                 self.add_notice(alias, self._plugin_status_text())
+            else:
+                await self._handle_plugins_command(alias, parameters)
         elif command == "version":
             if parameters:
                 self.add_notice(alias, "Usage: /version")
@@ -3383,7 +3390,7 @@ class TfrTui:
         elif command == "reconnect":
             await self.reconnect_world(alias)
         elif command == "clear":
-            self._handle_clear_command(alias, parameters)
+            await self._handle_clear_command(alias, parameters)
         elif command == "recall":
             self._handle_recall_command(alias, parameters)
         elif command == "end":
@@ -3420,7 +3427,14 @@ class TfrTui:
             else:
                 self.switch_world(self.world_switch_aliases[command])
         else:
-            self.add_notice(alias, f"Unknown client command: /{command}")
+            names = tuple(sorted(set(COMMAND_HELP) | set(self.plugins.registry.commands)))
+            suggestions = suggest_help(command, names)
+            next_action = (
+                " Did you mean " + ", ".join(f"/{item}" for item in suggestions) + "?"
+                if suggestions
+                else " Use /help to browse available command topics."
+            )
+            self.add_notice(alias, f"Unknown client command: /{command}.{next_action}")
 
     def _shadowed_world_aliases(self) -> dict[str, str]:
         shadowed: dict[str, str] = {}
@@ -3431,76 +3445,76 @@ class TfrTui:
                 shadowed[command] = f"{registered[0]} plugin command"
         return shadowed
 
-    def help_text(self) -> str:
-        update_channel = (
-            self.update_checker.config.channel if self.update_checker is not None else "stable"
-        )
-        lines = [
-            "TFR commands",
-            "  /help - show this help",
-            "  /sh - temporarily open an interactive local shell",
-            "  ! command - run one local shell command; !!TEXT sends a literal !",
-            "  /world ALIAS - switch worlds; /next (/n) and /previous (/p) also switch",
-            "  /connect, /disconnect, /reconnect - manage the active connection",
-            "  /image [--width N] [--ascii|--unicode] [--withcolor] [path] - send an image",
-            "  /clear [status|cycle|random|lock EFFECT] - clear input/output or select effect",
-            "  /recall X - show the last X retained lines for the active world",
-            "  /end - return to live output",
-            "  /nospoof show|hide|status - control NOSPOOF prefix visibility",
-            "  /lowbw [on|off|status] - suppress continuous UI animation",
-            "  /mouse auto|terminal|tfr|status - choose and save local mouse handling",
-            "  /animations [on|off|status] - enable continuous UI effects",
-            "  /spellcheck on|off|status|undo - manage shared submit-time spell checking",
-            "  /gag list|add PATTERN|remove PATTERN|reset - manage shared world gags",
-            "  /streaks on|off|status - manage shared speaking streak effects",
-            "  /effects - open the local Effects Lab; /demoeffects is an alias",
-            "  /update - update TFR and stable-auto plugins on the Gateway and all connected UIs",
-            f"  /update status|check - inspect {update_channel} TFR and plugin releases",
-            "  /update force - candidate channel only; force every host to stage locally",
-            "  /web status|repair|pair|devices|revoke - manage the private iPhone PWA",
-            "  /config status|list|show|set|reset|changes|undo - inspect or change configuration",
-            "  /ui list|show|rename|forget - inspect and administer user interfaces",
-            "  /diagnostics [web|presentations|plugins|clear] - inspect runtime diagnostics",
-            "  /plugins - show configured, loaded, and failed plugins",
-            "  /version - show the UI and gateway TFR versions",
-            "  /agent status|inspect|pause|resume|trigger|close - manage agents",
-            "  /quit - exit TFR; //TEXT sends a literal leading slash",
-            "",
-            "World markers",
-            "  [H] human-operated world; [A] agent world",
-            "  (Xs/Xm/Xh/Xd) time since that world last received inbound input",
-            "",
-            "Keybindings",
-            "  Enter send; F5/Ctrl-Left/Option-Left previous world",
-            "  F6/Ctrl-Right next; left-click selects a world; drag copies output",
-            "  Click an underlined http(s) link to open it in your browser",
-            "  PageUp/PageDown scroll or page; empty-input Tab also pages when more output exists",
-            "  Ctrl-L clear visible input/output; Ctrl-R reconnect; F8 agent inspector",
-            "  Ctrl-Q quit; Ctrl-C interrupt",
-            "",
-            "World-switch aliases",
-        ]
-        if self.restart_supported:
-            lines.insert(
-                4,
-                "  /reload, /restart - reload this UI without disconnecting the gateway",
+    def _help_unavailable_reason(self, descriptor: CommandHelp) -> str | None:
+        if descriptor.availability == "gateway" and self.gateway_reconnect is None:
+            return "connect this UI to a Gateway"
+        if descriptor.availability == "restart" and not self.restart_supported:
+            return "UI restart management is not active"
+        if descriptor.availability == "agents" and not getattr(
+            self.agents, "controllers", self.agents
+        ):
+            return "no agents are configured"
+        return None
+
+    def help_text(self, query: str | None = None) -> str:
+        dynamic: dict[str, CommandHelp] = {}
+        for name, (plugin, _handler) in self.plugins.registry.commands.items():
+            summary = self.plugins.registry.command_help.get(name, "Plugin command")
+            dynamic[name] = CommandHelp(
+                name=name,
+                summary=summary,
+                usage=f"/{name} [ARGS]",
+                examples=(),
+                topic="plugins",
+                scope=f"{plugin} plugin",
+                related=("plugins",),
             )
-        if self.gateway_reconnect is not None:
-            lines.insert(5, "  /gateway reconnect - reconnect this UI to the gateway")
-        shadowed = self._shadowed_world_aliases()
-        if not self.world_switch_aliases:
-            lines.append("  none")
-        else:
-            for command, world in sorted(self.world_switch_aliases.items()):
-                suffix = f"; shadowed by {shadowed[command]}" if command in shadowed else ""
-                lines.append(f"  /{command} - switch to {world}{suffix}")
-        lines.extend(("", "Loaded plugin commands"))
-        if not self.plugins.registry.commands:
-            lines.append("  none")
-        else:
-            for command, (plugin, _handler) in sorted(self.plugins.registry.commands.items()):
-                description = self.plugins.registry.command_help.get(command, "plugin command")
-                lines.append(f"  /{command} ({plugin}) - {description}")
+        descriptors = {**COMMAND_HELP, **dynamic}
+        if query is not None:
+            normalized = query.casefold().removeprefix("/")
+            descriptor = descriptors.get(normalized)
+            if descriptor is not None:
+                return descriptor.render(unavailable=self._help_unavailable_reason(descriptor))
+            if normalized in TOPIC_SUMMARIES:
+                lines = [f"Help topic: {normalized} — {TOPIC_SUMMARIES[normalized]}"]
+                for item in sorted(descriptors.values(), key=lambda value: value.name):
+                    if item.topic != normalized or self._help_unavailable_reason(item):
+                        continue
+                    lines.append(f"  /{item.name} — {item.summary}")
+                if len(lines) == 1:
+                    lines.append("  No commands in this topic are currently available.")
+                return "\n".join(lines)
+            names = tuple(sorted(set(descriptors) | set(TOPIC_SUMMARIES)))
+            suggestions = suggest_help(normalized, names)
+            suffix = (
+                " Did you mean: " + ", ".join(suggestions) + "?"
+                if suggestions
+                else " Use /help to browse topics."
+            )
+            return f"Unknown help topic or command: {query}.{suffix}"
+        lines = [
+            "TFR help topics",
+            "Use /help TOPIC or /help COMMAND for usage, examples, scope, and related commands.",
+        ]
+        available_topics = {
+            item.topic
+            for item in descriptors.values()
+            if self._help_unavailable_reason(item) is None
+        }
+        lines.extend(
+            f"  {topic} — {summary}"
+            for topic, summary in TOPIC_SUMMARIES.items()
+            if topic in available_topics
+        )
+        lines.extend(
+            (
+                "",
+                "Input shortcuts",
+                "  ! command runs one local shell command; !!TEXT sends a literal !",
+                "  //TEXT sends a literal leading slash",
+                "  Enter sends; PageUp/PageDown pages; Ctrl-Q quits",
+            )
+        )
         return "\n".join(lines)
 
     def _effects_border_text(
@@ -3848,6 +3862,141 @@ class TfrTui:
                 lines.append(f"  {name}: failed ({reason})")
         return "\n".join(lines)
 
+    async def _handle_gateway_profile_command(self, alias: str, parameters: list[str]) -> None:
+        from tfr.gateway_profiles import (
+            GatewayProfileStore,
+            interactive_gateway_repair,
+            interactive_gateway_setup,
+        )
+
+        store = self.gateway_profiles
+        if not isinstance(store, GatewayProfileStore):
+            self.add_notice(alias, "Gateway profiles are unavailable")
+            return
+        usage = (
+            "Usage: /gateway reconnect|setup|profiles [export]|switch NAME|rename NAME NEW-NAME|"
+            "repair NAME|forget NAME --confirm"
+        )
+        try:
+            action = parameters[0] if parameters else ""
+            if parameters == ["profiles"]:
+                active = store.active
+                lines = ["Gateway connection profiles:"]
+                lines.extend(
+                    f"  {'*' if active and item.name == active.name else ' '} {item.name}  "
+                    f"{item.host}:{item.port}  TLS {item.tls_server_name}"
+                    for item in store.profiles()
+                )
+                self.add_notice(alias, "\n".join(lines))
+                return
+            if parameters == ["profiles", "export"]:
+                self.add_notice(alias, json.dumps(store.export(), indent=2, sort_keys=True))
+                return
+            if parameters == ["setup"]:
+                await run_in_terminal(lambda: interactive_gateway_setup(store))
+                self.restart_requested = True
+                get_app().exit(result=0)
+                return
+            if action == "switch" and len(parameters) == 2:
+                store.switch(parameters[1])
+                self.restart_requested = True
+                get_app().exit(result=0)
+                return
+            if action == "rename" and len(parameters) == 3:
+                renamed = store.rename(parameters[1], parameters[2])
+                self.add_notice(alias, f"Renamed Gateway profile to {renamed.name}.")
+                return
+            if action == "repair" and len(parameters) == 2:
+                await run_in_terminal(lambda: interactive_gateway_repair(store, parameters[1]))
+                if store.active and store.active.name.casefold() == parameters[1].casefold():
+                    self.restart_requested = True
+                    get_app().exit(result=0)
+                else:
+                    self.add_notice(alias, f"Repaired Gateway profile {parameters[1]}.")
+                return
+            if action == "forget" and len(parameters) == 3 and parameters[2] == "--confirm":
+                forgotten = store.forget(parameters[1])
+                self.add_notice(alias, f"Forgot Gateway profile {forgotten.name}.")
+                return
+            self.add_notice(alias, usage)
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.add_notice(alias, f"Gateway profile error: {exc}")
+
+    async def _handle_plugins_command(self, alias: str, parameters: list[str]) -> None:
+        usage = (
+            "Usage: /plugins available|installed|enabled|failed|show NAME|"
+            "enable NAME [confirm]|disable NAME [confirm]"
+        )
+        if self.service_runtime is None or not hasattr(self.service_runtime, "plugins_catalog"):
+            self.add_notice(alias, usage)
+            return
+        try:
+            action = parameters[0].casefold() if parameters else "enabled"
+            if action in {"available", "installed", "enabled", "failed"} and len(parameters) <= 1:
+                plugins = await self.service_runtime.plugins_catalog(action)
+                lines = [f"Plugins — {action}"]
+                for item in plugins:
+                    state = (
+                        "loaded"
+                        if item.get("loaded")
+                        else "failed"
+                        if item.get("failed")
+                        else "disabled"
+                    )
+                    lines.append(
+                        f"  {item.get('name')} {item.get('version')} — {state}"
+                        + ("; portable" if item.get("portable") else "")
+                    )
+                if len(lines) == 1:
+                    lines.append("  none")
+                self.add_notice(alias, "\n".join(lines))
+                return
+            if action == "show" and len(parameters) == 2:
+                result = await self.service_runtime.plugin_show(parameters[1])
+                plugin = result["plugin"]
+                lines = [
+                    f"Plugin {plugin.get('name')} {plugin.get('version')}",
+                    f"  {plugin.get('summary')}",
+                    f"  category: {plugin.get('category')}; enabled: {plugin.get('enabled')}; "
+                    f"loaded: {plugin.get('loaded')}; portable: {plugin.get('portable')}",
+                    "  capabilities: " + (", ".join(plugin.get("capabilities", [])) or "none"),
+                ]
+                for client in result.get("clients", []):
+                    if isinstance(client, dict) and not client.get("compatible"):
+                        lines.append(
+                            f"  incompatible: {client.get('ui_name')} — {client.get('reason')}"
+                        )
+                self.add_notice(alias, "\n".join(lines))
+                return
+            if action in {"enable", "disable"} and len(parameters) in {2, 3}:
+                confirm = len(parameters) == 3 and parameters[2].casefold() == "confirm"
+                status = await self.service_runtime.config_status()
+                result = await self.service_runtime.plugin_enablement(
+                    parameters[1],
+                    enabled=action == "enable",
+                    expected_revision=int(status["revision"]),
+                    confirm=confirm,
+                )
+                if result.get("requires_confirmation"):
+                    self.add_notice(
+                        alias,
+                        f"{action.title()} {parameters[1]} for Gateway, native UIs, and PWA? "
+                        f"Required action: {result.get('restart')}. Confirm with: "
+                        f"/plugins {action} {parameters[1]} confirm",
+                    )
+                else:
+                    self.add_notice(
+                        alias,
+                        f"Plugin {parameters[1]} is now "
+                        f"{'enabled' if action == 'enable' else 'disabled'} at revision "
+                        f"{result.get('revision')}; reload clients to converge.",
+                    )
+                return
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            self.add_notice(alias, f"Plugin management failed: {exc}")
+            return
+        self.add_notice(alias, usage)
+
     async def _handle_web_command(self, alias: str, parameters: list[str]) -> None:
         usage = (
             "Usage: /web status|repair|devices|"
@@ -4012,6 +4161,9 @@ class TfrTui:
         valid_reset = action == "reset" and len(parameters) >= 2
         valid_changes = action == "changes" and len(parameters) <= 2
         valid_undo = action == "undo" and len(parameters) <= 2
+        valid_migrate = action == "migrate"
+        valid_migration_status = action == "migration-status" and len(parameters) == 1
+        valid_rollback_migration = action == "rollback-migration" and len(parameters) <= 2
         if parameters and not (
             valid_status
             or valid_list
@@ -4020,16 +4172,110 @@ class TfrTui:
             or valid_reset
             or valid_changes
             or valid_undo
+            or valid_migrate
+            or valid_migration_status
+            or valid_rollback_migration
         ):
             self.add_notice(
                 alias,
-                "Usage: /config status|list|show|set|reset|changes|undo",
+                "Usage: /config status|list|show|set|reset|changes|undo|migrate|"
+                "migration-status|rollback-migration",
             )
             return
         if self.service_runtime is None:
             self.add_notice(alias, "Configuration inventory is available only in an attached UI")
             return
         try:
+            if valid_migration_status:
+                status = await self.service_runtime.config_migration_status()
+                lines = [
+                    f"Migration status — Gateway revision {status.get('revision')}",
+                    f"  proposals: {status.get('proposal_count', 0)}",
+                    f"  applied revision: {status.get('applied_revision') or 'none'}",
+                ]
+                for proposal in status.get("proposals", []):
+                    if isinstance(proposal, dict):
+                        lines.append(
+                            f"  {proposal.get('ui_name')} at r{proposal.get('base_revision')} "
+                            f"({len(proposal.get('settings', []))} settings)"
+                        )
+                self.add_notice(alias, "\n".join(lines))
+                return
+            if valid_rollback_migration:
+                confirm = len(parameters) == 2 and parameters[1].casefold() == "confirm"
+                status = await self.service_runtime.config_migration_status()
+                if not confirm:
+                    self.add_notice(
+                        alias,
+                        "Roll back the applied migration? Confirm with: "
+                        "/config rollback-migration confirm",
+                    )
+                    return
+                result = await self.service_runtime.config_migration_rollback(
+                    expected_revision=int(status["revision"]), confirm=True
+                )
+                self.add_notice(
+                    alias, f"Migration rolled back at revision {result.get('revision')}."
+                )
+                return
+            if valid_migrate:
+                subcommand = parameters[1].casefold() if len(parameters) > 1 else "submit"
+                choices = getattr(self, "_migration_choices", {})
+                if subcommand == "submit" and len(parameters) in {1, 2}:
+                    preview = await self.service_runtime.config_migrate()
+                elif subcommand == "preview" and len(parameters) == 2:
+                    preview = await self.service_runtime.config_migration_preview(choices)
+                elif subcommand == "choose" and len(parameters) >= 4:
+                    choices[parameters[2]] = " ".join(parameters[3:])
+                    self._migration_choices = choices
+                    preview = await self.service_runtime.config_migration_preview(choices)
+                elif subcommand == "skip" and len(parameters) == 3:
+                    choices[parameters[2]] = "skip"
+                    self._migration_choices = choices
+                    preview = await self.service_runtime.config_migration_preview(choices)
+                elif subcommand == "rename" and len(parameters) == 5:
+                    choices[parameters[2]] = f"rename:{parameters[3]}:{parameters[4]}"
+                    self._migration_choices = choices
+                    preview = await self.service_runtime.config_migration_preview(choices)
+                elif subcommand == "apply" and parameters == ["migrate", "apply", "confirm"]:
+                    status = await self.service_runtime.config_status()
+                    result = await self.service_runtime.config_migration_apply(
+                        expected_revision=int(status["revision"]),
+                        choices=choices,
+                        confirm=True,
+                    )
+                    self.add_notice(
+                        alias,
+                        f"Migration applied atomically at revision {result.get('revision')}. "
+                        "Clients will report convergence through /config status.",
+                    )
+                    return
+                else:
+                    self.add_notice(
+                        alias,
+                        "Usage: /config migrate [submit|preview|choose KEY UI|skip KEY|"
+                        "rename KEY UI NEW-NAME|"
+                        "apply confirm]",
+                    )
+                    return
+                lines = [
+                    f"Migration preview — base revision {preview.get('base_revision')}",
+                    f"  accepted: {len(preview.get('accepted', []))}; "
+                    f"conflicts: {len(preview.get('conflicts', []))}; "
+                    f"skipped: {len(preview.get('skipped', []))}",
+                ]
+                for conflict in preview.get("conflicts", []):
+                    if isinstance(conflict, dict):
+                        names = ", ".join(
+                            str(candidate.get("ui_name"))
+                            for candidate in conflict.get("candidates", [])
+                            if isinstance(candidate, dict)
+                        )
+                        lines.append(f"  conflict {conflict.get('key')}: choose {names} or skip")
+                if not preview.get("conflicts"):
+                    lines.append("  Apply with: /config migrate apply confirm")
+                self.add_notice(alias, "\n".join(lines))
+                return
             if valid_changes:
                 limit = int(parameters[1]) if len(parameters) == 2 else 50
                 history = await self.service_runtime.config_changes(limit)
@@ -4519,7 +4765,7 @@ class TfrTui:
         visibility = "shown" if session.show_nospoof_prefix else "hidden"
         self.add_notice(alias, f"NOSPOOF prefixes are {visibility}")
 
-    def _handle_clear_command(self, alias: str, parameters: list[str]) -> None:
+    async def _handle_clear_command(self, alias: str, parameters: list[str]) -> None:
         available = self._screen_clear_plugins()
         operation = parameters[0].casefold() if parameters else ""
         if not parameters:
@@ -4531,10 +4777,28 @@ class TfrTui:
                 if self.screen_clear_mode == "locked"
                 else self.screen_clear_mode
             )
-            self.add_notice(
-                alias,
-                f"Screen-clear mode is {selected}; effects: {', '.join(available) or 'none'}",
-            )
+            text = f"Screen-clear mode is {selected}; effects: {', '.join(available) or 'none'}"
+            if (
+                self.screen_clear_effect
+                and self.service_runtime is not None
+                and hasattr(self.service_runtime, "plugin_show")
+            ):
+                try:
+                    result = await self.service_runtime.plugin_show(self.screen_clear_effect)
+                except (ConnectionError, OSError, RuntimeError, ValueError):
+                    pass
+                else:
+                    exceptions = [
+                        str(client.get("ui_name"))
+                        for client in result.get("clients", [])
+                        if isinstance(client, dict) and not client.get("compatible")
+                    ]
+                    text += (
+                        "; shared enablement; incompatible clients: " + ", ".join(exceptions)
+                        if exceptions
+                        else "; shared enablement; all reported clients compatible"
+                    )
+            self.add_notice(alias, text)
             return
         if operation in {"cycle", "random"} and len(parameters) == 1:
             self.screen_clear_mode = operation
@@ -4545,7 +4809,16 @@ class TfrTui:
             requested = parameters[1].casefold()
             effect = next((name for name in available if name.casefold() == requested), None)
             if effect is None:
-                self.add_notice(alias, f"Unknown screen-clear effect: {parameters[1]}")
+                state = (
+                    self.plugins.plugin_state(parameters[1])
+                    if self.plugins is not None
+                    else "unavailable"
+                )
+                self.add_notice(
+                    alias,
+                    f"Unknown screen-clear effect: {parameters[1]} ({state}). "
+                    f"Use /plugins show {parameters[1]} for availability and compatibility.",
+                )
                 return
             self.screen_clear_mode = "locked"
             self.screen_clear_effect = effect
@@ -4623,7 +4896,11 @@ class TfrTui:
         self.add_notice(
             alias,
             f"Mouse mode: {self.mouse_mode} ({self.effective_mouse_mode}{reason}) — "
-            "saved on this device",
+            + (
+                "saved on this device"
+                if self.local_ui_settings is not None
+                else "temporary; use /config set ui.mouse_mode VALUE --scope ui to save"
+            ),
         )
 
     def _set_low_bandwidth(self, enabled: bool) -> None:

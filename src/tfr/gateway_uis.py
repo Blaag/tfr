@@ -328,6 +328,21 @@ class UiStore:
                 raise
             return record
 
+    async def update_capabilities(self, ui_id: UUID, capabilities: Sequence[str]) -> UiRecord:
+        validated = UiRecord._capabilities(list(capabilities))
+        async with self._lock:
+            previous = self._records.get(ui_id)
+            if previous is None:
+                raise ValueError(f"unknown UI ID: {ui_id}")
+            record = replace(previous, capabilities=validated)
+            self._records[ui_id] = record
+            try:
+                self._save()
+            except BaseException:
+                self._records[ui_id] = previous
+                raise
+            return record
+
     async def report_configuration(
         self, ui_id: UUID, revision: int, status: str, issues: tuple[str, ...]
     ) -> UiRecord:

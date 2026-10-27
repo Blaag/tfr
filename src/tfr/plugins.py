@@ -53,6 +53,9 @@ from tfr.presentation import EffectProgram, validate_effect_programs
 from tfr.text_effects import TextDecoration, validate_decorations
 
 PLUGIN_API_VERSION = 1
+PORTABLE_PLUGIN_NAMES = frozenset(
+    {"acid_rain", "sandstorm", "spotlight", "terminal_reveal", "water"}
+)
 PLUGIN_ENTRY_POINT_GROUP = "tfr.plugins.v1"
 _COMMAND_NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
 _MAX_BOSS_EVENTS = 200
@@ -852,6 +855,7 @@ class PluginManager:
         self.requested_plugins: tuple[str, ...] = ()
         self.config: Mapping[str, Any] = MappingProxyType({})
         self._loaded_plugins: list[str] = []
+        self._available_plugins: tuple[str, ...] = ()
         self.load_failures: dict[str, str] = {}
         self.diagnostics = DiagnosticBuffer()
         if scope != "gateway":
@@ -909,6 +913,7 @@ class PluginManager:
             else tuple(entry_points().select(group=PLUGIN_ENTRY_POINT_GROUP))
         )
         points = tuple(points) + tuple(extra_discovered)
+        manager._available_plugins = tuple(sorted({point.name for point in points}))
         manager.requested_plugins = tuple(dict.fromkeys(enabled))
         manager.config = MappingProxyType(
             {
@@ -973,6 +978,64 @@ class PluginManager:
             else:
                 manager._loaded_plugins.append(name)
         return manager
+
+    def catalog(self) -> list[dict[str, object]]:
+        output = []
+        portable = set(self.configured_portable_plugins())
+        for name in sorted(set(self._available_plugins) | set(self.requested_plugins)):
+            configuration = self.registry.configurations.get(name)
+            capabilities = sorted(
+                {
+                    kind
+                    for kind, registrations in (
+                        ("commands", self.registry.commands),
+                        ("presentation", self.registry.presentation_decorators),
+                        ("borders", self.registry.border_effects),
+                        ("screen-clear", self.registry.screen_clear_effects),
+                        ("boss", self.registry.boss_views),
+                    )
+                    if any(
+                        (value[0] if isinstance(value, tuple) else value.plugin) == name
+                        for value in registrations.values()
+                    )
+                }
+            )
+            output.append(
+                {
+                    "name": name,
+                    "summary": (
+                        configuration.summary if configuration else "Discovered TFR plugin"
+                    ),
+                    "category": configuration.category if configuration else "other",
+                    "version": configuration.version if configuration else "unknown",
+                    "settings": (
+                        [setting.as_dict() for setting in configuration.settings]
+                        if configuration
+                        else []
+                    ),
+                    "capabilities": capabilities,
+                    "available": name in self._available_plugins,
+                    "installed": name in self._available_plugins,
+                    "enabled": name in self.requested_plugins,
+                    "loaded": name in self._loaded_plugins,
+                    "failed": name in self.load_failures,
+                    "failure": self.load_failures.get(name),
+                    "portable": name in portable or name in PORTABLE_PLUGIN_NAMES,
+                }
+            )
+        return output
+
+    def plugin_state(self, name: str) -> str:
+        item = next((item for item in self.catalog() if item["name"] == name), None)
+        if item is None:
+            return "unavailable"
+        if item["failed"]:
+            return f"failed: {item['failure']}"
+        if not item["enabled"]:
+            return "installed but disabled"
+        if not item["loaded"]:
+            return "enabled but incompatible or unavailable in this client"
+        return "loaded"
 
     def configured_speaker_effects(self) -> tuple[str, ...]:
         value = self.config.get("speaker_effects", {})

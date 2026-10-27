@@ -85,6 +85,47 @@ class FakeEntryPoint:
         return self.plugin
 
 
+class SpotlightPlugin:
+    def register(self, registrar: PluginRegistrar, _config: object) -> None:
+        registrar.register_screen_clear_effect(
+            lambda _context: (), duration_seconds=1, frames_per_second=10
+        )
+
+
+async def test_plugin_catalog_distinguishes_available_enabled_loaded_and_portable() -> None:
+    point = FakeEntryPoint("spotlight", SpotlightPlugin())
+    disabled = await PluginManager.load(
+        enabled=(),
+        config={},
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        discovered=(point,),
+        scope="ui",
+    )
+    enabled = await PluginManager.load(
+        enabled=("spotlight",),
+        config={"spotlight": {}},
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        discovered=(point,),
+        scope="ui",
+    )
+
+    disabled_item = disabled.catalog()[0]
+    assert disabled_item["available"] is True
+    assert disabled_item["installed"] is True
+    assert disabled_item["enabled"] is False
+    assert disabled_item["loaded"] is False
+    assert disabled_item["portable"] is True
+    item = enabled.catalog()[0]
+    assert item["enabled"] is True
+    assert item["loaded"] is True
+    assert item["portable"] is True
+    assert "screen-clear" in item["capabilities"]
+
+
 def inbound_event(session_id: Any, *, text: str = "hello") -> Event:
     return Event(
         session_id=session_id,
