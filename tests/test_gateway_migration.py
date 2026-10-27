@@ -73,6 +73,46 @@ def test_matching_shared_values_deduplicate_and_ui_values_remain_separate(
     assert sum(item["key"] == "ui.mouse_mode" for item in accepted) == 2
 
 
+def test_gateway_import_keeps_per_ui_settings_out_of_ui_type_scope(tmp_path: Path) -> None:
+    configuration = GatewayConfigurationStore(tmp_path / "state", core_configuration_registry())
+    migration = GatewayMigrationStore(tmp_path / "state", configuration)
+    ui_id = uuid4()
+    settings = collect_migration_settings(
+        {
+            "ui.animations_enabled": False,
+            "ui.pager.enabled": False,
+        },
+        core_configuration_registry(),
+        ui_id=ui_id,
+        source="Gateway JSONC one-time import",
+        ui_scope="ui-type",
+        ui_target="terminal",
+    )
+    migration.submit(
+        new_proposal(
+            ui_id=ui_id,
+            ui_name="Gateway legacy configuration",
+            base_revision=0,
+            settings=settings,
+        )
+    )
+
+    assert migration.apply(
+        expected_revision=0,
+        choices=None,
+        actor_ui_id="migration",
+        actor_ui_name="Legacy one-time import",
+    ) == 1
+    assert configuration.get("ui.animations_enabled", scope="ui", target=str(ui_id)) == (
+        True,
+        False,
+    )
+    assert configuration.get("ui.pager.enabled", scope="ui-type", target="terminal") == (
+        True,
+        False,
+    )
+
+
 def test_divergent_shared_values_require_choice_and_apply_atomically(tmp_path: Path) -> None:
     configuration = GatewayConfigurationStore(tmp_path / "state", core_configuration_registry())
     migration = GatewayMigrationStore(tmp_path / "state", configuration)
