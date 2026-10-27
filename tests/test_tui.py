@@ -671,6 +671,25 @@ async def test_help_uses_topics_and_structured_command_and_plugin_details() -> N
     assert "Usage: /config status|list|show" in help_text
     assert "/fixture — run the harmless fixture" in help_text
     assert "Availability: fixture plugin" in help_text
+    assert "Help request: /help\n\nTFR help topics" in help_text
+    assert "Help request: /help config\n\n/config" in help_text
+    assert "Help request: /help fixture\n\n/fixture" in help_text
+    assert " --" not in help_text
+
+
+async def test_topic_help_explains_command_drill_down_and_separates_responses() -> None:
+    tui = make_tui()
+    tui.active_view.display.resize(width=100, height=100)
+    tui.gateway_reconnect = AsyncMock()
+
+    await tui._handle_client_command("alpha", "/help connections")
+    await tui._handle_client_command("alpha", "/help gateway")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Open command details with /help COMMAND." in text
+    assert "/gateway — Manage Gateway connections and profiles" in text
+    assert "\n\nHelp request: /help gateway\n\n/gateway" in text
+    assert "More help: /help config, /help ui" in text
 
 
 async def test_contextual_help_filters_index_and_explains_unavailable_commands() -> None:

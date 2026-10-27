@@ -2271,6 +2271,15 @@ class TfrTui:
         )
         self.application.invalidate()
 
+    def add_help(self, alias: str, query: str | None, text: str) -> None:
+        self.views[alias].clear_selection()
+        request = "/help" if query is None else f"/help {query}"
+        self.views[alias].display.append(
+            self.theme.ansi_text("warning", f"\nHelp request: {request}\n\n{text}\n"),
+            recallable=False,
+        )
+        self.application.invalidate()
+
     def _gateway_presentation_programs(
         self,
         event: Event,
@@ -3306,7 +3315,8 @@ class TfrTui:
             self._show_effects_lab_command_usage()
             return
         if command == "help":
-            self.add_notice(alias, self.help_text(parameters[0] if len(parameters) == 1 else None))
+            query = parameters[0] if len(parameters) == 1 else None
+            self.add_help(alias, query, self.help_text(query))
         elif command == "image":
             await self.open_image_preview(alias, parameters)
         elif command == "sh":
@@ -3476,12 +3486,16 @@ class TfrTui:
             if descriptor is not None:
                 return descriptor.render(unavailable=self._help_unavailable_reason(descriptor))
             if normalized in TOPIC_SUMMARIES:
-                lines = [f"Help topic: {normalized} — {TOPIC_SUMMARIES[normalized]}"]
+                lines = [
+                    f"Help topic: {normalized} — {TOPIC_SUMMARIES[normalized]}",
+                    "Open command details with /help COMMAND.",
+                    "",
+                ]
                 for item in sorted(descriptors.values(), key=lambda value: value.name):
                     if item.topic != normalized or self._help_unavailable_reason(item):
                         continue
                     lines.append(f"  /{item.name} — {item.summary}")
-                if len(lines) == 1:
+                if len(lines) == 3:
                     lines.append("  No commands in this topic are currently available.")
                 return "\n".join(lines)
             names = tuple(sorted(set(descriptors) | set(TOPIC_SUMMARIES)))
@@ -3494,7 +3508,8 @@ class TfrTui:
             return f"Unknown help topic or command: {query}.{suffix}"
         lines = [
             "TFR help topics",
-            "Use /help TOPIC or /help COMMAND for usage, examples, scope, and related commands.",
+            "Open a topic with /help TOPIC or a command with /help COMMAND.",
+            "",
         ]
         available_topics = {
             item.topic

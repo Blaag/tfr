@@ -24,7 +24,9 @@ class CommandHelp:
         if self.examples:
             lines.extend(("Examples:", *(f"  {item}" for item in self.examples)))
         if self.related:
-            lines.append("Related: " + ", ".join(f"/{name}" for name in self.related))
+            lines.append(
+                "More help: " + ", ".join(f"/help {name}" for name in self.related)
+            )
         return "\n".join(lines)
 
 
