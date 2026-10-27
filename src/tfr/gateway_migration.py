@@ -92,9 +92,12 @@ def collect_migration_settings(
             continue
         scope = descriptor.scope.value
         target: str | None = None
-        if descriptor.scope in {SettingScope.UI, SettingScope.UI_TYPE}:
+        if descriptor.scope is SettingScope.UI_TYPE:
             scope = ui_scope
             target = ui_target or str(ui_id)
+        elif descriptor.scope is SettingScope.UI:
+            scope = "ui"
+            target = str(ui_id)
         elif descriptor.scope is SettingScope.WORLD:
             scope = "world"
             parts = key.split(".")
