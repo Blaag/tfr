@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import hashlib
 import heapq
 import hmac
 import inspect
@@ -13,6 +14,7 @@ import socket
 import ssl
 import stat
 import sys
+import tempfile
 from collections import Counter, deque
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -3307,6 +3309,34 @@ class GatewayServer:
         return world
 
 
+def _stage_legacy_world_login_references(
+    bundle: ConfigurationBundle,
+    state_directory: Path,
+) -> dict[str, str]:
+    directory = state_directory / "migration-secrets"
+    references: dict[str, str] = {}
+    for name, world in bundle.worlds.worlds.items():
+        if world.login is None:
+            continue
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(directory, 0o700)
+        identifier = hashlib.sha256(name.encode()).hexdigest()
+        destination = directory / f"{identifier}.password"
+        descriptor, temporary = tempfile.mkstemp(prefix=".password.", dir=directory)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(world.login.password.get_secret_value() + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, destination)
+            os.chmod(destination, 0o600)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+        references[f"worlds.{name}.login.password"] = f"file:{destination}"
+    return references
+
+
 async def run_gateway(
     bundle: ConfigurationBundle,
     path: Path | str | None = None,
@@ -3351,10 +3381,14 @@ async def run_gateway(
         startup_values = {
             key: value
             for key, value in startup_values.items()
-            if ".login." not in key
+            if not key.endswith(".login.password")
             and not key.startswith("providers.")
             and not key.startswith("agents.")
         }
+        login_references = _stage_legacy_world_login_references(
+            migration_source,
+            bundle.main.managed_settings.state_directory,
+        )
         migration = GatewayMigrationStore(
             bundle.main.managed_settings.state_directory, startup_store
         )
@@ -3387,6 +3421,7 @@ async def run_gateway(
             choices={},
             actor_ui_id="migration",
             actor_ui_name="Legacy one-time import",
+            secret_references=login_references,
         )
     bundle = apply_gateway_configuration(bundle, startup_store.document)
     gateway_path = Path(path).expanduser() if path is not None else default_gateway_socket()

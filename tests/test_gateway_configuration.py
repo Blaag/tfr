@@ -54,6 +54,31 @@ def test_secret_references_resolve_only_into_runtime_bundle(
     )
 
 
+def test_world_defaults_apply_to_defaults_instead_of_creating_a_world(tmp_path: Path) -> None:
+    bundle = ConfigurationBundle(
+        main_path=tmp_path / "gateway.jsonc",
+        worlds_path=tmp_path / "worlds.jsonc",
+        agents_path=tmp_path / "agents.jsonc",
+        main=MainConfig(),
+        worlds=WorldsConfig.model_validate(
+            {"worlds": {"alpha": {"host": "example.test", "port": 4201}}}
+        ),
+        agents=AgentsConfig(),
+    )
+    document = GatewayConfigurationDocument(
+        shared={
+            "worlds.defaults.encoding": "latin-1",
+            "worlds.defaults.scrollback_lines": 1234,
+        }
+    )
+
+    effective = apply_gateway_configuration(bundle, document)
+
+    assert effective.worlds.defaults.encoding == "latin-1"
+    assert effective.worlds.defaults.scrollback_lines == 1234
+    assert set(effective.worlds.worlds) == {"alpha"}
+
+
 def test_store_persists_scoped_versioned_document_with_backup_and_audit(tmp_path: Path) -> None:
     configuration = store(tmp_path)
     first = configuration.set(

@@ -718,8 +718,13 @@ def apply_gateway_configuration(
             }
         )
     except ValidationError as exc:
+        details = "; ".join(
+            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+            for error in exc.errors(include_url=False, include_input=False)[:5]
+        )
         raise GatewayConfigurationError(
             "Gateway configuration produces invalid effective configuration"
+            + (f": {details}" if details else "")
         ) from exc
 
 
@@ -733,6 +738,8 @@ def _apply_key(
     segments = key.split(".")
     if segments[0] == "worlds":
         destination = worlds
+        if len(segments) > 1 and segments[1] in {"$schema", "schema_version", "defaults"}:
+            segments = segments[1:]
     elif segments[0] in {"providers", "agents"}:
         destination = agents
     else:

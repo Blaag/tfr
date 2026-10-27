@@ -269,6 +269,7 @@ class GatewayMigrationStore:
         choices: dict[str, str] | None,
         actor_ui_id: str,
         actor_ui_name: str,
+        secret_references: dict[str, str] | None = None,
     ) -> int:
         with self._lock:
             if expected_revision != self.configuration.revision:
@@ -293,6 +294,8 @@ class GatewayMigrationStore:
                 if destination is None:
                     raise ValueError("migration destination is unavailable")
                 destination[str(item["key"])] = copy.deepcopy(item["value"])
+            for key, reference in (secret_references or {}).items():
+                proposed.secret_references[key] = reference
             previous_state = (
                 self.pre_migration_document,
                 self.backups,
