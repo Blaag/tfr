@@ -153,26 +153,26 @@ built-in default → shared value → UI-type default → individual UI override
 
 ### Native UI first run
 
-- [ ] Detect absence of a connection profile.
-- [ ] Present an interactive Gateway setup flow.
-- [ ] Collect Gateway address and required TLS identity.
-- [ ] Pair or authenticate without requiring JSONC editing.
-- [ ] Propose and allow editing the UI display name.
-- [ ] Store credentials in the OS keychain where available.
-- [ ] Store only Gateway endpoint, credential reference, and stable UI ID locally.
+- [x] Detect absence of a connection profile.
+- [x] Present an interactive Gateway setup flow.
+- [x] Collect Gateway address and required TLS identity.
+- [x] Pair or authenticate without requiring JSONC editing.
+- [x] Propose and allow editing the UI display name.
+- [x] Store credentials in the OS keychain where available.
+- [x] Store only Gateway endpoint, credential reference, and stable UI ID locally.
 
 ### Profile management
 
-- [ ] Add `/gateway setup`.
-- [ ] Add `/gateway profiles`.
-- [ ] Add profile switch, repair, rename, and forget flows.
-- [ ] Ensure exported profiles omit credentials.
+- [x] Add `/gateway setup`.
+- [x] Add `/gateway profiles`.
+- [x] Add profile switch, repair, rename, and forget flows.
+- [x] Ensure exported profiles omit credentials.
 
 ### Verification
 
-- [ ] A fresh installation can connect without editing files.
-- [ ] Invalid TLS/authentication details give actionable recovery steps.
-- [ ] Losing local state does not expose Gateway secrets.
+- [x] A fresh installation can connect without editing files.
+- [x] Invalid TLS/authentication details give actionable recovery steps.
+- [x] Losing local state does not expose Gateway secrets.
 
 **Phase completion:** users can install and connect a UI entirely through TFR.
 
@@ -182,39 +182,39 @@ built-in default → shared value → UI-type default → individual UI override
 
 ### Proposal collection
 
-- [ ] Detect legacy JSONC and managed overrides.
-- [ ] Add `/config migrate` and first-run migration prompt.
-- [ ] Have each UI submit a migration proposal tagged with its stable ID.
-- [ ] Classify every value as shared, Gateway, UI-specific, world, bootstrap, or secret.
-- [ ] Preserve source file and provenance for review.
+- [x] Detect legacy JSONC and managed overrides.
+- [x] Add `/config migrate` and first-run migration prompt.
+- [x] Have each UI submit a migration proposal tagged with its stable ID.
+- [x] Classify every value as shared, Gateway, UI-specific, world, bootstrap, or secret.
+- [x] Preserve source file and provenance for review.
 
 ### Reconciliation
 
-- [ ] Deduplicate matching shared values automatically.
-- [ ] Preserve divergent UI-specific values under each named UI.
-- [ ] Flag divergent shared/Gateway values for explicit selection.
-- [ ] Merge identical worlds.
-- [ ] Require choose, rename, or skip for conflicting same-name worlds.
-- [ ] Never display or compare secret plaintext.
-- [ ] Allow offline UIs to submit later proposals without silently overriding current values.
+- [x] Deduplicate matching shared values automatically.
+- [x] Preserve divergent UI-specific values under each named UI.
+- [x] Flag divergent shared/Gateway values for explicit selection.
+- [x] Merge identical worlds.
+- [x] Require choose, rename, or skip for conflicting same-name worlds.
+- [x] Never display or compare secret plaintext.
+- [x] Allow offline UIs to submit later proposals without silently overriding current values.
 
 ### Apply and rollback
 
-- [ ] Show one complete migration preview.
-- [ ] Validate the proposed effective configuration before writing.
-- [ ] Apply as one atomic Gateway revision.
-- [ ] Back up legacy files without modifying them.
-- [ ] Verify clients reconnect and apply the new revision.
-- [ ] Mark legacy files migrated so they stop participating in precedence.
-- [ ] Add `/config migration-status`.
-- [ ] Add `/config rollback-migration`.
+- [x] Show one complete migration preview.
+- [x] Validate the proposed effective configuration before writing.
+- [x] Apply as one atomic Gateway revision.
+- [x] Back up legacy files without modifying them.
+- [x] Verify clients reconnect and apply the new revision.
+- [x] Mark legacy files migrated so they stop participating in precedence.
+- [x] Add `/config migration-status`.
+- [x] Add `/config rollback-migration`.
 
 ### Verification
 
-- [ ] Test matching and divergent multi-TUI configurations.
-- [ ] Test interrupted migration and rollback.
-- [ ] Test late migration from an offline UI.
-- [ ] Test conflicts against configuration changed after proposal creation.
+- [x] Test matching and divergent multi-TUI configurations.
+- [x] Test interrupted migration and rollback.
+- [x] Test late migration from an offline UI.
+- [x] Test conflicts against configuration changed after proposal creation.
 
 **Phase completion:** existing installations safely converge on Gateway-managed configuration.
 
@@ -222,21 +222,21 @@ built-in default → shared value → UI-type default → individual UI override
 
 ## Phase 7 — Centralized plugin management and discovery
 
-- [ ] Add plugin catalog metadata: name, summary, category, version, settings, and client capabilities.
-- [ ] Distinguish available, installed, enabled, loaded, failed, and portable states.
-- [ ] Add `/plugins available|installed|enabled|failed`.
-- [ ] Add `/plugins show NAME`.
-- [ ] Add `/plugins enable|disable NAME` backed by Gateway configuration.
-- [ ] Apply shared enablement to Gateway/PWA and all native UIs.
-- [ ] Report incompatible or outdated clients by UI name.
-- [ ] Announce newly available plugins once after update.
-- [ ] Make unknown effects explain whether they are unavailable, uninstalled, disabled, or incompatible.
+- [x] Add plugin catalog metadata: name, summary, category, version, settings, and client capabilities.
+- [x] Distinguish available, installed, enabled, loaded, failed, and portable states.
+- [x] Add `/plugins available|installed|enabled|failed`.
+- [x] Add `/plugins show NAME`.
+- [x] Add `/plugins enable|disable NAME` backed by Gateway configuration.
+- [x] Apply shared enablement to Gateway/PWA and all native UIs.
+- [x] Report incompatible or outdated clients by UI name.
+- [x] Announce newly available plugins once after update.
+- [x] Make unknown effects explain whether they are unavailable, uninstalled, disabled, or incompatible.
 
 ### Spotlight acceptance case
 
-- [ ] Enabling `spotlight` once makes it available to native UIs and PWA.
-- [ ] `/clear status` reports shared state and per-client exceptions.
-- [ ] No duplicate `plugins.enabled` editing is required.
+- [x] Enabling `spotlight` once makes it available to native UIs and PWA.
+- [x] `/clear status` reports shared state and per-client exceptions.
+- [x] No duplicate `plugins.enabled` editing is required.
 
 **Phase completion:** plugins and new capabilities are discoverable and centrally managed.
 
@@ -244,13 +244,13 @@ built-in default → shared value → UI-type default → individual UI override
 
 ## Phase 8 — Contextual help
 
-- [ ] Replace the `/help` wall with a topic index.
-- [ ] Add `/help TOPIC` and `/help COMMAND`.
-- [ ] Generate command help from structured descriptors.
-- [ ] Include usage, examples, scope, availability, and related commands.
-- [ ] Add command-specific help such as `/config help` and `/plugins help`.
-- [ ] Suggest corrections and next actions for unknown commands/settings/effects.
-- [ ] Show only relevant commands while explaining unavailable capabilities.
+- [x] Replace the `/help` wall with a topic index.
+- [x] Add `/help TOPIC` and `/help COMMAND`.
+- [x] Generate command help from structured descriptors.
+- [x] Include usage, examples, scope, availability, and related commands.
+- [x] Add command-specific help such as `/config help` and `/plugins help`.
+- [x] Suggest corrections and next actions for unknown commands/settings/effects.
+- [x] Show only relevant commands while explaining unavailable capabilities.
 
 **Phase completion:** users can discover features without reading external documentation.
 
@@ -258,12 +258,12 @@ built-in default → shared value → UI-type default → individual UI override
 
 ## Phase 9 — Remove legacy configuration scattering
 
-- [ ] Move remaining ordinary settings into Gateway-managed storage.
-- [ ] Reduce Gateway files to pre-start bootstrap only.
-- [ ] Reduce UI files to generated connection profiles only.
-- [ ] Remove legacy override precedence after a supported migration period.
-- [ ] Warn clearly when unmigrated legacy files are found.
-- [ ] Update setup, examples, diagnostics, and documentation.
+- [x] Move remaining ordinary settings into Gateway-managed storage.
+- [x] Reduce Gateway files to pre-start bootstrap only.
+- [x] Reduce UI files to generated connection profiles only.
+- [x] Remove legacy override precedence after a supported migration period.
+- [x] Warn clearly when unmigrated legacy files are found.
+- [x] Update setup, examples, diagnostics, and documentation.
 
 **Phase completion:** the Gateway is the sole authority for normal TFR configuration.
 
@@ -315,3 +315,25 @@ built-in default → shared value → UI-type default → individual UI override
 - 2026-10-26: Native clients overlay Gateway values only in memory before constructing plugins and the TUI. Safe shared spellcheck and speaking-streak changes apply live; other live values are explicitly reported unsupported, while declared reload/restart requirements produce user-visible coordination notices.
 - 2026-10-26: PWA clients apply supported shared settings live and report unknown future settings rather than ignoring them. The desired revision remains in the atomic Gateway document, so offline clients and interrupted restarts receive current state on their next registration.
 - 2026-10-26: Phase 4 completed with capability-negotiated native/PWA synchronization, scoped convergence, push delivery, bounded acknowledgements, unsupported-setting visibility, and no authoritative client-side configuration copy.
+- 2026-10-26: Phase 5 native bootstrap uses a private versioned connection-profile document containing endpoint/TLS identity, an opaque credential reference, stable UI ID, and the proposed display name; it does not require a main JSONC file on a fresh remote UI.
+- 2026-10-26: Gateway tokens use the macOS Keychain for the default profile location when available, with a private mode-0600 credential file fallback for unsupported platforms and isolated/test profile stores. Profile exports omit both credential references and token values.
+- 2026-10-26: `/gateway setup`, `/gateway profiles [export]`, `/gateway switch`, `/gateway rename`, `/gateway repair`, and confirmed `/gateway forget` provide profile lifecycle management. Active-profile changes restart the UI so bootstrap state is re-read rather than mutating an established authenticated transport.
+- 2026-10-26: Phase 5 completed with first-run interactive setup, editable stable UI naming, TLS/authentication bootstrap, private credential storage, profile recovery and switching, and credential-free exports.
+- 2026-10-26: Phase 6 migration proposals are tagged with stable UI identity and their starting Gateway revision, retain bounded source provenance, classify registry-backed values by managed scope, and replace sensitive plaintext with presence-only metadata before submission.
+- 2026-10-26: Reconciliation automatically deduplicates identical shared/world/plugin values, preserves UI-specific differences under stable IDs, and requires explicit choose-or-skip decisions for divergent shared, Gateway, world, or plugin values. Stale late proposals cannot overwrite newer configuration.
+- 2026-10-26: Applying a migration validates the complete proposed Gateway document and commits it as one audited atomic revision. Source files are copied without modification, migrated files receive a separate marker, connected clients receive the new desired revision, and the pre-migration document supports revision-checked rollback.
+- 2026-10-26: `/config migrate`, migration preview/choose/skip/apply flows, `/config migration-status`, and `/config rollback-migration` expose the complete guided workflow from TFR.
+- 2026-10-26: Phase 6 completed with deterministic multi-UI reconciliation, protected secret handling, source backups, stale-proposal rejection, atomic apply, convergence reporting, and rollback.
+- 2026-10-26: Phase 7 catalogs discovered and requested plugins with bounded name, summary, category, version, settings, capabilities, availability, installation, enablement, load failure, and portability state. Native clients refresh stable UI capabilities after plugin loading.
+- 2026-10-26: `/plugins available|installed|enabled|failed`, `/plugins show NAME`, and confirmed `/plugins enable|disable NAME` use the Gateway catalog and the shared `plugins.enabled` managed setting. Configuration synchronization distributes the desired list to Gateway, PWA, and every native UI for coordinated reload.
+- 2026-10-26: Plugin details identify incompatible/outdated clients by stable display name; periodic source notices remain de-duplicated by source/version, and unknown screen-clear effects explain unavailable, disabled, failed, or incompatible state with a discovery next action.
+- 2026-10-26: The spotlight acceptance case uses one shared enablement, marks the effect portable for PWA projection, and extends `/clear status` with shared state and named client exceptions.
+- 2026-10-26: Phase 7 completed with centralized discovery, Gateway-backed enablement, compatibility reporting, portable spotlight convergence, and contextual unavailable-effect guidance.
+- 2026-10-27: Phase 8 replaces the static help wall with structured command descriptors containing summary, usage, examples, topic, scope, availability requirements, and related commands. Loaded plugin commands are folded into the same help model at runtime.
+- 2026-10-27: `/help` lists only topics with currently available commands; `/help TOPIC` filters commands by context, while `/help COMMAND`, `/config help`, and `/plugins help` provide detailed command guidance and explicitly explain unavailable capabilities.
+- 2026-10-27: Unknown commands and help queries use deterministic close matches and next actions. Unknown settings retain registry suggestions and category links, while unknown effects now report plugin availability/enablement/failure/compatibility and point to plugin details.
+- 2026-10-27: Phase 8 completed with contextual topic/command discovery, structured generated help, dynamic plugin command help, availability filtering, and actionable correction guidance.
+- 2026-10-27: Phase 9 Gateway startup reads only an optional versioned bootstrap containing the managed state-directory location. It constructs ordinary defaults and overlays the Gateway document before creating connectors, sessions, plugins, agents, logging, updates, or web services.
+- 2026-10-27: Legacy JSONC and the former managed-overrides store no longer participate in Gateway runtime precedence. An empty Gateway document receives one atomic ordinary-value import with migration backups; later legacy files are detection/proposal inputs only and produce explicit ignored/unmigrated warnings. Bootstrap and secret values remain separate setup concerns.
+- 2026-10-27: Remote native UIs use generated connection profiles and the synchronized effective view. They no longer persist mouse preferences in a separate local authority; temporary `/mouse` changes direct users to an individual-UI `/config set` for persistence.
+- 2026-10-27: Setup, Doctor, examples, schemas, and README now distinguish standalone legacy input from Gateway bootstrap and managed configuration. Phase 9 completed with the Gateway as sole authority for normal split/remote TFR configuration.

@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import os
+import shutil
 import socket
 import ssl
 import sys
@@ -11,6 +12,8 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
+
+from pydantic import BaseModel
 
 from tfr.agents import AgentInspection
 from tfr.config import (
@@ -1105,6 +1108,149 @@ class GatewayClient:
             raise GatewayProtocolError("Gateway returned an invalid configuration undo")
         return result
 
+    async def config_migrate(
+        self,
+        values: dict[str, object],
+        source_files: tuple[str, ...],
+    ) -> dict[str, object]:
+        self._backup_migration_sources(source_files)
+        request_id = uuid4()
+        result = await self._request(
+            {
+                "type": "config_migrate",
+                "request_id": str(request_id),
+                "base_revision": self.configuration_revision or 0,
+                "values": values,
+                "source_files": list(source_files),
+            },
+            request_id,
+        )
+        if result is None or not isinstance(result.get("conflicts"), list):
+            raise GatewayProtocolError("Gateway returned an invalid migration preview")
+        return result
+
+    async def config_migration_preview(
+        self, choices: dict[str, str] | None = None
+    ) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {
+                "type": "config_migration_preview",
+                "request_id": str(request_id),
+                "choices": choices or {},
+            },
+            request_id,
+        )
+        if result is None or not isinstance(result.get("accepted"), list):
+            raise GatewayProtocolError("Gateway returned an invalid migration preview")
+        return result
+
+    async def config_migration_apply(
+        self, *, expected_revision: int, choices: dict[str, str], confirm: bool
+    ) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {
+                "type": "config_migration_apply",
+                "request_id": str(request_id),
+                "expected_revision": expected_revision,
+                "choices": choices,
+                "confirm": confirm,
+            },
+            request_id,
+        )
+        if result is None or result.get("applied") is not True:
+            raise GatewayProtocolError("Gateway returned an invalid migration result")
+        for source in getattr(self, "migration_source_files", ()):
+            path = Path(source)
+            if path.is_file() and not path.is_symlink():
+                marker = path.with_name(f"{path.name}.tfr-migrated")
+                marker.write_text(f"revision {result.get('revision')}\n", encoding="utf-8")
+                os.chmod(marker, 0o600)
+        return result
+
+    async def config_migration_status(self) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "config_migration_status", "request_id": str(request_id)}, request_id
+        )
+        if result is None or not isinstance(result.get("proposal_count"), int):
+            raise GatewayProtocolError("Gateway returned invalid migration status")
+        return result
+
+    async def config_migration_rollback(
+        self, *, expected_revision: int, confirm: bool
+    ) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {
+                "type": "config_migration_rollback",
+                "request_id": str(request_id),
+                "expected_revision": expected_revision,
+                "confirm": confirm,
+            },
+            request_id,
+        )
+        if result is None or result.get("rolled_back") is not True:
+            raise GatewayProtocolError("Gateway returned invalid migration rollback")
+        return result
+
+    async def plugins_catalog(self, state: str | None = None) -> list[dict[str, object]]:
+        request_id = uuid4()
+        message: dict[str, object] = {
+            "type": "plugins_catalog",
+            "request_id": str(request_id),
+        }
+        if state is not None:
+            message["state"] = state
+        result = await self._request(message, request_id)
+        plugins = result.get("plugins") if result else None
+        if not isinstance(plugins, list) or not all(
+            isinstance(plugin, dict) and isinstance(plugin.get("name"), str) for plugin in plugins
+        ):
+            raise GatewayProtocolError("Gateway returned an invalid plugin catalog")
+        return plugins
+
+    async def plugin_show(self, name: str) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "plugin_show", "request_id": str(request_id), "name": name}, request_id
+        )
+        plugin = result.get("plugin") if result else None
+        clients = result.get("clients") if result else None
+        if not isinstance(plugin, dict) or not isinstance(clients, list):
+            raise GatewayProtocolError("Gateway returned invalid plugin details")
+        return {"plugin": plugin, "clients": clients}
+
+    async def plugin_enablement(
+        self, name: str, *, enabled: bool, expected_revision: int, confirm: bool
+    ) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {
+                "type": "plugin_enable" if enabled else "plugin_disable",
+                "request_id": str(request_id),
+                "name": name,
+                "expected_revision": expected_revision,
+                "confirm": confirm,
+            },
+            request_id,
+        )
+        if result is None or result.get("name") != name:
+            raise GatewayProtocolError("Gateway returned invalid plugin enablement")
+        return result
+
+    @staticmethod
+    def _backup_migration_sources(source_files: tuple[str, ...]) -> None:
+        for source in source_files:
+            path = Path(source).expanduser()
+            if not path.is_file() or path.is_symlink():
+                continue
+            backup = path.with_name(f"{path.name}.pre-tfr-migration")
+            if not backup.exists():
+                shutil.copyfile(path, backup)
+                os.chmod(backup, 0o600)
+
     async def pair_web_device(self, label: str) -> str:
         request_id = uuid4()
         result = await self._request(
@@ -1115,6 +1261,22 @@ class GatewayClient:
         if not isinstance(pairing_url, str):
             raise GatewayProtocolError("Gateway returned an invalid pairing URL")
         return pairing_url
+
+    async def update_ui_capabilities(self, capabilities: tuple[str, ...]) -> None:
+        request_id = uuid4()
+        result = await self._request(
+            {
+                "type": "ui_capabilities",
+                "request_id": str(request_id),
+                "capabilities": list(capabilities),
+            },
+            request_id,
+        )
+        value = result.get("ui") if result else None
+        try:
+            self.ui_record = UiRecord.from_dict(value)
+        except ValueError as exc:
+            raise GatewayProtocolError("Gateway returned invalid UI capabilities") from exc
 
     async def list_web_devices(self) -> list[dict[str, Any]]:
         request_id = uuid4()
@@ -1731,6 +1893,52 @@ class GatewayUiRuntime:
             confirm=confirm,
         )
 
+    async def config_migrate(self) -> dict[str, object]:
+        values = getattr(self.client, "migration_values", {})
+        sources = getattr(self.client, "migration_source_files", ())
+        return await self.client.config_migrate(values, sources)
+
+    async def config_migration_preview(
+        self, choices: dict[str, str] | None = None
+    ) -> dict[str, object]:
+        return await self.client.config_migration_preview(choices)
+
+    async def config_migration_apply(
+        self, *, expected_revision: int, choices: dict[str, str], confirm: bool
+    ) -> dict[str, object]:
+        return await self.client.config_migration_apply(
+            expected_revision=expected_revision,
+            choices=choices,
+            confirm=confirm,
+        )
+
+    async def config_migration_status(self) -> dict[str, object]:
+        return await self.client.config_migration_status()
+
+    async def config_migration_rollback(
+        self, *, expected_revision: int, confirm: bool
+    ) -> dict[str, object]:
+        return await self.client.config_migration_rollback(
+            expected_revision=expected_revision,
+            confirm=confirm,
+        )
+
+    async def plugins_catalog(self, state: str | None = None) -> list[dict[str, object]]:
+        return await self.client.plugins_catalog(state)
+
+    async def plugin_show(self, name: str) -> dict[str, object]:
+        return await self.client.plugin_show(name)
+
+    async def plugin_enablement(
+        self, name: str, *, enabled: bool, expected_revision: int, confirm: bool
+    ) -> dict[str, object]:
+        return await self.client.plugin_enablement(
+            name,
+            enabled=enabled,
+            expected_revision=expected_revision,
+            confirm=confirm,
+        )
+
     async def pair_web_device(self, label: str) -> str:
         return await self.client.pair_web_device(label)
 
@@ -2006,6 +2214,47 @@ def _apply_gateway_ui_configuration(
     return configuration.model_copy(update={"main": MainConfig.model_validate(value)})
 
 
+def _legacy_migration_values(
+    configuration: UiConfiguration, plugin_descriptors: Sequence[SettingDescriptor] = ()
+) -> dict[str, object]:
+    marker = configuration.main_path.with_name(f"{configuration.main_path.name}.tfr-migrated")
+    if marker.is_file():
+        return {}
+    registry = core_configuration_registry()
+    for descriptor in plugin_descriptors:
+        registry.register(descriptor)
+    output: dict[str, object] = {}
+
+    def record_plugin(prefix: str, value: object) -> None:
+        descriptor = registry.get(prefix)
+        if descriptor is not None:
+            output[prefix] = None if descriptor.sensitivity else value
+            return
+        if isinstance(value, dict):
+            for name, item in value.items():
+                record_plugin(f"{prefix}.{name}", item)
+
+    def visit(model: BaseModel, prefix: str = "") -> None:
+        serialized = model.model_dump(mode="json")
+        for field in model.model_fields_set:
+            if field == "schema_url":
+                continue
+            item = getattr(model, field)
+            key = f"{prefix}.{field}" if prefix else field
+            if isinstance(item, BaseModel):
+                visit(item, key)
+            else:
+                descriptor = registry.get(key)
+                if key == "plugins.config" and isinstance(serialized[field], dict):
+                    for plugin, plugin_value in serialized[field].items():
+                        record_plugin(f"plugins.config.{plugin}", plugin_value)
+                elif descriptor is not None:
+                    output[key] = None if descriptor.sensitivity else serialized[field]
+
+    visit(configuration.main)
+    return output
+
+
 async def run_gateway_ui(
     configuration: UiConfiguration,
     path: Path | str | None = None,
@@ -2015,10 +2264,12 @@ async def run_gateway_ui(
     token_file: Path | str | None = None,
     tls_ca: Path | str | None = None,
     tls_server_name: str | None = None,
+    client_id: UUID | None = None,
+    gateway_profiles: object | None = None,
+    auth_token: str | None = None,
+    desired_ui_name: str | None = None,
 ) -> int:
     from tfr.tui import TfrTui
-    from tfr.ui_settings import LocalUiSettingsStore
-
     resume_gateway_id, resume_world, update_restart = _restart_state_from_environment()
     build = current_build()
     platform_name = socket.gethostname().strip()
@@ -2045,9 +2296,8 @@ async def run_gateway_ui(
     )
     connection_options = {
         "show_nospoof_prefix": configuration.main.ui.show_nospoof_prefix,
-        "client_id": load_or_create_native_ui_id(
-            configuration.main.managed_settings.state_directory
-        ),
+        "client_id": client_id
+        or load_or_create_native_ui_id(configuration.main.managed_settings.state_directory),
         "ui_registration": ui_registration,
         "gateway_id": resume_gateway_id,
         # A replacement UI needs retained history to rebuild its in-memory display.
@@ -2061,12 +2311,12 @@ async def run_gateway_ui(
                 **connection_options,
             )
         validate_tcp_endpoint(gateway_host, gateway_port)
-        if token_file is None:
+        if token_file is None and auth_token is None:
             raise ValueError("network gateway connection requires --token-file")
         return await GatewayClient.connect_tcp(
             gateway_host,
             gateway_port,
-            auth_token=load_gateway_token(token_file),
+            auth_token=auth_token or load_gateway_token(token_file),
             tls_context=create_gateway_client_tls_context(tls_ca),
             server_hostname=tls_server_name,
             **connection_options,
@@ -2088,6 +2338,8 @@ async def run_gateway_ui(
                 raise
             await asyncio.sleep(1)
     manager = SessionManager(client.sessions)  # type: ignore[arg-type]
+    client.migration_values = {}
+    client.migration_source_files = ()
     configuration = _apply_gateway_ui_configuration(
         configuration, getattr(client, "effective_configuration", {})
     )
@@ -2122,11 +2374,29 @@ async def run_gateway_ui(
         )
         if hasattr(client, "prepare_initial_configuration_ack"):
             descriptors = (
-                plugins.registry.configuration_descriptors()
-                if hasattr(plugins, "registry")
-                else ()
+                plugins.registry.configuration_descriptors() if hasattr(plugins, "registry") else ()
             )
             client.prepare_initial_configuration_ack(descriptors)
+            client.migration_values = _legacy_migration_values(configuration, descriptors)
+            client.migration_source_files = (
+                (str(configuration.main_path),) if configuration.main_path.is_file() else ()
+            )
+            client.start()
+            await client.update_ui_capabilities(
+                tuple(
+                    sorted(
+                        {capability.value for capability in TUI_PRESENTATION_CAPABILITIES}
+                        | {CONFIGURATION_SYNC_CAPABILITY}
+                        | {f"plugin:{name}" for name in plugins.loaded_plugins}
+                    )
+                )
+            )
+        if (
+            desired_ui_name is not None
+            and client.ui_record is not None
+            and client.ui_record.display_name != desired_ui_name
+        ):
+            await client.rename_ui(desired_ui_name)
         plugins.initialize_boss_selection(
             configuration.main.ui.boss.mode,
             configuration.main.ui.boss.screen,
@@ -2155,8 +2425,10 @@ async def run_gateway_ui(
         update_config=configuration.main.updates,
         plugin_update_checker=plugin_update_checker,
     )
-    local_ui_settings = LocalUiSettingsStore(configuration.main.managed_settings.state_directory)
-    mouse_mode = local_ui_settings.mouse_mode or configuration.main.ui.mouse_mode
+    # Remote UIs keep no authoritative preference file. Per-UI values arrive
+    # in the Gateway configuration view and are changed with /config set.
+    local_ui_settings = None
+    mouse_mode = configuration.main.ui.mouse_mode
     tui = TfrTui(
         sessions=client.sessions,  # type: ignore[arg-type]
         manager=manager,
@@ -2197,6 +2469,7 @@ async def run_gateway_ui(
         service_runtime=runtime,
         gateway_reconnect=runtime.reconnect,
         gateway_effect_demos=lambda: getattr(client, "effect_demos", ()),
+        gateway_profiles=gateway_profiles,
         restart_supported=True,
         update_checker=update_checker,
         plugin_update_checker=plugin_update_checker,
@@ -2259,6 +2532,12 @@ async def run_gateway_ui(
     )
     if speaker_effects_warning is not None:
         tui.queue_startup_notice(tui.active_alias, speaker_effects_warning)
+    if client.migration_values:
+        tui.queue_startup_notice(
+            tui.active_alias,
+            "Legacy local configuration was detected. Submit and review it with "
+            "/config migrate, then resolve conflicts before applying.",
+        )
     if client.history_reset:
         tui.queue_startup_notice(
             tui.active_alias,

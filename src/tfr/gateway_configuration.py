@@ -7,6 +7,8 @@ import json
 import os
 import secrets
 import stat
+import subprocess
+import sys
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -313,6 +315,40 @@ class GatewayConfigurationStore:
             self._document,
             defer_plugin_validation=defer_plugin_validation,
         )
+
+    def replace_for_migration(
+        self,
+        document: GatewayConfigurationDocument,
+        *,
+        expected_revision: int,
+        actor_ui_id: str,
+        actor_ui_name: str,
+        operation: str = "migration",
+    ) -> ConfigurationMutation:
+        """Atomically replace all managed sections as one audited revision."""
+
+        with self._mutation_lock():
+            self._check_revision(expected_revision)
+            proposed = GatewayConfigurationDocument.from_dict(document.as_dict())
+            proposed.revision = self.revision + 1
+            self._validate_document(proposed)
+            mutation = ConfigurationMutation(
+                revision=proposed.revision,
+                operation=operation,
+                key="migration",
+                scope="shared",
+                target=None,
+                previous_present=True,
+                previous_value={"revision": self._document.revision},
+                value_present=True,
+                value={"revision": proposed.revision},
+                actor_ui_id=actor_ui_id,
+                actor_ui_name=actor_ui_name,
+                timestamp=_utc_now(),
+                restart="client-reload",
+            )
+            self._commit(proposed, mutation)
+            return mutation
 
     def _mutate(
         self,
@@ -669,6 +705,10 @@ def apply_gateway_configuration(
         for section in mapping.values():
             for key, value in section.items():
                 _apply_key(main, worlds, agents, key, value)
+    for key, reference in document.secret_references.items():
+        if not isinstance(reference, str):  # already enforced by document validation
+            raise GatewayConfigurationError("secret reference is invalid")
+        _apply_key(main, worlds, agents, key, _resolve_secret_reference(reference))
     try:
         return bundle.model_copy(
             update={
@@ -705,3 +745,49 @@ def _apply_key(
             current[segment] = child
         current = child
     current[segments[-1]] = copy.deepcopy(value)
+
+
+def _resolve_secret_reference(reference: str) -> str:
+    """Resolve a protected reference only while constructing Gateway runtime state."""
+
+    scheme, separator, location = reference.partition(":")
+    if not separator or not location:
+        raise GatewayConfigurationError("secret reference is invalid")
+    try:
+        if scheme == "env":
+            value = os.environ[location]
+        elif scheme == "file":
+            path = Path(location).expanduser()
+            details = path.stat(follow_symlinks=False)
+            if not stat.S_ISREG(details.st_mode) or (
+                os.name == "posix" and stat.S_IMODE(details.st_mode) & 0o077
+            ):
+                raise GatewayConfigurationError("secret reference file must be private")
+            value = path.read_text(encoding="utf-8").rstrip("\r\n")
+        elif scheme == "keychain" and sys.platform == "darwin":
+            service, split, account = location.partition(":")
+            if not split or not service or not account:
+                raise GatewayConfigurationError(
+                    "keychain references must be keychain:SERVICE:ACCOUNT"
+                )
+            value = subprocess.run(
+                [
+                    "security",
+                    "find-generic-password",
+                    "-s",
+                    service,
+                    "-a",
+                    account,
+                    "-w",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.rstrip("\r\n")
+        else:
+            raise GatewayConfigurationError("secret reference scheme is unavailable")
+    except (KeyError, OSError, subprocess.SubprocessError) as exc:
+        raise GatewayConfigurationError("secret reference could not be resolved") from exc
+    if not value or len(value) > 65_536:
+        raise GatewayConfigurationError("resolved secret has an invalid size")
+    return value

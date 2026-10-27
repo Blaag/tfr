@@ -75,16 +75,16 @@ To install without the setup assistant:
 ~/.local/bin/tfr --version
 ```
 
-Copy and protect the example configuration, edit `worlds.jsonc`, and validate
-the result:
+Create the Gateway's pre-start bootstrap. It contains only the location of the
+private Gateway-managed configuration store:
 
 ```console
 tfr_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/tfr"
 mkdir -p "$tfr_config_dir"
 chmod 700 "$tfr_config_dir"
-cp examples/config.jsonc examples/worlds.jsonc examples/agents.jsonc "$tfr_config_dir/"
-chmod 600 "$tfr_config_dir"/*.jsonc
-~/.local/bin/tfr --check-config
+cp examples/gateway-bootstrap.jsonc "$tfr_config_dir/gateway.jsonc"
+chmod 600 "$tfr_config_dir/gateway.jsonc"
+~/.local/bin/tfr gateway --config "$tfr_config_dir/gateway.jsonc"
 ```
 
 Run `~/.local/bin/tfr` for all-in-one mode. For persistent local connections,
@@ -101,23 +101,22 @@ uv sync
 uv run tfr --help
 uv run tfr --check-config --config examples/config.jsonc
 uv run tfr --config examples/config.jsonc
-uv run tfr gateway --config examples/config.jsonc
-uv run tfr ui --config examples/config.jsonc
+uv run tfr gateway --config examples/gateway-bootstrap.jsonc
+uv run tfr ui
 uv run tfr --replay ~/.local/state/tfr/logs/tfr-TIMESTAMP-PID.jsonl
 ./scripts/check-security
 uv run ruff check .
 uv run pytest
 ```
 
-Example configuration is under [`examples/`](examples/). The default main
-configuration path is `$XDG_CONFIG_HOME/tfr/config.jsonc` when
-`XDG_CONFIG_HOME` is set, otherwise `~/.config/tfr/config.jsonc`. Use
-`--config PATH` only to select a nonstandard main configuration. Referenced
-`worlds_file` and `agents_file` paths are resolved relative to that file.
-Credential-bearing files should be readable only by their owner (`0600` on
-POSIX systems).
+Example configuration is under [`examples/`](examples/). In Gateway mode,
+`--config PATH` selects the optional bootstrap shown in
+`examples/gateway-bootstrap.jsonc`; normal settings are changed with `/config`,
+and `/config status` reports the authoritative revision. Standalone mode still
+accepts the legacy three-file examples. Credential-bearing bootstrap and state
+files should be readable only by their owner (`0600` on POSIX systems).
 
-Each world may define command-style switching shortcuts in `worlds.jsonc`, for
+Each Gateway-managed world may define command-style switching shortcuts, for
 example `"aliases": ["g"]` makes `/g` switch to that world. Alias names are
 case-insensitive, must use letters, digits, underscores, or hyphens, and must be
 unique across worlds. Each world may define up to 32 aliases of at most 64
@@ -125,7 +124,7 @@ characters, with 256 aliases allowed across the configuration. Core and plugin
 commands take precedence over conflicting world aliases; `/help` identifies
 aliases that are shadowed.
 
-Add aliases to the world entry without the leading `/`. For example, this makes
+Set aliases without the leading `/`. For example, this makes
 `/d` switch to the world named `dragon`:
 
 ```jsonc
@@ -648,38 +647,77 @@ network listener. Use a normal non-root account with Python 3.12 or newer,
 network access to the Gateway. Keep the UI and Gateway on the same reviewed TFR
 revision when upgrading them.
 
-The recommended setup on the UI machine is:
+The recommended setup on the UI machine is interactive and does not require a
+JSONC file:
 
 ```console
 git clone https://github.com/Blaag/tfr.git ~/tfr
 cd ~/tfr
-./scripts/setup-tfr
-# Choose "Remote UI"
-~/.local/bin/tfr-doctor
-~/.local/bin/tfr-remote-ui
+./scripts/install-from-checkout --latest-stable
+~/.local/bin/tfr ui
 ```
 
-The assistant asks for the Gateway host, port, copied token path, optional
-public CA path, and optional TLS certificate hostname. It stores no token value
-in the generated launcher. If the Gateway is not reachable yet, setup still
-finishes; `tfr-doctor` reports the specific DNS, routing, TLS, token, or version
-problem when rerun later.
+On first run, TFR asks for a profile name, Gateway host and port, TLS certificate
+identity, optional custom CA, authentication token, and proposed UI display
+name. The profile stores only bootstrap metadata and a credential reference.
+On macOS the default store uses Keychain when available; other platforms use a
+private mode-0600 credential file. The token is never written into the profile
+or an export.
+
+Once connected, manage profiles from TFR with `/gateway setup`, `/gateway
+profiles`, `/gateway switch NAME`, `/gateway rename NAME NEW-NAME`, `/gateway
+repair NAME`, and `/gateway forget NAME --confirm`. Use `/gateway profiles
+export` for a credential-free backup. TLS and authentication errors identify
+the failed handshake; repair the selected profile and reconnect.
+
+If TFR detects values in a legacy local UI configuration, it offers the
+Gateway-managed migration flow. Run `/config migrate` on each named UI, inspect
+the complete preview, resolve shared conflicts with `/config migrate choose KEY
+UI-NAME` or `/config migrate skip KEY`, and apply with `/config migrate apply
+confirm`. `/config migration-status` reports collected and applied revisions;
+`/config rollback-migration confirm` restores the pre-migration Gateway document
+when no later configuration change makes rollback unsafe. Legacy files are
+copied before submission and are never rewritten; a separate marker records a
+successful migration. Secret plaintext is omitted from proposals and previews.
+After migration, legacy files no longer participate in precedence. Gateway
+startup performs a one-time ordinary-value import only when its managed document
+is empty, warns about every unmigrated legacy main file, and thereafter builds
+runtime state exclusively from the Gateway document. Bootstrap-only and secret
+values require separate setup.
+
+Sensitive settings store references rather than plaintext. Use `env:VARIABLE`,
+`file:/absolute/private/path`, or on macOS `keychain:SERVICE:ACCOUNT` as the
+value of a secret-scoped `/config set`. Referenced files must not grant group or
+other permissions. Exports and configuration synchronization omit these
+references and resolved values.
+
+Plugin discovery and enablement are also Gateway-managed. Use `/plugins
+available`, `/plugins installed`, `/plugins enabled`, or `/plugins failed` to
+inspect the catalog; `/plugins show NAME` includes settings, capabilities,
+portable state, and named incompatible clients. `/plugins enable NAME confirm`
+and `/plugins disable NAME confirm` update the shared `plugins.enabled` setting
+once for the Gateway, PWA, and native UIs. Clients reload when required. Unknown
+screen-clear effects explain whether their plugin is unavailable, disabled,
+failed, or incompatible instead of reporting only an unknown name.
+
+In TFR, `/help` opens a concise topic index rather than a complete command wall.
+Use `/help TOPIC` to browse relevant commands or `/help COMMAND` for exact usage,
+examples, scope, availability, and related commands. `/config help` and
+`/plugins help` open their command-specific pages. Help hides commands that do
+not apply to the current session while a direct lookup explains what capability
+or connection is missing. Misspelled commands, settings, and effects provide
+close matches and a concrete next action.
 
 The remaining steps in this section are the equivalent manual procedure.
 
 Portable transcript presentation is Gateway-owned for remote sessions. Configure
-plugins such as `speaker_effects` and `terminal_reveal` in the Gateway
-`config.jsonc`; a remote native UI does not evaluate or override their policy
-from a locally installed copy. Copy only those portable plugins' enabled entries
-and matching `plugins.config` objects to the Gateway, not the entire local
-`plugins` section. Borders, screen-clear effects, boss views, keybindings, status
-segments, and other client-only plugins remain configured on the UI host.
-If `speaker_effects` remains configured in a remote UI's local `config.jsonc`,
-the UI warns that the configuration is ignored and uses the Gateway's bounded
-speaker summary to identify rules that are missing from the Gateway's
-`config.jsonc`. The remote native Effects Lab also uses Gateway-projected demos,
-so its speaker previews match live remote presentation policy rather than the
-ignored local rules.
+plugins such as `speaker_effects` and `terminal_reveal` with `/plugins` and
+`/config`; a remote native UI does not evaluate or override their policy from a
+locally installed copy. Client-only plugin and UI settings are Gateway-managed
+under UI-type or individual-UI scope. If a legacy local `config.jsonc` remains,
+the UI warns that its normal settings are ignored and offers `/config migrate`.
+The remote native Effects Lab uses Gateway-projected demos, so its speaker
+previews match live remote presentation policy.
 Standalone mode is unaffected because its process acts as both policy authority
 and renderer.
 
@@ -709,55 +747,11 @@ cd ~/tfr
 ~/.local/bin/tfr --version
 ```
 
-Create a private configuration directory on the UI host:
-
-```console
-tfr_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/tfr"
-mkdir -p "$tfr_config_dir"
-chmod 700 "$tfr_config_dir"
-```
-
-Then create `config.jsonc` in that directory for UI preferences. A remote UI
-needs only the main configuration; the `worlds.jsonc` and `agents.jsonc` paths
-use their defaults but are not opened in UI mode:
-
-```jsonc
-{
-  "schema_version": 1,
-  "ui": {
-    "scrollback_lines": 20000,
-    "recent_input_lines": 3,
-    "theme": { "preset": "catppuccin-mocha" },
-    "show_nospoof_prefix": false,
-    "animations_enabled": true,
-    "low_bandwidth": false,
-    "screen_clear": { "mode": "cycle" },
-    "pager": { "enabled": true, "overlap_lines": 1 }
-  },
-  "plugins": {
-    "enabled": [],
-    "config": {}
-  }
-}
-```
-
-Protect the configuration even though this UI-only file should not contain
-world or provider credentials:
-
-```console
-chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/tfr/config.jsonc"
-```
-
-Add entry-point names under `plugins.enabled` for whichever UI plugins you
-want on this host. The easiest way to make plugin code available here without
-separately copying a plugin repository is `plugins.sources`, described in
-[Installing Plugins From a GitHub Repository](#installing-plugins-from-a-github-repository);
-TFR fetches each configured repository into `plugins.state_directory` on this
-host the first time it starts.
-
-The general `--check-config` command also loads the Gateway's world and agent
-files, so do not use it to validate this intentionally UI-only configuration.
-UI fields are validated when `tfr ui` starts.
+Do not create a UI preferences file. Run `~/.local/bin/tfr ui` and complete the
+interactive connection setup; the generated profile contains only endpoint,
+TLS identity, credential reference, and stable UI ID. Configure preferences with
+`/config set ... --scope ui` for this UI or `--scope ui-type` for terminal
+defaults. Plugin availability and enablement are managed with `/plugins`.
 
 Transfer the shared token through an authenticated channel instead of pasting
 it into a command or configuration file. For example, run this on the UI host
@@ -918,8 +912,8 @@ Corrected words appear bold, underlined, and bright in the matching speech echo
 in world output. Echo matching is local, short-lived, and exact; if no matching
 echo arrives, unrelated output is left unchanged. `/spellcheck undo` restores
 the most recent original pre-correction draft for the active world; it cannot
-retract text that was already sent. Add global or per-world vocabulary in
-`config.jsonc`:
+retract text that was already sent. Set global or per-world vocabulary through
+`/config`; the value shape is:
 
 ```jsonc
 "ui": {
@@ -927,7 +921,7 @@ retract text that was already sent. Add global or per-world vocabulary in
     "enabled": false,
     // Protected in every world.
     "protected_words": ["TFR", "MUSH", "NOSPOOF"],
-    // Each key is an exact world name from worlds.jsonc. Its words are
+    // Each key is an exact Gateway-managed world name. Its words are
     // additionally protected only while sending to that world.
     "worlds": {
       "my-world-name": ["Alice", "Blaag", "TinyMUX"],
@@ -937,7 +931,7 @@ retract text that was already sent. Add global or per-world vocabulary in
 ```
 
 Image output uses portable ASCII glyphs unless the target world explicitly
-declares that it preserves Unicode in `worlds.jsonc`:
+declares that it preserves Unicode with `worlds.NAME.capabilities.unicode`:
 
 ```jsonc
 "capabilities": {
@@ -956,7 +950,8 @@ connection is still alive on a background interval, and automatically retries
 `/gateway reconnect`'s own logic (bounded attempts, configurable interval)
 before asking you to run it manually. This only replaces the stale transport;
 it restores missed retained events and preserves the current UI. Configure
-attempt count and timing under `ui.gateway_reconnect` in `config.jsonc`:
+attempt count and timing under the Gateway-managed `ui.gateway_reconnect`
+settings:
 
 ```jsonc
 "ui": {
@@ -1134,8 +1129,8 @@ active cover with `registrar.emit_boss_event(event)`. See
 [`BOSS-VIEWS.md`](BOSS-VIEWS.md) for the complete context, event, selection,
 refresh, and safety contracts.
 
-Enable entry-point names under `plugins.enabled` in `config.jsonc`. Arbitrary
-plugin-owned settings belong under `plugins.config.NAME`. A failed extension is
+Enable entry-point names with `/plugins enable NAME confirm`. Arbitrary
+plugin-owned settings belong under Gateway-managed `plugins.config.NAME`. A failed extension is
 disabled and reported as a redacted internal plugin event without interrupting
 world sessions or event logging.
 

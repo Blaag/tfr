@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from PIL import Image
@@ -637,7 +637,7 @@ def test_osc52_clipboard_sequence_contains_utf8_selection() -> None:
     assert base64.b64decode(payload).decode("utf-8") == "hello π"
 
 
-async def test_help_lists_commands_keybindings_markers_and_loaded_plugins() -> None:
+async def test_help_uses_topics_and_structured_command_and_plugin_details() -> None:
     tui = make_tui()
     tui.active_view.display.resize(width=80, height=100)
 
@@ -657,20 +657,43 @@ async def test_help_lists_commands_keybindings_markers_and_loaded_plugins() -> N
         targets={},
         discovered=(entry_point("fixture", HelpFixture()),),
     )
+    tui.gateway_reconnect = AsyncMock()
 
     await tui._handle_client_command("alpha", "/help")
+    await tui._handle_client_command("alpha", "/help config")
+    await tui._handle_client_command("alpha", "/help fixture")
 
     help_text = fragment_list_to_text(tui.active_view.display.formatted_text())
-    assert "/boss (tfr.boss) - open or configure" in help_text
-    assert "/sh - temporarily open" in help_text
+    assert "TFR help topics" in help_text
+    assert "configuration — Gateway-owned settings" in help_text
     assert "! command" in help_text
-    assert "/nospoof show|hide|status" in help_text
-    assert "/recall X" in help_text
-    assert "/update status|check" in help_text
-    assert "/plugins - show configured" in help_text
-    assert "[H] human-operated world" in help_text
-    assert "left-click selects a world" in help_text
-    assert "/fixture (fixture) - run the harmless fixture" in help_text
+    assert "/config — Inspect, change, and migrate" in help_text
+    assert "Usage: /config status|list|show" in help_text
+    assert "/fixture — run the harmless fixture" in help_text
+    assert "Availability: fixture plugin" in help_text
+
+
+async def test_contextual_help_filters_index_and_explains_unavailable_commands() -> None:
+    tui = make_tui()
+
+    index = tui.help_text()
+    gateway_detail = tui.help_text("config")
+    correction = tui.help_text("plguins")
+
+    assert "configuration —" not in index
+    assert "Availability: unavailable — connect this UI to a Gateway" in gateway_detail
+    assert "Did you mean: plugins?" in correction
+
+
+async def test_unknown_command_suggests_correction_and_next_action() -> None:
+    tui = make_tui()
+
+    await tui._handle_client_command("alpha", "/plguins")
+    await tui._handle_client_command("alpha", "/utterlyunknown")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Did you mean /plugins?" in text
+    assert "Use /help to browse available comman" in text
 
 
 async def test_plugins_command_reports_loaded_and_missing_plugins() -> None:
@@ -822,7 +845,7 @@ async def test_update_check_reports_configured_candidate_channel(tmp_path: Path)
     assert "Checking for stable TFR updates" not in text
     assert "UI 1.2.3 (aaaaaaaaaaaa) [candidate]: up to date" in text
     assert "Gateway 1.2.3 (aaaaaaaaaaaa) [candidate]: up to date" in text
-    assert "inspect candidate TFR and plugin releases" in tui.help_text()
+    assert "Check or coordinate managed updates" in tui.help_text("update")
 
 
 async def test_web_commands_manage_devices_through_attached_gateway() -> None:
@@ -1589,6 +1612,148 @@ async def test_gateway_reconnect_command_preserves_the_running_ui() -> None:
     assert tui.restart_requested is False
 
 
+async def test_gateway_profile_commands_list_rename_export_and_forget(tmp_path: Path) -> None:
+    from tfr.gateway_profiles import GatewayConnectionProfile, GatewayProfileStore
+
+    store = GatewayProfileStore(tmp_path / "connections")
+    store.add(
+        GatewayConnectionProfile(
+            name="home",
+            host="gateway.example",
+            port=7347,
+            tls_server_name="gateway.example",
+            tls_ca=None,
+            credential_reference="credential:pending",
+            ui_id=uuid4(),
+            ui_name="Home Terminal",
+        ),
+        "a" * 64,
+    )
+    tui = make_tui()
+    tui.gateway_profiles = store
+
+    await tui._handle_client_command("alpha", "/gateway profiles")
+    await tui._handle_client_command("alpha", "/gateway rename home house")
+    await tui._handle_client_command("alpha", "/gateway profiles export")
+    await tui._handle_client_command("alpha", "/gateway forget house --confirm")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "gateway.example:7347" in text
+    assert "Renamed Gateway profile to house" in text
+    assert "credential_reference" not in text
+    assert "Forgot Gateway profile house" in text
+
+
+async def test_config_migration_commands_submit_choose_apply_and_report_status() -> None:
+    tui = make_tui()
+    preview = {
+        "base_revision": 4,
+        "accepted": [],
+        "conflicts": [
+            {
+                "key": "ui.spellcheck.enabled",
+                "candidates": [{"ui_name": "Office"}, {"ui_name": "Laptop"}],
+            }
+        ],
+        "skipped": [],
+    }
+    runtime = SimpleNamespace(
+        config_migrate=AsyncMock(return_value=preview),
+        config_migration_preview=AsyncMock(
+            return_value={**preview, "conflicts": [], "accepted": [{}]}
+        ),
+        config_status=AsyncMock(return_value={"revision": 4}),
+        config_migration_apply=AsyncMock(return_value={"revision": 5, "applied": True}),
+        config_migration_status=AsyncMock(
+            return_value={
+                "revision": 5,
+                "proposal_count": 2,
+                "applied_revision": 5,
+                "proposals": [],
+            }
+        ),
+    )
+    tui.service_runtime = runtime
+
+    await tui._handle_client_command("alpha", "/config migrate")
+    await tui._handle_client_command("alpha", "/config migrate choose ui.spellcheck.enabled Office")
+    await tui._handle_client_command("alpha", "/config migrate apply confirm")
+    await tui._handle_client_command("alpha", "/config migration-status")
+
+    runtime.config_migration_preview.assert_awaited_with({"ui.spellcheck.enabled": "Office"})
+    runtime.config_migration_apply.assert_awaited_with(
+        expected_revision=4,
+        choices={"ui.spellcheck.enabled": "Office"},
+        confirm=True,
+    )
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "conflict ui.spellcheck.enabled" in text
+    assert "Migration applied atomically at revision 5" in text
+    assert "proposals: 2" in text
+
+
+async def test_central_plugin_commands_list_show_and_enable_spotlight() -> None:
+    tui = make_tui()
+    plugin = {
+        "name": "spotlight",
+        "version": "1.0",
+        "summary": "Portable spotlight clear effect",
+        "category": "effects",
+        "enabled": False,
+        "loaded": False,
+        "failed": False,
+        "portable": True,
+        "capabilities": ["screen-clear"],
+    }
+    runtime = SimpleNamespace(
+        plugins_catalog=AsyncMock(return_value=[plugin]),
+        plugin_show=AsyncMock(
+            return_value={
+                "plugin": plugin,
+                "clients": [
+                    {
+                        "ui_name": "Old Terminal",
+                        "compatible": False,
+                        "reason": "plugin capability not reported",
+                    }
+                ],
+            }
+        ),
+        config_status=AsyncMock(return_value={"revision": 3}),
+        plugin_enablement=AsyncMock(
+            side_effect=[
+                {
+                    "name": "spotlight",
+                    "enabled": True,
+                    "revision": 3,
+                    "requires_confirmation": True,
+                    "restart": "client-reload",
+                },
+                {
+                    "name": "spotlight",
+                    "enabled": True,
+                    "revision": 4,
+                    "requires_confirmation": False,
+                    "restart": "client-reload",
+                },
+            ]
+        ),
+    )
+    tui.service_runtime = runtime
+    tui.gateway_reconnect = AsyncMock()
+
+    await tui._handle_client_command("alpha", "/plugins available")
+    await tui._handle_client_command("alpha", "/plugins show spotlight")
+    await tui._handle_client_command("alpha", "/plugins enable spotlight")
+    await tui._handle_client_command("alpha", "/plugins enable spotlight confirm")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "spotlight 1.0" in text
+    assert "incompatible: Old Terminal" in text
+    assert "/plugins enable spotlight confirm" in text
+    assert "enabled at revision 4" in text
+
+
 async def test_n_and_p_are_shortcuts_for_next_and_previous_world() -> None:
     tui = make_tui()
     assert tui.active_alias == "alpha"
@@ -1646,10 +1811,8 @@ async def test_core_and_plugin_commands_take_priority_over_world_aliases() -> No
     assert tui.active_alias == "alpha"
     assert calls == ["alpha"]
 
-    help_text = tui.help_text()
-    assert "/b - switch to beta" in help_text
-    assert "/n - switch to alpha; shadowed by core command" in help_text
-    assert "/fixture - switch to alpha; shadowed by fixture plugin command" in help_text
+    help_text = tui.help_text("worlds")
+    assert "/world — Switch to a named world" in help_text
     assert {world for world, _text in tui._startup_notices} == {"alpha", "beta"}
     assert all(
         "World-switch aliases shadowed by commands" in text for _world, text in tui._startup_notices
@@ -2804,9 +2967,9 @@ async def test_effects_lab_demo_commands_require_explicit_activation() -> None:
 def test_general_help_hides_effects_lab_only_commands() -> None:
     tui = make_tui()
 
-    help_text = tui.help_text()
+    help_text = tui.help_text("appearance")
 
-    assert "/effects - open the local Effects Lab" in help_text
+    assert "/effects — Open the Effects Lab" in help_text
     assert "/teststreak" not in help_text
     assert "/testspeaker" not in help_text
     assert "/effects effect" not in help_text
@@ -3034,7 +3197,7 @@ async def test_empty_particle_layer_never_masks_output_or_help() -> None:
 
     await tui._handle_client_command("alpha", "/help")
 
-    assert "TFR commands" in fragment_list_to_text(tui.active_view.output_text())
+    assert "TFR help topics" in fragment_list_to_text(tui.active_view.output_text())
 
 
 async def test_speaker_effects_keep_static_color_when_animations_are_off() -> None:

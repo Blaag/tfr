@@ -1711,6 +1711,7 @@ function applyGatewayConfiguration(envelope) {
     "updates.initial_delay_seconds",
     "updates.jitter_seconds",
     "updates.timeout_seconds",
+    "plugins.enabled",
   ]);
   const issues = Object.keys(envelope.settings)
     .filter((key) => !supported.has(key))

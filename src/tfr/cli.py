@@ -10,8 +10,12 @@ from uuid import UUID
 
 from tfr.config import (
     ConfigurationError,
+    MainConfig,
+    UiConfiguration,
     default_config_path,
+    gateway_bootstrap_bundle,
     load_configuration,
+    load_gateway_bootstrap,
     load_ui_configuration,
 )
 from tfr.gateway_transport import DEFAULT_GATEWAY_PORT
@@ -43,7 +47,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=default_config_path(),
-        help="main JSONC configuration file (default: %(default)s)",
+        help=(
+            "Gateway bootstrap or standalone legacy configuration file "
+            "(default: %(default)s)"
+        ),
     )
     parser.add_argument(
         "--check-config",
@@ -442,11 +449,39 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     if args.mode == "ui" and not args.check_config:
         try:
-            configuration = load_ui_configuration(args.config)
+            configuration_file_exists = args.config.exists()
+            try:
+                configuration = load_ui_configuration(args.config)
+            except ConfigurationError:
+                if args.config.exists():
+                    raise
+                configuration = UiConfiguration(main_path=args.config.resolve(), main=MainConfig())
             from tfr.gateway_client import run_gateway_ui
 
-            if args.gateway_host is None:
+            if args.gateway_host is None and args.socket is not None:
                 return asyncio.run(run_gateway_ui(configuration, args.socket))
+            if args.gateway_host is None:
+                from tfr.gateway_profiles import GatewayProfileStore, interactive_gateway_setup
+
+                profiles = GatewayProfileStore()
+                active = profiles.active
+                if active is None and configuration_file_exists:
+                    return asyncio.run(run_gateway_ui(configuration, args.socket))
+                active = active or interactive_gateway_setup(profiles)
+                return asyncio.run(
+                    run_gateway_ui(
+                        configuration,
+                        gateway_host=active.host,
+                        gateway_port=active.port,
+                        token_file=None,
+                        tls_ca=Path(active.tls_ca) if active.tls_ca else None,
+                        tls_server_name=active.tls_server_name,
+                        client_id=active.ui_id,
+                        gateway_profiles=profiles,
+                        auth_token=profiles.credentials.load(active.credential_reference),
+                        desired_ui_name=active.ui_name,
+                    )
+                )
             return asyncio.run(
                 run_gateway_ui(
                     configuration,
@@ -480,7 +515,11 @@ def run(argv: Sequence[str] | None = None) -> int:
         raise RuntimeError("gateway supervisor exec unexpectedly returned")
 
     try:
-        bundle = load_configuration(args.config)
+        if args.mode == "gateway":
+            bootstrap = load_gateway_bootstrap(args.config)
+            bundle = gateway_bootstrap_bundle(bootstrap)
+        else:
+            bundle = load_configuration(args.config)
     except ConfigurationError as exc:
         print(f"tfr: configuration error: {exc}", file=sys.stderr)
         return 2
@@ -496,7 +535,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     if args.socket is not None and args.mode not in {"gateway", "ui"}:
         print("tfr: --socket requires gateway or ui mode", file=sys.stderr)
         return 2
-    if not bundle.worlds.worlds:
+    if args.mode != "gateway" and not bundle.worlds.worlds:
         print("tfr: configuration error: no worlds are configured", file=sys.stderr)
         return 2
 
