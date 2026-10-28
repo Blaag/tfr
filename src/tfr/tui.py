@@ -4274,8 +4274,20 @@ class TfrTui:
         title: str,
         text: str,
         values: list[tuple[str, str]],
+        default: str | None = None,
     ) -> str | None:
-        choices = RadioList(values=values)
+        choices = RadioList(values=values, default=default)
+        activate = KeyBindings()
+
+        @activate.add("enter", eager=True)
+        def activate_current(_event: Any) -> None:
+            value = choices.values[choices._selected_index][0]
+            choices.current_value = value
+            self._finish_settings_dialog(value)
+
+        choices.control.key_bindings = merge_key_bindings(
+            [choices.control.key_bindings, activate]
+        )
         dialog = Dialog(
             title=title,
             body=HSplit(
@@ -4283,7 +4295,7 @@ class TfrTui:
                     Label(
                         text=(
                             f"{text}\n\n"
-                            "↑/↓ move · Space select · Tab buttons · Esc cancel"
+                            "↑/↓ move · Enter choose · Space mark · Esc cancel"
                         ),
                         dont_extend_height=True,
                     ),
@@ -4583,7 +4595,7 @@ class TfrTui:
         if isinstance(validation_value, dict) and validation_value.get("nullable") is True:
             actions.append(("null", "Set explicit empty/null value"))
         if str(setting.get("scope")) in {"ui", "ui-type"}:
-            actions.append(("target", "Choose an advanced UI target"))
+            actions.append(("target", "Choose which UI this applies to"))
         action = await self._settings_choice(
             title=setting_label(key),
             text=(
@@ -4597,12 +4609,12 @@ class TfrTui:
             return
         if action == "target":
             target_choice = await self._settings_choice(
-                title="Advanced target",
-                text="Choose where this value applies.",
+                title="Choose UI",
+                text="Choose which UI or group of UIs should use this value.",
                 values=[
-                    ("current", "This UI only"),
-                    ("terminal", "All terminal UIs by default"),
-                    ("named", "Another named UI"),
+                    ("current", "This UI"),
+                    ("terminal", "All terminal UIs"),
+                    ("named", "A different named UI"),
                 ],
             )
             if target_choice is None:
@@ -4643,16 +4655,21 @@ class TfrTui:
         if value_type == "boolean":
             selected = await self._settings_choice(
                 title=setting_label(key),
-                text="Choose a value.",
+                text=f"Current value: {'On' if detail.get('value') is True else 'Off'}",
                 values=[("true", "On"), ("false", "Off")],
+                default="true" if detail.get("value") is True else "false",
             )
             if selected is None:
                 return
             value = selected == "true"
         elif isinstance(choices, list) and choices:
             encoded = [(json.dumps(item), str(item)) for item in choices]
+            current = json.dumps(detail.get("value"))
             selected = await self._settings_choice(
-                title=setting_label(key), text="Choose a value.", values=encoded
+                title=setting_label(key),
+                text=f"Current value: {detail.get('value')!r}\nChoose a new value.",
+                values=encoded,
+                default=current if any(value == current for value, _label in encoded) else None,
             )
             if selected is None:
                 return
@@ -5161,7 +5178,11 @@ class TfrTui:
                     continue
                 key = await self._settings_choice(
                     title="Search results",
-                    text=f"{len(candidates)} matching settings",
+                    text=(
+                        f"{len(candidates)} matching settings. Choose one to open its editor; "
+                        "the next screen shows its current value and available actions. "
+                        "The (*) marks the result to open, not that setting's current value."
+                    ),
                     values=[
                         (
                             str(item["key"]),
@@ -5328,21 +5349,59 @@ class TfrTui:
                     )
                     return
                 lines = [
-                    f"Migration preview — base revision {preview.get('base_revision')}",
-                    f"  accepted: {len(preview.get('accepted', []))}; "
-                    f"conflicts: {len(preview.get('conflicts', []))}; "
-                    f"skipped: {len(preview.get('skipped', []))}",
+                    "Configuration migration preview (nothing has been changed yet)",
+                    f"  Ready to import: {len(preview.get('accepted', []))}",
+                    f"  Need your decision: {len(preview.get('conflicts', []))}",
+                    f"  Not imported automatically: {len(preview.get('skipped', []))}",
                 ]
                 for conflict in preview.get("conflicts", []):
                     if isinstance(conflict, dict):
-                        names = ", ".join(
-                            str(candidate.get("ui_name"))
-                            for candidate in conflict.get("candidates", [])
-                            if isinstance(candidate, dict)
+                        key = str(conflict.get("key"))
+                        lines.extend(
+                            [
+                                "",
+                                f"{setting_label(key)} ({key}) has different values in your "
+                                "existing configurations.",
+                                "Choose which existing value should become the Gateway-managed "
+                                "value:",
+                                "Each name below identifies the old configuration that supplied "
+                                "the value.",
+                            ]
                         )
-                        lines.append(f"  conflict {conflict.get('key')}: choose {names} or skip")
+                        for candidate in conflict.get("candidates", []):
+                            if not isinstance(candidate, dict):
+                                continue
+                            name = str(candidate.get("ui_name"))
+                            value = json.dumps(candidate.get("value"), ensure_ascii=False)
+                            lines.extend(
+                                [
+                                    f"  {name}: {value}",
+                                    f"    /config migrate choose {key} {shlex.quote(name)}",
+                                ]
+                            )
+                        lines.extend(
+                            [
+                                "Or leave this setting unchanged and do not import either value:",
+                                f"  /config migrate skip {key}",
+                            ]
+                        )
                 if not preview.get("conflicts"):
-                    lines.append("  Apply with: /config migrate apply confirm")
+                    lines.extend(
+                        [
+                            "",
+                            "All required decisions are complete. Review the counts above, then "
+                            "apply the migration with:",
+                            "  /config migrate apply confirm",
+                        ]
+                    )
+                else:
+                    lines.extend(
+                        [
+                            "",
+                            "Resolve each setting above, then run /config migrate preview again. "
+                            "The migration cannot be applied until every decision is complete.",
+                        ]
+                    )
                 self.add_notice(alias, "\n".join(lines))
                 return
             if valid_changes:

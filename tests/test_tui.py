@@ -189,10 +189,6 @@ async def test_settings_dialog_uses_main_renderer_and_keyboard_navigation() -> N
             application_ids.append(id(tui.application))
             input.send_text("\x1b[B")
             await asyncio.sleep(0.05)
-            input.send_text(" ")
-            await asyncio.sleep(0.05)
-            input.send_text("\t")
-            await asyncio.sleep(0.05)
             input.send_text("\r")
             assert await asyncio.wait_for(choice, timeout=1) == "second"
             assert tui._settings_dialog is None
@@ -820,6 +816,10 @@ async def test_settings_browser_infers_current_ui_scope_and_saves_boolean() -> N
         "confirm": False,
     }
     assert runtime.config_mutate.await_args_list[1].kwargs["confirm"] is True
+    value_prompt = tui._settings_choice.await_args_list[4].kwargs
+    assert value_prompt["text"] == "Current value: Off"
+    assert value_prompt["values"] == [("true", "On"), ("false", "Off")]
+    assert value_prompt["default"] == "false"
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
     assert "Saved Animations Enabled at revision 5" in text
 
@@ -1813,7 +1813,10 @@ async def test_config_migration_commands_submit_choose_apply_and_report_status()
         "conflicts": [
             {
                 "key": "ui.spellcheck.enabled",
-                "candidates": [{"ui_name": "Office"}, {"ui_name": "Laptop"}],
+                "candidates": [
+                    {"ui_name": "Office", "value": True},
+                    {"ui_name": "Laptop Terminal", "value": False},
+                ],
             }
         ],
         "skipped": [],
@@ -1837,6 +1840,13 @@ async def test_config_migration_commands_submit_choose_apply_and_report_status()
     tui.service_runtime = runtime
 
     await tui._handle_client_command("alpha", "/config migrate")
+    conflict_text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "nothing has been changed yet" in conflict_text
+    assert "ui.spellcheck.enabled" in conflict_text
+    assert "has different values" in conflict_text
+    assert "Laptop Terminal" in conflict_text
+    assert "migrate choose" in conflict_text
+    assert "migrate skip" in conflict_text
     await tui._handle_client_command("alpha", "/config migrate choose ui.spellcheck.enabled Office")
     await tui._handle_client_command("alpha", "/config migrate apply confirm")
     await tui._handle_client_command("alpha", "/config migration-status")
@@ -1847,8 +1857,9 @@ async def test_config_migration_commands_submit_choose_apply_and_report_status()
         choices={"ui.spellcheck.enabled": "Office"},
         confirm=True,
     )
-    text = fragment_list_to_text(tui.active_view.display.formatted_text())
-    assert "conflict ui.spellcheck.enabled" in text
+    text = "\n".join(
+        fragment_list_to_text(row) for row in tui.active_view.display.rows
+    )
     assert "Migration applied atomically at revision 5" in text
     assert "proposals: 2" in text
 

@@ -697,7 +697,8 @@ scope and target, provides typed controls and a review step, and supports reset
 and undo without requiring registry keys or JSON. Advanced users and automation
 can continue using `/config show`, `/config set`, and the other explicit
 subcommands; `/config summary` displays the aggregate inventory report. Use the
-arrow keys to move, Enter to select, Tab to move between buttons, and Escape to
+arrow keys to move, Enter to choose the focused row immediately, Space to mark
+a row without closing the menu, Tab to move between buttons, and Escape to
 cancel the current dialog. The keyboard cursor is shown as a bold reverse-video
 row independently of the `(*)` or `[*]` marker for the chosen value.
 Authenticated native Gateway connections use the
