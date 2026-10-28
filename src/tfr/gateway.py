@@ -1777,7 +1777,9 @@ class GatewayServer:
                     write_lock,
                     allow_admin=True,
                     ui_id=ui_record.ui_id if ui_record is not None else None,
-                    configuration_admin=auth_token is None,
+                    # Native Unix-socket and authenticated TLS clients use the owner
+                    # administration protocol. PWA devices use a separate restricted API.
+                    configuration_admin=True,
                 ),
                 name=f"tfr-gateway-requests-{connection_id}",
             )

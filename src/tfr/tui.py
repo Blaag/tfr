@@ -25,7 +25,7 @@ from uuid import UUID, uuid4
 import qrcode
 from PIL import Image
 from prompt_toolkit import Application
-from prompt_toolkit.application import get_app, run_in_terminal
+from prompt_toolkit.application import get_app, in_terminal, run_in_terminal
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.document import Document
@@ -34,6 +34,7 @@ from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input import Input
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding.key_bindings import merge_key_bindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import BufferControl, DynamicContainer, FormattedTextControl, HSplit
 from prompt_toolkit.layout.containers import VSplit, Window
@@ -4242,7 +4243,19 @@ class TfrTui:
         values: list[tuple[str, str]],
     ) -> str | None:
         dialog = radiolist_dialog(title=title, text=text, values=values)
-        return await dialog.run_async()
+        result = await self._run_settings_dialog(dialog)
+        return str(result) if isinstance(result, str) else None
+
+    async def _run_settings_dialog(self, dialog) -> object:
+        escape = KeyBindings()
+
+        @escape.add("escape")
+        def _cancel(_event) -> None:
+            dialog.exit(result=None)
+
+        dialog.key_bindings = merge_key_bindings([dialog.key_bindings, escape])
+        async with in_terminal():
+            return await dialog.run_async()
 
     async def _settings_input(
         self,
@@ -4252,7 +4265,8 @@ class TfrTui:
         default: str = "",
     ) -> str | None:
         dialog = input_dialog(title=title, text=text, default=default)
-        return await dialog.run_async()
+        result = await self._run_settings_dialog(dialog)
+        return str(result) if isinstance(result, str) else None
 
     async def _settings_multiselect(
         self,
@@ -4268,7 +4282,7 @@ class TfrTui:
             values=values,
             default_values=defaults,
         )
-        result = await dialog.run_async()
+        result = await self._run_settings_dialog(dialog)
         return list(result) if result is not None else None
 
     async def _settings_color(
@@ -4300,11 +4314,11 @@ class TfrTui:
 
     async def _settings_confirm(self, *, title: str, text: str) -> bool:
         dialog = yes_no_dialog(title=title, text=text, yes_text="Apply", no_text="Cancel")
-        return bool(await dialog.run_async())
+        return bool(await self._run_settings_dialog(dialog))
 
     async def _settings_message(self, *, title: str, text: str) -> None:
         dialog = message_dialog(title=title, text=text, ok_text="Continue")
-        await dialog.run_async()
+        await self._run_settings_dialog(dialog)
 
     async def _save_settings_value(
         self,

@@ -17,6 +17,7 @@ from PIL import Image
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.formatted_text import fragment_list_to_text
 from prompt_toolkit.input import DummyInput, Input, create_pipe_input
+from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import DummyOutput
@@ -171,6 +172,12 @@ async def test_settings_dialog_uses_async_application_runner(
     tui = make_tui()
 
     class Dialog:
+        def __init__(self) -> None:
+            self.key_bindings = KeyBindings()
+
+        def exit(self, *, result: object) -> None:
+            raise AssertionError(f"unexpected exit: {result}")
+
         def run(self) -> str:
             raise AssertionError("synchronous runner must not be used inside the TUI event loop")
 

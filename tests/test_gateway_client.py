@@ -1905,7 +1905,7 @@ async def test_client_connects_to_authenticated_tls_gateway(tmp_path: Path) -> N
     socket_path.parent.rmdir()
 
 
-async def test_remote_ui_can_change_only_its_own_ui_scoped_configuration(
+async def test_authenticated_native_ui_can_administer_gateway_configuration(
     tmp_path: Path,
 ) -> None:
     ca = trustme.CA()
@@ -1970,18 +1970,19 @@ async def test_remote_ui_can_change_only_its_own_ui_scoped_configuration(
         shown = await client.config_show("ui.mouse_mode", ui="remote · Terminal")
         assert shown["value"] == "terminal"
         assert shown["source"] == "managed"
-        with pytest.raises(ValueError, match="requires owner/admin access"):
-            await client.config_mutate(
-                "set",
-                "ui.spellcheck.enabled",
-                value=True,
-                scope="shared",
-                target=None,
-                expected_revision=1,
-                confirm=True,
-            )
-        with pytest.raises(ValueError, match="history requires owner/admin access"):
-            await client.config_changes()
+        shared = await client.config_mutate(
+            "set",
+            "ui.spellcheck.enabled",
+            value=True,
+            scope="shared",
+            target=None,
+            expected_revision=1,
+            confirm=True,
+        )
+        assert shared["revision"] == 2
+        assert (await client.config_changes())["changes"][-1]["key"] == (
+            "ui.spellcheck.enabled"
+        )
     finally:
         await client.stop()
         await server.stop()
