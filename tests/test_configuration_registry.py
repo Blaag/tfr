@@ -77,6 +77,36 @@ def test_descriptor_validates_defaults_choices_and_patterns() -> None:
         )
 
 
+def test_descriptor_exposes_bounded_declarative_form_metadata() -> None:
+    descriptor = SettingDescriptor(
+        key="plugins.config.demo.rules",
+        value_type=SettingType.JSON,
+        default=[],
+        scope=SettingScope.PLUGIN,
+        consumers=("gateway",),
+        form={
+            "editor": "collection",
+            "label": "Demo rules",
+            "item": {"fields": [{"key": "name", "type": "string"}]},
+        },
+    )
+
+    assert descriptor.as_dict()["form"] == {
+        "editor": "collection",
+        "label": "Demo rules",
+        "item": {"fields": [{"key": "name", "type": "string"}]},
+    }
+    with pytest.raises(ValueError, match="32 KiB"):
+        SettingDescriptor(
+            key="plugins.config.demo.large",
+            value_type=SettingType.JSON,
+            default=[],
+            scope=SettingScope.PLUGIN,
+            consumers=("gateway",),
+            form={"label": "x" * 40_000},
+        )
+
+
 def test_descriptor_freezes_structured_defaults_and_redacts_nothing_itself() -> None:
     source = {"reference": "keychain:tfr/gateway", "fallbacks": ["environment"]}
     descriptor = SettingDescriptor(

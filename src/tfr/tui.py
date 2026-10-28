@@ -41,6 +41,13 @@ from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.layout.processors import Processor, Transformation, TransformationInput
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import Output
+from prompt_toolkit.shortcuts import (
+    checkboxlist_dialog,
+    input_dialog,
+    message_dialog,
+    radiolist_dialog,
+    yes_no_dialog,
+)
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 
@@ -96,6 +103,17 @@ from tfr.plugins import (
 )
 from tfr.presentation import ActiveEffectProgram, EffectProgram, effect_programs_from_dict
 from tfr.sessions import SessionManager, SessionState, WorldSession
+from tfr.settings_ui import (
+    editable_settings,
+    parse_setting_value,
+    setting_category,
+    setting_destination,
+    setting_label,
+    setting_value_text,
+    speaker_rule_label,
+    speaker_rules,
+    validate_speaker_rule,
+)
 from tfr.spellcheck import Correction, LocalSpellChecker, speech_payload
 from tfr.text_effects import TextDecoration, TextEffectKind, derive_bright_color, interpolate_color
 from tfr.themes import ResolvedTheme, resolve_theme
@@ -146,6 +164,7 @@ _CORE_CLIENT_COMMANDS = frozenset(
         "reconnect",
         "reload",
         "restart",
+        "settings",
         "sh",
         "spellcheck",
         "streaks",
@@ -266,6 +285,14 @@ class ServiceRuntime(Protocol):
         value: object = None,
         scope: str,
         target: str | None,
+        expected_revision: int,
+        confirm: bool,
+    ) -> dict[str, object]: ...
+
+    async def config_batch(
+        self,
+        changes: list[dict[str, object]],
+        *,
         expected_revision: int,
         confirm: bool,
     ) -> dict[str, object]: ...
@@ -3370,6 +3397,11 @@ class TfrTui:
                 self.add_help(alias, "config", self.help_text("config"))
             else:
                 await self._handle_config_command(alias, parameters)
+        elif command == "settings":
+            if parameters:
+                self.add_notice(alias, "Usage: /settings")
+            else:
+                await self._open_settings_menu(alias)
         elif command == "ui":
             await self._handle_ui_command(alias, parameters)
         elif command == "diagnostics":
@@ -3757,7 +3789,16 @@ class TfrTui:
                     )
                 )
 
-    def _show_text_effect_demo(self, name: str, *, speaker: str | None = None) -> None:
+    def _show_text_effect_demo(
+        self,
+        name: str,
+        *,
+        speaker: str | None = None,
+        base_color: str | None = None,
+        accent_color: str | None = None,
+        duration_seconds: float | None = None,
+        effect_width: float | None = None,
+    ) -> None:
         try:
             effect = TextEffectKind(name.casefold())
         except ValueError:
@@ -3777,14 +3818,14 @@ class TfrTui:
             start=start,
             end=start + len(sample),
             effect=effect,
-            base_color=self.theme.output_color,
-            accent_color="#ffffff",
+            base_color=base_color or self.theme.output_color,
+            accent_color=accent_color or "#ffffff",
             interval_seconds=interval,
-            repeat_seconds=10,
+            repeat_seconds=duration_seconds or 10,
             phase_offset_seconds=-self._effects_animation_elapsed_seconds(),
             frames_per_second=20,
             loop=False,
-            effect_width=3,
+            effect_width=effect_width or 3,
             sparkle_count=4,
         )
         self.effects_display.append(text, decorations=(decoration,), recallable=False)
@@ -4193,8 +4234,850 @@ class TfrTui:
             return
         self.add_notice(alias, usage)
 
+    async def _settings_choice(
+        self,
+        *,
+        title: str,
+        text: str,
+        values: list[tuple[str, str]],
+    ) -> str | None:
+        dialog = radiolist_dialog(title=title, text=text, values=values)
+        return await run_in_terminal(dialog.run)
+
+    async def _settings_input(
+        self,
+        *,
+        title: str,
+        text: str,
+        default: str = "",
+    ) -> str | None:
+        dialog = input_dialog(title=title, text=text, default=default)
+        return await run_in_terminal(dialog.run)
+
+    async def _settings_multiselect(
+        self,
+        *,
+        title: str,
+        text: str,
+        values: list[tuple[str, str]],
+        defaults: list[str] | None = None,
+    ) -> list[str] | None:
+        dialog = checkboxlist_dialog(
+            title=title,
+            text=text,
+            values=values,
+            default_values=defaults,
+        )
+        result = await run_in_terminal(dialog.run)
+        return list(result) if result is not None else None
+
+    async def _settings_color(
+        self,
+        *,
+        title: str,
+        label: str,
+        current: str | None,
+    ) -> str | None:
+        palette = [
+            ("#ffdd76", "Warm gold  #ffdd76"),
+            ("#ffffff", "White      #ffffff"),
+            ("#5fd7ff", "Sky blue   #5fd7ff"),
+            ("#ff87d7", "Pink       #ff87d7"),
+            ("#87d75f", "Green      #87d75f"),
+            ("custom", "Custom hexadecimal color"),
+            ("", "Use effect default"),
+        ]
+        selected = await self._settings_choice(title=title, text=label, values=palette)
+        if selected is None:
+            return None
+        if selected != "custom":
+            return selected
+        return await self._settings_input(
+            title=title,
+            text=f"{label} (#RRGGBB)",
+            default=current or "#ffffff",
+        )
+
+    async def _settings_confirm(self, *, title: str, text: str) -> bool:
+        dialog = yes_no_dialog(title=title, text=text, yes_text="Apply", no_text="Cancel")
+        return bool(await run_in_terminal(dialog.run))
+
+    async def _settings_message(self, *, title: str, text: str) -> None:
+        dialog = message_dialog(title=title, text=text, ok_text="Continue")
+        await run_in_terminal(dialog.run)
+
+    async def _save_settings_value(
+        self,
+        alias: str,
+        setting: dict[str, object],
+        value: object,
+        *,
+        reset: bool = False,
+        old_value: object = None,
+        retry: bool = True,
+    ) -> bool:
+        if self.service_runtime is None:
+            return False
+        key = str(setting["key"])
+        if "edit_scope" in setting:
+            scope = str(setting["edit_scope"])
+            target_value = setting.get("edit_target")
+            target = str(target_value) if target_value is not None else None
+        else:
+            scope, target = setting_destination(key, str(setting["scope"]))
+        status = await self.service_runtime.config_status()
+        operation = "reset" if reset else "set"
+        preview = await self.service_runtime.config_mutate(
+            operation,
+            key,
+            value=value,
+            scope=scope,
+            target=target,
+            expected_revision=int(status["revision"]),
+            confirm=False,
+        )
+        action = str(preview.get("restart", "live"))
+        value_text = "Inherited/default value" if reset else json.dumps(value, ensure_ascii=False)
+        confirmed = await self._settings_confirm(
+            title="Review configuration change",
+            text=(
+                f"{setting_label(key)}\n\n"
+                f"Target: {scope}{f' · {target}' if target else ''}\n"
+                f"Current value: {json.dumps(old_value, ensure_ascii=False)}\n"
+                f"New value: {value_text}\nRequired action: {action}"
+            ),
+        )
+        if not confirmed:
+            return False
+        try:
+            result = await self.service_runtime.config_mutate(
+                operation,
+                key,
+                value=value,
+                scope=scope,
+                target=target,
+                expected_revision=int(status["revision"]),
+                confirm=True,
+            )
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            if retry and "revision" in str(exc).casefold():
+                await self._settings_message(
+                    title="Configuration changed",
+                    text="Another client changed configuration. Review the refreshed revision.",
+                )
+                return await self._save_settings_value(
+                    alias,
+                    setting,
+                    value,
+                    reset=reset,
+                    old_value=old_value,
+                    retry=False,
+                )
+            raise
+        self.add_command_report(
+            alias,
+            "/config",
+            f"Saved {setting_label(key)} at revision {result.get('revision')}.\n"
+            f"Required action: {result.get('restart', action)}",
+        )
+        return True
+
+    async def _save_settings_batch(
+        self,
+        alias: str,
+        setting: dict[str, object],
+        value: object,
+        *,
+        old_value: object,
+    ) -> bool:
+        if self.service_runtime is None:
+            return False
+        key = str(setting["key"])
+        scope, target = setting_destination(key, str(setting["scope"]))
+        changes = [
+            {
+                "operation": "set",
+                "key": key,
+                "value": value,
+                "scope": scope,
+                "target": target,
+            }
+        ]
+        status = await self.service_runtime.config_status()
+        preview = await self.service_runtime.config_batch(
+            changes,
+            expected_revision=int(status["revision"]),
+            confirm=False,
+        )
+        if not await self._settings_confirm(
+            title="Review configuration changes",
+            text=(
+                f"{setting_label(key)}\n\n"
+                f"Current value: {json.dumps(old_value, ensure_ascii=False)}\n"
+                f"New value: {json.dumps(value, ensure_ascii=False)}\n"
+                f"Required action: {preview.get('restart', 'live')}"
+            ),
+        ):
+            return False
+        result = await self.service_runtime.config_batch(
+            changes,
+            expected_revision=int(status["revision"]),
+            confirm=True,
+        )
+        self.add_command_report(
+            alias,
+            "/config",
+            f"Saved {len(changes)} related change at revision {result.get('revision')}.\n"
+            f"Required action: {result.get('restart', 'live')}",
+        )
+        return True
+
+    async def _edit_generic_setting(
+        self,
+        alias: str,
+        setting: dict[str, object],
+        detail: dict[str, object],
+    ) -> None:
+        key = str(setting["key"])
+        actions = [("edit", "Change value"), ("reset", "Use inherited/default value")]
+        validation_value = setting.get("validation")
+        if isinstance(validation_value, dict) and validation_value.get("nullable") is True:
+            actions.append(("null", "Set explicit empty/null value"))
+        if str(setting.get("scope")) in {"ui", "ui-type"}:
+            actions.append(("target", "Choose an advanced UI target"))
+        action = await self._settings_choice(
+            title=setting_label(key),
+            text=(
+                f"Current value: {detail.get('value')!r}\n"
+                f"Source: {detail.get('source')}\n"
+                f"Required action: {setting.get('restart', 'live')}"
+            ),
+            values=actions,
+        )
+        if action is None:
+            return
+        if action == "target":
+            target_choice = await self._settings_choice(
+                title="Advanced target",
+                text="Choose where this value applies.",
+                values=[
+                    ("current", "This UI only"),
+                    ("terminal", "All terminal UIs by default"),
+                    ("named", "Another named UI"),
+                ],
+            )
+            if target_choice is None:
+                return
+            setting = dict(setting)
+            if target_choice == "current":
+                setting.update(edit_scope="ui", edit_target=None)
+            elif target_choice == "terminal":
+                setting.update(edit_scope="ui-type", edit_target="terminal")
+            else:
+                uis = await self.service_runtime.list_uis() if self.service_runtime else []
+                name = await self._settings_choice(
+                    title="Named UI",
+                    text="Choose a UI.",
+                    values=[
+                        (str(item.get("display_name")), str(item.get("display_name")))
+                        for item in uis
+                    ],
+                )
+                if name is None:
+                    return
+                setting.update(edit_scope="ui", edit_target=name)
+            action = "edit"
+        if action == "reset":
+            await self._save_settings_value(
+                alias, setting, None, reset=True, old_value=detail.get("value")
+            )
+            return
+        if action == "null":
+            await self._save_settings_value(
+                alias, setting, None, old_value=detail.get("value")
+            )
+            return
+        value_type = str(setting.get("type", "json"))
+        validation = setting.get("validation")
+        choices = validation.get("choices") if isinstance(validation, dict) else None
+        value: object
+        if value_type == "boolean":
+            selected = await self._settings_choice(
+                title=setting_label(key),
+                text="Choose a value.",
+                values=[("true", "On"), ("false", "Off")],
+            )
+            if selected is None:
+                return
+            value = selected == "true"
+        elif isinstance(choices, list) and choices:
+            encoded = [(json.dumps(item), str(item)) for item in choices]
+            selected = await self._settings_choice(
+                title=setting_label(key), text="Choose a value.", values=encoded
+            )
+            if selected is None:
+                return
+            value = json.loads(selected)
+        elif value_type == "string-list":
+            current = detail.get("value")
+            entries = list(current) if isinstance(current, list) else []
+            original = list(entries)
+            while True:
+                selected = await self._settings_choice(
+                    title=setting_label(key),
+                    text=f"{len(entries)} entries",
+                    values=[("add", "Add entry")]
+                    + [(f"entry:{index}", entry) for index, entry in enumerate(entries)]
+                    + [("save", "Save list"), ("cancel", "Cancel")],
+                )
+                if selected in {None, "cancel"}:
+                    return
+                if selected == "save":
+                    if entries == original:
+                        return
+                    value = entries
+                    break
+                if selected == "add":
+                    entry = await self._settings_input(
+                        title=setting_label(key), text="New list entry"
+                    )
+                    if entry:
+                        entries.append(entry)
+                    continue
+                index = int(selected.split(":", 1)[1])
+                list_action = await self._settings_choice(
+                    title=entries[index],
+                    text="Choose an action.",
+                    values=[
+                        ("edit", "Edit"),
+                        ("up", "Move earlier"),
+                        ("down", "Move later"),
+                        ("delete", "Delete"),
+                    ],
+                )
+                if list_action == "edit":
+                    replacement = await self._settings_input(
+                        title=setting_label(key), text="List entry", default=entries[index]
+                    )
+                    if replacement:
+                        entries[index] = replacement
+                elif list_action == "up" and index > 0:
+                    entries[index - 1], entries[index] = entries[index], entries[index - 1]
+                elif list_action == "down" and index + 1 < len(entries):
+                    entries[index + 1], entries[index] = entries[index], entries[index + 1]
+                elif list_action == "delete":
+                    entries.pop(index)
+        elif value_type == "string" and (
+            "color" in key
+            or (
+                isinstance(validation, dict)
+                and validation.get("pattern") == r"#[0-9a-fA-F]{6}"
+            )
+        ):
+            selected_color = await self._settings_color(
+                title=setting_label(key),
+                label="Choose a color",
+                current=(str(detail["value"]) if detail.get("value") is not None else None),
+            )
+            if selected_color is None:
+                return
+            value = selected_color
+        else:
+            raw = await self._settings_input(
+                title=setting_label(key),
+                text=(
+                    "Enter the new value. Lists and structured values use JSON.\n"
+                    f"Type: {value_type}"
+                ),
+                default=setting_value_text(detail.get("value"), value_type),
+            )
+            if raw is None:
+                return
+            try:
+                value = parse_setting_value(raw, value_type)
+            except ValueError as exc:
+                await self._settings_message(title="Invalid value", text=str(exc))
+                return
+        await self._save_settings_value(alias, setting, value, old_value=detail.get("value"))
+
+    async def _speaker_rule_form(
+        self,
+        existing: dict[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        rule = dict(existing or {})
+        speaker = await self._settings_input(
+            title="Speaker effect",
+            text="Speaker name",
+            default=str(rule.get("speaker", "")),
+        )
+        if speaker is None:
+            return None
+        effects = [effect.value for effect in TextEffectKind]
+        effect = await self._settings_choice(
+            title="Speaker effect",
+            text=f"Choose the effect for {speaker}.",
+            values=[(name, name.replace("_", " ").title()) for name in effects],
+        )
+        if effect is None:
+            return None
+        rule.update({"speaker": speaker, "effect": effect})
+        color = await self._settings_color(
+            title="Speaker effect",
+            label="Base color",
+            current=(str(rule["color"]) if "color" in rule else None),
+        )
+        if color is None:
+            return None
+        if color:
+            rule["color"] = color
+        else:
+            rule.pop("color", None)
+        accent = await self._settings_color(
+            title="Speaker effect",
+            label="Accent color",
+            current=(str(rule["accent_color"]) if "accent_color" in rule else None),
+        )
+        if accent is None:
+            return None
+        if accent:
+            rule["accent_color"] = accent
+        else:
+            rule.pop("accent_color", None)
+        if effect == "comet":
+            duration = await self._settings_input(
+                title="Comet effect",
+                text="Duration in seconds",
+                default=str(rule.get("duration_seconds", 1.2)),
+            )
+            if duration is None:
+                return None
+            trail = await self._settings_input(
+                title="Comet effect",
+                text="Trail width",
+                default=str(rule.get("trail_width", 3)),
+            )
+            if trail is None:
+                return None
+            try:
+                rule["duration_seconds"] = float(duration)
+                rule["trail_width"] = float(trail)
+            except ValueError:
+                await self._settings_message(
+                    title="Invalid comet settings",
+                    text="Duration and trail width must be numbers.",
+                )
+                return None
+        worlds = await self._settings_multiselect(
+            title="Speaker effect",
+            text="Limit this rule to worlds. Select none for all worlds.",
+            values=[(name, name) for name in self.aliases],
+            defaults=[str(item) for item in rule.get("worlds", [])],
+        )
+        if worlds is None:
+            return None
+        if worlds:
+            rule["worlds"] = worlds
+        else:
+            rule.pop("worlds", None)
+        kinds = await self._settings_multiselect(
+            title="Speaker effect",
+            text="Apply to message kinds. Select none for all supported kinds.",
+            values=[("say", "Say"), ("pose", "Pose"), ("page", "Page")],
+            defaults=[str(item) for item in rule.get("kinds", [])],
+        )
+        if kinds is None:
+            return None
+        if kinds:
+            rule["kinds"] = kinds
+        else:
+            rule.pop("kinds", None)
+        try:
+            return validate_speaker_rule(rule)
+        except ValueError as exc:
+            await self._settings_message(title="Invalid speaker rule", text=str(exc))
+            return None
+
+    async def _declarative_item_form(
+        self,
+        form: dict[str, object],
+        existing: dict[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        item_schema = form.get("item")
+        fields = item_schema.get("fields") if isinstance(item_schema, dict) else None
+        if not isinstance(fields, list):
+            await self._settings_message(
+                title="Unsupported form", text="This collection has no bounded field schema."
+            )
+            return None
+        item = dict(existing or {})
+        for raw_field in fields:
+            if not isinstance(raw_field, dict):
+                continue
+            key = raw_field.get("key")
+            field_type = raw_field.get("type")
+            if not isinstance(key, str) or not isinstance(field_type, str):
+                continue
+            condition = raw_field.get("visible_when")
+            if isinstance(condition, dict) and any(
+                item.get(condition_key) not in allowed
+                for condition_key, allowed in condition.items()
+                if isinstance(allowed, list)
+            ):
+                item.pop(key, None)
+                continue
+            label = str(raw_field.get("label", key.replace("_", " ").title()))
+            value: object | None
+            if field_type == "color":
+                value = await self._settings_color(
+                    title=str(form.get("label", "Edit item")),
+                    label=label,
+                    current=(str(item[key]) if key in item else None),
+                )
+            elif field_type in {"multi-select", "world-multi-select"}:
+                choices = self.aliases if field_type == "world-multi-select" else raw_field.get(
+                    "choices", []
+                )
+                value = await self._settings_multiselect(
+                    title=str(form.get("label", "Edit item")),
+                    text=label,
+                    values=[(str(choice), str(choice)) for choice in choices],
+                    defaults=[str(choice) for choice in item.get(key, [])],
+                )
+            elif field_type == "boolean":
+                selected = await self._settings_choice(
+                    title=str(form.get("label", "Edit item")),
+                    text=label,
+                    values=[("true", "On"), ("false", "Off")],
+                )
+                value = None if selected is None else selected == "true"
+            elif isinstance(raw_field.get("choices"), list):
+                encoded = [(json.dumps(choice), str(choice)) for choice in raw_field["choices"]]
+                selected = await self._settings_choice(
+                    title=str(form.get("label", "Edit item")), text=label, values=encoded
+                )
+                value = None if selected is None else json.loads(selected)
+            else:
+                raw = await self._settings_input(
+                    title=str(form.get("label", "Edit item")),
+                    text=label,
+                    default=setting_value_text(item.get(key), field_type),
+                )
+                if raw is None:
+                    return None
+                value = parse_setting_value(raw, field_type if field_type != "effect" else "string")
+            if value is None:
+                return None
+            if (value == "" or value == []) and raw_field.get("required") is not True:
+                item.pop(key, None)
+            else:
+                item[key] = value
+        return item
+
+    async def _edit_structured_collection(
+        self,
+        alias: str,
+        setting: dict[str, object],
+        detail: dict[str, object],
+        form: dict[str, object],
+    ) -> None:
+        raw = detail.get("value")
+        if not isinstance(raw, list) or any(not isinstance(item, dict) for item in raw):
+            await self._settings_message(
+                title="Invalid collection", text="The current value is not a list of objects."
+            )
+            return
+        items = [dict(item) for item in raw]
+        original = json.dumps(items, sort_keys=True)
+        item_schema = form.get("item")
+        label_field = (
+            str(item_schema.get("label_field", "name"))
+            if isinstance(item_schema, dict)
+            else "name"
+        )
+        while True:
+            selected = await self._settings_choice(
+                title=str(form.get("label", setting_label(str(setting["key"])))),
+                text=f"{len(items)} items",
+                values=[("add", "Add item")]
+                + [
+                    (f"item:{index}", str(item.get(label_field, f"Item {index + 1}")))
+                    for index, item in enumerate(items)
+                ]
+                + [("save", "Save changes"), ("cancel", "Cancel")],
+            )
+            if selected in {None, "cancel"}:
+                return
+            if selected == "save":
+                if json.dumps(items, sort_keys=True) != original:
+                    await self._save_settings_batch(
+                        alias, setting, items, old_value=detail.get("value")
+                    )
+                return
+            if selected == "add":
+                item = await self._declarative_item_form(form)
+                if item is not None:
+                    items.append(item)
+                continue
+            index = int(selected.split(":", 1)[1])
+            operation = await self._settings_choice(
+                title=str(items[index].get(label_field, "Item")),
+                text="Choose an action.",
+                values=[
+                    ("edit", "Edit"),
+                    ("up", "Move earlier"),
+                    ("down", "Move later"),
+                    ("delete", "Delete"),
+                ],
+            )
+            if operation == "edit":
+                replacement = await self._declarative_item_form(form, items[index])
+                if replacement is not None:
+                    items[index] = replacement
+            elif operation == "up" and index > 0:
+                items[index - 1], items[index] = items[index], items[index - 1]
+            elif operation == "down" and index + 1 < len(items):
+                items[index + 1], items[index] = items[index], items[index + 1]
+            elif operation == "delete":
+                items.pop(index)
+
+    async def _edit_speaker_rules(
+        self,
+        alias: str,
+        setting: dict[str, object],
+        detail: dict[str, object],
+    ) -> None:
+        try:
+            rules = speaker_rules(detail.get("value"))
+        except ValueError as exc:
+            await self._settings_message(title="Speaker effects", text=str(exc))
+            return
+        original = json.dumps(rules, sort_keys=True)
+        plugin_status = "unknown"
+        if self.service_runtime is not None and hasattr(self.service_runtime, "plugins_catalog"):
+            catalog = await self.service_runtime.plugins_catalog("available")
+            plugin = next(
+                (item for item in catalog if item.get("name") == "speaker_effects"), None
+            )
+            if isinstance(plugin, dict):
+                plugin_status = (
+                    "loaded"
+                    if plugin.get("loaded")
+                    else "failed"
+                    if plugin.get("failed")
+                    else "disabled"
+                )
+        while True:
+            values = [("add", "Add speaker rule")]
+            values.extend(
+                (f"rule:{index}", speaker_rule_label(rule))
+                for index, rule in enumerate(rules)
+            )
+            values.extend((("save", "Save changes"), ("cancel", "Cancel")))
+            selected = await self._settings_choice(
+                title="Speaker effects",
+                text=(
+                    f"Plugin: {plugin_status}\n"
+                    f"{len(rules)} configured rule{'s' if len(rules) != 1 else ''}"
+                ),
+                values=values,
+            )
+            if selected in {None, "cancel"}:
+                return
+            if selected == "save":
+                if json.dumps(rules, sort_keys=True) == original:
+                    return
+                if await self._save_settings_batch(
+                    alias, setting, rules, old_value=detail.get("value")
+                ):
+                    self.add_command_report(
+                        alias,
+                        "/config",
+                        "Speaker effects saved. Preview a configured speaker with "
+                        "/effects and /testspeaker NAME.",
+                    )
+                return
+            if selected == "add":
+                rule = await self._speaker_rule_form()
+                if rule is not None:
+                    rules.append(rule)
+                continue
+            index = int(selected.split(":", 1)[1])
+            operation = await self._settings_choice(
+                title=speaker_rule_label(rules[index]),
+                text="Choose an action.",
+                values=[
+                    ("edit", "Edit rule"),
+                    ("preview", "Preview rule in Effects Lab"),
+                    ("up", "Move earlier"),
+                    ("down", "Move later"),
+                    ("delete", "Delete rule"),
+                ],
+            )
+            if operation == "edit":
+                replacement = await self._speaker_rule_form(rules[index])
+                if replacement is not None:
+                    rules[index] = replacement
+            elif operation == "preview":
+                rule = rules[index]
+                self._open_effects_lab()
+                self._show_text_effect_demo(
+                    str(rule.get("effect", "")),
+                    speaker=str(rule.get("speaker", "Speaker")),
+                    base_color=(str(rule["color"]) if "color" in rule else None),
+                    accent_color=(
+                        str(rule["accent_color"]) if "accent_color" in rule else None
+                    ),
+                    duration_seconds=(
+                        float(rule["duration_seconds"])
+                        if "duration_seconds" in rule
+                        else None
+                    ),
+                    effect_width=(float(rule["trail_width"]) if "trail_width" in rule else None),
+                )
+            elif operation == "delete" and await self._settings_confirm(
+                title="Delete speaker rule",
+                text=f"Delete {speaker_rule_label(rules[index])}?",
+            ):
+                rules.pop(index)
+            elif operation == "up" and index > 0:
+                rules[index - 1], rules[index] = rules[index], rules[index - 1]
+            elif operation == "down" and index + 1 < len(rules):
+                rules[index + 1], rules[index] = rules[index], rules[index + 1]
+
+    async def _open_settings_menu(self, alias: str) -> None:
+        if self.service_runtime is None:
+            self.add_notice(alias, "Settings are available only in an attached UI")
+            return
+        raw_settings = await self.service_runtime.config_list(None)
+        settings = editable_settings(raw_settings, worlds=self.aliases)
+        if not settings:
+            self.add_notice(alias, "No editable settings are available")
+            return
+        while True:
+            operation = await self._settings_choice(
+                title="TFR Settings",
+                text="Browse, search, or undo Gateway-managed configuration.",
+                values=[
+                    ("browse", "Browse categories"),
+                    ("search", "Search settings"),
+                    ("undo", "Undo latest change"),
+                ],
+            )
+            if operation is None:
+                return
+            if operation == "undo":
+                status = await self.service_runtime.config_status()
+                preview = await self.service_runtime.config_undo(
+                    expected_revision=int(status["revision"]), confirm=False
+                )
+                if await self._settings_confirm(
+                    title="Undo latest change",
+                    text=(
+                        f"Undo {preview.get('key', 'the latest configuration change')}?\n"
+                        f"Required action: {preview.get('restart', 'live')}"
+                    ),
+                ):
+                    result = await self.service_runtime.config_undo(
+                        expected_revision=int(status["revision"]), confirm=True
+                    )
+                    self.add_command_report(
+                        alias,
+                        "/config",
+                        f"Undid the latest change at revision {result.get('revision')}.",
+                    )
+                continue
+            candidates = settings
+            if operation == "search":
+                query = await self._settings_input(
+                    title="Search settings",
+                    text="Search by key, label, category, scope, or plugin.",
+                )
+                if query is None:
+                    continue
+                normalized = query.casefold().strip()
+                candidates = [
+                    item
+                    for item in settings
+                    if normalized
+                    in " ".join(
+                        (
+                            str(item.get("key", "")),
+                            setting_label(str(item.get("key", ""))),
+                            setting_category(item),
+                            str(item.get("scope", "")),
+                            str(item.get("description", "")),
+                            str(
+                                item.get("form", {}).get("description", "")
+                                if isinstance(item.get("form"), dict)
+                                else ""
+                            ),
+                        )
+                    ).casefold()
+                ]
+                if not candidates:
+                    await self._settings_message(
+                        title="Search settings",
+                        text=f"No editable settings match {query!r}.",
+                    )
+                    continue
+                key = await self._settings_choice(
+                    title="Search results",
+                    text=f"{len(candidates)} matching settings",
+                    values=[
+                        (
+                            str(item["key"]),
+                            f"{setting_category(item)} · {setting_label(str(item['key']))}",
+                        )
+                        for item in candidates
+                    ],
+                )
+                if key is None:
+                    continue
+                setting = next(item for item in candidates if item["key"] == key)
+                detail = await self.service_runtime.config_show(key)
+                form = setting.get("form")
+                if key == "plugins.config.speaker_effects.rules" or (
+                    isinstance(form, dict) and form.get("editor") == "speaker-rules"
+                ):
+                    await self._edit_speaker_rules(alias, setting, detail)
+                elif isinstance(form, dict) and form.get("editor") == "collection":
+                    await self._edit_structured_collection(alias, setting, detail, form)
+                else:
+                    await self._edit_generic_setting(alias, setting, detail)
+                continue
+            categories = sorted({setting_category(item) for item in settings})
+            category = await self._settings_choice(
+                title="TFR Settings",
+                text="Choose a category. Scope and target are selected automatically.",
+                values=[(name, name) for name in categories],
+            )
+            if category is None:
+                return
+            choices = [item for item in settings if setting_category(item) == category]
+            key = await self._settings_choice(
+                title=category,
+                text="Choose a setting.",
+                values=[(str(item["key"]), setting_label(str(item["key"]))) for item in choices],
+            )
+            if key is None:
+                continue
+            setting = next(item for item in choices if item["key"] == key)
+            detail = await self.service_runtime.config_show(key)
+            form = setting.get("form")
+            if key == "plugins.config.speaker_effects.rules" or (
+                isinstance(form, dict)
+                and form.get("editor") == "speaker-rules"
+                and "speaker_effects" in key
+            ):
+                await self._edit_speaker_rules(alias, setting, detail)
+            elif isinstance(form, dict) and form.get("editor") == "collection":
+                await self._edit_structured_collection(alias, setting, detail, form)
+            else:
+                await self._edit_generic_setting(alias, setting, detail)
+
     async def _handle_config_command(self, alias: str, parameters: list[str]) -> None:
         action = parameters[0].casefold() if parameters else ""
+        valid_summary = action == "summary" and len(parameters) == 1
         valid_status = action == "status" and len(parameters) == 1
         valid_list = action == "list" and len(parameters) <= 2
         valid_show = action == "show" and (
@@ -4209,6 +5092,7 @@ class TfrTui:
         valid_rollback_migration = action == "rollback-migration" and len(parameters) <= 2
         if parameters and not (
             valid_status
+            or valid_summary
             or valid_list
             or valid_show
             or valid_set
@@ -4221,14 +5105,17 @@ class TfrTui:
         ):
             self.add_notice(
                 alias,
-                "Usage: /config status|list|show|set|reset|changes|undo|migrate|"
-                "migration-status|rollback-migration",
+                "Usage: /config [summary|status|list|show|set|reset|changes|undo|migrate|"
+                "migration-status|rollback-migration]",
             )
             return
         if self.service_runtime is None:
             self.add_notice(alias, "Configuration inventory is available only in an attached UI")
             return
         try:
+            if not parameters:
+                await self._open_settings_menu(alias)
+                return
             if valid_migration_status:
                 status = await self.service_runtime.config_migration_status()
                 lines = [
@@ -4490,6 +5377,8 @@ class TfrTui:
                     f"  Restart: {setting.get('restart')}"
                     f"{ui_text}",
                 )
+                return
+            if not valid_summary:
                 return
             summary = await self.service_runtime.config_summary()
         except (ConnectionError, OSError, RuntimeError, ValueError) as exc:

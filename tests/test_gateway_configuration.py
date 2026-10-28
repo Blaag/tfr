@@ -121,6 +121,56 @@ def test_store_persists_scoped_versioned_document_with_backup_and_audit(tmp_path
         assert stat.S_IMODE(reloaded.path.stat().st_mode) == 0o600
 
 
+def test_batch_validates_and_commits_related_values_as_one_revision(tmp_path: Path) -> None:
+    configuration = store(tmp_path)
+    changes = [
+        {
+            "operation": "set",
+            "key": "ui.spellcheck.enabled",
+            "value": True,
+            "scope": "shared",
+            "target": None,
+        },
+        {
+            "operation": "set",
+            "key": "ui.show_nospoof_prefix",
+            "value": True,
+            "scope": "shared",
+            "target": None,
+        },
+    ]
+
+    preview = configuration.preview_batch(changes)
+    mutations = configuration.batch(
+        changes,
+        expected_revision=0,
+        actor_ui_id="admin",
+        actor_ui_name="Administrator",
+    )
+
+    assert preview["requires_confirmation"] is True
+    assert len(preview["changes"]) == 2
+    assert configuration.revision == 1
+    assert {mutation.revision for mutation in mutations} == {1}
+    assert configuration.get("ui.spellcheck.enabled", scope="shared") == (True, True)
+    assert configuration.get("ui.show_nospoof_prefix", scope="shared") == (True, True)
+    assert [change["key"] for change in configuration.changes(limit=2)] == [
+        "ui.spellcheck.enabled",
+        "ui.show_nospoof_prefix",
+    ]
+
+    undo = configuration.undo(
+        expected_revision=1,
+        actor_ui_id="admin",
+        actor_ui_name="Administrator",
+    )
+
+    assert undo.key == "batch"
+    assert configuration.revision == 2
+    assert configuration.get("ui.spellcheck.enabled", scope="shared") == (False, None)
+    assert configuration.get("ui.show_nospoof_prefix", scope="shared") == (False, None)
+
+
 def test_revision_conflict_prevents_lost_update(tmp_path: Path) -> None:
     configuration = store(tmp_path)
     configuration.set(

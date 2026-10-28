@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import difflib
+import json
 import math
 import re
 from collections.abc import Mapping, Sequence
@@ -13,6 +14,7 @@ from typing import Any
 MAX_SETTING_KEY_CHARACTERS = 160
 MAX_SETTING_CONSUMERS = 16
 MAX_SETTING_CONSUMER_CHARACTERS = 64
+MAX_SETTING_FORM_BYTES = 32_768
 _SETTING_KEY = re.compile(r"^(?:[a-z][a-z0-9_-]*|\*)(?:\.(?:[a-z][a-z0-9_-]*|\*))*$")
 _CONSUMER = re.compile(r"^[a-z][a-z0-9_.:-]*$")
 
@@ -124,6 +126,7 @@ class SettingDescriptor:
     sensitivity: bool = False
     restart: RestartRequirement = RestartRequirement.LIVE
     validation: SettingValidation = field(default_factory=SettingValidation)
+    form: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -155,6 +158,12 @@ class SettingDescriptor:
             raise ValueError("setting consumers are invalid")
         if not isinstance(self.validation, SettingValidation):
             raise ValueError("setting validation is invalid")
+        if self.form is not None:
+            if not isinstance(self.form, Mapping) or not _is_json_value(self.form):
+                raise ValueError("setting form metadata must be a JSON object")
+            if len(json.dumps(self.form, separators=(",", ":")).encode()) > MAX_SETTING_FORM_BYTES:
+                raise ValueError("setting form metadata exceeds 32 KiB")
+            object.__setattr__(self, "form", _freeze(self.form))
         if self.default is not NO_DEFAULT:
             self.validate(self.default, label="default")
         for choice in self.validation.choices:
@@ -228,6 +237,8 @@ class SettingDescriptor:
             value["required"] = True
         else:
             value["default"] = _thaw(self.default)
+        if self.form is not None:
+            value["form"] = _thaw(self.form)
         return value
 
 

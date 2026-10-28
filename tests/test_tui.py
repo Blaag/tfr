@@ -667,8 +667,8 @@ async def test_help_uses_topics_and_structured_command_and_plugin_details() -> N
     assert "TFR help topics" in help_text
     assert "configuration — Gateway-owned settings" in help_text
     assert "! command" in help_text
-    assert "/config — Inspect, change, and migrate" in help_text
-    assert "Usage: /config status|list|show" in help_text
+    assert "/config — Open settings or manage Gateway configuration" in help_text
+    assert "Usage: /config [summary|status|list|show" in help_text
     assert "/fixture — run the harmless fixture" in help_text
     assert "Availability: fixture plugin" in help_text
     assert "Help request: /help\n\nTFR help topics" in help_text
@@ -702,6 +702,78 @@ async def test_contextual_help_filters_index_and_explains_unavailable_commands()
     assert "configuration —" not in index
     assert "Availability: unavailable — connect this UI to a Gateway" in gateway_detail
     assert "Did you mean: plugins?" in correction
+
+
+async def test_settings_browser_infers_current_ui_scope_and_saves_boolean() -> None:
+    tui = make_tui()
+    runtime = SimpleNamespace(
+        config_list=AsyncMock(
+            return_value=[
+                {
+                    "key": "ui.animations_enabled",
+                    "type": "boolean",
+                    "scope": "ui",
+                    "validation": {"nullable": False},
+                    "restart": "live",
+                    "sensitive": False,
+                }
+            ]
+        ),
+        config_show=AsyncMock(
+            return_value={
+                "key": "ui.animations_enabled",
+                "type": "boolean",
+                "scope": "ui",
+                "value": False,
+                "source": "default",
+            }
+        ),
+        config_status=AsyncMock(return_value={"revision": 4}),
+        config_mutate=AsyncMock(
+            side_effect=[
+                {"revision": 4, "restart": "live", "requires_confirmation": True},
+                {"revision": 5, "restart": "live", "requires_confirmation": False},
+            ]
+        ),
+    )
+    tui.service_runtime = runtime
+    choices = iter(["browse", "Ui", "ui.animations_enabled", "edit", "true", None])
+    tui._settings_choice = AsyncMock(side_effect=lambda **_kwargs: next(choices))
+    tui._settings_confirm = AsyncMock(return_value=True)
+
+    await tui._open_settings_menu("alpha")
+
+    assert runtime.config_mutate.await_args_list[0].kwargs == {
+        "value": True,
+        "scope": "ui",
+        "target": None,
+        "expected_revision": 4,
+        "confirm": False,
+    }
+    assert runtime.config_mutate.await_args_list[1].kwargs["confirm"] is True
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Saved Animations Enabled at revision 5" in text
+
+
+async def test_speaker_effect_form_builds_comet_rule_without_json() -> None:
+    tui = make_tui()
+    inputs = iter(["Barnaby", "1.2", "3"])
+    tui._settings_input = AsyncMock(side_effect=lambda **_kwargs: next(inputs))
+    tui._settings_choice = AsyncMock(return_value="comet")
+    tui._settings_color = AsyncMock(side_effect=["#ffdd76", "#ffffff"])
+    tui._settings_multiselect = AsyncMock(side_effect=[[], ["say", "pose"]])
+
+    rule = await tui._speaker_rule_form()
+
+    assert rule == {
+        "speaker": "Barnaby",
+        "effect": "comet",
+        "color": "#ffdd76",
+        "accent_color": "#ffffff",
+        "duration_seconds": 1.2,
+        "trail_width": 3.0,
+        "kinds": ["say", "pose"],
+    }
 
 
 async def test_unknown_command_suggests_correction_and_next_action() -> None:
@@ -1049,7 +1121,7 @@ async def test_web_commands_manage_devices_through_attached_gateway() -> None:
 
     for command in (
         "/web status",
-        "/config",
+        "/config summary",
         "/config list shared",
         '/config show ui.mouse_mode --ui "office-mac · Terminal"',
         "/config status",

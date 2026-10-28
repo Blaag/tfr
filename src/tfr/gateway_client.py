@@ -1079,6 +1079,34 @@ class GatewayClient:
             raise GatewayProtocolError("Gateway returned an invalid configuration mutation")
         return result
 
+    async def config_batch(
+        self,
+        changes: list[dict[str, object]],
+        *,
+        expected_revision: int,
+        confirm: bool,
+    ) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {
+                "type": "config_batch",
+                "request_id": str(request_id),
+                "changes": changes,
+                "expected_revision": expected_revision,
+                "confirm": confirm,
+            },
+            request_id,
+        )
+        if (
+            result is None
+            or not isinstance(result.get("revision"), int)
+            or not isinstance(result.get("restart"), str)
+            or not isinstance(result.get("requires_confirmation"), bool)
+            or not isinstance(result.get("changes"), list)
+        ):
+            raise GatewayProtocolError("Gateway returned an invalid configuration batch")
+        return result
+
     async def config_changes(self, limit: int = 50) -> dict[str, object]:
         request_id = uuid4()
         result = await self._request(
@@ -1886,6 +1914,19 @@ class GatewayUiRuntime:
 
     async def config_changes(self, limit: int = 50) -> dict[str, object]:
         return await self.client.config_changes(limit)
+
+    async def config_batch(
+        self,
+        changes: list[dict[str, object]],
+        *,
+        expected_revision: int,
+        confirm: bool,
+    ) -> dict[str, object]:
+        return await self.client.config_batch(
+            changes,
+            expected_revision=expected_revision,
+            confirm=confirm,
+        )
 
     async def config_undo(self, *, expected_revision: int, confirm: bool) -> dict[str, object]:
         return await self.client.config_undo(

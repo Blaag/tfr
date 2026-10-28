@@ -34,6 +34,7 @@ from tfr.config import (
     gateway_bootstrap_bundle,
     load_configuration,
 )
+from tfr.configuration_forms import with_builtin_form_metadata
 from tfr.configuration_sync import (
     CONFIGURATION_SYNC_CAPABILITY,
     effective_client_configuration,
@@ -743,7 +744,7 @@ class GatewayRuntime:
         )
         configuration_registry = core_configuration_registry()
         for descriptor in plugins.registry.configuration_descriptors():
-            configuration_registry.register(descriptor)
+            configuration_registry.register(with_builtin_form_metadata(descriptor))
         gateway_configuration.registry = configuration_registry
         gateway_configuration.validate_current(defer_plugin_validation=True)
         gateway_migration = GatewayMigrationStore(
@@ -2460,6 +2461,79 @@ class GatewayServer:
                         ),
                         "requires_confirmation": False,
                     }
+            elif message_type == "config_batch":
+                store = self.runtime.gateway_configuration
+                if store is None:
+                    raise ValueError("Gateway configuration mutation is unavailable")
+                if set(message) != {
+                    "type",
+                    "protocol",
+                    "request_id",
+                    "changes",
+                    "expected_revision",
+                    "confirm",
+                }:
+                    raise ValueError("config_batch has invalid fields")
+                changes = message.get("changes")
+                expected_revision = message.get("expected_revision")
+                confirm = message.get("confirm")
+                if not isinstance(changes, list):
+                    raise ValueError("configuration batch changes must be a list")
+                if (
+                    not isinstance(expected_revision, int)
+                    or isinstance(expected_revision, bool)
+                    or expected_revision < 0
+                    or not isinstance(confirm, bool)
+                ):
+                    raise ValueError("configuration batch revision or confirmation is invalid")
+                resolved_changes = []
+                for raw in changes:
+                    if not isinstance(raw, dict):
+                        raise ValueError("configuration batch change must be an object")
+                    change = dict(raw)
+                    scope = change.get("scope")
+                    target = change.get("target")
+                    if not isinstance(scope, str):
+                        raise ValueError("configuration batch scope must be a string")
+                    if target is not None and not isinstance(target, str):
+                        raise ValueError("configuration batch target must be a string or null")
+                    self_service = scope == "ui" and target is None and ui_id is not None
+                    if not configuration_admin and not self_service:
+                        raise ValueError(
+                            "configuration mutation requires owner/admin access; remote UIs may "
+                            "change only their own UI-scoped settings"
+                        )
+                    change["target"] = self._configuration_target(scope, target, ui_id=ui_id)
+                    resolved_changes.append(change)
+                preview = store.preview_batch(resolved_changes)
+                if not confirm:
+                    result = preview
+                else:
+                    actor = self.ui_store.get(ui_id) if self.ui_store and ui_id else None
+                    mutations = await asyncio.to_thread(
+                        store.batch,
+                        resolved_changes,
+                        expected_revision=expected_revision,
+                        actor_ui_id=str(ui_id) if ui_id is not None else "local-admin",
+                        actor_ui_name=(
+                            actor.display_name if actor is not None else "Local administrator"
+                        ),
+                    )
+                    for mutation in mutations:
+                        self._sync_gateway_configuration_value(mutation)
+                        self._apply_live_gateway_configuration(mutation)
+                    await self._broadcast_configuration()
+                    if any(
+                        mutation.key
+                        in {"ui.spellcheck.enabled", "ui.speaking_streaks.enabled"}
+                        for mutation in mutations
+                    ):
+                        await self._broadcast_ui_settings()
+                    result = {
+                        **preview,
+                        "revision": store.revision,
+                        "requires_confirmation": False,
+                    }
             elif message_type == "config_changes":
                 store = self.runtime.gateway_configuration
                 if store is None:
@@ -2501,19 +2575,23 @@ class GatewayServer:
                     }
                 else:
                     actor = self.ui_store.get(ui_id) if self.ui_store and ui_id else None
+                    undone_mutations = store.mutations_at_revision(expected_revision)
                     mutation = await asyncio.to_thread(
                         store.undo,
                         expected_revision=expected_revision,
                         actor_ui_id=str(ui_id) if ui_id else "local-admin",
                         actor_ui_name=(actor.display_name if actor else "Local administrator"),
                     )
-                    self._sync_gateway_configuration_value(mutation)
-                    self._apply_live_gateway_configuration(mutation)
+                    affected = undone_mutations if mutation.key == "batch" else (mutation,)
+                    for affected_mutation in affected:
+                        self._sync_gateway_configuration_value(affected_mutation)
+                        self._apply_live_gateway_configuration(affected_mutation)
                     await self._broadcast_configuration()
-                    if mutation.key in {
-                        "ui.spellcheck.enabled",
-                        "ui.speaking_streaks.enabled",
-                    }:
+                    if any(
+                        item.key
+                        in {"ui.spellcheck.enabled", "ui.speaking_streaks.enabled"}
+                        for item in affected
+                    ):
                         await self._broadcast_ui_settings()
                     descriptor = store.registry.get(mutation.key)
                     result = {

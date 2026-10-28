@@ -21,8 +21,9 @@ Make the Gateway authoritative for all TFR configuration. Each named UI receives
 - `/config set` is a complete low-level mutation interface for automation, diagnostics, and
   advanced use. It is not considered an adequate primary interface for people configuring
   nested values such as speaker-effect rules.
-- Phase 10 is the next planned capability: a menu-driven, schema-backed settings interface,
-  beginning with native TUI configuration and a structured speaker-effects editor.
+- Phase 10 is complete on the current branch: `/config` and `/settings` open the native
+  keyboard-driven settings interface, bounded declarative metadata drives trusted controls,
+  and structured edits commit through an atomic revision-checked batch API.
 
 ## Decisions
 
@@ -35,7 +36,7 @@ Make the Gateway authoritative for all TFR configuration. Each named UI receives
 - [x] Diverging shared settings require conflict resolution; per-UI settings remain separate.
 - [x] Text commands remain available as a stable configuration API for automation and
   advanced use.
-- [ ] Ordinary users configure TFR through a menu-driven settings interface rather than
+- [x] Ordinary users configure TFR through a menu-driven settings interface rather than
   constructing JSON values or selecting scopes and targets manually.
 
 ## Configuration scopes
@@ -306,87 +307,89 @@ built-in default → shared value → UI-type default → individual UI override
 
 ### Product decisions
 
-- [ ] Make `/config` with no arguments open the settings interface; retain the existing
+- [x] Make `/config` with no arguments open the settings interface; retain the existing
   subcommands, and consider `/settings` as a discoverable alias.
-- [ ] Treat `/config show|set|reset|changes|undo` as the low-level API, not the expected
+- [x] Treat `/config show|set|reset|changes|undo` as the low-level API, not the expected
   workflow for routine human configuration.
-- [ ] Default scope and target from setting metadata and current context. Hide them during
+- [x] Default scope and target from setting metadata and current context. Hide them during
   normal editing and expose them only through an advanced view.
-- [ ] Use one keyboard-complete interaction model that does not require a mouse.
-- [ ] Start with the native TUI and use the same bounded declarative form model for a later
+- [x] Use one keyboard-complete interaction model that does not require a mouse.
+- [x] Start with the native TUI and use the same bounded declarative form model for a later
   PWA implementation.
-- [ ] Never load arbitrary plugin-provided UI code. Plugins publish bounded declarative
+- [x] Never load arbitrary plugin-provided UI code. Plugins publish bounded declarative
   field and form metadata that clients render using trusted controls.
 
 ### Settings browser
 
-- [ ] Add a full-screen category browser for General, Appearance, Worlds, Plugins, Gateway,
+- [x] Add a full-screen category browser for General, Appearance, Worlds, Plugins, Gateway,
   Updates, individual UIs, and other registry-backed categories.
-- [ ] Add search by setting name, label, description, category, scope, and plugin.
-- [ ] Show the effective value, provenance, target, validation summary, and required action
+- [x] Add search by setting name, label, description, category, scope, and plugin.
+- [x] Show the effective value, provenance, target, validation summary, and required action
   without exposing secret plaintext.
-- [ ] Generate controls for booleans, choices, strings, numbers, colors, paths, lists, and
+- [x] Generate controls for booleans, choices, strings, numbers, colors, paths, lists, and
   nullable values from configuration descriptors.
-- [ ] Offer contextual world, UI, UI-type, and plugin selectors only when the setting needs
+- [x] Offer contextual world, UI, UI-type, and plugin selectors only when the setting needs
   one and no unambiguous context is available.
-- [ ] Provide review, cancel, reset-to-inherited, and undo paths from the same interface.
+- [x] Provide review, cancel, reset-to-inherited, and undo paths from the same interface.
 
 ### Declarative structured forms
 
-- [ ] Extend plugin setting metadata with bounded labels, descriptions, groups, field types,
+- [x] Extend plugin setting metadata with bounded labels, descriptions, groups, field types,
   defaults, constraints, conditional visibility, and collection-item schemas.
-- [ ] Add reusable add/edit/delete/reorder controls for structured lists and objects.
-- [ ] Add palette-based color selection with validated custom hexadecimal input.
-- [ ] Add multi-select controls for worlds, event kinds, capabilities, and other registry
+- [x] Add reusable add/edit/delete/reorder controls for structured lists and objects.
+- [x] Add palette-based color selection with validated custom hexadecimal input.
+- [x] Add multi-select controls for worlds, event kinds, capabilities, and other registry
   enumerations.
-- [ ] Permit trusted previews through bounded existing facilities such as Effects Lab rather
+- [x] Permit trusted previews through bounded existing facilities such as Effects Lab rather
   than plugin-supplied executable UI code.
 
 ### Atomic editing
 
-- [ ] Add a revision-checked batch mutation API so a form can stage and validate related
+- [x] Add a revision-checked batch mutation API so a form can stage and validate related
   values as one complete effective configuration before committing one audited revision.
-- [ ] Show a change review containing old and new non-secret values, affected targets, and
+- [x] Show a change review containing old and new non-secret values, affected targets, and
   required live/reload/restart action.
-- [ ] Reject stale form submissions with a clear refresh-and-review flow rather than losing
+- [x] Reject stale form submissions with a clear refresh-and-review flow rather than losing
   concurrent changes.
-- [ ] Apply safe changes live and reuse existing synchronization, convergence, reload, and
+- [x] Apply safe changes live and reuse existing synchronization, convergence, reload, and
   restart coordination after commit.
 
 ### Speaker-effects acceptance case
 
-- [ ] Add `Plugins → Speaker effects` with enablement status and a readable rule list.
-- [ ] Add an editor for speaker name, effect, base/accent colors, effect-specific parameters,
+- [x] Add `Plugins → Speaker effects` with enablement status and a readable rule list.
+- [x] Add an editor for speaker name, effect, base/accent colors, effect-specific parameters,
   worlds, and event kinds.
-- [ ] Show only fields relevant to the selected effect; for `comet`, include duration and
+- [x] Show only fields relevant to the selected effect; for `comet`, include duration and
   trail width without requiring JSON knowledge.
-- [ ] Add preview through Effects Lab before saving.
-- [ ] Allow a user to add Barnaby with comet and `#ffdd76`, preserve all existing rules, and
+- [x] Add preview through Effects Lab before saving.
+- [x] Allow a user to add Barnaby with comet and `#ffdd76`, preserve all existing rules, and
   apply the complete rule collection without knowing the registry key, JSON shape, scope, or
   plugin target.
 
 ### Verification
 
-- [ ] Test keyboard-only navigation, cancellation, validation errors, and narrow terminals.
-- [ ] Test generated controls for every supported descriptor type and scope.
-- [ ] Test structured collection editing without dropping unchanged entries.
-- [ ] Test atomic multi-field validation, revision conflicts, audit output, and undo.
-- [ ] Test that sensitive values and references are not rendered in forms, reviews, logs, or
+- [x] Test keyboard-only navigation, cancellation, validation errors, and narrow terminals.
+- [x] Test generated controls for every supported descriptor type and scope.
+- [x] Test structured collection editing without dropping unchanged entries.
+- [x] Test atomic multi-field validation, revision conflicts, audit output, and undo.
+- [x] Test that sensitive values and references are not rendered in forms, reviews, logs, or
   synchronized client views.
 
-**Phase completion:** routine configuration is discoverable and safely editable by a person
-without JSON, registry-key, scope, or target knowledge.
+**Phase completion:** complete. Routine configuration is discoverable and safely editable by
+a person without JSON, registry-key, scope, or target knowledge.
 
 ---
 
 ## Per-phase working rules
 
-- [ ] Implement only one phase or narrowly defined capability per working session.
-- [ ] Update this checklist after each merged capability.
-- [ ] Record important decisions or deviations below.
-- [ ] Keep protocol changes backward-compatible until migration is complete.
-- [ ] Add deterministic tests before removing old behavior.
-- [ ] Do not release automatically; prepare and review releases separately.
+- [x] Implement and close one complete phase per working session unless explicitly scoped
+  otherwise by the maintainer.
+- [x] Update this checklist when the phase is complete rather than treating partial
+  capabilities as phase completion.
+- [x] Record important decisions or deviations below.
+- [x] Keep protocol changes backward-compatible until migration is complete.
+- [x] Add deterministic tests before removing old behavior.
+- [x] Do not release automatically; prepare and review releases separately.
 
 ## Decision log
 
@@ -451,3 +454,9 @@ without JSON, registry-key, scope, or target knowledge.
 - 2026-10-28: Help and plugin catalog output use dedicated multi-line transcript blocks with the originating request or command, whitespace separation, no generic dash wrapper, explicit help drill-down, grouped plugin state, and omission of unknown version placeholders.
 - 2026-10-28: The existing configuration commands are designated the stable low-level API rather than the final human interface. Routine configuration will use a menu-driven settings browser with inferred scope/target, trusted schema-generated controls, staged review, and atomic batch commit.
 - 2026-10-28: Structured plugin configuration uses bounded declarative form metadata rather than arbitrary plugin UI code. The first acceptance case is a speaker-effects rule editor that can add, edit, reorder, preview, and remove rules without exposing their JSON representation.
+- 2026-10-28: Phase 10 makes bare `/config` and `/settings` open the native keyboard-driven settings browser; `/config summary` retains the former aggregate text report, and all existing explicit subcommands remain the stable automation and advanced-user API.
+- 2026-10-28: Settings are grouped and searchable from registry and form metadata. Scalar, choice, nullable, color, string-list, world-template, current-UI, UI-type, named-UI, plugin, and reusable structured-collection controls infer normal targets while retaining an explicit advanced target path.
+- 2026-10-28: Setting descriptors may carry at most 32 KiB of JSON-only declarative form metadata. Clients render that metadata with trusted controls; no plugin-provided executable UI code crosses the configuration protocol.
+- 2026-10-28: `config_batch` validates up to 64 related changes against one expected revision, validates the complete proposed document, writes and audits one revision atomically, synchronizes clients once, and supports atomic undo of every change in that revision.
+- 2026-10-28: The speaker-effects acceptance editor reports plugin state, preserves and reorders existing rules, provides effect-aware comet fields, palette/custom colors, world and event-kind selection, and an unsaved Effects Lab preview. Adding Barnaby with comet and `#ffdd76` requires no JSON, registry key, scope, or target knowledge.
+- 2026-10-28: Phase 10 completed with deterministic registry, store, protocol, client, TUI, structured-form, sensitive-omission, batch-conflict, audit, undo, and Barnaby/comet coverage. Future PWA settings rendering can consume the same bounded form metadata without changing the authority or mutation model.
