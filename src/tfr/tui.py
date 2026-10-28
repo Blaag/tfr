@@ -37,21 +37,21 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_bindings import merge_key_bindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import BufferControl, DynamicContainer, FormattedTextControl, HSplit
-from prompt_toolkit.layout.containers import VSplit, Window
+from prompt_toolkit.layout.containers import (
+    ConditionalContainer,
+    Float,
+    FloatContainer,
+    VSplit,
+    Window,
+)
 from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.layout.processors import Processor, Transformation, TransformationInput
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import Output
-from prompt_toolkit.shortcuts import (
-    checkboxlist_dialog,
-    input_dialog,
-    message_dialog,
-    radiolist_dialog,
-    yes_no_dialog,
-)
 from prompt_toolkit.styles import Style, merge_styles
 from prompt_toolkit.styles.defaults import default_ui_style
 from prompt_toolkit.utils import get_cwidth
+from prompt_toolkit.widgets import Button, CheckboxList, Dialog, Label, RadioList, TextArea
 
 from tfr.agents import AgentRuntime
 from tfr.ansi import ansi_visible_text, safe_ansi_formatted_text, terminal_plain_text
@@ -1127,6 +1127,8 @@ class TfrTui:
         self.inspector_agent: str | None = None
         self._event_queue: asyncio.Queue[Event] | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._settings_dialog: Dialog | None = None
+        self._settings_dialog_result: asyncio.Future[object] | None = None
         self._active_multiline_pastes: set[str] = set()
         self._image_operation_active = False
         self._image_work_lock = asyncio.Lock()
@@ -1411,13 +1413,24 @@ class TfrTui:
         )
         self._firework_width = 1
         self._firework_height = 1
-        root = normal_content
+        settings_dialog = ConditionalContainer(
+            content=DynamicContainer(
+                lambda: self._settings_dialog if self._settings_dialog is not None else Window()
+            ),
+            filter=Condition(lambda: self._settings_dialog is not None),
+        )
+        root = FloatContainer(
+            content=normal_content,
+            floats=[Float(content=settings_dialog)],
+        )
         self.application: Application[int] = Application(
             layout=Layout(root, focused_element=self.active_view.input_buffer),
             key_bindings=bindings,
             full_screen=True,
             mouse_support=Condition(lambda: self.effective_mouse_mode == "tfr"),
-            style=Style.from_dict(dict(self.theme.styles)),
+            style=merge_styles(
+                [Style.from_dict(dict(self.theme.styles)), _SETTINGS_DIALOG_STYLE]
+            ),
             before_render=self._before_render,
             input=input,
             output=output,
@@ -1454,6 +1467,11 @@ class TfrTui:
 
     def _create_bindings(self) -> KeyBindings:
         bindings = KeyBindings()
+        settings_dialog_active = Condition(lambda: self._settings_dialog is not None)
+
+        @bindings.add("escape", filter=settings_dialog_active, is_global=True)
+        def cancel_settings_dialog(_event: Any) -> None:
+            self._finish_settings_dialog(None)
 
         @bindings.add("c-q")
         @bindings.add("c-c")
@@ -4257,24 +4275,68 @@ class TfrTui:
         text: str,
         values: list[tuple[str, str]],
     ) -> str | None:
-        dialog = radiolist_dialog(
+        choices = RadioList(values=values)
+        dialog = Dialog(
             title=title,
-            text=f"{text}\n\n↑/↓ move · Enter select · Tab buttons · Esc cancel",
-            values=values,
-            style=_SETTINGS_DIALOG_STYLE,
+            body=HSplit(
+                [
+                    Label(
+                        text=(
+                            f"{text}\n\n"
+                            "↑/↓ move · Space select · Tab buttons · Esc cancel"
+                        ),
+                        dont_extend_height=True,
+                    ),
+                    choices,
+                ],
+                padding=1,
+            ),
+            buttons=[
+                Button(
+                    text="Ok",
+                    handler=lambda: self._finish_settings_dialog(choices.current_value),
+                ),
+                Button(text="Cancel", handler=lambda: self._finish_settings_dialog(None)),
+            ],
+            with_background=True,
         )
-        result = await self._run_settings_dialog(dialog)
+        result = await self._run_settings_dialog(dialog, focus=choices)
         return str(result) if isinstance(result, str) else None
 
-    async def _run_settings_dialog(self, dialog) -> object:
+    def _finish_settings_dialog(self, result: object) -> None:
+        future = self._settings_dialog_result
+        if future is not None and not future.done():
+            future.set_result(result)
+
+    async def _run_settings_dialog(self, dialog: Dialog, *, focus: object) -> object:
+        if self._settings_dialog is not None:
+            raise RuntimeError("a settings dialog is already open")
         escape = KeyBindings()
 
         @escape.add("escape")
-        def _cancel(_event) -> None:
-            dialog.exit(result=None)
+        def cancel(_event: Any) -> None:
+            self._finish_settings_dialog(None)
 
-        dialog.key_bindings = merge_key_bindings([dialog.key_bindings, escape])
-        return await run_in_terminal(dialog.run, in_executor=True)
+        for control in Layout(dialog).find_all_controls():
+            if not hasattr(control, "key_bindings"):
+                continue
+            bindings = control.key_bindings
+            control.key_bindings = (
+                escape if bindings is None else merge_key_bindings([bindings, escape])
+            )
+        previous_control = self.application.layout.current_control
+        future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+        self._settings_dialog = dialog
+        self._settings_dialog_result = future
+        self.application.layout.focus(focus)
+        self.application.invalidate()
+        try:
+            return await future
+        finally:
+            self._settings_dialog = None
+            self._settings_dialog_result = None
+            self.application.layout.focus(previous_control)
+            self.application.invalidate()
 
     async def _settings_input(
         self,
@@ -4283,10 +4345,19 @@ class TfrTui:
         text: str,
         default: str = "",
     ) -> str | None:
-        dialog = input_dialog(
-            title=title, text=text, default=default, style=_SETTINGS_DIALOG_STYLE
+        field = TextArea(text=default, multiline=False)
+        dialog = Dialog(
+            title=title,
+            body=HSplit([Label(text=text, dont_extend_height=True), field], padding=1),
+            buttons=[
+                Button(
+                    text="Ok", handler=lambda: self._finish_settings_dialog(field.text)
+                ),
+                Button(text="Cancel", handler=lambda: self._finish_settings_dialog(None)),
+            ],
+            with_background=True,
         )
-        result = await self._run_settings_dialog(dialog)
+        result = await self._run_settings_dialog(dialog, focus=field)
         return str(result) if isinstance(result, str) else None
 
     async def _settings_multiselect(
@@ -4297,14 +4368,31 @@ class TfrTui:
         values: list[tuple[str, str]],
         defaults: list[str] | None = None,
     ) -> list[str] | None:
-        dialog = checkboxlist_dialog(
+        choices = CheckboxList(values=values, default_values=defaults)
+        dialog = Dialog(
             title=title,
-            text=f"{text}\n\n↑/↓ move · Space toggle · Tab buttons · Esc cancel",
-            values=values,
-            default_values=defaults,
-            style=_SETTINGS_DIALOG_STYLE,
+            body=HSplit(
+                [
+                    Label(
+                        text=f"{text}\n\n↑/↓ move · Space toggle · Tab buttons · Esc cancel",
+                        dont_extend_height=True,
+                    ),
+                    choices,
+                ],
+                padding=1,
+            ),
+            buttons=[
+                Button(
+                    text="Ok",
+                    handler=lambda: self._finish_settings_dialog(
+                        list(choices.current_values)
+                    ),
+                ),
+                Button(text="Cancel", handler=lambda: self._finish_settings_dialog(None)),
+            ],
+            with_background=True,
         )
-        result = await self._run_settings_dialog(dialog)
+        result = await self._run_settings_dialog(dialog, focus=choices)
         return list(result) if result is not None else None
 
     async def _settings_color(
@@ -4335,20 +4423,27 @@ class TfrTui:
         )
 
     async def _settings_confirm(self, *, title: str, text: str) -> bool:
-        dialog = yes_no_dialog(
+        apply = Button(text="Apply", handler=lambda: self._finish_settings_dialog(True))
+        dialog = Dialog(
             title=title,
-            text=text,
-            yes_text="Apply",
-            no_text="Cancel",
-            style=_SETTINGS_DIALOG_STYLE,
+            body=Label(text=text),
+            buttons=[
+                apply,
+                Button(text="Cancel", handler=lambda: self._finish_settings_dialog(False)),
+            ],
+            with_background=True,
         )
-        return bool(await self._run_settings_dialog(dialog))
+        return bool(await self._run_settings_dialog(dialog, focus=apply))
 
     async def _settings_message(self, *, title: str, text: str) -> None:
-        dialog = message_dialog(
-            title=title, text=text, ok_text="Continue", style=_SETTINGS_DIALOG_STYLE
+        button = Button(text="Continue", handler=lambda: self._finish_settings_dialog(None))
+        dialog = Dialog(
+            title=title,
+            body=Label(text=text),
+            buttons=[button],
+            with_background=True,
         )
-        await self._run_settings_dialog(dialog)
+        await self._run_settings_dialog(dialog, focus=button)
 
     async def _save_settings_value(
         self,
