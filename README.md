@@ -698,7 +698,9 @@ and undo without requiring registry keys or JSON. Advanced users and automation
 can continue using `/config show`, `/config set`, and the other explicit
 subcommands; `/config summary` displays the aggregate inventory report. Use the
 arrow keys to move, Enter to select, Tab to move between buttons, and Escape to
-cancel the current dialog. Authenticated native Gateway connections use the
+cancel the current dialog. The keyboard cursor is shown as a bold reverse-video
+row independently of the `(*)` or `[*]` marker for the chosen value.
+Authenticated native Gateway connections use the
 owner administration interface; restricted PWA devices do not.
 
 Structured plugin settings use trusted declarative forms. For example, open
