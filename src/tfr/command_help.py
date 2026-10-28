@@ -24,7 +24,9 @@ class CommandHelp:
         if self.examples:
             lines.extend(("Examples:", *(f"  {item}" for item in self.examples)))
         if self.related:
-            lines.append("Related: " + ", ".join(f"/{name}" for name in self.related))
+            lines.append(
+                "More help: " + ", ".join(f"/help {name}" for name in self.related)
+            )
         return "\n".join(lines)
 
 
@@ -121,14 +123,23 @@ COMMAND_HELP = {
         ),
         _command(
             "config",
-            "Inspect, change, and migrate Gateway configuration",
-            "/config status|list|show|set|reset|changes|undo|migrate|"
-            "migration-status|rollback-migration",
+            "Open settings or manage Gateway configuration",
+            "/config [summary|status|list|show|set|reset|changes|undo|migrate|"
+            "migration-status|rollback-migration]",
             "configuration",
             "Gateway-managed configuration",
-            examples=("/config show ui.theme.preset", "/config status"),
+            examples=("/config", "/config show ui.theme.preset", "/config status"),
             availability="gateway",
             related=("plugins", "ui"),
+        ),
+        _command(
+            "settings",
+            "Open the interactive settings browser",
+            "/settings",
+            "configuration",
+            "Gateway-managed configuration",
+            availability="gateway",
+            related=("config",),
         ),
         _command(
             "plugins",

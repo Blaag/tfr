@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import stat
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+from tfr.config import AgentsConfig, ConfigurationBundle, MainConfig, WorldsConfig
 from tfr.core_settings import core_configuration_registry
+from tfr.gateway import _stage_legacy_world_login_references
 from tfr.gateway_client import GatewayClient, _legacy_migration_values
-from tfr.gateway_configuration import GatewayConfigurationStore
+from tfr.gateway_configuration import GatewayConfigurationStore, apply_gateway_configuration
 from tfr.gateway_migration import (
     GatewayMigrationStore,
     collect_migration_settings,
@@ -111,6 +114,72 @@ def test_gateway_import_keeps_per_ui_settings_out_of_ui_type_scope(tmp_path: Pat
         True,
         False,
     )
+
+
+def test_gateway_import_moves_world_passwords_to_private_references(tmp_path: Path) -> None:
+    legacy = ConfigurationBundle(
+        main_path=tmp_path / "config.jsonc",
+        worlds_path=tmp_path / "worlds.jsonc",
+        agents_path=tmp_path / "agents.jsonc",
+        main=MainConfig(),
+        worlds=WorldsConfig.model_validate(
+            {
+                "worlds": {
+                    "alpha": {
+                        "host": "example.test",
+                        "port": 4201,
+                        "login": {"character": "Alice", "password": "secret-value"},
+                    }
+                }
+            }
+        ),
+        agents=AgentsConfig(),
+    )
+    configuration = GatewayConfigurationStore(tmp_path / "state", core_configuration_registry())
+    migration = GatewayMigrationStore(tmp_path / "state", configuration)
+    migration.submit(
+        new_proposal(
+            ui_id=uuid4(),
+            ui_name="Gateway legacy configuration",
+            base_revision=0,
+            settings=collect_migration_settings(
+                {
+                    "worlds.alpha.host": "example.test",
+                    "worlds.alpha.port": 4201,
+                    "worlds.alpha.login.character": "Alice",
+                },
+                core_configuration_registry(),
+                ui_id=uuid4(),
+                source="Gateway JSONC one-time import",
+            ),
+        )
+    )
+    references = _stage_legacy_world_login_references(legacy, tmp_path / "state")
+
+    migration.apply(
+        expected_revision=0,
+        choices=None,
+        actor_ui_id="migration",
+        actor_ui_name="Legacy one-time import",
+        secret_references=references,
+    )
+    effective = apply_gateway_configuration(
+        ConfigurationBundle(
+            main_path=legacy.main_path,
+            worlds_path=legacy.worlds_path,
+            agents_path=legacy.agents_path,
+            main=MainConfig(),
+            worlds=WorldsConfig(),
+            agents=AgentsConfig(),
+        ),
+        configuration.document,
+    )
+
+    reference = references["worlds.alpha.login.password"]
+    secret_path = Path(reference.removeprefix("file:"))
+    assert stat.S_IMODE(secret_path.stat().st_mode) == 0o600
+    assert effective.worlds.worlds["alpha"].login is not None
+    assert effective.worlds.worlds["alpha"].login.password.get_secret_value() == "secret-value"
 
 
 def test_divergent_shared_values_require_choice_and_apply_atomically(tmp_path: Path) -> None:

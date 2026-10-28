@@ -21,6 +21,7 @@ from tfr.configuration_registry import ConfigurationRegistry, SettingScope
 
 MAX_GATEWAY_CONFIGURATION_BYTES = 1024 * 1024
 MAX_GATEWAY_AUDIT_ENTRIES = 500
+MAX_GATEWAY_BATCH_CHANGES = 64
 
 
 class GatewayConfigurationError(ValueError):
@@ -246,6 +247,116 @@ class GatewayConfigurationStore:
             restart=descriptor.restart.value,
         )
 
+    def preview_batch(self, changes: list[dict[str, object]]) -> dict[str, object]:
+        normalized = self._normalize_batch(changes)
+        return {
+            "operation": "batch",
+            "changes": [
+                {
+                    "operation": operation,
+                    "key": key,
+                    "scope": scope,
+                    "target": target,
+                    "restart": descriptor.restart.value,
+                }
+                for operation, key, _value, scope, target, descriptor in normalized
+            ],
+            "restart": _maximum_restart(
+                descriptor.restart.value for *_prefix, descriptor in normalized
+            ),
+            "requires_confirmation": True,
+            "revision": self.revision,
+        }
+
+    def batch(
+        self,
+        changes: list[dict[str, object]],
+        *,
+        expected_revision: int,
+        actor_ui_id: str,
+        actor_ui_name: str,
+    ) -> tuple[ConfigurationMutation, ...]:
+        normalized = self._normalize_batch(changes)
+        with self._mutation_lock():
+            self._check_revision(expected_revision)
+            proposed = GatewayConfigurationDocument.from_dict(self._document.as_dict())
+            revision = self.revision + 1
+            timestamp = _utc_now()
+            mutations = []
+            seen: set[tuple[str, str | None, str]] = set()
+            for operation, key, value, scope, target, descriptor in normalized:
+                identity = (scope, target, key)
+                if identity in seen:
+                    raise GatewayConfigurationError(f"batch changes {key} more than once")
+                seen.add(identity)
+                current = self._section(self._document, scope, target, create=False) or {}
+                previous_present = key in current
+                previous_value = copy.deepcopy(current.get(key))
+                destination = self._section(proposed, scope, target, create=True)
+                if destination is None:
+                    raise GatewayConfigurationError("configuration scope is unavailable")
+                if operation == "set":
+                    destination[key] = copy.deepcopy(value)
+                    value_present = True
+                else:
+                    destination.pop(key, None)
+                    value_present = False
+                if previous_present == value_present and previous_value == value:
+                    raise GatewayConfigurationError(f"batch change for {key} would have no effect")
+                mutations.append(
+                    ConfigurationMutation(
+                        revision=revision,
+                        operation=operation,
+                        key=key,
+                        scope=scope,
+                        target=target,
+                        previous_present=previous_present,
+                        previous_value=previous_value,
+                        value_present=value_present,
+                        value=copy.deepcopy(value),
+                        actor_ui_id=actor_ui_id,
+                        actor_ui_name=actor_ui_name,
+                        timestamp=timestamp,
+                        restart=descriptor.restart.value,
+                    )
+                )
+            proposed.revision = revision
+            self._validate_document(proposed)
+            self._commit(proposed, tuple(mutations))
+            return tuple(mutations)
+
+    def _normalize_batch(
+        self, changes: list[dict[str, object]]
+    ) -> list[tuple[str, str, object, str, str | None, object]]:
+        if not isinstance(changes, list) or not 1 <= len(changes) <= MAX_GATEWAY_BATCH_CHANGES:
+            raise GatewayConfigurationError("configuration batch must contain 1-64 changes")
+        output = []
+        for change in changes:
+            if not isinstance(change, dict):
+                raise GatewayConfigurationError("configuration batch change must be an object")
+            operation = change.get("operation")
+            key = change.get("key")
+            scope = change.get("scope")
+            target = change.get("target")
+            value = change.get("value")
+            allowed = {"operation", "key", "scope", "target"}
+            if operation == "set":
+                allowed.add("value")
+            if set(change) != allowed or operation not in {"set", "reset"}:
+                raise GatewayConfigurationError("configuration batch change has invalid fields")
+            if not isinstance(key, str) or not isinstance(scope, str):
+                raise GatewayConfigurationError("configuration batch key and scope must be strings")
+            if target is not None and not isinstance(target, str):
+                raise GatewayConfigurationError(
+                    "configuration batch target must be a string or null"
+                )
+            descriptor = self._descriptor(key, scope)
+            self._validate_target_key(key, scope, target)
+            if operation == "set":
+                descriptor.validate(value)
+            output.append((operation, key, value, scope, target, descriptor))
+        return output
+
     def undo(
         self,
         *,
@@ -255,14 +366,43 @@ class GatewayConfigurationStore:
     ) -> ConfigurationMutation:
         with self._mutation_lock():
             self._check_revision(expected_revision)
-            previous = next(
-                (item for item in reversed(self._history) if item.revision == self.revision),
-                None,
-            )
-            if previous is None:
+            previous_changes = [
+                item for item in self._history if item.revision == self.revision
+            ]
+            if not previous_changes:
                 raise GatewayConfigurationError(
                     "there is no committed configuration change to undo"
                 )
+            previous = previous_changes[-1]
+            if len(previous_changes) > 1:
+                proposed = GatewayConfigurationDocument.from_dict(self._document.as_dict())
+                for item in reversed(previous_changes):
+                    destination = self._section(proposed, item.scope, item.target, create=True)
+                    if destination is None:
+                        raise GatewayConfigurationError("configuration undo scope is unavailable")
+                    if item.previous_present:
+                        destination[item.key] = copy.deepcopy(item.previous_value)
+                    else:
+                        destination.pop(item.key, None)
+                proposed.revision += 1
+                self._validate_document(proposed)
+                mutation = ConfigurationMutation(
+                    revision=proposed.revision,
+                    operation="undo",
+                    key="batch",
+                    scope="shared",
+                    target=None,
+                    previous_present=True,
+                    previous_value={"revision": self._document.revision},
+                    value_present=True,
+                    value={"revision": proposed.revision, "changes": len(previous_changes)},
+                    actor_ui_id=actor_ui_id,
+                    actor_ui_name=actor_ui_name,
+                    timestamp=_utc_now(),
+                    restart=_maximum_restart(item.restart for item in previous_changes),
+                )
+                self._commit(proposed, mutation)
+                return mutation
             section = self._section(self._document, previous.scope, previous.target, create=False)
             section = section or {}
             current_present = previous.key in section
@@ -303,6 +443,9 @@ class GatewayConfigurationStore:
             descriptor = self.registry.get(mutation.key)
             output.append(mutation.as_dict(redact=descriptor.sensitivity if descriptor else True))
         return output
+
+    def mutations_at_revision(self, revision: int) -> tuple[ConfigurationMutation, ...]:
+        return tuple(item for item in self._history if item.revision == revision)
 
     def export(self, *, include_secret_references: bool = False) -> dict[str, object]:
         value = self.document.as_dict()
@@ -402,19 +545,22 @@ class GatewayConfigurationStore:
             return mutation
 
     def _commit(
-        self, document: GatewayConfigurationDocument, mutation: ConfigurationMutation
+        self,
+        document: GatewayConfigurationDocument,
+        mutation: ConfigurationMutation | tuple[ConfigurationMutation, ...],
     ) -> None:
+        mutations = mutation if isinstance(mutation, tuple) else (mutation,)
         encoded = _encode(document.as_dict())
         previous = _encode(self._document.as_dict())
         self._write_atomic(self.previous_path, previous)
         self._write_atomic(self.path, encoded)
         try:
-            self._append_audit(mutation)
+            self._append_audit(mutations)
         except BaseException:
             self._write_atomic(self.path, previous)
             raise
         self._document = document
-        self._history.append(mutation)
+        self._history.extend(mutations)
         self._history = self._history[-MAX_GATEWAY_AUDIT_ENTRIES:]
 
     def _descriptor(self, key: str, scope: str):
@@ -573,24 +719,23 @@ class GatewayConfigurationStore:
             raise GatewayConfigurationError("Gateway configuration audit is invalid") from exc
         return output[-MAX_GATEWAY_AUDIT_ENTRIES:]
 
-    def _append_audit(self, mutation: ConfigurationMutation) -> None:
+    def _append_audit(self, mutations: tuple[ConfigurationMutation, ...]) -> None:
         existing = b""
         with contextlib.suppress(FileNotFoundError):
             existing = self._read_private(self.audit_path)
-        newest = _encode(mutation.as_dict()).rstrip(b"\n")
-        if len(newest) + 1 > MAX_GATEWAY_CONFIGURATION_BYTES:
-            raise GatewayConfigurationError("Gateway configuration audit entry is too large")
-        lines = [newest]
-        total = len(newest) + 1
+        newest = [_encode(mutation.as_dict()).rstrip(b"\n") for mutation in mutations]
+        total = sum(len(line) + 1 for line in newest)
+        if total > MAX_GATEWAY_CONFIGURATION_BYTES:
+            raise GatewayConfigurationError("Gateway configuration audit entries are too large")
+        lines = list(newest)
         for line in reversed(existing.splitlines()):
             if (
                 len(lines) >= MAX_GATEWAY_AUDIT_ENTRIES
                 or total + len(line) + 1 > MAX_GATEWAY_CONFIGURATION_BYTES
             ):
                 break
-            lines.append(line)
+            lines.insert(0, line)
             total += len(line) + 1
-        lines.reverse()
         self._write_atomic(self.audit_path, b"\n".join(lines) + b"\n")
 
     @contextlib.contextmanager
@@ -685,6 +830,11 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _maximum_restart(values) -> str:
+    ranks = {"live": 0, "client-reload": 1, "client-restart": 2, "gateway-restart": 3}
+    return max(values, key=lambda value: ranks.get(value, 4))
+
+
 def apply_gateway_configuration(
     bundle: ConfigurationBundle,
     document: GatewayConfigurationDocument,
@@ -718,8 +868,13 @@ def apply_gateway_configuration(
             }
         )
     except ValidationError as exc:
+        details = "; ".join(
+            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+            for error in exc.errors(include_url=False, include_input=False)[:5]
+        )
         raise GatewayConfigurationError(
             "Gateway configuration produces invalid effective configuration"
+            + (f": {details}" if details else "")
         ) from exc
 
 
@@ -733,6 +888,8 @@ def _apply_key(
     segments = key.split(".")
     if segments[0] == "worlds":
         destination = worlds
+        if len(segments) > 1 and segments[1] in {"$schema", "schema_version", "defaults"}:
+            segments = segments[1:]
     elif segments[0] in {"providers", "agents"}:
         destination = agents
     else:

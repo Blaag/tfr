@@ -691,6 +691,19 @@ value of a secret-scoped `/config set`. Referenced files must not grant group or
 other permissions. Exports and configuration synchronization omit these
 references and resolved values.
 
+Run `/config` or `/settings` in a connected native UI for the keyboard-driven
+settings browser. It groups and searches editable settings, chooses the normal
+scope and target, provides typed controls and a review step, and supports reset
+and undo without requiring registry keys or JSON. Advanced users and automation
+can continue using `/config show`, `/config set`, and the other explicit
+subcommands; `/config summary` displays the aggregate inventory report.
+
+Structured plugin settings use trusted declarative forms. For example, open
+`Plugin: Speaker Effects` to add, edit, reorder, delete, and preview speaker
+rules with color, effect-specific, world, and message-kind controls. Saving
+validates and commits the complete collection atomically, preserving unchanged
+rules.
+
 Plugin discovery and enablement are also Gateway-managed. Use `/plugins
 available`, `/plugins installed`, `/plugins enabled`, or `/plugins failed` to
 inspect the catalog; `/plugins show NAME` includes settings, capabilities,
