@@ -17,7 +17,6 @@ from PIL import Image
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.formatted_text import fragment_list_to_text
 from prompt_toolkit.input import DummyInput, Input, create_pipe_input
-from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import DummyOutput
@@ -167,34 +166,63 @@ def test_catppuccin_theme_applies_to_ui_output_and_notices() -> None:
     assert "--" not in fragment_list_to_text(tui.active_view.display.rows[-1])
 
 
-async def test_settings_dialog_suspends_tui_and_runs_in_worker(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    tui = make_tui()
-    captured: dict[str, object] = {}
+async def test_settings_dialog_uses_main_renderer_and_keyboard_navigation() -> None:
+    started = asyncio.Event()
+    with create_pipe_input() as input:
+        tui = make_tui(input=input)
+        application_ids: list[int] = []
 
-    class Dialog:
-        def __init__(self) -> None:
-            self.key_bindings = KeyBindings()
+        async def exercise_dialog() -> None:
+            await started.wait()
+            choice = asyncio.create_task(
+                tui._settings_choice(
+                    title="Settings",
+                    text="Choose",
+                    values=[("first", "First"), ("second", "Second")],
+                )
+            )
+            render_counter = tui.application.render_counter
+            while tui._settings_dialog is None:
+                await asyncio.sleep(0)
+            while tui.application.render_counter == render_counter:
+                await asyncio.sleep(0)
+            application_ids.append(id(tui.application))
+            input.send_text("\x1b[B")
+            await asyncio.sleep(0.05)
+            input.send_text(" ")
+            await asyncio.sleep(0.05)
+            input.send_text("\t")
+            await asyncio.sleep(0.05)
+            input.send_text("\r")
+            assert await asyncio.wait_for(choice, timeout=1) == "second"
+            assert tui._settings_dialog is None
 
-        def exit(self, *, result: object) -> None:
-            raise AssertionError(f"unexpected exit: {result}")
+            render_counter = tui.application.render_counter
+            cancelled = asyncio.create_task(
+                tui._settings_choice(
+                    title="Settings",
+                    text="Cancel",
+                    values=[("only", "Only")],
+                )
+            )
+            while tui._settings_dialog is None:
+                await asyncio.sleep(0)
+            while tui.application.render_counter == render_counter:
+                await asyncio.sleep(0)
+            application_ids.append(id(tui.application))
+            input.send_text("\x1b")
+            assert await asyncio.wait_for(cancelled, timeout=2) is None
+            tui.application.exit(result=0)
 
-        def run(self) -> str:
-            return "selected"
+        dialog_task = asyncio.create_task(exercise_dialog())
+        result = await asyncio.wait_for(
+            tui.application.run_async(pre_run=started.set), timeout=4
+        )
+        await dialog_task
 
-        async def run_async(self) -> str:
-            raise AssertionError("nested async application must not share the TUI renderer")
-
-    async def suspended_runner(callable_, *, in_executor: bool = False):
-        captured["in_executor"] = in_executor
-        return callable_()
-
-    monkeypatch.setattr("tfr.tui.radiolist_dialog", lambda **_kwargs: Dialog())
-    monkeypatch.setattr("tfr.tui.run_in_terminal", suspended_runner)
-
-    assert await tui._settings_choice(title="Settings", text="Choose", values=[]) == "selected"
-    assert captured == {"in_executor": True}
+        assert result == 0
+        assert application_ids == [id(tui.application), id(tui.application)]
+        assert tui.application._running_in_terminal is False
 
 
 def test_settings_keyboard_cursor_has_visible_terminal_independent_style() -> None:
