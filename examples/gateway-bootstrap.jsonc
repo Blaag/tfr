@@ -1,0 +1,7 @@
+{
+  "$schema": "../schemas/gateway-bootstrap.schema.json",
+  "schema_version": 1,
+  // This is pre-start bootstrap only. Normal settings, worlds, agents, and
+  // plugin policy live in gateway-configuration.json and are managed in TFR.
+  "state_directory": "~/.local/state/tfr/settings"
+}

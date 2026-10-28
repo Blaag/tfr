@@ -523,7 +523,11 @@ def run(repository: Path) -> int:
         _install_release(repository)
         config_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         config_directory.chmod(0o700)
-        _configure_main(repository, config_directory)
+        # Remote UIs use generated connection bootstrap only; they never need
+        # a preferences JSONC file. Gateway/standalone profiles retain the
+        # installer input as a one-time managed-configuration import source.
+        if profile != "remote-ui":
+            _configure_main(repository, config_directory)
         details: dict[str, object] | None = None
         if profile != "remote-ui":
             _configure_worlds(repository, config_directory)
@@ -554,6 +558,7 @@ def run(repository: Path) -> int:
         print(f"UI handoff:   {config_directory / 'remote-ui-handoff.txt'}")
     else:
         print(f"Start remote UI: {bin_directory / 'tfr-remote-ui'}")
+        print("UI preferences are Gateway-managed; no local config.jsonc was generated.")
     print(f"Check setup: {bin_directory / 'tfr-doctor'}")
     if str(bin_directory) not in os.environ.get("PATH", "").split(os.pathsep):
         print(f"Add {bin_directory} to PATH for launcher names without full paths.")

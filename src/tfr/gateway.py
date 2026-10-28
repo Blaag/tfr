@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import hashlib
 import heapq
 import hmac
 import inspect
@@ -13,6 +14,7 @@ import socket
 import ssl
 import stat
 import sys
+import tempfile
 from collections import Counter, deque
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -24,7 +26,15 @@ from uuid import UUID, uuid4
 
 from tfr.agents import AgentRuntime
 from tfr.ansi import terminal_plain_text
-from tfr.config import ConfigurationBundle, WorldsConfig
+from tfr.config import (
+    ConfigurationBundle,
+    ConfigurationError,
+    GatewayBootstrapConfiguration,
+    WorldsConfig,
+    gateway_bootstrap_bundle,
+    load_configuration,
+)
+from tfr.configuration_forms import with_builtin_form_metadata
 from tfr.configuration_sync import (
     CONFIGURATION_SYNC_CAPABILITY,
     effective_client_configuration,
@@ -53,6 +63,11 @@ from tfr.gateway_configuration import (
     ConfigurationMutation,
     GatewayConfigurationStore,
     apply_gateway_configuration,
+)
+from tfr.gateway_migration import (
+    GatewayMigrationStore,
+    collect_migration_settings,
+    new_proposal,
 )
 from tfr.gateway_protocol import (
     MAX_MESSAGE_BYTES,
@@ -571,6 +586,7 @@ class GatewayRuntime:
         configuration_values: ConfigurationValues | None = None,
         gateway_configuration: GatewayConfigurationStore | None = None,
         configuration_bundle: ConfigurationBundle | None = None,
+        gateway_migration: GatewayMigrationStore | None = None,
     ) -> None:
         self.event_bus = event_bus
         self.command_bus = command_bus
@@ -592,6 +608,7 @@ class GatewayRuntime:
         self.configuration_values = configuration_values
         self.gateway_configuration = gateway_configuration
         self.configuration_bundle = configuration_bundle
+        self.gateway_migration = gateway_migration
         self.gateway_id = uuid4()
         self._started = False
         self._update_task: asyncio.Task[None] | None = None
@@ -606,9 +623,15 @@ class GatewayRuntime:
         *,
         plugin_scope: Literal["all", "gateway"] = "gateway",
         connector_bridge: ConnectorSessionBridge | None = None,
+        migration_source_bundle: ConfigurationBundle | None = None,
+        legacy_precedence: bool = True,
     ) -> GatewayRuntime:
-        source_bundle = bundle
-        bundle, managed_settings = apply_managed_settings(bundle)
+        source_bundle = migration_source_bundle or bundle
+        managed_settings: ManagedSettingsStore | None
+        if legacy_precedence:
+            bundle, managed_settings = apply_managed_settings(bundle)
+        else:
+            managed_settings = None
         initial_registry = core_configuration_registry()
         gateway_configuration = GatewayConfigurationStore(
             bundle.main.managed_settings.state_directory,
@@ -622,6 +645,7 @@ class GatewayRuntime:
                 section
                 for _scope, _target, section in gateway_configuration._sections(gateway_document)
             )
+            and managed_settings is not None
             and managed_settings.revision > 0
         ):
             legacy_values: list[tuple[str, object, str, str | None]] = []
@@ -720,14 +744,50 @@ class GatewayRuntime:
         )
         configuration_registry = core_configuration_registry()
         for descriptor in plugins.registry.configuration_descriptors():
-            configuration_registry.register(descriptor)
+            configuration_registry.register(with_builtin_form_metadata(descriptor))
         gateway_configuration.registry = configuration_registry
         gateway_configuration.validate_current(defer_plugin_validation=True)
+        gateway_migration = GatewayMigrationStore(
+            bundle.main.managed_settings.state_directory,
+            gateway_configuration,
+        )
         configuration_values = configuration_values_from_bundle(
+            bundle if not legacy_precedence else source_bundle,
+            configuration_registry,
+            managed=(managed_settings.document if managed_settings is not None else None),
+        )
+        gateway_source_files = tuple(
+            str(path)
+            for path in (
+                source_bundle.main_path,
+                source_bundle.worlds_path,
+                source_bundle.agents_path,
+            )
+            if path.is_file()
+        )
+        migration_values = configuration_values_from_bundle(
             source_bundle,
             configuration_registry,
-            managed=managed_settings.document,
+            managed=(managed_settings.document if managed_settings is not None else None),
         )
+        gateway_values = migration_values.jsonc_proposal_values()
+        if gateway_values and UUID(int=0) not in gateway_migration.proposals:
+            gateway_migration.submit(
+                new_proposal(
+                    ui_id=UUID(int=0),
+                    ui_name="Gateway legacy configuration",
+                    base_revision=gateway_configuration.revision,
+                    settings=collect_migration_settings(
+                        gateway_values,
+                        configuration_registry,
+                        ui_id=UUID(int=0),
+                        source="Gateway JSONC",
+                        ui_scope="ui-type",
+                        ui_target="terminal",
+                    ),
+                    source_files=gateway_source_files,
+                )
+            )
         for scope, _target, section in gateway_configuration._sections(
             gateway_configuration.document
         ):
@@ -778,18 +838,19 @@ class GatewayRuntime:
                 operation=f"pattern_index:{index}",
             )
         )
-        managed_settings.set_audit_handler(
-            lambda entry: plugins.diagnostics.record(
-                severity="info" if entry["result"] != "failed" else "error",
-                component="managed-settings",
-                code=str(entry["result"]),
-                message=(
-                    f"Managed setting {entry['operation']} for world {entry['world']!r}: "
-                    f"{entry['result']} at revision {entry['revision']}"
-                )[:240],
-                operation=str(entry["operation"])[:100],
+        if managed_settings is not None:
+            managed_settings.set_audit_handler(
+                lambda entry: plugins.diagnostics.record(
+                    severity="info" if entry["result"] != "failed" else "error",
+                    component="managed-settings",
+                    code=str(entry["result"]),
+                    message=(
+                        f"Managed setting {entry['operation']} for world {entry['world']!r}: "
+                        f"{entry['result']} at revision {entry['revision']}"
+                    )[:240],
+                    operation=str(entry["operation"])[:100],
+                )
             )
-        )
         event_bus.add_processor(plugins.process_event)
         agents = AgentRuntime.from_configuration(bundle, sessions, event_bus, command_bus)
         history = EventHistory(
@@ -832,6 +893,7 @@ class GatewayRuntime:
             configuration_values=configuration_values,
             gateway_configuration=gateway_configuration,
             configuration_bundle=bundle,
+            gateway_migration=gateway_migration,
         )
 
     async def start(self) -> None:
@@ -862,6 +924,65 @@ class GatewayRuntime:
         pattern: str | None = None,
         expected_revision: int | None = None,
     ) -> dict[str, Any]:
+        if self.managed_settings is None and self.gateway_configuration is not None:
+            if self.gag_policy is None or self.configuration_bundle is None:
+                raise ValueError("managed gag settings are unavailable")
+            key = f"worlds.{world}.gag.patterns"
+            if world not in self.configuration_bundle.worlds.worlds:
+                raise ValueError(f"unknown world: {world}")
+            present, stored = self.gateway_configuration.get(key, scope="world", target=world)
+            patterns = list(stored) if present and isinstance(stored, list) else list(
+                self.configuration_bundle.worlds.worlds[world].gag.patterns
+            )
+            if operation == "list":
+                if pattern is not None or expected_revision is not None:
+                    raise ValueError("list gag operation does not accept mutation fields")
+                return {
+                    "revision": self.gateway_configuration.revision,
+                    "patterns": patterns,
+                    "changed": False,
+                }
+            if expected_revision is None:
+                raise ValueError("gag mutation requires expected_revision")
+            proposed = list(patterns)
+            if operation == "add" and pattern is not None:
+                if pattern not in proposed:
+                    proposed.append(pattern)
+            elif operation == "remove" and pattern is not None:
+                proposed = [item for item in proposed if item != pattern]
+            elif operation == "reset" and pattern is None:
+                proposed = []
+            else:
+                raise ValueError(f"{operation} gag operation has invalid fields")
+            changed = proposed != patterns
+            if changed:
+                mutation = await asyncio.to_thread(
+                    self.gateway_configuration.set,
+                    key,
+                    proposed,
+                    scope="world",
+                    target=world,
+                    expected_revision=expected_revision,
+                    actor_ui_id="legacy-command",
+                    actor_ui_name="Gag command",
+                )
+                if self.configuration_values is not None:
+                    self.configuration_values.record(
+                        key,
+                        proposed,
+                        SettingProvenance.MANAGED,
+                        source_detail=f"Gateway configuration revision {mutation.revision}",
+                    )
+                effective = apply_gateway_configuration(
+                    self.configuration_bundle, self.gateway_configuration.document
+                )
+                self.gag_policy.replace_configuration(effective.worlds)
+            return {
+                "revision": self.gateway_configuration.revision,
+                "patterns": proposed,
+                "changed": changed,
+                "restart_required": False,
+            }
         if self.managed_settings is None or self.gag_policy is None:
             raise ValueError("managed gag settings are unavailable")
         if operation == "list":
@@ -971,6 +1092,43 @@ class GatewayRuntime:
         enabled: bool | None = None,
         expected_revision: int | None = None,
     ) -> dict[str, Any]:
+        if self.managed_settings is None and self.gateway_configuration is not None:
+            key = f"ui.{setting}.enabled"
+            current = self.shared_ui_settings()[f"{setting}_enabled"]
+            if operation == "get":
+                if enabled is not None or expected_revision is not None:
+                    raise ValueError("get UI setting operation does not accept mutation fields")
+                return {
+                    "revision": self.gateway_configuration.revision,
+                    "enabled": current,
+                    "changed": False,
+                }
+            if enabled is None or expected_revision is None:
+                raise ValueError("set UI setting operation requires enabled and expected_revision")
+            if enabled == current:
+                return {
+                    "revision": self.gateway_configuration.revision,
+                    "enabled": enabled,
+                    "changed": False,
+                }
+            mutation = await asyncio.to_thread(
+                self.gateway_configuration.set,
+                key,
+                enabled,
+                scope="shared",
+                target=None,
+                expected_revision=expected_revision,
+                actor_ui_id="legacy-command",
+                actor_ui_name="UI setting command",
+            )
+            if self.configuration_values is not None:
+                self.configuration_values.record(
+                    key,
+                    enabled,
+                    SettingProvenance.MANAGED,
+                    source_detail=f"Gateway configuration revision {mutation.revision}",
+                )
+            return {"revision": mutation.revision, "enabled": enabled, "changed": True}
         if self.managed_settings is None:
             raise ValueError("managed UI settings are unavailable")
         getter = (
@@ -1852,6 +2010,16 @@ class GatewayServer:
                     participant.configuration_issues = issues
                 await self.ui_store.report_configuration(ui_id, revision, status, issues)
                 result = {"revision": revision, "status": status}
+            elif message_type == "ui_capabilities":
+                if ui_id is None or self.ui_store is None:
+                    raise ValueError("capability update requires a registered UI")
+                if set(message) != {"type", "protocol", "request_id", "capabilities"}:
+                    raise ValueError("ui_capabilities has invalid fields")
+                capabilities = message.get("capabilities")
+                if not isinstance(capabilities, list):
+                    raise ValueError("UI capabilities must be a list")
+                record = await self.ui_store.update_capabilities(ui_id, capabilities)
+                result = {"ui": record.as_dict()}
             elif message_type == "command":
                 world = self._world(message)
                 text = message.get("text")
@@ -2293,6 +2461,79 @@ class GatewayServer:
                         ),
                         "requires_confirmation": False,
                     }
+            elif message_type == "config_batch":
+                store = self.runtime.gateway_configuration
+                if store is None:
+                    raise ValueError("Gateway configuration mutation is unavailable")
+                if set(message) != {
+                    "type",
+                    "protocol",
+                    "request_id",
+                    "changes",
+                    "expected_revision",
+                    "confirm",
+                }:
+                    raise ValueError("config_batch has invalid fields")
+                changes = message.get("changes")
+                expected_revision = message.get("expected_revision")
+                confirm = message.get("confirm")
+                if not isinstance(changes, list):
+                    raise ValueError("configuration batch changes must be a list")
+                if (
+                    not isinstance(expected_revision, int)
+                    or isinstance(expected_revision, bool)
+                    or expected_revision < 0
+                    or not isinstance(confirm, bool)
+                ):
+                    raise ValueError("configuration batch revision or confirmation is invalid")
+                resolved_changes = []
+                for raw in changes:
+                    if not isinstance(raw, dict):
+                        raise ValueError("configuration batch change must be an object")
+                    change = dict(raw)
+                    scope = change.get("scope")
+                    target = change.get("target")
+                    if not isinstance(scope, str):
+                        raise ValueError("configuration batch scope must be a string")
+                    if target is not None and not isinstance(target, str):
+                        raise ValueError("configuration batch target must be a string or null")
+                    self_service = scope == "ui" and target is None and ui_id is not None
+                    if not configuration_admin and not self_service:
+                        raise ValueError(
+                            "configuration mutation requires owner/admin access; remote UIs may "
+                            "change only their own UI-scoped settings"
+                        )
+                    change["target"] = self._configuration_target(scope, target, ui_id=ui_id)
+                    resolved_changes.append(change)
+                preview = store.preview_batch(resolved_changes)
+                if not confirm:
+                    result = preview
+                else:
+                    actor = self.ui_store.get(ui_id) if self.ui_store and ui_id else None
+                    mutations = await asyncio.to_thread(
+                        store.batch,
+                        resolved_changes,
+                        expected_revision=expected_revision,
+                        actor_ui_id=str(ui_id) if ui_id is not None else "local-admin",
+                        actor_ui_name=(
+                            actor.display_name if actor is not None else "Local administrator"
+                        ),
+                    )
+                    for mutation in mutations:
+                        self._sync_gateway_configuration_value(mutation)
+                        self._apply_live_gateway_configuration(mutation)
+                    await self._broadcast_configuration()
+                    if any(
+                        mutation.key
+                        in {"ui.spellcheck.enabled", "ui.speaking_streaks.enabled"}
+                        for mutation in mutations
+                    ):
+                        await self._broadcast_ui_settings()
+                    result = {
+                        **preview,
+                        "revision": store.revision,
+                        "requires_confirmation": False,
+                    }
             elif message_type == "config_changes":
                 store = self.runtime.gateway_configuration
                 if store is None:
@@ -2334,19 +2575,23 @@ class GatewayServer:
                     }
                 else:
                     actor = self.ui_store.get(ui_id) if self.ui_store and ui_id else None
+                    undone_mutations = store.mutations_at_revision(expected_revision)
                     mutation = await asyncio.to_thread(
                         store.undo,
                         expected_revision=expected_revision,
                         actor_ui_id=str(ui_id) if ui_id else "local-admin",
                         actor_ui_name=(actor.display_name if actor else "Local administrator"),
                     )
-                    self._sync_gateway_configuration_value(mutation)
-                    self._apply_live_gateway_configuration(mutation)
+                    affected = undone_mutations if mutation.key == "batch" else (mutation,)
+                    for affected_mutation in affected:
+                        self._sync_gateway_configuration_value(affected_mutation)
+                        self._apply_live_gateway_configuration(affected_mutation)
                     await self._broadcast_configuration()
-                    if mutation.key in {
-                        "ui.spellcheck.enabled",
-                        "ui.speaking_streaks.enabled",
-                    }:
+                    if any(
+                        item.key
+                        in {"ui.spellcheck.enabled", "ui.speaking_streaks.enabled"}
+                        for item in affected
+                    ):
                         await self._broadcast_ui_settings()
                     descriptor = store.registry.get(mutation.key)
                     result = {
@@ -2362,6 +2607,249 @@ class GatewayServer:
                 if set(message) != {"type", "protocol", "request_id"}:
                     raise ValueError("config_export has invalid fields")
                 result = {"document": store.export()}
+            elif message_type == "config_migrate":
+                migration = self.runtime.gateway_migration
+                store = self.runtime.gateway_configuration
+                if migration is None or store is None or self.ui_store is None or ui_id is None:
+                    raise ValueError("configuration migration requires a registered UI")
+                if set(message) != {
+                    "type",
+                    "protocol",
+                    "request_id",
+                    "base_revision",
+                    "values",
+                    "source_files",
+                }:
+                    raise ValueError("config_migrate has invalid fields")
+                base_revision = message.get("base_revision")
+                values = message.get("values")
+                source_files = message.get("source_files")
+                if (
+                    not isinstance(base_revision, int)
+                    or isinstance(base_revision, bool)
+                    or not isinstance(values, dict)
+                    or not all(isinstance(key, str) for key in values)
+                    or not isinstance(source_files, list)
+                    or len(source_files) > 16
+                    or any(
+                        not isinstance(source, str) or not 1 <= len(source) <= 1_024
+                        for source in source_files
+                    )
+                ):
+                    raise ValueError("configuration migration proposal is invalid")
+                record = self.ui_store.get(ui_id)
+                if record is None:
+                    raise ValueError("current UI identity is unavailable")
+                settings = collect_migration_settings(
+                    values,
+                    store.registry,
+                    ui_id=ui_id,
+                    source=f"UI {record.display_name}",
+                )
+                migration.submit(
+                    new_proposal(
+                        ui_id=ui_id,
+                        ui_name=record.display_name,
+                        base_revision=base_revision,
+                        settings=settings,
+                        source_files=tuple(source_files),
+                    )
+                )
+                result = migration.preview()
+            elif message_type == "config_migration_preview":
+                migration = self.runtime.gateway_migration
+                if migration is None:
+                    raise ValueError("configuration migration is unavailable")
+                if set(message) != {"type", "protocol", "request_id", "choices"}:
+                    raise ValueError("config_migration_preview has invalid fields")
+                choices = message.get("choices")
+                if not isinstance(choices, dict) or not all(
+                    isinstance(key, str) and isinstance(value, str)
+                    for key, value in choices.items()
+                ):
+                    raise ValueError("migration choices must be strings")
+                result = migration.preview(choices)
+            elif message_type == "config_migration_apply":
+                migration = self.runtime.gateway_migration
+                if migration is None:
+                    raise ValueError("configuration migration is unavailable")
+                if not configuration_admin:
+                    raise ValueError("applying migration requires owner/admin access")
+                if set(message) != {
+                    "type",
+                    "protocol",
+                    "request_id",
+                    "expected_revision",
+                    "choices",
+                    "confirm",
+                }:
+                    raise ValueError("config_migration_apply has invalid fields")
+                if message.get("confirm") is not True:
+                    raise ValueError("config_migration_apply requires explicit confirmation")
+                expected = message.get("expected_revision")
+                choices = message.get("choices")
+                if (
+                    not isinstance(expected, int)
+                    or isinstance(expected, bool)
+                    or not isinstance(choices, dict)
+                    or not all(
+                        isinstance(key, str) and isinstance(value, str)
+                        for key, value in choices.items()
+                    )
+                ):
+                    raise ValueError("configuration migration apply is invalid")
+                actor = self.ui_store.get(ui_id) if self.ui_store and ui_id else None
+                revision = await asyncio.to_thread(
+                    migration.apply,
+                    expected_revision=expected,
+                    choices=choices,
+                    actor_ui_id=str(ui_id) if ui_id else "local-admin",
+                    actor_ui_name=actor.display_name if actor else "Local administrator",
+                )
+                await self._broadcast_configuration()
+                result = {"revision": revision, "applied": True}
+            elif message_type == "config_migration_status":
+                migration = self.runtime.gateway_migration
+                if migration is None:
+                    raise ValueError("configuration migration is unavailable")
+                if set(message) != {"type", "protocol", "request_id"}:
+                    raise ValueError("config_migration_status has invalid fields")
+                result = migration.status()
+            elif message_type == "config_migration_rollback":
+                migration = self.runtime.gateway_migration
+                if migration is None:
+                    raise ValueError("configuration migration is unavailable")
+                if not configuration_admin:
+                    raise ValueError("migration rollback requires owner/admin access")
+                if set(message) != {
+                    "type",
+                    "protocol",
+                    "request_id",
+                    "expected_revision",
+                    "confirm",
+                }:
+                    raise ValueError("config_migration_rollback has invalid fields")
+                if message.get("confirm") is not True:
+                    raise ValueError("migration rollback requires explicit confirmation")
+                expected = message.get("expected_revision")
+                if not isinstance(expected, int) or isinstance(expected, bool):
+                    raise ValueError("migration rollback revision is invalid")
+                actor = self.ui_store.get(ui_id) if self.ui_store and ui_id else None
+                revision = await asyncio.to_thread(
+                    migration.rollback,
+                    expected_revision=expected,
+                    actor_ui_id=str(ui_id) if ui_id else "local-admin",
+                    actor_ui_name=actor.display_name if actor else "Local administrator",
+                )
+                await self._broadcast_configuration()
+                result = {"revision": revision, "rolled_back": True}
+            elif message_type in {"plugins_catalog", "plugin_show"}:
+                catalog = self.runtime.plugins.catalog()
+                if message_type == "plugins_catalog":
+                    if set(message) not in (
+                        {"type", "protocol", "request_id"},
+                        {"type", "protocol", "request_id", "state"},
+                    ):
+                        raise ValueError("plugins_catalog has invalid fields")
+                    state = message.get("state")
+                    if state not in {None, "available", "installed", "enabled", "failed"}:
+                        raise ValueError("plugin catalog state is invalid")
+                    if state is not None:
+                        catalog = [item for item in catalog if item[state] is True]
+                    result = {"plugins": catalog}
+                else:
+                    if set(message) != {"type", "protocol", "request_id", "name"}:
+                        raise ValueError("plugin_show has invalid fields")
+                    name = message.get("name")
+                    if not isinstance(name, str):
+                        raise ValueError("plugin name must be a string")
+                    plugin = next((item for item in catalog if item["name"] == name), None)
+                    if plugin is None:
+                        raise ValueError(f"plugin {name!r} is unavailable or not installed")
+                    compatible = []
+                    if self.ui_store is not None:
+                        for record in self.ui_store.records():
+                            supported = (
+                                plugin["portable"] is True and record.client_type == "pwa"
+                            ) or f"plugin:{name}" in record.capabilities
+                            compatible.append(
+                                {
+                                    "ui_id": str(record.ui_id),
+                                    "ui_name": record.display_name,
+                                    "compatible": supported,
+                                    "reason": None
+                                    if supported
+                                    else "plugin capability not reported",
+                                }
+                            )
+                    result = {"plugin": plugin, "clients": compatible}
+            elif message_type in {"plugin_enable", "plugin_disable"}:
+                store = self.runtime.gateway_configuration
+                if store is None:
+                    raise ValueError("Gateway plugin configuration is unavailable")
+                if not configuration_admin:
+                    raise ValueError("plugin enablement requires owner/admin access")
+                if set(message) != {
+                    "type",
+                    "protocol",
+                    "request_id",
+                    "name",
+                    "expected_revision",
+                    "confirm",
+                }:
+                    raise ValueError(f"{message_type} has invalid fields")
+                name = message.get("name")
+                expected = message.get("expected_revision")
+                if not isinstance(name, str) or not isinstance(expected, int):
+                    raise ValueError("plugin name and revision are invalid")
+                catalog = self.runtime.plugins.catalog()
+                known = any(item["name"] == name and item["available"] for item in catalog)
+                if not known:
+                    raise ValueError(f"plugin {name!r} is unavailable or not installed")
+                present, configured = store.get("plugins.enabled", scope="shared")
+                enabled = (
+                    list(configured)
+                    if present and isinstance(configured, list)
+                    else list(self.runtime.plugins.requested_plugins)
+                )
+                desired = message_type == "plugin_enable"
+                updated = (
+                    list(dict.fromkeys([*enabled, name]))
+                    if desired
+                    else [item for item in enabled if item != name]
+                )
+                if message.get("confirm") is not True:
+                    result = {
+                        "name": name,
+                        "enabled": desired,
+                        "revision": store.revision,
+                        "requires_confirmation": True,
+                        "restart": "client-reload",
+                    }
+                else:
+                    mutation = await asyncio.to_thread(
+                        store.set,
+                        "plugins.enabled",
+                        updated,
+                        scope="shared",
+                        target=None,
+                        expected_revision=expected,
+                        actor_ui_id=str(ui_id) if ui_id else "local-admin",
+                        actor_ui_name=(
+                            self.ui_store.get(ui_id).display_name
+                            if self.ui_store and ui_id and self.ui_store.get(ui_id)
+                            else "Local administrator"
+                        ),
+                    )
+                    self._sync_gateway_configuration_value(mutation)
+                    await self._broadcast_configuration()
+                    result = {
+                        "name": name,
+                        "enabled": desired,
+                        "revision": mutation.revision,
+                        "requires_confirmation": False,
+                        "restart": mutation.restart,
+                    }
             elif message_type == "show_ui":
                 if not allow_admin or self.ui_store is None:
                     raise ValueError("UI inventory is unavailable")
@@ -2899,6 +3387,34 @@ class GatewayServer:
         return world
 
 
+def _stage_legacy_world_login_references(
+    bundle: ConfigurationBundle,
+    state_directory: Path,
+) -> dict[str, str]:
+    directory = state_directory / "migration-secrets"
+    references: dict[str, str] = {}
+    for name, world in bundle.worlds.worlds.items():
+        if world.login is None:
+            continue
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(directory, 0o700)
+        identifier = hashlib.sha256(name.encode()).hexdigest()
+        destination = directory / f"{identifier}.password"
+        descriptor, temporary = tempfile.mkstemp(prefix=".password.", dir=directory)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(world.login.password.get_secret_value() + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, destination)
+            os.chmod(destination, 0o600)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+        references[f"worlds.{name}.login.password"] = f"file:{destination}"
+    return references
+
+
 async def run_gateway(
     bundle: ConfigurationBundle,
     path: Path | str | None = None,
@@ -2909,11 +3425,82 @@ async def run_gateway(
     tls_certificate: Path | str | None = None,
     tls_private_key: Path | str | None = None,
 ) -> int:
+    migration_source = bundle if bundle.worlds.worlds or bundle.agents.agents else None
+    if migration_source is None and bundle.main_path.is_file():
+        try:
+            migration_source = load_configuration(bundle.main_path)
+        except ConfigurationError:
+            # A canonical bootstrap intentionally has no worlds/agents files.
+            migration_source = None
+    bootstrap = GatewayBootstrapConfiguration(
+        main_path=bundle.main_path,
+        state_directory=bundle.main.managed_settings.state_directory,
+        warnings=bundle.warnings,
+    )
+    bundle = gateway_bootstrap_bundle(bootstrap)
     startup_store = GatewayConfigurationStore(
         bundle.main.managed_settings.state_directory,
         core_configuration_registry(),
         defer_plugin_validation=True,
     )
+    startup_document = startup_store.document
+    if migration_source is not None and not any(
+        section for _scope, _target, section in startup_store._sections(startup_document)
+    ):
+        # Phase-9 compatibility performs a one-time import, not a legacy
+        # precedence overlay. From this commit onward the managed document is
+        # the only source used to construct runtime state.
+        startup_values = configuration_values_from_bundle(
+            migration_source, startup_store.registry
+        ).jsonc_proposal_values()
+        # Credential-bearing aggregates cannot be imported partially after
+        # plaintext omission. Keep worlds usable without login, and require
+        # explicit protected references before providers/agents are enabled.
+        startup_values = {
+            key: value
+            for key, value in startup_values.items()
+            if not key.endswith(".login.password")
+            and not key.startswith("providers.")
+            and not key.startswith("agents.")
+        }
+        login_references = _stage_legacy_world_login_references(
+            migration_source,
+            bundle.main.managed_settings.state_directory,
+        )
+        migration = GatewayMigrationStore(
+            bundle.main.managed_settings.state_directory, startup_store
+        )
+        migration.submit(
+            new_proposal(
+                ui_id=UUID(int=0),
+                ui_name="Gateway legacy configuration",
+                base_revision=startup_store.revision,
+                settings=collect_migration_settings(
+                    startup_values,
+                    startup_store.registry,
+                    ui_id=UUID(int=0),
+                    source="Gateway JSONC one-time import",
+                    ui_scope="ui-type",
+                    ui_target="terminal",
+                ),
+                source_files=tuple(
+                    str(path)
+                    for path in (
+                        migration_source.main_path,
+                        migration_source.worlds_path,
+                        migration_source.agents_path,
+                    )
+                    if path.is_file()
+                ),
+            )
+        )
+        migration.apply(
+            expected_revision=startup_store.revision,
+            choices={},
+            actor_ui_id="migration",
+            actor_ui_name="Legacy one-time import",
+            secret_references=login_references,
+        )
     bundle = apply_gateway_configuration(bundle, startup_store.document)
     gateway_path = Path(path).expanduser() if path is not None else default_gateway_socket()
     connector_path = gateway_path.with_name(f"{gateway_path.name}.worlds")
@@ -2926,6 +3513,8 @@ async def run_gateway(
         runtime = await GatewayRuntime.from_configuration(
             bundle,
             connector_bridge=connector_bridge,
+            migration_source_bundle=migration_source,
+            legacy_precedence=False,
         )
     except BaseException:
         await connector_client.close()

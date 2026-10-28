@@ -7,16 +7,76 @@ from pathlib import Path
 
 import pytest
 
+from tfr.config import AgentsConfig, ConfigurationBundle, MainConfig, WorldsConfig
 from tfr.core_settings import core_configuration_registry
 from tfr.gateway_configuration import (
+    GatewayConfigurationDocument,
     GatewayConfigurationError,
     GatewayConfigurationRevisionConflict,
     GatewayConfigurationStore,
+    apply_gateway_configuration,
 )
 
 
 def store(tmp_path: Path) -> GatewayConfigurationStore:
     return GatewayConfigurationStore(tmp_path / "settings", core_configuration_registry())
+
+
+def test_secret_references_resolve_only_into_runtime_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TFR_TEST_WORLD_PASSWORD", "secret-value")
+    bundle = ConfigurationBundle(
+        main_path=tmp_path / "gateway.jsonc",
+        worlds_path=tmp_path / "worlds.jsonc",
+        agents_path=tmp_path / "agents.jsonc",
+        main=MainConfig(),
+        worlds=WorldsConfig.model_validate(
+            {"worlds": {"alpha": {"host": "example.test", "port": 4201}}}
+        ),
+        agents=AgentsConfig(),
+    )
+    document = GatewayConfigurationDocument(
+        worlds={
+            "alpha": {"worlds.alpha.login.character": "Alice"},
+        },
+        secret_references={
+            "worlds.alpha.login.password": "env:TFR_TEST_WORLD_PASSWORD",
+        },
+    )
+
+    effective = apply_gateway_configuration(bundle, document)
+
+    assert effective.worlds.worlds["alpha"].login is not None
+    assert effective.worlds.worlds["alpha"].login.password.get_secret_value() == "secret-value"
+    assert document.secret_references["worlds.alpha.login.password"] == (
+        "env:TFR_TEST_WORLD_PASSWORD"
+    )
+
+
+def test_world_defaults_apply_to_defaults_instead_of_creating_a_world(tmp_path: Path) -> None:
+    bundle = ConfigurationBundle(
+        main_path=tmp_path / "gateway.jsonc",
+        worlds_path=tmp_path / "worlds.jsonc",
+        agents_path=tmp_path / "agents.jsonc",
+        main=MainConfig(),
+        worlds=WorldsConfig.model_validate(
+            {"worlds": {"alpha": {"host": "example.test", "port": 4201}}}
+        ),
+        agents=AgentsConfig(),
+    )
+    document = GatewayConfigurationDocument(
+        shared={
+            "worlds.defaults.encoding": "latin-1",
+            "worlds.defaults.scrollback_lines": 1234,
+        }
+    )
+
+    effective = apply_gateway_configuration(bundle, document)
+
+    assert effective.worlds.defaults.encoding == "latin-1"
+    assert effective.worlds.defaults.scrollback_lines == 1234
+    assert set(effective.worlds.worlds) == {"alpha"}
 
 
 def test_store_persists_scoped_versioned_document_with_backup_and_audit(tmp_path: Path) -> None:
@@ -59,6 +119,56 @@ def test_store_persists_scoped_versioned_document_with_backup_and_audit(tmp_path
     ]
     if os.name == "posix":
         assert stat.S_IMODE(reloaded.path.stat().st_mode) == 0o600
+
+
+def test_batch_validates_and_commits_related_values_as_one_revision(tmp_path: Path) -> None:
+    configuration = store(tmp_path)
+    changes = [
+        {
+            "operation": "set",
+            "key": "ui.spellcheck.enabled",
+            "value": True,
+            "scope": "shared",
+            "target": None,
+        },
+        {
+            "operation": "set",
+            "key": "ui.show_nospoof_prefix",
+            "value": True,
+            "scope": "shared",
+            "target": None,
+        },
+    ]
+
+    preview = configuration.preview_batch(changes)
+    mutations = configuration.batch(
+        changes,
+        expected_revision=0,
+        actor_ui_id="admin",
+        actor_ui_name="Administrator",
+    )
+
+    assert preview["requires_confirmation"] is True
+    assert len(preview["changes"]) == 2
+    assert configuration.revision == 1
+    assert {mutation.revision for mutation in mutations} == {1}
+    assert configuration.get("ui.spellcheck.enabled", scope="shared") == (True, True)
+    assert configuration.get("ui.show_nospoof_prefix", scope="shared") == (True, True)
+    assert [change["key"] for change in configuration.changes(limit=2)] == [
+        "ui.spellcheck.enabled",
+        "ui.show_nospoof_prefix",
+    ]
+
+    undo = configuration.undo(
+        expected_revision=1,
+        actor_ui_id="admin",
+        actor_ui_name="Administrator",
+    )
+
+    assert undo.key == "batch"
+    assert configuration.revision == 2
+    assert configuration.get("ui.spellcheck.enabled", scope="shared") == (False, None)
+    assert configuration.get("ui.show_nospoof_prefix", scope="shared") == (False, None)
 
 
 def test_revision_conflict_prevents_lost_update(tmp_path: Path) -> None:

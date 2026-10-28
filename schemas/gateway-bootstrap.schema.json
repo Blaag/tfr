@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Blaag/tfr/schemas/gateway-bootstrap.schema.json",
+  "title": "TFR Gateway bootstrap configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": 1},
+    "state_directory": {"type": "string", "minLength": 1}
+  },
+  "required": ["schema_version"]
+}

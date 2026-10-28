@@ -127,6 +127,21 @@ class ConfigurationValues:
         }
         return tuple(sorted(static | set(self._layers)))
 
+    def jsonc_proposal_values(self) -> dict[str, object]:
+        """Return legacy JSONC values, with sensitive plaintext omitted."""
+
+        output: dict[str, object] = {}
+        for key, layers in self._layers.items():
+            item = layers.get(SettingProvenance.JSONC)
+            if item is None:
+                continue
+            descriptor = self.registry.get(key)
+            if descriptor is None:
+                continue
+            value, _detail = item
+            output[key] = None if descriptor.sensitivity else copy.deepcopy(value)
+        return output
+
     def summary(self) -> dict[str, object]:
         keys = self.inventory_keys()
         source_counts: Counter[str] = Counter()

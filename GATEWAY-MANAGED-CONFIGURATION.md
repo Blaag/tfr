@@ -6,6 +6,25 @@
 
 Make the Gateway authoritative for all TFR configuration. Each named UI receives a scoped configuration view. Local UI state contains only what is required to connect to a Gateway.
 
+## Current status — 2026-10-28
+
+- Phases 1–9 are implemented: the Gateway is authoritative, clients synchronize scoped
+  configuration, connection setup and migration run inside TFR, plugins are centrally
+  managed, contextual help is available, and ordinary legacy precedence is removed.
+- The current corrective branch fixes issues discovered while testing the Phase 9 candidate:
+  per-UI values are no longer placed in UI-type scope, world defaults no longer create a
+  bogus world named `defaults`, and legacy world login passwords are moved atomically into
+  private mode-0600 files referenced by managed configuration.
+- The current branch also improves transcript readability for help and plugin catalog
+  reports by showing the originating command, separating responses, removing the generic
+  `-- ... --` wrapper, grouping plugin states, and omitting meaningless unknown versions.
+- `/config set` is a complete low-level mutation interface for automation, diagnostics, and
+  advanced use. It is not considered an adequate primary interface for people configuring
+  nested values such as speaker-effect rules.
+- Phase 10 is complete on the current branch: `/config` and `/settings` open the native
+  keyboard-driven settings interface, bounded declarative metadata drives trusted controls,
+  and structured edits commit through an atomic revision-checked batch API.
+
 ## Decisions
 
 - [x] Gateway owns shared, Gateway, world, plugin, and per-UI settings.
@@ -15,6 +34,10 @@ Make the Gateway authoritative for all TFR configuration. Each named UI receives
 - [x] Local UI storage is limited to Gateway connection profiles and cached, non-authoritative data.
 - [x] Existing clients receive a guided, reviewable migration.
 - [x] Diverging shared settings require conflict resolution; per-UI settings remain separate.
+- [x] Text commands remain available as a stable configuration API for automation and
+  advanced use.
+- [x] Ordinary users configure TFR through a menu-driven settings interface rather than
+  constructing JSON values or selecting scopes and targets manually.
 
 ## Configuration scopes
 
@@ -153,26 +176,26 @@ built-in default → shared value → UI-type default → individual UI override
 
 ### Native UI first run
 
-- [ ] Detect absence of a connection profile.
-- [ ] Present an interactive Gateway setup flow.
-- [ ] Collect Gateway address and required TLS identity.
-- [ ] Pair or authenticate without requiring JSONC editing.
-- [ ] Propose and allow editing the UI display name.
-- [ ] Store credentials in the OS keychain where available.
-- [ ] Store only Gateway endpoint, credential reference, and stable UI ID locally.
+- [x] Detect absence of a connection profile.
+- [x] Present an interactive Gateway setup flow.
+- [x] Collect Gateway address and required TLS identity.
+- [x] Pair or authenticate without requiring JSONC editing.
+- [x] Propose and allow editing the UI display name.
+- [x] Store credentials in the OS keychain where available.
+- [x] Store only Gateway endpoint, credential reference, and stable UI ID locally.
 
 ### Profile management
 
-- [ ] Add `/gateway setup`.
-- [ ] Add `/gateway profiles`.
-- [ ] Add profile switch, repair, rename, and forget flows.
-- [ ] Ensure exported profiles omit credentials.
+- [x] Add `/gateway setup`.
+- [x] Add `/gateway profiles`.
+- [x] Add profile switch, repair, rename, and forget flows.
+- [x] Ensure exported profiles omit credentials.
 
 ### Verification
 
-- [ ] A fresh installation can connect without editing files.
-- [ ] Invalid TLS/authentication details give actionable recovery steps.
-- [ ] Losing local state does not expose Gateway secrets.
+- [x] A fresh installation can connect without editing files.
+- [x] Invalid TLS/authentication details give actionable recovery steps.
+- [x] Losing local state does not expose Gateway secrets.
 
 **Phase completion:** users can install and connect a UI entirely through TFR.
 
@@ -182,39 +205,45 @@ built-in default → shared value → UI-type default → individual UI override
 
 ### Proposal collection
 
-- [ ] Detect legacy JSONC and managed overrides.
-- [ ] Add `/config migrate` and first-run migration prompt.
-- [ ] Have each UI submit a migration proposal tagged with its stable ID.
-- [ ] Classify every value as shared, Gateway, UI-specific, world, bootstrap, or secret.
-- [ ] Preserve source file and provenance for review.
+- [x] Detect legacy JSONC and managed overrides.
+- [x] Add `/config migrate` and first-run migration prompt.
+- [x] Have each UI submit a migration proposal tagged with its stable ID.
+- [x] Classify every value as shared, Gateway, UI-specific, world, bootstrap, or secret.
+- [x] Preserve source file and provenance for review.
 
 ### Reconciliation
 
-- [ ] Deduplicate matching shared values automatically.
-- [ ] Preserve divergent UI-specific values under each named UI.
-- [ ] Flag divergent shared/Gateway values for explicit selection.
-- [ ] Merge identical worlds.
-- [ ] Require choose, rename, or skip for conflicting same-name worlds.
-- [ ] Never display or compare secret plaintext.
-- [ ] Allow offline UIs to submit later proposals without silently overriding current values.
+- [x] Deduplicate matching shared values automatically.
+- [x] Preserve divergent UI-specific values under each named UI.
+- [x] Flag divergent shared/Gateway values for explicit selection.
+- [x] Merge identical worlds.
+- [x] Require choose, rename, or skip for conflicting same-name worlds.
+- [x] Never display or compare secret plaintext.
+- [x] Allow offline UIs to submit later proposals without silently overriding current values.
 
 ### Apply and rollback
 
-- [ ] Show one complete migration preview.
-- [ ] Validate the proposed effective configuration before writing.
-- [ ] Apply as one atomic Gateway revision.
-- [ ] Back up legacy files without modifying them.
-- [ ] Verify clients reconnect and apply the new revision.
-- [ ] Mark legacy files migrated so they stop participating in precedence.
-- [ ] Add `/config migration-status`.
-- [ ] Add `/config rollback-migration`.
+- [x] Show one complete migration preview.
+- [x] Validate the proposed effective configuration before writing.
+- [x] Apply as one atomic Gateway revision.
+- [x] Back up legacy files without modifying them.
+- [x] Verify clients reconnect and apply the new revision.
+- [x] Mark legacy files migrated so they stop participating in precedence.
+- [x] Add `/config migration-status`.
+- [x] Add `/config rollback-migration`.
+- [x] Keep individual-UI values in individual-UI scope during Gateway legacy import.
+- [x] Apply `worlds.defaults.*` keys to world defaults rather than a world named `defaults`.
+- [x] Move legacy world login passwords into private mode-0600 files and commit only
+  `file:` references alongside login character names in the atomic migration revision.
 
 ### Verification
 
-- [ ] Test matching and divergent multi-TUI configurations.
-- [ ] Test interrupted migration and rollback.
-- [ ] Test late migration from an offline UI.
-- [ ] Test conflicts against configuration changed after proposal creation.
+- [x] Test matching and divergent multi-TUI configurations.
+- [x] Test interrupted migration and rollback.
+- [x] Test late migration from an offline UI.
+- [x] Test conflicts against configuration changed after proposal creation.
+- [x] Test mixed UI/UI-type import, world-default application, and private world-login
+  reference creation.
 
 **Phase completion:** existing installations safely converge on Gateway-managed configuration.
 
@@ -222,21 +251,21 @@ built-in default → shared value → UI-type default → individual UI override
 
 ## Phase 7 — Centralized plugin management and discovery
 
-- [ ] Add plugin catalog metadata: name, summary, category, version, settings, and client capabilities.
-- [ ] Distinguish available, installed, enabled, loaded, failed, and portable states.
-- [ ] Add `/plugins available|installed|enabled|failed`.
-- [ ] Add `/plugins show NAME`.
-- [ ] Add `/plugins enable|disable NAME` backed by Gateway configuration.
-- [ ] Apply shared enablement to Gateway/PWA and all native UIs.
-- [ ] Report incompatible or outdated clients by UI name.
-- [ ] Announce newly available plugins once after update.
-- [ ] Make unknown effects explain whether they are unavailable, uninstalled, disabled, or incompatible.
+- [x] Add plugin catalog metadata: name, summary, category, version, settings, and client capabilities.
+- [x] Distinguish available, installed, enabled, loaded, failed, and portable states.
+- [x] Add `/plugins available|installed|enabled|failed`.
+- [x] Add `/plugins show NAME`.
+- [x] Add `/plugins enable|disable NAME` backed by Gateway configuration.
+- [x] Apply shared enablement to Gateway/PWA and all native UIs.
+- [x] Report incompatible or outdated clients by UI name.
+- [x] Announce newly available plugins once after update.
+- [x] Make unknown effects explain whether they are unavailable, uninstalled, disabled, or incompatible.
 
 ### Spotlight acceptance case
 
-- [ ] Enabling `spotlight` once makes it available to native UIs and PWA.
-- [ ] `/clear status` reports shared state and per-client exceptions.
-- [ ] No duplicate `plugins.enabled` editing is required.
+- [x] Enabling `spotlight` once makes it available to native UIs and PWA.
+- [x] `/clear status` reports shared state and per-client exceptions.
+- [x] No duplicate `plugins.enabled` editing is required.
 
 **Phase completion:** plugins and new capabilities are discoverable and centrally managed.
 
@@ -244,13 +273,18 @@ built-in default → shared value → UI-type default → individual UI override
 
 ## Phase 8 — Contextual help
 
-- [ ] Replace the `/help` wall with a topic index.
-- [ ] Add `/help TOPIC` and `/help COMMAND`.
-- [ ] Generate command help from structured descriptors.
-- [ ] Include usage, examples, scope, availability, and related commands.
-- [ ] Add command-specific help such as `/config help` and `/plugins help`.
-- [ ] Suggest corrections and next actions for unknown commands/settings/effects.
-- [ ] Show only relevant commands while explaining unavailable capabilities.
+- [x] Replace the `/help` wall with a topic index.
+- [x] Add `/help TOPIC` and `/help COMMAND`.
+- [x] Generate command help from structured descriptors.
+- [x] Include usage, examples, scope, availability, and related commands.
+- [x] Add command-specific help such as `/config help` and `/plugins help`.
+- [x] Suggest corrections and next actions for unknown commands/settings/effects.
+- [x] Show only relevant commands while explaining unavailable capabilities.
+- [x] Show the originating help request and visually separate consecutive help responses.
+- [x] Remove the generic `-- ... --` notice wrapper from multi-line help output.
+- [x] Make topic and related-command drill-down explicit with `/help COMMAND` examples.
+- [x] Render plugin catalog reports as labeled command results grouped by loaded, disabled,
+  and failed state; omit meaningless `unknown` versions.
 
 **Phase completion:** users can discover features without reading external documentation.
 
@@ -258,25 +292,104 @@ built-in default → shared value → UI-type default → individual UI override
 
 ## Phase 9 — Remove legacy configuration scattering
 
-- [ ] Move remaining ordinary settings into Gateway-managed storage.
-- [ ] Reduce Gateway files to pre-start bootstrap only.
-- [ ] Reduce UI files to generated connection profiles only.
-- [ ] Remove legacy override precedence after a supported migration period.
-- [ ] Warn clearly when unmigrated legacy files are found.
-- [ ] Update setup, examples, diagnostics, and documentation.
+- [x] Move remaining ordinary settings into Gateway-managed storage.
+- [x] Reduce Gateway files to pre-start bootstrap only.
+- [x] Reduce UI files to generated connection profiles only.
+- [x] Remove legacy override precedence after a supported migration period.
+- [x] Warn clearly when unmigrated legacy files are found.
+- [x] Update setup, examples, diagnostics, and documentation.
 
 **Phase completion:** the Gateway is the sole authority for normal TFR configuration.
 
 ---
 
+## Phase 10 — Interactive settings interface
+
+### Product decisions
+
+- [x] Make `/config` with no arguments open the settings interface; retain the existing
+  subcommands, and consider `/settings` as a discoverable alias.
+- [x] Treat `/config show|set|reset|changes|undo` as the low-level API, not the expected
+  workflow for routine human configuration.
+- [x] Default scope and target from setting metadata and current context. Hide them during
+  normal editing and expose them only through an advanced view.
+- [x] Use one keyboard-complete interaction model that does not require a mouse.
+- [x] Start with the native TUI and use the same bounded declarative form model for a later
+  PWA implementation.
+- [x] Never load arbitrary plugin-provided UI code. Plugins publish bounded declarative
+  field and form metadata that clients render using trusted controls.
+
+### Settings browser
+
+- [x] Add a full-screen category browser for General, Appearance, Worlds, Plugins, Gateway,
+  Updates, individual UIs, and other registry-backed categories.
+- [x] Add search by setting name, label, description, category, scope, and plugin.
+- [x] Show the effective value, provenance, target, validation summary, and required action
+  without exposing secret plaintext.
+- [x] Generate controls for booleans, choices, strings, numbers, colors, paths, lists, and
+  nullable values from configuration descriptors.
+- [x] Offer contextual world, UI, UI-type, and plugin selectors only when the setting needs
+  one and no unambiguous context is available.
+- [x] Provide review, cancel, reset-to-inherited, and undo paths from the same interface.
+
+### Declarative structured forms
+
+- [x] Extend plugin setting metadata with bounded labels, descriptions, groups, field types,
+  defaults, constraints, conditional visibility, and collection-item schemas.
+- [x] Add reusable add/edit/delete/reorder controls for structured lists and objects.
+- [x] Add palette-based color selection with validated custom hexadecimal input.
+- [x] Add multi-select controls for worlds, event kinds, capabilities, and other registry
+  enumerations.
+- [x] Permit trusted previews through bounded existing facilities such as Effects Lab rather
+  than plugin-supplied executable UI code.
+
+### Atomic editing
+
+- [x] Add a revision-checked batch mutation API so a form can stage and validate related
+  values as one complete effective configuration before committing one audited revision.
+- [x] Show a change review containing old and new non-secret values, affected targets, and
+  required live/reload/restart action.
+- [x] Reject stale form submissions with a clear refresh-and-review flow rather than losing
+  concurrent changes.
+- [x] Apply safe changes live and reuse existing synchronization, convergence, reload, and
+  restart coordination after commit.
+
+### Speaker-effects acceptance case
+
+- [x] Add `Plugins → Speaker effects` with enablement status and a readable rule list.
+- [x] Add an editor for speaker name, effect, base/accent colors, effect-specific parameters,
+  worlds, and event kinds.
+- [x] Show only fields relevant to the selected effect; for `comet`, include duration and
+  trail width without requiring JSON knowledge.
+- [x] Add preview through Effects Lab before saving.
+- [x] Allow a user to add Barnaby with comet and `#ffdd76`, preserve all existing rules, and
+  apply the complete rule collection without knowing the registry key, JSON shape, scope, or
+  plugin target.
+
+### Verification
+
+- [x] Test keyboard-only navigation, cancellation, validation errors, and narrow terminals.
+- [x] Test generated controls for every supported descriptor type and scope.
+- [x] Test structured collection editing without dropping unchanged entries.
+- [x] Test atomic multi-field validation, revision conflicts, audit output, and undo.
+- [x] Test that sensitive values and references are not rendered in forms, reviews, logs, or
+  synchronized client views.
+
+**Phase completion:** complete. Routine configuration is discoverable and safely editable by
+a person without JSON, registry-key, scope, or target knowledge.
+
+---
+
 ## Per-phase working rules
 
-- [ ] Implement only one phase or narrowly defined capability per working session.
-- [ ] Update this checklist after each merged capability.
-- [ ] Record important decisions or deviations below.
-- [ ] Keep protocol changes backward-compatible until migration is complete.
-- [ ] Add deterministic tests before removing old behavior.
-- [ ] Do not release automatically; prepare and review releases separately.
+- [x] Implement and close one complete phase per working session unless explicitly scoped
+  otherwise by the maintainer.
+- [x] Update this checklist when the phase is complete rather than treating partial
+  capabilities as phase completion.
+- [x] Record important decisions or deviations below.
+- [x] Keep protocol changes backward-compatible until migration is complete.
+- [x] Add deterministic tests before removing old behavior.
+- [x] Do not release automatically; prepare and review releases separately.
 
 ## Decision log
 
@@ -315,3 +428,35 @@ built-in default → shared value → UI-type default → individual UI override
 - 2026-10-26: Native clients overlay Gateway values only in memory before constructing plugins and the TUI. Safe shared spellcheck and speaking-streak changes apply live; other live values are explicitly reported unsupported, while declared reload/restart requirements produce user-visible coordination notices.
 - 2026-10-26: PWA clients apply supported shared settings live and report unknown future settings rather than ignoring them. The desired revision remains in the atomic Gateway document, so offline clients and interrupted restarts receive current state on their next registration.
 - 2026-10-26: Phase 4 completed with capability-negotiated native/PWA synchronization, scoped convergence, push delivery, bounded acknowledgements, unsupported-setting visibility, and no authoritative client-side configuration copy.
+- 2026-10-26: Phase 5 native bootstrap uses a private versioned connection-profile document containing endpoint/TLS identity, an opaque credential reference, stable UI ID, and the proposed display name; it does not require a main JSONC file on a fresh remote UI.
+- 2026-10-26: Gateway tokens use the macOS Keychain for the default profile location when available, with a private mode-0600 credential file fallback for unsupported platforms and isolated/test profile stores. Profile exports omit both credential references and token values.
+- 2026-10-26: `/gateway setup`, `/gateway profiles [export]`, `/gateway switch`, `/gateway rename`, `/gateway repair`, and confirmed `/gateway forget` provide profile lifecycle management. Active-profile changes restart the UI so bootstrap state is re-read rather than mutating an established authenticated transport.
+- 2026-10-26: Phase 5 completed with first-run interactive setup, editable stable UI naming, TLS/authentication bootstrap, private credential storage, profile recovery and switching, and credential-free exports.
+- 2026-10-26: Phase 6 migration proposals are tagged with stable UI identity and their starting Gateway revision, retain bounded source provenance, classify registry-backed values by managed scope, and replace sensitive plaintext with presence-only metadata before submission.
+- 2026-10-26: Reconciliation automatically deduplicates identical shared/world/plugin values, preserves UI-specific differences under stable IDs, and requires explicit choose-or-skip decisions for divergent shared, Gateway, world, or plugin values. Stale late proposals cannot overwrite newer configuration.
+- 2026-10-26: Applying a migration validates the complete proposed Gateway document and commits it as one audited atomic revision. Source files are copied without modification, migrated files receive a separate marker, connected clients receive the new desired revision, and the pre-migration document supports revision-checked rollback.
+- 2026-10-26: `/config migrate`, migration preview/choose/skip/apply flows, `/config migration-status`, and `/config rollback-migration` expose the complete guided workflow from TFR.
+- 2026-10-26: Phase 6 completed with deterministic multi-UI reconciliation, protected secret handling, source backups, stale-proposal rejection, atomic apply, convergence reporting, and rollback.
+- 2026-10-26: Phase 7 catalogs discovered and requested plugins with bounded name, summary, category, version, settings, capabilities, availability, installation, enablement, load failure, and portability state. Native clients refresh stable UI capabilities after plugin loading.
+- 2026-10-26: `/plugins available|installed|enabled|failed`, `/plugins show NAME`, and confirmed `/plugins enable|disable NAME` use the Gateway catalog and the shared `plugins.enabled` managed setting. Configuration synchronization distributes the desired list to Gateway, PWA, and every native UI for coordinated reload.
+- 2026-10-26: Plugin details identify incompatible/outdated clients by stable display name; periodic source notices remain de-duplicated by source/version, and unknown screen-clear effects explain unavailable, disabled, failed, or incompatible state with a discovery next action.
+- 2026-10-26: The spotlight acceptance case uses one shared enablement, marks the effect portable for PWA projection, and extends `/clear status` with shared state and named client exceptions.
+- 2026-10-26: Phase 7 completed with centralized discovery, Gateway-backed enablement, compatibility reporting, portable spotlight convergence, and contextual unavailable-effect guidance.
+- 2026-10-27: Phase 8 replaces the static help wall with structured command descriptors containing summary, usage, examples, topic, scope, availability requirements, and related commands. Loaded plugin commands are folded into the same help model at runtime.
+- 2026-10-27: `/help` lists only topics with currently available commands; `/help TOPIC` filters commands by context, while `/help COMMAND`, `/config help`, and `/plugins help` provide detailed command guidance and explicitly explain unavailable capabilities.
+- 2026-10-27: Unknown commands and help queries use deterministic close matches and next actions. Unknown settings retain registry suggestions and category links, while unknown effects now report plugin availability/enablement/failure/compatibility and point to plugin details.
+- 2026-10-27: Phase 8 completed with contextual topic/command discovery, structured generated help, dynamic plugin command help, availability filtering, and actionable correction guidance.
+- 2026-10-27: Phase 9 Gateway startup reads only an optional versioned bootstrap containing the managed state-directory location. It constructs ordinary defaults and overlays the Gateway document before creating connectors, sessions, plugins, agents, logging, updates, or web services.
+- 2026-10-27: Legacy JSONC and the former managed-overrides store no longer participate in Gateway runtime precedence. An empty Gateway document receives one atomic ordinary-value import with migration backups; later legacy files are detection/proposal inputs only and produce explicit ignored/unmigrated warnings. Bootstrap values and secrets other than migrated world logins remain separate setup concerns.
+- 2026-10-27: Remote native UIs use generated connection profiles and the synchronized effective view. They no longer persist mouse preferences in a separate local authority; temporary `/mouse` changes direct users to an individual-UI `/config set` for persistence.
+- 2026-10-27: Setup, Doctor, examples, schemas, and README now distinguish standalone legacy input from Gateway bootstrap and managed configuration. Phase 9 completed with the Gateway as sole authority for normal split/remote TFR configuration.
+- 2026-10-28: Candidate testing exposed three Phase 9 defects: individual-UI legacy values were incorrectly mapped to UI-type scope, `worlds.defaults.*` was applied as a world named `defaults`, and world login credentials were omitted. Corrective work separates UI scopes, applies world defaults to the correct model location, and atomically stages legacy world passwords in private files referenced by the managed document.
+- 2026-10-28: Help and plugin catalog output use dedicated multi-line transcript blocks with the originating request or command, whitespace separation, no generic dash wrapper, explicit help drill-down, grouped plugin state, and omission of unknown version placeholders.
+- 2026-10-28: The existing configuration commands are designated the stable low-level API rather than the final human interface. Routine configuration will use a menu-driven settings browser with inferred scope/target, trusted schema-generated controls, staged review, and atomic batch commit.
+- 2026-10-28: Structured plugin configuration uses bounded declarative form metadata rather than arbitrary plugin UI code. The first acceptance case is a speaker-effects rule editor that can add, edit, reorder, preview, and remove rules without exposing their JSON representation.
+- 2026-10-28: Phase 10 makes bare `/config` and `/settings` open the native keyboard-driven settings browser; `/config summary` retains the former aggregate text report, and all existing explicit subcommands remain the stable automation and advanced-user API.
+- 2026-10-28: Settings are grouped and searchable from registry and form metadata. Scalar, choice, nullable, color, string-list, world-template, current-UI, UI-type, named-UI, plugin, and reusable structured-collection controls infer normal targets while retaining an explicit advanced target path.
+- 2026-10-28: Setting descriptors may carry at most 32 KiB of JSON-only declarative form metadata. Clients render that metadata with trusted controls; no plugin-provided executable UI code crosses the configuration protocol.
+- 2026-10-28: `config_batch` validates up to 64 related changes against one expected revision, validates the complete proposed document, writes and audits one revision atomically, synchronizes clients once, and supports atomic undo of every change in that revision.
+- 2026-10-28: The speaker-effects acceptance editor reports plugin state, preserves and reorders existing rules, provides effect-aware comet fields, palette/custom colors, world and event-kind selection, and an unsaved Effects Lab preview. Adding Barnaby with comet and `#ffdd76` requires no JSON, registry key, scope, or target knowledge.
+- 2026-10-28: Phase 10 completed with deterministic registry, store, protocol, client, TUI, structured-form, sensitive-omission, batch-conflict, audit, undo, and Barnaby/comet coverage. Future PWA settings rendering can consume the same bounded form metadata without changing the authority or mutation model.

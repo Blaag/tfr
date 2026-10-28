@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -348,6 +349,45 @@ def test_ui_mode_passes_remote_gateway_options(
     assert values["gateway_host"] == "gateway.example.test"
     assert values["gateway_port"] == 7443
     assert values["token_file"] == tmp_path / "gateway.token"
+
+
+def test_ui_mode_uses_active_profile_without_a_configuration_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tfr.gateway_profiles import GatewayConnectionProfile, GatewayProfileStore
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    profile_store = GatewayProfileStore()
+    ui_id = uuid4()
+    profile_store.add(
+        GatewayConnectionProfile(
+            name="home",
+            host="gateway.example.test",
+            port=7443,
+            tls_server_name="gateway.example.test",
+            tls_ca=None,
+            credential_reference="credential:pending",
+            ui_id=ui_id,
+            ui_name="Office Terminal",
+        ),
+        "a" * 64,
+    )
+    values: dict[str, object] = {}
+
+    async def fake_run_gateway_ui(_configuration: object, **options: object) -> int:
+        values.update(options)
+        return 9
+
+    monkeypatch.setattr("tfr.gateway_client.run_gateway_ui", fake_run_gateway_ui)
+
+    result = run(["ui", "--config", str(tmp_path / "missing.jsonc")])
+
+    assert result == 9
+    assert values["gateway_host"] == "gateway.example.test"
+    assert values["client_id"] == ui_id
+    assert values["desired_ui_name"] == "Office Terminal"
+    assert values["auth_token"] == "a" * 64
 
 
 @pytest.mark.parametrize(

@@ -15,7 +15,9 @@ from tfr.config import (
     credential_permission_warning,
     default_config_directory,
     default_config_path,
+    gateway_bootstrap_bundle,
     load_configuration,
+    load_gateway_bootstrap,
     load_ui_configuration,
 )
 
@@ -104,6 +106,50 @@ def test_default_config_path_falls_back_to_home(
 
     assert default_config_directory() == tmp_path / ".config" / "tfr"
     assert default_config_path() == tmp_path / ".config" / "tfr" / "config.jsonc"
+
+
+def test_gateway_bootstrap_accepts_minimal_document(tmp_path: Path) -> None:
+    path = tmp_path / "gateway.jsonc"
+    path.write_text(
+        '{"schema_version": 1, "state_directory": "gateway-state"}',
+        encoding="utf-8",
+    )
+
+    bootstrap = load_gateway_bootstrap(path)
+    bundle = gateway_bootstrap_bundle(bootstrap)
+
+    assert bootstrap.legacy is False
+    assert bootstrap.warnings == ()
+    assert bootstrap.state_directory == (tmp_path / "gateway-state").resolve()
+    assert bundle.main.managed_settings.state_directory == bootstrap.state_directory
+    assert bundle.worlds.worlds == {}
+    assert bundle.agents.agents == {}
+
+
+def test_gateway_bootstrap_warns_and_ignores_legacy_values(tmp_path: Path) -> None:
+    path = tmp_path / "config.jsonc"
+    path.write_text(
+        '{"schema_version": 1, "ui": {"scrollback_lines": 7}, '
+        '"managed_settings": {"state_directory": "state"}}',
+        encoding="utf-8",
+    )
+
+    bootstrap = load_gateway_bootstrap(path)
+    bundle = gateway_bootstrap_bundle(bootstrap)
+
+    assert bootstrap.legacy is True
+    assert "unmigrated legacy configuration" in bootstrap.warnings[0]
+    assert bundle.main.ui.scrollback_lines == 20_000
+    assert bundle.main.managed_settings.state_directory == (tmp_path / "state").resolve()
+
+
+def test_gateway_bootstrap_does_not_require_a_file(tmp_path: Path) -> None:
+    path = tmp_path / "missing.jsonc"
+
+    bootstrap = load_gateway_bootstrap(path)
+
+    assert bootstrap.legacy is False
+    assert bootstrap.warnings == ()
 
 
 def test_loads_jsonc_and_resolves_references(tmp_path: Path) -> None:

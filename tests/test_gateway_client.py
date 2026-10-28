@@ -780,6 +780,36 @@ async def test_gateway_configuration_mutation_preview_history_and_undo(tmp_path:
         shown = await client.config_show("ui.spellcheck.enabled")
         assert shown["value"] is False
         assert shown["source"] == "default"
+
+        batch_changes = [
+            {
+                "operation": "set",
+                "key": "ui.spellcheck.enabled",
+                "value": True,
+                "scope": "shared",
+                "target": None,
+            },
+            {
+                "operation": "set",
+                "key": "ui.show_nospoof_prefix",
+                "value": True,
+                "scope": "shared",
+                "target": None,
+            },
+        ]
+        batch_preview = await client.config_batch(
+            batch_changes, expected_revision=2, confirm=False
+        )
+        assert batch_preview["requires_confirmation"] is True
+        assert len(batch_preview["changes"]) == 2
+        batch = await client.config_batch(batch_changes, expected_revision=2, confirm=True)
+        assert batch["revision"] == 3
+        assert (await client.config_show("ui.spellcheck.enabled"))["value"] is True
+        assert (await client.config_show("ui.show_nospoof_prefix"))["value"] is True
+        batch_undo = await client.config_undo(expected_revision=3, confirm=True)
+        assert batch_undo["key"] == "batch"
+        assert (await client.config_show("ui.spellcheck.enabled"))["value"] is False
+        assert (await client.config_show("ui.show_nospoof_prefix"))["value"] is False
     finally:
         await client.stop()
         await server.stop()
