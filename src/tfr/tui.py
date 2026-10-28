@@ -25,7 +25,7 @@ from uuid import UUID, uuid4
 import qrcode
 from PIL import Image
 from prompt_toolkit import Application
-from prompt_toolkit.application import get_app, in_terminal, run_in_terminal
+from prompt_toolkit.application import get_app, run_in_terminal
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.document import Document
@@ -49,7 +49,8 @@ from prompt_toolkit.shortcuts import (
     radiolist_dialog,
     yes_no_dialog,
 )
-from prompt_toolkit.styles import Style
+from prompt_toolkit.styles import Style, merge_styles
+from prompt_toolkit.styles.defaults import default_ui_style
 from prompt_toolkit.utils import get_cwidth
 
 from tfr.agents import AgentRuntime
@@ -182,6 +183,20 @@ _MAX_OBSERVED_SPEAKERS = 1_000
 _MAX_OBSERVED_SPEAKER_LENGTH = 64
 _MAX_PENDING_SPELLCHECK_ECHOES = 32
 _SPELLCHECK_ECHO_TIMEOUT_SECONDS = 10.0
+_SETTINGS_DIALOG_STYLE = merge_styles(
+    [
+        default_ui_style(),
+        Style.from_dict(
+            {
+                # The selected row is the keyboard cursor; checked/current values retain
+                # their (*)/[＊] marker independently. Reverse video remains visible in
+                # limited-color SSH and mosh terminals.
+                "radio-selected": "reverse bold",
+                "checkbox-selected": "reverse bold",
+            }
+        ),
+    ]
+)
 
 
 def _parse_web_pair_arguments(
@@ -4242,7 +4257,12 @@ class TfrTui:
         text: str,
         values: list[tuple[str, str]],
     ) -> str | None:
-        dialog = radiolist_dialog(title=title, text=text, values=values)
+        dialog = radiolist_dialog(
+            title=title,
+            text=f"{text}\n\n↑/↓ move · Enter select · Tab buttons · Esc cancel",
+            values=values,
+            style=_SETTINGS_DIALOG_STYLE,
+        )
         result = await self._run_settings_dialog(dialog)
         return str(result) if isinstance(result, str) else None
 
@@ -4254,8 +4274,7 @@ class TfrTui:
             dialog.exit(result=None)
 
         dialog.key_bindings = merge_key_bindings([dialog.key_bindings, escape])
-        async with in_terminal():
-            return await dialog.run_async()
+        return await run_in_terminal(dialog.run, in_executor=True)
 
     async def _settings_input(
         self,
@@ -4264,7 +4283,9 @@ class TfrTui:
         text: str,
         default: str = "",
     ) -> str | None:
-        dialog = input_dialog(title=title, text=text, default=default)
+        dialog = input_dialog(
+            title=title, text=text, default=default, style=_SETTINGS_DIALOG_STYLE
+        )
         result = await self._run_settings_dialog(dialog)
         return str(result) if isinstance(result, str) else None
 
@@ -4278,9 +4299,10 @@ class TfrTui:
     ) -> list[str] | None:
         dialog = checkboxlist_dialog(
             title=title,
-            text=text,
+            text=f"{text}\n\n↑/↓ move · Space toggle · Tab buttons · Esc cancel",
             values=values,
             default_values=defaults,
+            style=_SETTINGS_DIALOG_STYLE,
         )
         result = await self._run_settings_dialog(dialog)
         return list(result) if result is not None else None
@@ -4313,11 +4335,19 @@ class TfrTui:
         )
 
     async def _settings_confirm(self, *, title: str, text: str) -> bool:
-        dialog = yes_no_dialog(title=title, text=text, yes_text="Apply", no_text="Cancel")
+        dialog = yes_no_dialog(
+            title=title,
+            text=text,
+            yes_text="Apply",
+            no_text="Cancel",
+            style=_SETTINGS_DIALOG_STYLE,
+        )
         return bool(await self._run_settings_dialog(dialog))
 
     async def _settings_message(self, *, title: str, text: str) -> None:
-        dialog = message_dialog(title=title, text=text, ok_text="Continue")
+        dialog = message_dialog(
+            title=title, text=text, ok_text="Continue", style=_SETTINGS_DIALOG_STYLE
+        )
         await self._run_settings_dialog(dialog)
 
     async def _save_settings_value(

@@ -68,6 +68,7 @@ from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.tui import (
     _MAX_OBSERVED_SPEAKER_LENGTH,
     _MAX_OBSERVED_SPEAKERS,
+    _SETTINGS_DIALOG_STYLE,
     TfrTui,
     _format_elapsed,
     _multiline_paste_commands,
@@ -166,10 +167,11 @@ def test_catppuccin_theme_applies_to_ui_output_and_notices() -> None:
     assert "--" not in fragment_list_to_text(tui.active_view.display.rows[-1])
 
 
-async def test_settings_dialog_uses_async_application_runner(
+async def test_settings_dialog_suspends_tui_and_runs_in_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tui = make_tui()
+    captured: dict[str, object] = {}
 
     class Dialog:
         def __init__(self) -> None:
@@ -179,14 +181,28 @@ async def test_settings_dialog_uses_async_application_runner(
             raise AssertionError(f"unexpected exit: {result}")
 
         def run(self) -> str:
-            raise AssertionError("synchronous runner must not be used inside the TUI event loop")
-
-        async def run_async(self) -> str:
             return "selected"
 
+        async def run_async(self) -> str:
+            raise AssertionError("nested async application must not share the TUI renderer")
+
+    async def suspended_runner(callable_, *, in_executor: bool = False):
+        captured["in_executor"] = in_executor
+        return callable_()
+
     monkeypatch.setattr("tfr.tui.radiolist_dialog", lambda **_kwargs: Dialog())
+    monkeypatch.setattr("tfr.tui.run_in_terminal", suspended_runner)
 
     assert await tui._settings_choice(title="Settings", text="Choose", values=[]) == "selected"
+    assert captured == {"in_executor": True}
+
+
+def test_settings_keyboard_cursor_has_visible_terminal_independent_style() -> None:
+    radio = _SETTINGS_DIALOG_STYLE.get_attrs_for_style_str("class:radio-selected")
+    checkbox = _SETTINGS_DIALOG_STYLE.get_attrs_for_style_str("class:checkbox-selected")
+
+    assert radio.reverse is True and radio.bold is True
+    assert checkbox.reverse is True and checkbox.bold is True
 
 
 def test_output_color_overrides_theme_plain_text_color() -> None:
