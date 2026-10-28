@@ -378,6 +378,17 @@ built-in default → shared value → UI-type default → individual UI override
 **Phase completion:** complete. Routine configuration is discoverable and safely editable by
 a person without JSON, registry-key, scope, or target knowledge.
 
+### Post-phase usability follow-up
+
+- [ ] After keyboard behavior, rendering, permissions, mutation, and preview workflows are
+  proven functional in candidate testing, make every settings dialog follow the active TFR
+  theme. Map dialog background, border, title, focused row, selected marker, input, button,
+  warning, error, and confirmation styles to trusted theme roles while retaining a
+  high-contrast terminal-safe keyboard cursor for SSH and mosh.
+- [ ] Verify settings dialogs across every bundled theme, custom colors, reduced terminal
+  color capabilities, narrow terminals, SSH, and mosh before considering visual integration
+  complete.
+
 ---
 
 ## Per-phase working rules
@@ -462,4 +473,5 @@ a person without JSON, registry-key, scope, or target knowledge.
 - 2026-10-28: Phase 10 completed with deterministic registry, store, protocol, client, TUI, structured-form, sensitive-omission, batch-conflict, audit, undo, and Barnaby/comet coverage. Future PWA settings rendering can consume the same bounded form metadata without changing the authority or mutation model.
 - 2026-10-28: Settings dialogs suspend the main Prompt Toolkit renderer while their own asynchronous application is active, preventing interleaved screen artifacts. Arrow keys move, Enter selects, Tab changes buttons, and Escape consistently cancels the current dialog.
 - 2026-10-28: Radio and checkbox dialogs render the moving keyboard cursor with a theme-independent bold reverse-video row. The cursor highlight is separate from the `(*)` or `[*]` marker that records the selected value, so navigation remains visible in limited-color SSH and mosh terminals before selection.
+- 2026-10-28: Candidate testing prioritizes settings functionality over visual polish. Once navigation, rendering, permissions, edits, undo, and previews are proven reliable, settings dialogs will inherit the active TFR theme without weakening the terminal-safe focused-row contrast.
 - 2026-10-28: The authenticated native TLS token is an owner credential and grants the same configuration administration available on the local Unix socket. Restricted PWA device credentials remain on their separate limited protocol and cannot use owner configuration mutations.
