@@ -696,7 +696,10 @@ settings browser. It groups and searches editable settings, chooses the normal
 scope and target, provides typed controls and a review step, and supports reset
 and undo without requiring registry keys or JSON. Advanced users and automation
 can continue using `/config show`, `/config set`, and the other explicit
-subcommands; `/config summary` displays the aggregate inventory report.
+subcommands; `/config summary` displays the aggregate inventory report. Use the
+arrow keys to move, Enter to select, Tab to move between buttons, and Escape to
+cancel the current dialog. Authenticated native Gateway connections use the
+owner administration interface; restricted PWA devices do not.
 
 Structured plugin settings use trusted declarative forms. For example, open
 `Plugin: Speaker Effects` to add, edit, reorder, delete, and preview speaker
