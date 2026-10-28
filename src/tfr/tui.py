@@ -2294,7 +2294,7 @@ class TfrTui:
     def add_notice(self, alias: str, text: str) -> None:
         self.views[alias].clear_selection()
         self.views[alias].display.append(
-            self.theme.ansi_text("warning", f"-- {text} --"), recallable=False
+            self.theme.ansi_text("warning", f"\n{text}"), recallable=False
         )
         self.application.invalidate()
 
@@ -2897,7 +2897,7 @@ class TfrTui:
                 )
         elif event.kind is EventKind.PLUGIN and event.display_text is not None:
             view.clear_selection()
-            view.display.append(self.theme.ansi_text("error", f"-- {event.display_text} --"))
+            view.display.append(self.theme.ansi_text("error", event.display_text))
             should_count = True
         elif event.kind is EventKind.CONNECTION:
             state = event.metadata.get("state")
@@ -2905,7 +2905,7 @@ class TfrTui:
             if state == SessionState.CONNECTED.value:
                 view.clear_selection()
                 view.display.append(
-                    self.theme.ansi_text("success", f"-- Connected [{timestamp}] --")
+                    self.theme.ansi_text("success", f"Connected · [{timestamp}]")
                 )
                 should_count = True
             elif state == SessionState.DISCONNECTED.value:
@@ -2913,7 +2913,7 @@ class TfrTui:
                 reason = event.metadata.get("error")
                 suffix = f": {reason}" if reason else ""
                 view.display.append(
-                    self.theme.ansi_text("error", f"-- Disconnected{suffix} [{timestamp}] --")
+                    self.theme.ansi_text("error", f"Disconnected{suffix} · [{timestamp}]")
                 )
                 should_count = True
             elif state == SessionState.RECONNECT_WAIT.value:
@@ -2921,7 +2921,7 @@ class TfrTui:
                 delay = event.metadata.get("delay_seconds")
                 suffix = f" in {delay:g}s" if isinstance(delay, (int, float)) else ""
                 view.display.append(
-                    self.theme.ansi_text("warning", f"-- Reconnecting{suffix} [{timestamp}] --")
+                    self.theme.ansi_text("warning", f"Reconnecting{suffix} · [{timestamp}]")
                 )
                 should_count = True
         if should_count and (self.effects_lab_open or event.world != self.active_alias):
@@ -3612,7 +3612,7 @@ class TfrTui:
         self.effects_display.append(
             self.theme.ansi_text(
                 "warning",
-                "-- Effects Lab only accepts valid lab commands --",
+                "Effects Lab only accepts valid lab commands",
             ),
             recallable=False,
         )
@@ -3773,7 +3773,7 @@ class TfrTui:
             )
             return
         self.effects_display.append(
-            f"-- Configured speaker preview: {speaker} --", recallable=False
+            f"Configured speaker preview: {speaker}", recallable=False
         )
         world = next((candidate for candidate in demo.worlds if candidate in self.views), None)
         for sample in demo.samples:
@@ -4242,7 +4242,7 @@ class TfrTui:
         values: list[tuple[str, str]],
     ) -> str | None:
         dialog = radiolist_dialog(title=title, text=text, values=values)
-        return await run_in_terminal(dialog.run)
+        return await dialog.run_async()
 
     async def _settings_input(
         self,
@@ -4252,7 +4252,7 @@ class TfrTui:
         default: str = "",
     ) -> str | None:
         dialog = input_dialog(title=title, text=text, default=default)
-        return await run_in_terminal(dialog.run)
+        return await dialog.run_async()
 
     async def _settings_multiselect(
         self,
@@ -4268,7 +4268,7 @@ class TfrTui:
             values=values,
             default_values=defaults,
         )
-        result = await run_in_terminal(dialog.run)
+        result = await dialog.run_async()
         return list(result) if result is not None else None
 
     async def _settings_color(
@@ -4300,11 +4300,11 @@ class TfrTui:
 
     async def _settings_confirm(self, *, title: str, text: str) -> bool:
         dialog = yes_no_dialog(title=title, text=text, yes_text="Apply", no_text="Cancel")
-        return bool(await run_in_terminal(dialog.run))
+        return bool(await dialog.run_async())
 
     async def _settings_message(self, *, title: str, text: str) -> None:
         dialog = message_dialog(title=title, text=text, ok_text="Continue")
-        await run_in_terminal(dialog.run)
+        await dialog.run_async()
 
     async def _save_settings_value(
         self,
@@ -5773,7 +5773,7 @@ class TfrTui:
         view = self.views[alias]
         recalled = view.display.recent_entries(count)
         view.clear_selection()
-        view.display.append(self.theme.ansi_text("warning", f"-- Recall {count}"), recallable=False)
+        view.display.append(self.theme.ansi_text("warning", f"Recall {count}"), recallable=False)
         elapsed_seconds = self._animation_elapsed_seconds()
         for text, decorations, presentations, style_spans in recalled:
             replayed = tuple(

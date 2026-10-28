@@ -162,6 +162,24 @@ def test_catppuccin_theme_applies_to_ui_output_and_notices() -> None:
     tui.add_notice("alpha", "Themed notice")
 
     assert "#f9e2af" in tui.active_view.display.rows[-1][0][0]
+    assert "--" not in fragment_list_to_text(tui.active_view.display.rows[-1])
+
+
+async def test_settings_dialog_uses_async_application_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tui = make_tui()
+
+    class Dialog:
+        def run(self) -> str:
+            raise AssertionError("synchronous runner must not be used inside the TUI event loop")
+
+        async def run_async(self) -> str:
+            return "selected"
+
+    monkeypatch.setattr("tfr.tui.radiolist_dialog", lambda **_kwargs: Dialog())
+
+    assert await tui._settings_choice(title="Settings", text="Choose", values=[]) == "selected"
 
 
 def test_output_color_overrides_theme_plain_text_color() -> None:
@@ -1117,7 +1135,8 @@ async def test_web_commands_manage_devices_through_attached_gateway() -> None:
 
     runtime = WebRuntime()
     tui = make_tui(service_runtime=runtime)
-    tui.active_view.display.resize(width=120, height=220)
+    tui.active_view.display.max_rows = 500
+    tui.active_view.display.resize(width=120, height=300)
 
     for command in (
         "/web status",
@@ -1519,7 +1538,7 @@ async def test_recall_appends_retained_rows_after_a_screen_clear() -> None:
     await tui._handle_client_command("alpha", "/recall 2")
 
     rows = view.display.visible_rows()
-    assert fragment_list_to_text(view.display.formatted_text()) == "-- Recall 2\nsecond\nthird"
+    assert fragment_list_to_text(view.display.formatted_text()) == "Recall 2\nsecond\nthird"
     assert "ansiyellow" in rows[0][0][0]
 
 
@@ -1535,7 +1554,7 @@ async def test_recall_output_is_anchored_to_the_bottom_of_the_pane() -> None:
     await tui._handle_client_command("alpha", "/recall 2")
 
     lines = fragment_list_to_text(view.output_text()).split("\n")
-    assert lines == ["", "", "", "", "", "", "", "-- Recall 2", "second", "third"]
+    assert lines == ["", "", "", "", "", "", "", "Recall 2", "second", "third"]
 
 
 async def test_recall_replays_speaker_and_terminal_reveal_effects(
@@ -1634,7 +1653,7 @@ async def test_recall_does_not_recall_previous_recall_blocks() -> None:
     await tui._handle_client_command("alpha", "/recall 1")
     await tui._handle_client_command("alpha", "/recall 1")
 
-    assert fragment_list_to_text(view.display.formatted_text()).endswith("-- Recall 1\nsource line")
+    assert fragment_list_to_text(view.display.formatted_text()).endswith("Recall 1\nsource line")
     recalled = view.display.recent_rows(1)
     assert fragment_list_to_text(list(recalled[0])) == "source line"
 
@@ -1647,7 +1666,7 @@ async def test_recall_uses_only_the_requested_world_history() -> None:
     await tui._handle_client_command("beta", "/recall 1")
 
     beta_text = fragment_list_to_text(tui.views["beta"].display.formatted_text())
-    assert beta_text.endswith("-- Recall 1\nbeta line")
+    assert beta_text.endswith("Recall 1\nbeta line")
     assert "alpha line" not in beta_text
 
 
@@ -1660,8 +1679,8 @@ async def test_recall_excludes_local_client_command_notices() -> None:
     await tui._handle_client_command("alpha", "/recall 1")
 
     text = fragment_list_to_text(view.display.formatted_text())
-    assert text.endswith("-- Recall 1\nworld output")
-    assert "TFR commands" not in text.rsplit("-- Recall 1", 1)[-1]
+    assert text.endswith("Recall 1\nworld output")
+    assert "TFR commands" not in text.rsplit("Recall 1", 1)[-1]
 
 
 @pytest.mark.parametrize("command", ["/recall", "/recall two", "/recall 1 2"])
@@ -2185,14 +2204,14 @@ async def test_screen_clear_after_recall_uses_the_full_pane_as_its_floor() -> No
     assert task is not None
     tui.screen_clear_text()
 
-    # /recall left only 3 buffered rows ("-- Recall 2", "second", "third") in
+    # /recall left only 3 buffered rows ("Recall 2", "second", "third") in
     # a 10-row pane. The animation's geometry must still span the pane's
     # true height, with the recalled text anchored at the bottom -- not
     # shrink to only the buffered rows, which would put the animation's
     # floor at the last recalled row instead of the pane's actual bottom.
     assert len(captured[0].lines) == 10
     assert captured[0].lines[:7] == ("",) * 7
-    assert captured[0].lines[7:] == ("-- Recall 2", "second", "third")
+    assert captured[0].lines[7:] == ("Recall 2", "second", "third")
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -3502,9 +3521,9 @@ def test_world_transition_notices_include_local_and_utc_timestamps() -> None:
         )
 
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
-    assert "Connected [local " in text
-    assert "Disconnected: remote closed [local " in text
-    assert "Reconnecting in 5s [local " in text
+    assert "Connected · [local " in text
+    assert "Disconnected: remote closed · [local " in text
+    assert "Reconnecting in 5s · [local " in text
     assert text.count("UTC 2026-09-28 18:34:56 UTC") == 3
 
 
