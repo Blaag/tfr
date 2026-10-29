@@ -230,13 +230,9 @@ class GatewayMigrationStore:
             descriptor = self.configuration.registry.get(key)
             if descriptor is None:
                 raise ValueError(f"migration setting is no longer registered: {key}")
-            if scope in {"bootstrap", "secret"} or any(
-                setting.sensitive for _proposal, setting in candidates
-            ):
-                reason = "secret" if any(
-                    setting.sensitive for _proposal, setting in candidates
-                ) else scope
-                skipped.append({"key": key, "reason": f"{reason} values require separate setup"})
+            if scope == "bootstrap":
+                # Bootstrap metadata remains in the bootstrap files that were
+                # necessarily loaded before the managed store existed.
                 continue
             managed, _managed_value = self.configuration.get(key, scope=scope, target=target)
             if managed:
@@ -245,6 +241,13 @@ class GatewayMigrationStore:
                         "key": key,
                         "reason": "already managed; the existing Gateway value is preserved",
                     }
+                )
+                continue
+            if scope == "secret" or any(
+                setting.sensitive for _proposal, setting in candidates
+            ):
+                skipped.append(
+                    {"key": key, "reason": "secure storage could not be prepared automatically"}
                 )
                 continue
             unique = {_canonical(item.value) for _proposal, item in candidates}

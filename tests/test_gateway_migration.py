@@ -119,6 +119,45 @@ def test_speaker_rules_are_migrated_and_unknown_plugin_leaves_are_reported(
     } in preview["skipped"]
 
 
+def test_bootstrap_metadata_is_silent_and_existing_secret_reference_is_preserved(
+    tmp_path: Path,
+) -> None:
+    registry = core_configuration_registry()
+    configuration = GatewayConfigurationStore(tmp_path / "state", registry)
+    configuration.set(
+        "worlds.alpha.login.password",
+        "file:/private/alpha.password",
+        scope="secret",
+        target=None,
+        expected_revision=0,
+        actor_ui_id="migration",
+        actor_ui_name="Migration",
+    )
+    migration = GatewayMigrationStore(tmp_path / "state", configuration)
+    submit(
+        migration,
+        ui_id=uuid4(),
+        ui_name="Gateway legacy configuration",
+        values={
+            "schema_version": 1,
+            "worlds_file": "worlds.jsonc",
+            "worlds.alpha.login.password": None,
+        },
+        source=tmp_path / "config.jsonc",
+    )
+
+    preview = migration.preview()
+
+    assert preview["conflicts"] == []
+    assert preview["accepted"] == []
+    assert preview["skipped"] == [
+        {
+            "key": "worlds.alpha.login.password",
+            "reason": "already managed; the existing Gateway value is preserved",
+        }
+    ]
+
+
 def test_incremental_migration_preserves_existing_managed_values(tmp_path: Path) -> None:
     registry = core_configuration_registry()
     configuration = GatewayConfigurationStore(tmp_path / "state", registry)
