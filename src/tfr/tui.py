@@ -1435,10 +1435,6 @@ class TfrTui:
             input=input,
             output=output,
         )
-        # A bare Escape is ambiguous with the prefix of terminal key sequences.
-        # Prompt Toolkit's default is perceptibly slow for modal cancellation.
-        self.application.ttimeoutlen = 0.1
-        self.application.timeoutlen = 0.1
         self.plugins.initialize_boss_selection(boss_screen_mode, boss_screen)
         self.plugins.set_notice_handler(self.add_notice)
         self.plugins.set_boss_state_handler(self._boss_state_changed)
@@ -4347,9 +4343,15 @@ class TfrTui:
                 escape if bindings is None else merge_key_bindings([bindings, escape])
             )
         previous_control = self.application.layout.current_control
+        previous_ttimeoutlen = self.application.ttimeoutlen
+        previous_timeoutlen = self.application.timeoutlen
         future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
         self._settings_dialog = dialog
         self._settings_dialog_result = future
+        # Make a bare Escape responsive only while a modal menu owns input.
+        # Outside settings, retain Prompt Toolkit's normal sequence timing.
+        self.application.ttimeoutlen = 0.1
+        self.application.timeoutlen = 0.1
         self.application.layout.focus(focus)
         self.application.invalidate()
         try:
@@ -4357,6 +4359,8 @@ class TfrTui:
         finally:
             self._settings_dialog = None
             self._settings_dialog_result = None
+            self.application.ttimeoutlen = previous_ttimeoutlen
+            self.application.timeoutlen = previous_timeoutlen
             self.application.layout.focus(previous_control)
             self.application.invalidate()
 
@@ -5438,7 +5442,7 @@ class TfrTui:
                     if isinstance(item, dict)
                     and (
                         str(item.get("reason", "")).startswith("unrecognized setting")
-                        or "require separate setup" in str(item.get("reason", ""))
+                        or str(item.get("reason", "")).startswith("secure storage")
                     )
                 ]
                 lines = [

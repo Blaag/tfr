@@ -639,6 +639,30 @@ class GatewayRuntime:
             initial_registry,
             defer_plugin_validation=True,
         )
+        missing_login_keys = {
+            f"worlds.{name}.login.password"
+            for name, world in source_bundle.worlds.worlds.items()
+            if world.login is not None
+            and not gateway_configuration.get(
+                f"worlds.{name}.login.password", scope="secret"
+            )[0]
+        }
+        if missing_login_keys:
+            references = _stage_legacy_world_login_references(
+                source_bundle,
+                bundle.main.managed_settings.state_directory,
+                only_keys=missing_login_keys,
+            )
+            for key, reference in references.items():
+                gateway_configuration.set(
+                    key,
+                    reference,
+                    scope="secret",
+                    target=None,
+                    expected_revision=gateway_configuration.revision,
+                    actor_ui_id="migration",
+                    actor_ui_name="Automatic legacy secret migration",
+                )
         gateway_document = gateway_configuration.document
         if (
             gateway_configuration.revision == 0
@@ -3403,11 +3427,14 @@ class GatewayServer:
 def _stage_legacy_world_login_references(
     bundle: ConfigurationBundle,
     state_directory: Path,
+    *,
+    only_keys: set[str] | None = None,
 ) -> dict[str, str]:
     directory = state_directory / "migration-secrets"
     references: dict[str, str] = {}
     for name, world in bundle.worlds.worlds.items():
-        if world.login is None:
+        key = f"worlds.{name}.login.password"
+        if world.login is None or (only_keys is not None and key not in only_keys):
             continue
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(directory, 0o700)
@@ -3424,7 +3451,7 @@ def _stage_legacy_world_login_references(
             os.chmod(destination, 0o600)
         finally:
             Path(temporary).unlink(missing_ok=True)
-        references[f"worlds.{name}.login.password"] = f"file:{destination}"
+        references[key] = f"file:{destination}"
     return references
 
 

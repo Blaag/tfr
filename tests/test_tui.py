@@ -170,6 +170,8 @@ async def test_settings_dialog_uses_main_renderer_and_keyboard_navigation() -> N
     started = asyncio.Event()
     with create_pipe_input() as input:
         tui = make_tui(input=input)
+        original_ttimeoutlen = tui.application.ttimeoutlen
+        original_timeoutlen = tui.application.timeoutlen
         application_ids: list[int] = []
 
         async def exercise_dialog() -> None:
@@ -187,6 +189,8 @@ async def test_settings_dialog_uses_main_renderer_and_keyboard_navigation() -> N
             while tui.application.render_counter == render_counter:
                 await asyncio.sleep(0)
             application_ids.append(id(tui.application))
+            assert tui.application.ttimeoutlen == 0.1
+            assert tui.application.timeoutlen == 0.1
             input.send_text("\x1b[B")
             await asyncio.sleep(0.05)
             input.send_text("\r")
@@ -231,8 +235,8 @@ async def test_settings_dialog_uses_main_renderer_and_keyboard_navigation() -> N
         assert result == 0
         assert application_ids == [id(tui.application)] * 3
         assert tui.application._running_in_terminal is False
-        assert tui.application.ttimeoutlen == 0.1
-        assert tui.application.timeoutlen == 0.1
+        assert tui.application.ttimeoutlen == original_ttimeoutlen
+        assert tui.application.timeoutlen == original_timeoutlen
 
 
 def test_settings_keyboard_cursor_has_visible_terminal_independent_style() -> None:
