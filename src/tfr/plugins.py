@@ -984,6 +984,21 @@ class PluginManager:
         portable = set(self.configured_portable_plugins())
         for name in sorted(set(self._available_plugins) | set(self.requested_plugins)):
             configuration = self.registry.configurations.get(name)
+            builtin_settings: list[dict[str, object]] = []
+            if name == "speaker_effects" and configuration is None:
+                from tfr.core_settings import core_configuration_registry
+
+                descriptor = core_configuration_registry().get(
+                    "plugins.config.speaker_effects.rules"
+                )
+                if descriptor is not None:
+                    builtin_settings.append(descriptor.as_dict())
+            builtin_summary = (
+                "Apply configurable presentation effects to named speakers"
+                if name == "speaker_effects"
+                else "Discovered TFR plugin"
+            )
+            builtin_category = "effects" if name == "speaker_effects" else "other"
             capabilities = sorted(
                 {
                     kind
@@ -1000,18 +1015,21 @@ class PluginManager:
                     )
                 }
             )
+            if builtin_settings:
+                capabilities.append("configuration")
+                capabilities.sort()
             output.append(
                 {
                     "name": name,
                     "summary": (
-                        configuration.summary if configuration else "Discovered TFR plugin"
+                        configuration.summary if configuration else builtin_summary
                     ),
-                    "category": configuration.category if configuration else "other",
+                    "category": configuration.category if configuration else builtin_category,
                     "version": configuration.version if configuration else "unknown",
                     "settings": (
                         [setting.as_dict() for setting in configuration.settings]
                         if configuration
-                        else []
+                        else builtin_settings
                     ),
                     "capabilities": capabilities,
                     "available": name in self._available_plugins,

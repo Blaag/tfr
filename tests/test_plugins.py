@@ -126,6 +126,25 @@ async def test_plugin_catalog_distinguishes_available_enabled_loaded_and_portabl
     assert "screen-clear" in item["capabilities"]
 
 
+async def test_speaker_effects_catalog_includes_first_party_configuration_metadata() -> None:
+    manager = await PluginManager.load(
+        enabled=("speaker_effects",),
+        config={"speaker_effects": {}},
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        discovered=(FakeEntryPoint("speaker_effects", SpotlightPlugin()),),
+        scope="ui",
+    )
+
+    item = manager.catalog()[0]
+
+    assert item["category"] == "effects"
+    assert item["summary"] == "Apply configurable presentation effects to named speakers"
+    assert "configuration" in item["capabilities"]
+    assert item["settings"][0]["key"] == "plugins.config.speaker_effects.rules"
+
+
 def inbound_event(session_id: Any, *, text: str = "hello") -> Event:
     return Event(
         session_id=session_id,

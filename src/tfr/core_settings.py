@@ -35,6 +35,14 @@ def _setting(
     maximum_length: int | None = None,
     pattern: str | None = None,
 ) -> SettingDescriptor:
+    if (
+        restart is RestartRequirement.LIVE
+        and key.startswith("ui.")
+        and key not in {"ui.spellcheck.enabled", "ui.speaking_streaks.enabled"}
+    ):
+        # Native UI state is constructed once at startup. Keep the small set of
+        # settings with explicit live handlers live; report the rest honestly.
+        restart = RestartRequirement.CLIENT_RESTART
     return SettingDescriptor(
         key=key,
         value_type=value_type,
@@ -484,6 +492,14 @@ def core_setting_descriptors() -> tuple[SettingDescriptor, ...]:
             restart=RestartRequirement.CLIENT_RELOAD,
         ),
         _setting(
+            "plugins.config.speaker_effects.rules",
+            SettingType.JSON,
+            [],
+            SettingScope.PLUGIN,
+            GATEWAY_AND_UI,
+            restart=RestartRequirement.GATEWAY_RESTART,
+        ),
+        _setting(
             "plugins.sources",
             SettingType.JSON,
             [],
@@ -775,4 +791,8 @@ def core_setting_descriptors() -> tuple[SettingDescriptor, ...]:
 
 
 def core_configuration_registry() -> ConfigurationRegistry:
-    return ConfigurationRegistry(core_setting_descriptors())
+    from tfr.configuration_forms import with_builtin_form_metadata
+
+    return ConfigurationRegistry(
+        tuple(with_builtin_form_metadata(item) for item in core_setting_descriptors())
+    )

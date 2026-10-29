@@ -6,7 +6,12 @@ from dataclasses import replace
 import pytest
 
 from tfr.config import AgentsConfig, MainConfig, WorldDefaults, WorldsConfig
-from tfr.configuration_registry import NO_DEFAULT, ConfigurationRegistry, SettingScope
+from tfr.configuration_registry import (
+    NO_DEFAULT,
+    ConfigurationRegistry,
+    RestartRequirement,
+    SettingScope,
+)
 from tfr.core_settings import core_configuration_registry, core_setting_descriptors
 
 
@@ -50,6 +55,23 @@ def test_core_registry_tracks_world_defaults_and_dynamic_setting_templates() -> 
     assert password is not None and password.sensitivity is True
     assert password.scope is SettingScope.SECRET
     assert model is not None and model.key == "agents.*.model"
+
+
+def test_ui_restart_metadata_and_speaker_editor_are_always_available() -> None:
+    registry = core_configuration_registry()
+
+    typing_glow = registry.get("ui.typing_glow.enabled")
+    spellcheck = registry.get("ui.spellcheck.enabled")
+    speaker_rules = registry.get("plugins.config.speaker_effects.rules")
+
+    assert typing_glow is not None
+    assert typing_glow.restart is RestartRequirement.CLIENT_RESTART
+    assert spellcheck is not None
+    assert spellcheck.restart is RestartRequirement.LIVE
+    assert speaker_rules is not None
+    assert speaker_rules.restart is RestartRequirement.GATEWAY_RESTART
+    assert speaker_rules.form is not None
+    assert speaker_rules.form["editor"] == "collection"
 
 
 def test_core_registry_is_unique_sorted_and_read_only_metadata() -> None:

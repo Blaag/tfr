@@ -14,6 +14,7 @@ from tfr.gateway_configuration import GatewayConfigurationStore, apply_gateway_c
 from tfr.gateway_migration import (
     GatewayMigrationStore,
     collect_migration_settings,
+    collect_omitted_migration_keys,
     new_proposal,
 )
 
@@ -39,6 +40,9 @@ def submit(
             base_revision=migration.configuration.revision,
             settings=settings,
             source_files=(str(source),),
+            omitted_keys=collect_omitted_migration_keys(
+                values, core_configuration_registry()
+            ),
         )
     )
 
@@ -74,6 +78,77 @@ def test_matching_shared_values_deduplicate_and_ui_values_remain_separate(
     accepted = preview["accepted"]
     assert sum(item["key"] == "ui.spellcheck.enabled" for item in accepted) == 1
     assert sum(item["key"] == "ui.mouse_mode" for item in accepted) == 2
+
+
+def test_speaker_rules_are_migrated_and_unknown_plugin_leaves_are_reported(
+    tmp_path: Path,
+) -> None:
+    configuration = GatewayConfigurationStore(tmp_path / "state", core_configuration_registry())
+    migration = GatewayMigrationStore(tmp_path / "state", configuration)
+    values = {
+        "plugins.config": {
+            "speaker_effects": {"rules": [{"speaker": "Barnaby", "effect": "comet"}]},
+            "unknown_plugin": {"nested": {"value": 3}},
+        }
+    }
+    submit(
+        migration,
+        ui_id=uuid4(),
+        ui_name="Terminal",
+        values=values,
+        source=tmp_path / "config.jsonc",
+    )
+
+    preview = migration.preview()
+
+    assert preview["accepted"][0]["key"] == "plugins.config.speaker_effects.rules"
+    assert preview["accepted"][0]["value"][0]["speaker"] == "Barnaby"
+    assert preview["restart"] == "gateway-restart"
+    assert {
+        "key": "plugins.config.unknown_plugin.nested.value",
+        "reason": "unrecognized setting; retained in the source file but not imported",
+        "source": "Terminal",
+    } in preview["skipped"]
+
+
+def test_incremental_migration_preserves_existing_managed_values(tmp_path: Path) -> None:
+    registry = core_configuration_registry()
+    configuration = GatewayConfigurationStore(tmp_path / "state", registry)
+    configuration.set(
+        "ui.spellcheck.enabled",
+        False,
+        scope="shared",
+        target=None,
+        expected_revision=0,
+        actor_ui_id="owner",
+        actor_ui_name="Owner",
+    )
+    migration = GatewayMigrationStore(tmp_path / "state", configuration)
+    submit(
+        migration,
+        ui_id=uuid4(),
+        ui_name="Terminal",
+        values={
+            "ui.spellcheck.enabled": True,
+            "plugins.config": {
+                "speaker_effects": {
+                    "rules": [{"speaker": "Barnaby", "effect": "comet"}]
+                }
+            },
+        },
+        source=tmp_path / "config.jsonc",
+    )
+
+    preview = migration.preview()
+
+    assert [item["key"] for item in preview["accepted"]] == [
+        "plugins.config.speaker_effects.rules"
+    ]
+    assert preview["restart"] == "gateway-restart"
+    assert {
+        "key": "ui.spellcheck.enabled",
+        "reason": "already managed; the existing Gateway value is preserved",
+    } in preview["skipped"]
 
 
 def test_gateway_import_keeps_per_ui_settings_out_of_ui_type_scope(tmp_path: Path) -> None:
@@ -353,7 +428,7 @@ def test_secret_proposals_never_include_plaintext(tmp_path: Path) -> None:
     assert "super-secret" not in str(settings[0].as_dict())
 
 
-def test_client_backup_preserves_legacy_file_and_marker_disables_proposal(
+def test_client_backup_preserves_legacy_file_and_marker_allows_incremental_recovery(
     tmp_path: Path,
 ) -> None:
     from tfr.config import MainConfig, UiConfiguration
@@ -371,4 +446,4 @@ def test_client_backup_preserves_legacy_file_and_marker_disables_proposal(
 
     assert source.read_text(encoding="utf-8") == '{"ui":{"mouse_mode":"terminal"}}'
     assert source.with_name(f"{source.name}.pre-tfr-migration").is_file()
-    assert _legacy_migration_values(configuration) == {}
+    assert _legacy_migration_values(configuration)["ui.mouse_mode"] == "terminal"

@@ -54,6 +54,7 @@ class MigrationProposal:
     submitted_at: str
     settings: tuple[MigrationSetting, ...]
     source_files: tuple[str, ...] = ()
+    omitted_keys: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -64,6 +65,7 @@ class MigrationProposal:
             "submitted_at": self.submitted_at,
             "settings": [item.as_dict() for item in self.settings],
             "source_files": list(self.source_files),
+            "omitted_keys": list(self.omitted_keys),
         }
 
 
@@ -121,6 +123,35 @@ def collect_migration_settings(
             )
         )
     return tuple(output)
+
+
+def collect_omitted_migration_keys(
+    values: dict[str, object], registry: ConfigurationRegistry
+) -> tuple[str, ...]:
+    """Return leaf paths migration cannot safely interpret; never include values."""
+
+    omitted: list[str] = []
+    for key, value in values.items():
+        if key == "plugins.config" and isinstance(value, dict):
+            for plugin, plugin_value in value.items():
+                _collect_unknown_leaves(
+                    omitted, f"plugins.config.{plugin}", plugin_value, registry
+                )
+        elif registry.get(key) is None:
+            _collect_unknown_leaves(omitted, key, value, registry)
+    return tuple(sorted(set(omitted)))
+
+
+def _collect_unknown_leaves(
+    output: list[str], prefix: str, value: object, registry: ConfigurationRegistry
+) -> None:
+    if registry.get(prefix) is not None:
+        return
+    if isinstance(value, dict) and value:
+        for name, item in value.items():
+            _collect_unknown_leaves(output, f"{prefix}.{name}", item, registry)
+    else:
+        output.append(prefix)
 
 
 def _flatten_plugin_config(
@@ -185,6 +216,16 @@ class GatewayMigrationStore:
         accepted: list[dict[str, object]] = []
         conflicts: list[dict[str, object]] = []
         skipped: list[dict[str, object]] = []
+        restart_requirements: list[str] = []
+        for proposal in self.proposals.values():
+            skipped.extend(
+                {
+                    "key": key,
+                    "reason": "unrecognized setting; retained in the source file but not imported",
+                    "source": proposal.ui_name,
+                }
+                for key in proposal.omitted_keys
+            )
         for (scope, target, key), candidates in sorted(grouped.items()):
             if scope in {"bootstrap", "secret"} or any(
                 setting.sensitive for _proposal, setting in candidates
@@ -193,6 +234,15 @@ class GatewayMigrationStore:
                     setting.sensitive for _proposal, setting in candidates
                 ) else scope
                 skipped.append({"key": key, "reason": f"{reason} values require separate setup"})
+                continue
+            managed, _managed_value = self.configuration.get(key, scope=scope, target=target)
+            if managed:
+                skipped.append(
+                    {
+                        "key": key,
+                        "reason": "already managed; the existing Gateway value is preserved",
+                    }
+                )
                 continue
             unique = {_canonical(item.value) for _proposal, item in candidates}
             renamed_target: str | None = None
@@ -240,6 +290,10 @@ class GatewayMigrationStore:
                     )
                     continue
             proposal, setting = selected
+            descriptor = self.configuration.registry.get(key)
+            if descriptor is None:
+                raise ValueError(f"migration setting is no longer registered: {key}")
+            restart_requirements.append(descriptor.restart.value)
             accepted_target = renamed_target if len(unique) > 1 and renamed_target else target
             accepted_key = key
             if renamed_target and scope == "world" and target:
@@ -260,6 +314,7 @@ class GatewayMigrationStore:
             "accepted": accepted,
             "conflicts": conflicts,
             "skipped": skipped,
+            "restart": _maximum_restart(restart_requirements),
         }
 
     def apply(
@@ -453,6 +508,7 @@ def _proposal_from_dict(value: object) -> MigrationProposal:
         submitted_at=str(value["submitted_at"]),
         settings=settings,
         source_files=tuple(str(item) for item in value.get("source_files", [])),
+        omitted_keys=tuple(str(item) for item in value.get("omitted_keys", [])),
     )
 
 
@@ -463,12 +519,22 @@ def new_proposal(
     base_revision: int,
     settings: tuple[MigrationSetting, ...],
     source_files: tuple[str, ...] = (),
+    omitted_keys: tuple[str, ...] = (),
 ) -> MigrationProposal:
-    return MigrationProposal(uuid4(), ui_id, ui_name, base_revision, _now(), settings, source_files)
+    return MigrationProposal(
+        uuid4(), ui_id, ui_name, base_revision, _now(), settings, source_files, omitted_keys
+    )
 
 
 def _canonical(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _maximum_restart(values: list[str]) -> str:
+    if not values:
+        return "live"
+    ranks = {"live": 0, "client-reload": 1, "client-restart": 2, "gateway-restart": 3}
+    return max(values, key=lambda value: ranks.get(value, 4))
 
 
 def _now() -> str:
