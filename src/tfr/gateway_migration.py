@@ -346,10 +346,6 @@ class GatewayMigrationStore:
         with self._lock:
             if expected_revision != self.configuration.revision:
                 raise ValueError("configuration changed after migration proposals were collected")
-            if any(
-                proposal.base_revision != expected_revision for proposal in self.proposals.values()
-            ):
-                raise ValueError("migration proposal is stale; submit it again")
             preview = self._preview_locked(choices or {})
             if preview["conflicts"]:
                 raise ValueError("migration has unresolved conflicts")

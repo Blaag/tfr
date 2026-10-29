@@ -378,7 +378,7 @@ def test_conflicting_same_name_world_can_be_renamed(tmp_path: Path) -> None:
     assert preview["accepted"][0]["value"] == "two.example"
 
 
-def test_late_stale_proposal_cannot_override_and_rollback_is_atomic(tmp_path: Path) -> None:
+def test_older_proposal_rebases_without_overriding_managed_values(tmp_path: Path) -> None:
     configuration = GatewayConfigurationStore(tmp_path / "state", core_configuration_registry())
     migration = GatewayMigrationStore(tmp_path / "state", configuration)
     source = tmp_path / "config.jsonc"
@@ -387,51 +387,34 @@ def test_late_stale_proposal_cannot_override_and_rollback_is_atomic(tmp_path: Pa
         migration,
         ui_id=uuid4(),
         ui_name="One",
-        values={"ui.spellcheck.enabled": True},
+        values={
+            "ui.spellcheck.enabled": False,
+            "logging.directory": "/legacy/logs",
+        },
         source=source,
     )
-    assert (
-        migration.apply(
-            expected_revision=0,
-            choices=None,
-            actor_ui_id="admin",
-            actor_ui_name="Admin",
-        )
-        == 1
+    configuration.set(
+        "ui.spellcheck.enabled",
+        True,
+        scope="shared",
+        target=None,
+        expected_revision=0,
+        actor_ui_id="owner",
+        actor_ui_name="Owner",
     )
 
-    late = uuid4()
-    settings = collect_migration_settings(
-        {"ui.spellcheck.enabled": False},
-        core_configuration_registry(),
-        ui_id=late,
-        source=str(source),
-    )
-    migration.submit(
-        new_proposal(
-            ui_id=late,
-            ui_name="Late",
-            base_revision=0,
-            settings=settings,
-        )
-    )
-    with pytest.raises(ValueError, match="stale"):
-        migration.apply(
-            expected_revision=1,
-            choices={"ui.spellcheck.enabled": "Late"},
-            actor_ui_id="admin",
-            actor_ui_name="Admin",
-        )
+    assert migration.apply(
+        expected_revision=1,
+        choices=None,
+        actor_ui_id="admin",
+        actor_ui_name="Admin",
+    ) == 2
 
-    assert (
-        migration.rollback(
-            expected_revision=1,
-            actor_ui_id="admin",
-            actor_ui_name="Admin",
-        )
-        == 2
+    assert configuration.get("ui.spellcheck.enabled", scope="shared") == (True, True)
+    assert configuration.get("logging.directory", scope="gateway") == (
+        True,
+        "/legacy/logs",
     )
-    assert configuration.get("ui.spellcheck.enabled", scope="shared") == (False, None)
 
 
 def test_interrupted_apply_keeps_active_configuration_and_clears_pending_state(

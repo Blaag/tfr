@@ -563,6 +563,26 @@ def scrollback_for(bundle: ConfigurationBundle, alias: str) -> int:
     return bundle.main.ui.scrollback_lines
 
 
+def _record_plugin_catalog(state_directory: Path, names: tuple[str, ...]) -> tuple[str, ...]:
+    path = state_directory.expanduser() / "known-plugins.json"
+    previous: set[str] = set()
+    if path.is_file():
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(value, list) and all(isinstance(item, str) for item in value):
+                previous = set(value)
+        except (OSError, ValueError):
+            previous = set()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    combined = previous | set(names)
+    temporary.write_text(json.dumps(sorted(combined)) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+    return tuple(sorted(set(names) - previous)) if previous else ()
+
+
 class GatewayRuntime:
     def __init__(
         self,
@@ -588,6 +608,7 @@ class GatewayRuntime:
         gateway_configuration: GatewayConfigurationStore | None = None,
         configuration_bundle: ConfigurationBundle | None = None,
         gateway_migration: GatewayMigrationStore | None = None,
+        new_plugins: tuple[str, ...] = (),
     ) -> None:
         self.event_bus = event_bus
         self.command_bus = command_bus
@@ -610,6 +631,7 @@ class GatewayRuntime:
         self.gateway_configuration = gateway_configuration
         self.configuration_bundle = configuration_bundle
         self.gateway_migration = gateway_migration
+        self.new_plugins = new_plugins
         self.gateway_id = uuid4()
         self._started = False
         self._update_task: asyncio.Task[None] | None = None
@@ -767,6 +789,10 @@ class GatewayRuntime:
             scope=plugin_scope,
             event_visibility=gag_policy.allows,
         )
+        new_plugins = _record_plugin_catalog(
+            bundle.main.plugins.state_directory,
+            tuple(str(item["name"]) for item in plugins.catalog()),
+        )
         configuration_registry = core_configuration_registry()
         for descriptor in plugins.registry.configuration_descriptors():
             if not any(
@@ -922,6 +948,7 @@ class GatewayRuntime:
             gateway_configuration=gateway_configuration,
             configuration_bundle=bundle,
             gateway_migration=gateway_migration,
+            new_plugins=new_plugins,
         )
 
     async def start(self) -> None:
@@ -1493,6 +1520,7 @@ class GatewayServer:
         self._update_gateway_restart = False
         self._update_force = False
         self._update_task: asyncio.Task[None] | None = None
+        self._plugin_catalog_task: asyncio.Task[None] | None = None
         self._update_restart = asyncio.Event()
 
     async def start(self, *, start_serving: bool = True) -> None:
@@ -1525,6 +1553,12 @@ class GatewayServer:
                     limit=MAX_MESSAGE_BYTES,
                     start_serving=start_serving,
                 )
+            checker = getattr(self.runtime, "plugin_update_checker", None)
+            if checker is not None and getattr(checker, "enabled", False):
+                self._plugin_catalog_task = asyncio.create_task(
+                    self._watch_plugin_catalog(checker),
+                    name="tfr-plugin-catalog-updates",
+                )
         except BaseException:
             listener.close()
             await self.stop()
@@ -1538,6 +1572,11 @@ class GatewayServer:
             await self._tcp_server.start_serving()
 
     async def stop(self) -> None:
+        if self._plugin_catalog_task is not None:
+            self._plugin_catalog_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._plugin_catalog_task
+            self._plugin_catalog_task = None
         if (
             self._update_task is not None
             and self._update_task is not asyncio.current_task()
@@ -1562,6 +1601,40 @@ class GatewayServer:
         self._tcp_clients.clear()
         self._pending_tcp_clients.clear()
         self._remove_owned_socket()
+
+    async def _watch_plugin_catalog(self, checker: PluginUpdateChecker) -> None:
+        for result in await checker.check():
+            self._plugin_source_update_available(result)
+        await checker.run_periodically(self._plugin_source_update_available)
+
+    def _plugin_source_update_available(self, result: Any) -> None:
+        latest_plugins = tuple(getattr(result, "latest_plugins", ()))
+        bundle = getattr(self.runtime, "configuration_bundle", None)
+        if bundle is None or not latest_plugins:
+            return
+        installed = tuple(str(item["name"]) for item in self.runtime.plugins.catalog())
+        new_plugins = _record_plugin_catalog(
+            bundle.main.plugins.state_directory,
+            tuple(sorted(set(installed) | set(latest_plugins))),
+        )
+        if new_plugins:
+            asyncio.create_task(self._broadcast_new_plugins(new_plugins))
+
+    async def _broadcast_new_plugins(self, names: tuple[str, ...]) -> None:
+        message = {
+            "type": "plugin_catalog",
+            "protocol": PROTOCOL_VERSION,
+            "new_plugins": list(names),
+        }
+        async with self._update_participants_lock:
+            participants = tuple(self._update_participants.values())
+        for participant in participants:
+            with contextlib.suppress(ConnectionError, OSError):
+                await write_message(
+                    participant.writer,
+                    message,
+                    lock=participant.write_lock,
+                )
 
     async def wait_update_restart(self) -> None:
         await self._update_restart.wait()
@@ -1753,6 +1826,7 @@ class GatewayServer:
                 "effect_demos": self._native_effect_demos(),
                 "speaker_effects": self._speaker_effects_summary(),
                 "build": getattr(self.runtime, "build", current_build()).as_dict(),
+                "new_plugins": list(getattr(self.runtime, "new_plugins", ())),
             }
             if ui_record is not None:
                 hello_response["ui"] = ui_record.as_dict()
