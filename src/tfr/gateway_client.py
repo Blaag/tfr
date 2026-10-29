@@ -729,7 +729,8 @@ class GatewayClient:
     ) -> tuple[str, tuple[str, ...]]:
         registry = core_configuration_registry()
         for descriptor in plugin_descriptors:
-            registry.register(descriptor)
+            if not any(item.key == descriptor.key for item in registry.descriptors()):
+                registry.register(descriptor)
         issues = tuple(
             f"unsupported setting: {key}"
             for key in sorted(self.effective_configuration)
@@ -2258,12 +2259,10 @@ def _apply_gateway_ui_configuration(
 def _legacy_migration_values(
     configuration: UiConfiguration, plugin_descriptors: Sequence[SettingDescriptor] = ()
 ) -> dict[str, object]:
-    marker = configuration.main_path.with_name(f"{configuration.main_path.name}.tfr-migrated")
-    if marker.is_file():
-        return {}
     registry = core_configuration_registry()
     for descriptor in plugin_descriptors:
-        registry.register(descriptor)
+        if not any(item.key == descriptor.key for item in registry.descriptors()):
+            registry.register(descriptor)
     output: dict[str, object] = {}
 
     def record_plugin(prefix: str, value: object) -> None:

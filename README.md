@@ -710,6 +710,23 @@ rules with color, effect-specific, world, and message-kind controls. Saving
 validates and commits the complete collection atomically, preserving unchanged
 rules.
 
+For scripts, provisioning, and assistive tools, use the non-interactive owner
+interface. Mutations preview by default and require `--apply`; multiple
+assignments are committed as one atomic batch:
+
+```bash
+tfr config list typing_glow
+tfr config get ui.typing_glow.enabled
+tfr config set ui.typing_glow.enabled off
+tfr config set ui.typing_glow.enabled=off ui.typing_glow.duration_seconds=0.25 --apply
+tfr config reset ui.typing_glow.enabled --apply
+```
+
+Use `--json` for stable machine-readable output, `--ui`, `--ui-type`, `--world`,
+or `--shared` for explicit targeting, and `--gateway-profile NAME` for a stored
+authenticated remote Gateway profile. Local commands use the owner Unix socket
+and never place owner tokens in process arguments.
+
 Plugin discovery and enablement are also Gateway-managed. Use `/plugins
 available`, `/plugins installed`, `/plugins enabled`, or `/plugins failed` to
 inspect the catalog; `/plugins show NAME` includes settings, capabilities,

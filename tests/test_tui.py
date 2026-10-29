@@ -194,6 +194,18 @@ async def test_settings_dialog_uses_main_renderer_and_keyboard_navigation() -> N
             assert tui._settings_dialog is None
 
             render_counter = tui.application.render_counter
+            entered = asyncio.create_task(
+                tui._settings_input(title="Search settings", text="Search")
+            )
+            while tui._settings_dialog is None:
+                await asyncio.sleep(0)
+            while tui.application.render_counter == render_counter:
+                await asyncio.sleep(0)
+            application_ids.append(id(tui.application))
+            input.send_text("mouse\r")
+            assert await asyncio.wait_for(entered, timeout=1) == "mouse"
+
+            render_counter = tui.application.render_counter
             cancelled = asyncio.create_task(
                 tui._settings_choice(
                     title="Settings",
@@ -207,18 +219,20 @@ async def test_settings_dialog_uses_main_renderer_and_keyboard_navigation() -> N
                 await asyncio.sleep(0)
             application_ids.append(id(tui.application))
             input.send_text("\x1b")
-            assert await asyncio.wait_for(cancelled, timeout=2) is None
+            assert await asyncio.wait_for(cancelled, timeout=0.5) is None
             tui.application.exit(result=0)
 
         dialog_task = asyncio.create_task(exercise_dialog())
         result = await asyncio.wait_for(
-            tui.application.run_async(pre_run=started.set), timeout=4
+            tui.application.run_async(pre_run=started.set), timeout=2
         )
         await dialog_task
 
         assert result == 0
-        assert application_ids == [id(tui.application), id(tui.application)]
+        assert application_ids == [id(tui.application)] * 3
         assert tui.application._running_in_terminal is False
+        assert tui.application.ttimeoutlen == 0.1
+        assert tui.application.timeoutlen == 0.1
 
 
 def test_settings_keyboard_cursor_has_visible_terminal_independent_style() -> None:
@@ -821,7 +835,7 @@ async def test_settings_browser_infers_current_ui_scope_and_saves_boolean() -> N
     assert value_prompt["values"] == [("true", "On"), ("false", "Off")]
     assert value_prompt["default"] == "false"
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
-    assert "Saved Animations Enabled at revision 5" in text
+    assert "Saved Animations Enabled = true at revision 5" in text
 
 
 async def test_speaker_effect_form_builds_comet_rule_without_json() -> None:

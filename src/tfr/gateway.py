@@ -67,6 +67,7 @@ from tfr.gateway_configuration import (
 from tfr.gateway_migration import (
     GatewayMigrationStore,
     collect_migration_settings,
+    collect_omitted_migration_keys,
     new_proposal,
 )
 from tfr.gateway_protocol import (
@@ -744,7 +745,10 @@ class GatewayRuntime:
         )
         configuration_registry = core_configuration_registry()
         for descriptor in plugins.registry.configuration_descriptors():
-            configuration_registry.register(with_builtin_form_metadata(descriptor))
+            if not any(
+                item.key == descriptor.key for item in configuration_registry.descriptors()
+            ):
+                configuration_registry.register(with_builtin_form_metadata(descriptor))
         gateway_configuration.registry = configuration_registry
         gateway_configuration.validate_current(defer_plugin_validation=True)
         gateway_migration = GatewayMigrationStore(
@@ -771,7 +775,7 @@ class GatewayRuntime:
             managed=(managed_settings.document if managed_settings is not None else None),
         )
         gateway_values = migration_values.jsonc_proposal_values()
-        if gateway_values and UUID(int=0) not in gateway_migration.proposals:
+        if gateway_values:
             gateway_migration.submit(
                 new_proposal(
                     ui_id=UUID(int=0),
@@ -2648,6 +2652,7 @@ class GatewayServer:
                     ui_id=ui_id,
                     source=f"UI {record.display_name}",
                 )
+                omitted_keys = collect_omitted_migration_keys(values, store.registry)
                 migration.submit(
                     new_proposal(
                         ui_id=ui_id,
@@ -2655,6 +2660,7 @@ class GatewayServer:
                         base_revision=base_revision,
                         settings=settings,
                         source_files=tuple(source_files),
+                        omitted_keys=omitted_keys,
                     )
                 )
                 result = migration.preview()
@@ -2701,6 +2707,7 @@ class GatewayServer:
                 ):
                     raise ValueError("configuration migration apply is invalid")
                 actor = self.ui_store.get(ui_id) if self.ui_store and ui_id else None
+                preview = migration.preview(choices)
                 revision = await asyncio.to_thread(
                     migration.apply,
                     expected_revision=expected,
@@ -2709,7 +2716,11 @@ class GatewayServer:
                     actor_ui_name=actor.display_name if actor else "Local administrator",
                 )
                 await self._broadcast_configuration()
-                result = {"revision": revision, "applied": True}
+                result = {
+                    "revision": revision,
+                    "applied": True,
+                    "restart": preview.get("restart", "live"),
+                }
             elif message_type == "config_migration_status":
                 migration = self.runtime.gateway_migration
                 if migration is None:

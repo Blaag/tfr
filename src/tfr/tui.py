@@ -1435,6 +1435,10 @@ class TfrTui:
             input=input,
             output=output,
         )
+        # A bare Escape is ambiguous with the prefix of terminal key sequences.
+        # Prompt Toolkit's default is perceptibly slow for modal cancellation.
+        self.application.ttimeoutlen = 0.1
+        self.application.timeoutlen = 0.1
         self.plugins.initialize_boss_selection(boss_screen_mode, boss_screen)
         self.plugins.set_notice_handler(self.add_notice)
         self.plugins.set_boss_state_handler(self._boss_state_changed)
@@ -4068,8 +4072,14 @@ class TfrTui:
             if action == "show" and len(parameters) == 2:
                 result = await self.service_runtime.plugin_show(parameters[1])
                 plugin = result["plugin"]
+                version = plugin.get("version")
                 lines = [
-                    f"Plugin {plugin.get('name')} {plugin.get('version')}",
+                    f"Plugin {plugin.get('name')}"
+                    + (
+                        f" {version}"
+                        if isinstance(version, str) and version.casefold() != "unknown"
+                        else ""
+                    ),
                     f"  {plugin.get('summary')}",
                     f"  category: {plugin.get('category')}; enabled: {plugin.get('enabled')}; "
                     f"loaded: {plugin.get('loaded')}; portable: {plugin.get('portable')}",
@@ -4357,7 +4367,11 @@ class TfrTui:
         text: str,
         default: str = "",
     ) -> str | None:
-        field = TextArea(text=default, multiline=False)
+        field = TextArea(
+            text=default,
+            multiline=False,
+            accept_handler=lambda buffer: self._finish_settings_dialog(buffer.text),
+        )
         dialog = Dialog(
             title=title,
             body=HSplit([Label(text=text, dont_extend_height=True), field], padding=1),
@@ -4495,7 +4509,8 @@ class TfrTui:
                 f"{setting_label(key)}\n\n"
                 f"Target: {scope}{f' · {target}' if target else ''}\n"
                 f"Current value: {json.dumps(old_value, ensure_ascii=False)}\n"
-                f"New value: {value_text}\nRequired action: {action}"
+                f"New value: {value_text}\n"
+                f"Required action: {self._settings_action_text(action)}"
             ),
         )
         if not confirmed:
@@ -4528,10 +4543,20 @@ class TfrTui:
         self.add_command_report(
             alias,
             "/config",
-            f"Saved {setting_label(key)} at revision {result.get('revision')}.\n"
-            f"Required action: {result.get('restart', action)}",
+            f"Saved {setting_label(key)} = {value_text} at revision "
+            f"{result.get('revision')}.\n"
+            f"Required action: {self._settings_action_text(result.get('restart', action))}",
         )
         return True
+
+    @staticmethod
+    def _settings_action_text(action: object) -> str:
+        return {
+            "live": "Applies immediately",
+            "client-reload": "Reload affected UIs",
+            "client-restart": "Restart affected UIs",
+            "gateway-restart": "Restart the Gateway",
+        }.get(str(action), str(action))
 
     async def _save_settings_batch(
         self,
@@ -4566,7 +4591,8 @@ class TfrTui:
                 f"{setting_label(key)}\n\n"
                 f"Current value: {json.dumps(old_value, ensure_ascii=False)}\n"
                 f"New value: {json.dumps(value, ensure_ascii=False)}\n"
-                f"Required action: {preview.get('restart', 'live')}"
+                f"Required action: "
+                f"{self._settings_action_text(preview.get('restart', 'live'))}"
             ),
         ):
             return False
@@ -4579,7 +4605,8 @@ class TfrTui:
             alias,
             "/config",
             f"Saved {len(changes)} related change at revision {result.get('revision')}.\n"
-            f"Required action: {result.get('restart', 'live')}",
+            f"Required action: "
+            f"{self._settings_action_text(result.get('restart', 'live'))}",
         )
         return True
 
@@ -4601,7 +4628,8 @@ class TfrTui:
             text=(
                 f"Current value: {detail.get('value')!r}\n"
                 f"Source: {detail.get('source')}\n"
-                f"Required action: {setting.get('restart', 'live')}"
+                f"Required action: "
+                f"{self._settings_action_text(setting.get('restart', 'live'))}"
             ),
             values=actions,
         )
@@ -5337,6 +5365,8 @@ class TfrTui:
                     self.add_notice(
                         alias,
                         f"Migration applied atomically at revision {result.get('revision')}. "
+                        f"Required action: "
+                        f"{self._settings_action_text(result.get('restart', 'live'))}. "
                         "Clients will report convergence through /config status.",
                     )
                     return
@@ -5385,12 +5415,32 @@ class TfrTui:
                                 f"  /config migrate skip {key}",
                             ]
                         )
+                omitted = [
+                    item
+                    for item in preview.get("skipped", [])
+                    if isinstance(item, dict)
+                    and str(item.get("reason", "")).startswith("unrecognized setting")
+                ]
+                if omitted:
+                    lines.extend(
+                        [
+                            "",
+                            "These settings were found but are not recognized by this TFR "
+                            "build. They remain in their source files and will not be imported:",
+                        ]
+                    )
+                    for item in omitted:
+                        lines.append(
+                            f"  {item.get('key')} (source: {item.get('source', 'unknown')})"
+                        )
                 if not preview.get("conflicts"):
                     lines.extend(
                         [
                             "",
                             "All required decisions are complete. Review the counts above, then "
                             "apply the migration with:",
+                            f"Required action after applying: "
+                            f"{self._settings_action_text(preview.get('restart', 'live'))}",
                             "  /config migrate apply confirm",
                         ]
                     )

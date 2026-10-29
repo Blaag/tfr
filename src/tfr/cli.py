@@ -128,6 +128,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run(argv: Sequence[str] | None = None) -> int:
     original_arguments = list(argv) if argv is not None else sys.argv[1:]
+    if original_arguments and original_arguments[0] == "config":
+        from tfr.configuration_cli import run_config_cli
+
+        return run_config_cli(original_arguments[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
     network_arguments = (
