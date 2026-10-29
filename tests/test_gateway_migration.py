@@ -98,11 +98,19 @@ def test_speaker_rules_are_migrated_and_unknown_plugin_leaves_are_reported(
         values=values,
         source=tmp_path / "config.jsonc",
     )
+    submit(
+        migration,
+        ui_id=uuid4(),
+        ui_name="Empty Terminal",
+        values={"plugins.config": {"speaker_effects": {"rules": []}}},
+        source=tmp_path / "empty.jsonc",
+    )
 
     preview = migration.preview()
 
     assert preview["accepted"][0]["key"] == "plugins.config.speaker_effects.rules"
     assert preview["accepted"][0]["value"][0]["speaker"] == "Barnaby"
+    assert preview["conflicts"] == []
     assert preview["restart"] == "gateway-restart"
     assert {
         "key": "plugins.config.unknown_plugin.nested.value",
@@ -257,30 +265,32 @@ def test_gateway_import_moves_world_passwords_to_private_references(tmp_path: Pa
     assert effective.worlds.worlds["alpha"].login.password.get_secret_value() == "secret-value"
 
 
-def test_divergent_shared_values_require_choice_and_apply_atomically(tmp_path: Path) -> None:
+def test_divergent_non_default_values_require_choice_and_apply_atomically(
+    tmp_path: Path,
+) -> None:
     configuration = GatewayConfigurationStore(tmp_path / "state", core_configuration_registry())
     migration = GatewayMigrationStore(tmp_path / "state", configuration)
     first, second = uuid4(), uuid4()
     one = tmp_path / "one.jsonc"
     two = tmp_path / "two.jsonc"
-    one.write_text('{"value":true}', encoding="utf-8")
-    two.write_text('{"value":false}', encoding="utf-8")
+    one.write_text('{"directory":"/one"}', encoding="utf-8")
+    two.write_text('{"directory":"/two"}', encoding="utf-8")
     submit(
         migration,
         ui_id=first,
         ui_name="One",
-        values={"ui.spellcheck.enabled": True},
+        values={"logging.directory": "/one"},
         source=one,
     )
     submit(
         migration,
         ui_id=second,
         ui_name="Two",
-        values={"ui.spellcheck.enabled": False},
+        values={"logging.directory": "/two"},
         source=two,
     )
 
-    assert migration.preview()["conflicts"][0]["key"] == "ui.spellcheck.enabled"
+    assert migration.preview()["conflicts"][0]["key"] == "logging.directory"
     with pytest.raises(ValueError, match="unresolved"):
         migration.apply(
             expected_revision=0,
@@ -291,15 +301,15 @@ def test_divergent_shared_values_require_choice_and_apply_atomically(tmp_path: P
 
     revision = migration.apply(
         expected_revision=0,
-        choices={"ui.spellcheck.enabled": "Two"},
+        choices={"logging.directory": "Two"},
         actor_ui_id="admin",
         actor_ui_name="Admin",
     )
 
     assert revision == 1
-    assert configuration.get("ui.spellcheck.enabled", scope="shared") == (True, False)
+    assert configuration.get("logging.directory", scope="gateway") == (True, "/two")
     assert len(migration.backups) == 2
-    assert one.read_text(encoding="utf-8") == '{"value":true}'
+    assert one.read_text(encoding="utf-8") == '{"directory":"/one"}'
 
 
 def test_conflicting_same_name_world_can_be_renamed(tmp_path: Path) -> None:

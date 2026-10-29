@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from tfr.configuration_registry import ConfigurationRegistry, SettingScope
+from tfr.configuration_registry import NO_DEFAULT, ConfigurationRegistry, SettingScope
 from tfr.gateway_configuration import (
     GatewayConfigurationDocument,
     GatewayConfigurationStore,
@@ -227,6 +227,9 @@ class GatewayMigrationStore:
                 for key in proposal.omitted_keys
             )
         for (scope, target, key), candidates in sorted(grouped.items()):
+            descriptor = self.configuration.registry.get(key)
+            if descriptor is None:
+                raise ValueError(f"migration setting is no longer registered: {key}")
             if scope in {"bootstrap", "secret"} or any(
                 setting.sensitive for _proposal, setting in candidates
             ):
@@ -252,6 +255,19 @@ class GatewayMigrationStore:
                 # UI proposals are already targeted to stable IDs and cannot collide.
                 selected = candidates[0]
             else:
+                non_default = (
+                    []
+                    if descriptor.default is NO_DEFAULT
+                    else [
+                        candidate
+                        for candidate in candidates
+                        if _canonical(candidate[1].value) != _canonical(descriptor.default)
+                    ]
+                )
+                non_default_values = {
+                    _canonical(candidate[1].value) for candidate in non_default
+                }
+                selected = non_default[0] if len(non_default_values) == 1 else None
                 choice = choices.get(key)
                 selected_choice = choice
                 if choice is not None and choice.startswith("rename:"):
@@ -259,15 +275,16 @@ class GatewayMigrationStore:
                         _marker, selected_choice, renamed_target = choice.split(":", 2)
                     except ValueError:
                         selected_choice = None
-                selected = next(
-                    (
-                        candidate
-                        for candidate in candidates
-                        if str(candidate[0].ui_id) == selected_choice
-                        or candidate[0].ui_name == selected_choice
-                    ),
-                    None,
-                )
+                if selected_choice is not None:
+                    selected = next(
+                        (
+                            candidate
+                            for candidate in candidates
+                            if str(candidate[0].ui_id) == selected_choice
+                            or candidate[0].ui_name == selected_choice
+                        ),
+                        None,
+                    )
                 if choice == "skip":
                     skipped.append({"key": key, "reason": "explicitly skipped"})
                     continue
@@ -290,9 +307,6 @@ class GatewayMigrationStore:
                     )
                     continue
             proposal, setting = selected
-            descriptor = self.configuration.registry.get(key)
-            if descriptor is None:
-                raise ValueError(f"migration setting is no longer registered: {key}")
             restart_requirements.append(descriptor.restart.value)
             accepted_target = renamed_target if len(unique) > 1 and renamed_target else target
             accepted_key = key
