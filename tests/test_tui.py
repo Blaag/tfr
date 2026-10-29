@@ -1826,10 +1826,19 @@ async def test_config_migration_commands_submit_choose_apply_and_report_status()
         "accepted": [],
         "conflicts": [
             {
-                "key": "ui.spellcheck.enabled",
+                "key": "plugins.config.speaker_effects.rules",
                 "candidates": [
-                    {"ui_name": "Office", "value": True},
-                    {"ui_name": "Laptop Terminal", "value": False},
+                    {
+                        "ui_name": "Gateway",
+                        "value": [
+                            {"speaker": "Blood", "effect": "shimmer"},
+                            {"speaker": "Jarin", "effect": "rainbow_wave"},
+                        ],
+                    },
+                    {
+                        "ui_name": "Laptop Terminal",
+                        "value": [{"speaker": "Barnaby", "effect": "comet"}],
+                    },
                 ],
             }
         ],
@@ -1855,20 +1864,25 @@ async def test_config_migration_commands_submit_choose_apply_and_report_status()
 
     await tui._handle_client_command("alpha", "/config migrate")
     conflict_text = fragment_list_to_text(tui.active_view.display.formatted_text())
-    assert "nothing has been changed yet" in conflict_text
-    assert "ui.spellcheck.enabled" in conflict_text
-    assert "has different values" in conflict_text
+    assert "Migration needs a decision (1 remaining). Nothing changed." in conflict_text
+    assert "plugins.config.speaker_effects.rules" in conflict_text
+    assert "2 speaker rules: Blood — Shimmer, Jarin — Rainbow Wave" in conflict_text
     assert "Laptop Terminal" in conflict_text
     assert "migrate choose" in conflict_text
     assert "migrate skip" in conflict_text
-    await tui._handle_client_command("alpha", "/config migrate choose ui.spellcheck.enabled Office")
-    await tui._handle_client_command("alpha", "/config migrate apply confirm")
+    assert '"effect"' not in conflict_text
+    await tui._handle_client_command(
+        "alpha", "/config migrate choose plugins.config.speaker_effects.rules Gateway"
+    )
+    await tui._handle_client_command("alpha", "/config migrate apply")
     await tui._handle_client_command("alpha", "/config migration-status")
 
-    runtime.config_migration_preview.assert_awaited_with({"ui.spellcheck.enabled": "Office"})
+    runtime.config_migration_preview.assert_awaited_with(
+        {"plugins.config.speaker_effects.rules": "Gateway"}
+    )
     runtime.config_migration_apply.assert_awaited_with(
         expected_revision=4,
-        choices={"ui.spellcheck.enabled": "Office"},
+        choices={"plugins.config.speaker_effects.rules": "Gateway"},
         confirm=True,
     )
     text = "\n".join(

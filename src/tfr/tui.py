@@ -4558,6 +4558,30 @@ class TfrTui:
             "gateway-restart": "Restart the Gateway",
         }.get(str(action), str(action))
 
+    @staticmethod
+    def _migration_value_summary(key: str, value: object) -> str:
+        if key == "plugins.config.speaker_effects.rules" and isinstance(value, list):
+            if not value:
+                return "no speaker rules"
+            labels = []
+            for rule in value[:6]:
+                if isinstance(rule, dict):
+                    speaker = str(rule.get("speaker") or "unnamed")
+                    effect = str(rule.get("effect") or "unknown").replace("_", " ").title()
+                    labels.append(f"{speaker} — {effect}")
+            suffix = f", +{len(value) - 6} more" if len(value) > 6 else ""
+            return f"{len(value)} speaker rules: {', '.join(labels)}{suffix}"
+        if isinstance(value, list):
+            return f"{len(value)} items"
+        if isinstance(value, dict):
+            return f"{len(value)} fields"
+        if value is None:
+            return "empty"
+        if isinstance(value, bool):
+            return "On" if value else "Off"
+        text = str(value)
+        return text if len(text) <= 80 else text[:77] + "..."
+
     async def _save_settings_batch(
         self,
         alias: str,
@@ -5355,7 +5379,10 @@ class TfrTui:
                     choices[parameters[2]] = f"rename:{parameters[3]}:{parameters[4]}"
                     self._migration_choices = choices
                     preview = await self.service_runtime.config_migration_preview(choices)
-                elif subcommand == "apply" and parameters == ["migrate", "apply", "confirm"]:
+                elif subcommand == "apply" and parameters in (
+                    ["migrate", "apply"],
+                    ["migrate", "apply", "confirm"],
+                ):
                     status = await self.service_runtime.config_status()
                     result = await self.service_runtime.config_migration_apply(
                         expected_revision=int(status["revision"]),
@@ -5375,83 +5402,61 @@ class TfrTui:
                         alias,
                         "Usage: /config migrate [submit|preview|choose KEY UI|skip KEY|"
                         "rename KEY UI NEW-NAME|"
-                        "apply confirm]",
+                        "apply]",
                     )
                     return
-                lines = [
-                    "Configuration migration preview (nothing has been changed yet)",
-                    f"  Ready to import: {len(preview.get('accepted', []))}",
-                    f"  Need your decision: {len(preview.get('conflicts', []))}",
-                    f"  Not imported automatically: {len(preview.get('skipped', []))}",
+                conflicts = [
+                    item for item in preview.get("conflicts", []) if isinstance(item, dict)
                 ]
-                for conflict in preview.get("conflicts", []):
-                    if isinstance(conflict, dict):
-                        key = str(conflict.get("key"))
+                if conflicts:
+                    conflict = conflicts[0]
+                    key = str(conflict.get("key"))
+                    lines = [
+                        f"Migration needs a decision ({len(conflicts)} remaining). "
+                        "Nothing changed.",
+                        "",
+                        f"{setting_label(key)} ({key})",
+                        "Choose one complete value:",
+                    ]
+                    for candidate in conflict.get("candidates", []):
+                        if not isinstance(candidate, dict):
+                            continue
+                        name = str(candidate.get("ui_name"))
+                        summary = self._migration_value_summary(key, candidate.get("value"))
                         lines.extend(
                             [
-                                "",
-                                f"{setting_label(key)} ({key}) has different values in your "
-                                "existing configurations.",
-                                "Choose which existing value should become the Gateway-managed "
-                                "value:",
-                                "Each name below identifies the old configuration that supplied "
-                                "the value.",
+                                f"  {name}: {summary}",
+                                f"    /config migrate choose {key} {shlex.quote(name)}",
                             ]
                         )
-                        for candidate in conflict.get("candidates", []):
-                            if not isinstance(candidate, dict):
-                                continue
-                            name = str(candidate.get("ui_name"))
-                            value = json.dumps(candidate.get("value"), ensure_ascii=False)
-                            lines.extend(
-                                [
-                                    f"  {name}: {value}",
-                                    f"    /config migrate choose {key} {shlex.quote(name)}",
-                                ]
-                            )
-                        lines.extend(
-                            [
-                                "Or leave this setting unchanged and do not import either value:",
-                                f"  /config migrate skip {key}",
-                            ]
-                        )
-                omitted = [
+                    lines.extend(("  Keep unchanged:", f"    /config migrate skip {key}"))
+                    self.add_notice(alias, "\n".join(lines))
+                    return
+                problems = [
                     item
                     for item in preview.get("skipped", [])
                     if isinstance(item, dict)
-                    and str(item.get("reason", "")).startswith("unrecognized setting")
+                    and (
+                        str(item.get("reason", "")).startswith("unrecognized setting")
+                        or "require separate setup" in str(item.get("reason", ""))
+                    )
                 ]
-                if omitted:
+                lines = [
+                    f"Migration ready: {len(preview.get('accepted', []))} settings "
+                    "will be imported.",
+                ]
+                if problems:
+                    lines.append(f"Could not import {len(problems)} settings:")
                     lines.extend(
-                        [
-                            "",
-                            "These settings were found but are not recognized by this TFR "
-                            "build. They remain in their source files and will not be imported:",
-                        ]
+                        f"  {item.get('key')}: {item.get('reason')}" for item in problems
                     )
-                    for item in omitted:
-                        lines.append(
-                            f"  {item.get('key')} (source: {item.get('source', 'unknown')})"
-                        )
-                if not preview.get("conflicts"):
-                    lines.extend(
-                        [
-                            "",
-                            "All required decisions are complete. Review the counts above, then "
-                            "apply the migration with:",
-                            f"Required action after applying: "
-                            f"{self._settings_action_text(preview.get('restart', 'live'))}",
-                            "  /config migrate apply confirm",
-                        ]
-                    )
-                else:
-                    lines.extend(
-                        [
-                            "",
-                            "Resolve each setting above, then run /config migrate preview again. "
-                            "The migration cannot be applied until every decision is complete.",
-                        ]
-                    )
+                lines.extend(
+                    [
+                        f"Required action: "
+                        f"{self._settings_action_text(preview.get('restart', 'live'))}",
+                        "Apply: /config migrate apply",
+                    ]
+                )
                 self.add_notice(alias, "\n".join(lines))
                 return
             if valid_changes:
