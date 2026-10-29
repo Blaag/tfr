@@ -23,6 +23,18 @@ from tfr.plugin_sources import (
 )
 
 
+def test_plugin_update_result_identifies_new_catalog_entries() -> None:
+    result = PluginUpdateResult(
+        repo="owner/plugins",
+        policy="notify",
+        checked_at=None,
+        current_plugins=("speaker_effects",),
+        latest_plugins=("speaker_effects", "spotlight"),
+    )
+
+    assert result.new_plugins == ("spotlight",)
+
+
 def _git(*args: str, cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 

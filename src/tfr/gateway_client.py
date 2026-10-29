@@ -337,6 +337,7 @@ class GatewayClient:
         configuration_revision: int | None = None,
         effective_configuration: dict[str, object] | None = None,
         configuration_requirements: dict[str, str] | None = None,
+        new_plugins: tuple[str, ...] = (),
     ) -> None:
         self.reader = reader
         self.writer = writer
@@ -360,6 +361,7 @@ class GatewayClient:
         self.configuration_revision = configuration_revision
         self.effective_configuration = effective_configuration or {}
         self.configuration_requirements = configuration_requirements or {}
+        self.new_plugins = new_plugins
         self.command_bus = RemoteCommandBus(self)
         self.agents: RemoteAgentRuntime | None = None
         self._write_lock = asyncio.Lock()
@@ -379,6 +381,7 @@ class GatewayClient:
         self.configuration_handler: (
             Callable[[dict[str, object], dict[str, str]], tuple[str, tuple[str, ...]]] | None
         ) = None
+        self.plugin_catalog_handler: Callable[[tuple[str, ...]], None] | None = None
         self._initial_configuration_ack_pending = configuration_revision is not None
         (
             self._initial_configuration_status,
@@ -532,6 +535,11 @@ class GatewayClient:
             if hello.get("type") != "hello":
                 raise GatewayProtocolError("gateway did not send a hello response")
             gateway_uuid = UUID(str(hello["gateway_id"]))
+            raw_new_plugins = hello.get("new_plugins", [])
+            if not isinstance(raw_new_plugins, list) or not all(
+                isinstance(item, str) and item for item in raw_new_plugins
+            ):
+                raise GatewayProtocolError("Gateway new plugin list is invalid")
             cursor = cls._non_negative_integer(hello.get("cursor"), "cursor")
             oldest_cursor = cls._non_negative_integer(hello.get("oldest_cursor"), "oldest_cursor")
             snapshot_count = cls._non_negative_integer(
@@ -610,6 +618,7 @@ class GatewayClient:
                 configuration_revision=configuration_revision,
                 effective_configuration=effective_configuration,
                 configuration_requirements=configuration_requirements,
+                new_plugins=tuple(raw_new_plugins),
             )
             try:
                 client.sessions.extend(
@@ -1570,6 +1579,17 @@ class GatewayClient:
                     self._spawn_gateway_request(
                         self._acknowledge_configuration(revision, status, issues)
                     )
+                elif message_type == "plugin_catalog":
+                    names = message.get("new_plugins")
+                    if (
+                        set(message) != {"type", "protocol", "new_plugins"}
+                        or not isinstance(names, list)
+                        or not all(isinstance(item, str) and item for item in names)
+                    ):
+                        raise GatewayProtocolError("Gateway plugin catalog update is invalid")
+                    self.new_plugins = tuple(sorted(set(self.new_plugins) | set(names)))
+                    if self.plugin_catalog_handler is not None:
+                        self.plugin_catalog_handler(tuple(names))
                 elif message_type == "error":
                     raise GatewayProtocolError(str(message.get("message", "gateway error")))
                 else:
@@ -2518,6 +2538,11 @@ async def run_gateway_ui(
         initial_scroll_to_end=True,
     )
     runtime.notify = lambda text: tui.add_notice(tui.active_alias, text)
+    client.plugin_catalog_handler = lambda names: runtime.notify(
+        "New plugins available: "
+        + ", ".join(names)
+        + ". Use /update to install them, then /config to enable them."
+    )
     if hasattr(tui, "apply_shared_ui_settings"):
         client.ui_settings_handler = tui.apply_shared_ui_settings
 
@@ -2561,6 +2586,13 @@ async def run_gateway_ui(
         tui.switch_world(resume_world)
     for message in plugin_source_messages:
         tui.queue_startup_notice(tui.active_alias, message)
+    if getattr(client, "new_plugins", ()):
+        tui.queue_startup_notice(
+            tui.active_alias,
+            "New plugins available: "
+            + ", ".join(client.new_plugins)
+            + ". Use /plugins available or /config to enable them.",
+        )
     speaker_effects_warning = (
         remote_speaker_effects_warning(
             plugins,

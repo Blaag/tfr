@@ -98,7 +98,13 @@ class PluginUpdateResult:
     current_version: str | None = None
     latest_version: str | None = None
     release_url: str | None = None
+    current_plugins: tuple[str, ...] = ()
+    latest_plugins: tuple[str, ...] = ()
     error: str | None = None
+
+    @property
+    def new_plugins(self) -> tuple[str, ...]:
+        return tuple(sorted(set(self.latest_plugins) - set(self.current_plugins)))
 
     @property
     def available(self) -> bool:
@@ -380,6 +386,7 @@ def check_plugin_source_update(
                 source_path=source.path,
                 latest_version=manifest.version,
                 release_url=manifest.release_url,
+                latest_plugins=manifest.plugins,
                 error="no verified stable plugin release is installed",
             )
         installed = current[1]
@@ -404,6 +411,8 @@ def check_plugin_source_update(
             current_version=installed.version,
             latest_version=manifest.version,
             release_url=manifest.release_url,
+            current_plugins=installed.plugins,
+            latest_plugins=manifest.plugins,
         )
     except (PluginReleaseError, PluginSourceError, OSError, ValueError) as exc:
         return PluginUpdateResult(

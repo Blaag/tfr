@@ -820,7 +820,9 @@ async def test_settings_browser_infers_current_ui_scope_and_saves_boolean() -> N
         ),
     )
     tui.service_runtime = runtime
-    choices = iter(["browse", "Ui", "ui.animations_enabled", "edit", "true", None])
+    choices = iter(
+        ["browse", "Ui", "ui.animations_enabled", "edit", "true", None, None, None]
+    )
     tui._settings_choice = AsyncMock(side_effect=lambda **_kwargs: next(choices))
     tui._settings_confirm = AsyncMock(return_value=True)
 
@@ -840,6 +842,71 @@ async def test_settings_browser_infers_current_ui_scope_and_saves_boolean() -> N
     assert value_prompt["default"] == "false"
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
     assert "Saved Animations Enabled = true at revision 5" in text
+
+
+async def test_settings_escape_returns_one_navigation_level() -> None:
+    tui = make_tui()
+    tui.service_runtime = SimpleNamespace(
+        config_list=AsyncMock(
+            return_value=[
+                {
+                    "key": "ui.mouse_mode",
+                    "type": "string",
+                    "scope": "ui",
+                    "validation": {"choices": ["auto", "terminal", "tfr"]},
+                    "restart": "client-restart",
+                    "sensitive": False,
+                }
+            ]
+        )
+    )
+    choices = iter(["browse", "Ui", None, None, None])
+    tui._settings_choice = AsyncMock(side_effect=lambda **_kwargs: next(choices))
+
+    await tui._open_settings_menu("alpha")
+
+    assert [call.kwargs["title"] for call in tui._settings_choice.await_args_list] == [
+        "TFR Settings",
+        "TFR Settings",
+        "Ui",
+        "TFR Settings",
+        "TFR Settings",
+    ]
+
+
+async def test_plugins_enabled_uses_discovered_checkbox_manager() -> None:
+    tui = make_tui()
+    runtime = SimpleNamespace(
+        plugins_catalog=AsyncMock(
+            return_value=[
+                {"name": "speaker_effects", "loaded": True, "failed": False},
+                {"name": "spotlight", "loaded": False, "failed": False},
+            ]
+        )
+    )
+    tui.service_runtime = runtime
+    tui._settings_multiselect = AsyncMock(return_value=["speaker_effects", "spotlight"])
+    tui._save_settings_value = AsyncMock(return_value=True)
+    setting = {"key": "plugins.enabled", "scope": "shared", "type": "string-list"}
+
+    await tui._edit_enabled_plugins(
+        "alpha", setting, {"value": ["speaker_effects"]}
+    )
+
+    prompt = tui._settings_multiselect.await_args.kwargs
+    assert prompt["title"] == "Manage plugins"
+    assert prompt["defaults"] == ["speaker_effects"]
+    assert prompt["values"] == [
+        ("speaker_effects", "speaker_effects · available"),
+        ("spotlight", "spotlight · available"),
+    ]
+    assert prompt["apply_text"] == "Apply"
+    tui._save_settings_value.assert_awaited_once_with(
+        "alpha",
+        setting,
+        ["speaker_effects", "spotlight"],
+        old_value=["speaker_effects"],
+    )
 
 
 async def test_speaker_effect_form_builds_comet_rule_without_json() -> None:

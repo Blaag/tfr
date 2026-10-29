@@ -4397,6 +4397,7 @@ class TfrTui:
         text: str,
         values: list[tuple[str, str]],
         defaults: list[str] | None = None,
+        apply_text: str = "Ok",
     ) -> list[str] | None:
         choices = CheckboxList(values=values, default_values=defaults)
         dialog = Dialog(
@@ -4413,7 +4414,7 @@ class TfrTui:
             ),
             buttons=[
                 Button(
-                    text="Ok",
+                    text=apply_text,
                     handler=lambda: self._finish_settings_dialog(
                         list(choices.current_values)
                     ),
@@ -4893,8 +4894,15 @@ class TfrTui:
             rule.pop("worlds", None)
         kinds = await self._settings_multiselect(
             title="Speaker effect",
-            text="Apply to message kinds. Select none for all supported kinds.",
-            values=[("say", "Say"), ("pose", "Pose"), ("page", "Page")],
+            text=(
+                "The effect targets only the displayed speaker name. Choose when it appears; "
+                "select none for every supported line type."
+            ),
+            values=[
+                ("say", "When they say something"),
+                ("pose", "When they pose"),
+                ("page", "When they page"),
+            ],
             defaults=[str(item) for item in rule.get("kinds", [])],
         )
         if kinds is None:
@@ -5156,6 +5164,72 @@ class TfrTui:
             elif operation == "down" and index + 1 < len(rules):
                 rules[index + 1], rules[index] = rules[index], rules[index + 1]
 
+    async def _open_setting_editor(
+        self, alias: str, setting: dict[str, object]
+    ) -> None:
+        key = str(setting["key"])
+        runtime = self.service_runtime
+        if runtime is None:
+            raise RuntimeError("settings are unavailable without an attached Gateway")
+        detail = await runtime.config_show(key)
+        form = setting.get("form")
+        if key == "plugins.enabled":
+            await self._edit_enabled_plugins(alias, setting, detail)
+        elif key == "plugins.config.speaker_effects.rules" or (
+            isinstance(form, dict) and form.get("editor") == "speaker-rules"
+        ):
+            await self._edit_speaker_rules(alias, setting, detail)
+        elif isinstance(form, dict) and form.get("editor") == "collection":
+            await self._edit_structured_collection(alias, setting, detail, form)
+        else:
+            await self._edit_generic_setting(alias, setting, detail)
+
+    async def _edit_enabled_plugins(
+        self,
+        alias: str,
+        setting: dict[str, object],
+        detail: dict[str, object],
+    ) -> None:
+        runtime = self.service_runtime
+        if runtime is None or not hasattr(runtime, "plugins_catalog"):
+            await self._settings_message(
+                title="Manage plugins", text="The Gateway plugin catalog is unavailable."
+            )
+            return
+        catalog = await runtime.plugins_catalog("available")
+        current_value = detail.get("value")
+        current = [str(item) for item in current_value] if isinstance(current_value, list) else []
+        by_name = {
+            str(item.get("name")): item for item in catalog if isinstance(item, dict)
+        }
+        names = sorted(set(by_name) | set(current), key=str.casefold)
+        values = []
+        for name in names:
+            plugin = by_name.get(name)
+            status = (
+                "failed"
+                if plugin and plugin.get("failed")
+                else "available"
+                if plugin
+                else "enabled but unavailable"
+            )
+            values.append((name, f"{name} · {status}"))
+        selected = await self._settings_multiselect(
+            title="Manage plugins",
+            text="Select the plugins to enable. Newly discovered plugins start unchecked.",
+            values=values,
+            defaults=current,
+            apply_text="Apply",
+        )
+        if selected is None or selected == current:
+            return
+        await self._save_settings_value(
+            alias,
+            setting,
+            selected,
+            old_value=current,
+        )
+
     async def _open_settings_menu(self, alias: str) -> None:
         if self.service_runtime is None:
             self.add_notice(alias, "Settings are available only in an attached UI")
@@ -5200,96 +5274,80 @@ class TfrTui:
                 continue
             candidates = settings
             if operation == "search":
-                query = await self._settings_input(
-                    title="Search settings",
-                    text="Search by key, label, category, scope, or plugin.",
-                )
-                if query is None:
-                    continue
-                normalized = query.casefold().strip()
-                candidates = [
-                    item
-                    for item in settings
-                    if normalized
-                    in " ".join(
-                        (
-                            str(item.get("key", "")),
-                            setting_label(str(item.get("key", ""))),
-                            setting_category(item),
-                            str(item.get("scope", "")),
-                            str(item.get("description", "")),
-                            str(
-                                item.get("form", {}).get("description", "")
-                                if isinstance(item.get("form"), dict)
-                                else ""
-                            ),
-                        )
-                    ).casefold()
-                ]
-                if not candidates:
-                    await self._settings_message(
+                while True:
+                    query = await self._settings_input(
                         title="Search settings",
-                        text=f"No editable settings match {query!r}.",
+                        text="Search by key, label, category, scope, or plugin.",
                     )
-                    continue
-                key = await self._settings_choice(
-                    title="Search results",
-                    text=(
-                        f"{len(candidates)} matching settings. Choose one to open its editor; "
-                        "the next screen shows its current value and available actions. "
-                        "The (*) marks the result to open, not that setting's current value."
-                    ),
-                    values=[
-                        (
-                            str(item["key"]),
-                            f"{setting_category(item)} · {setting_label(str(item['key']))}",
+                    if query is None:
+                        break
+                    normalized = query.casefold().strip()
+                    candidates = [
+                        item
+                        for item in settings
+                        if normalized
+                        in " ".join(
+                            (
+                                str(item.get("key", "")),
+                                setting_label(str(item.get("key", ""))),
+                                setting_category(item),
+                                str(item.get("scope", "")),
+                                str(item.get("description", "")),
+                                str(
+                                    item.get("form", {}).get("description", "")
+                                    if isinstance(item.get("form"), dict)
+                                    else ""
+                                ),
+                            )
+                        ).casefold()
+                    ]
+                    if not candidates:
+                        await self._settings_message(
+                            title="Search settings",
+                            text=f"No editable settings match {query!r}.",
                         )
-                        for item in candidates
-                    ],
-                )
-                if key is None:
-                    continue
-                setting = next(item for item in candidates if item["key"] == key)
-                detail = await self.service_runtime.config_show(key)
-                form = setting.get("form")
-                if key == "plugins.config.speaker_effects.rules" or (
-                    isinstance(form, dict) and form.get("editor") == "speaker-rules"
-                ):
-                    await self._edit_speaker_rules(alias, setting, detail)
-                elif isinstance(form, dict) and form.get("editor") == "collection":
-                    await self._edit_structured_collection(alias, setting, detail, form)
-                else:
-                    await self._edit_generic_setting(alias, setting, detail)
+                        continue
+                    while True:
+                        key = await self._settings_choice(
+                            title="Search results",
+                            text=f"{len(candidates)} matching settings. Choose one to edit.",
+                            values=[
+                                (
+                                    str(item["key"]),
+                                    f"{setting_category(item)} · "
+                                    f"{setting_label(str(item['key']))}",
+                                )
+                                for item in candidates
+                            ],
+                        )
+                        if key is None:
+                            break
+                        setting = next(item for item in candidates if item["key"] == key)
+                        await self._open_setting_editor(alias, setting)
                 continue
             categories = sorted({setting_category(item) for item in settings})
-            category = await self._settings_choice(
-                title="TFR Settings",
-                text="Choose a category. Scope and target are selected automatically.",
-                values=[(name, name) for name in categories],
-            )
-            if category is None:
-                return
-            choices = [item for item in settings if setting_category(item) == category]
-            key = await self._settings_choice(
-                title=category,
-                text="Choose a setting.",
-                values=[(str(item["key"]), setting_label(str(item["key"]))) for item in choices],
-            )
-            if key is None:
-                continue
-            setting = next(item for item in choices if item["key"] == key)
-            detail = await self.service_runtime.config_show(key)
-            form = setting.get("form")
-            if key == "plugins.config.speaker_effects.rules" or (
-                isinstance(form, dict)
-                and form.get("editor") == "speaker-rules"
-                and "speaker_effects" in key
-            ):
-                await self._edit_speaker_rules(alias, setting, detail)
-            elif isinstance(form, dict) and form.get("editor") == "collection":
-                await self._edit_structured_collection(alias, setting, detail, form)
-            else:
-                await self._edit_generic_setting(alias, setting, detail)
+            while True:
+                category = await self._settings_choice(
+                    title="TFR Settings",
+                    text="Choose a category. Scope and target are selected automatically.",
+                    values=[(name, name) for name in categories],
+                )
+                if category is None:
+                    break
+                choices = [item for item in settings if setting_category(item) == category]
+                while True:
+                    key = await self._settings_choice(
+                        title=category,
+                        text="Choose a setting.",
+                        values=[
+                            (str(item["key"]), setting_label(str(item["key"])))
+                            for item in choices
+                        ],
+                    )
+                    if key is None:
+                        break
+                    setting = next(item for item in choices if item["key"] == key)
+                    await self._open_setting_editor(alias, setting)
 
     async def _handle_config_command(self, alias: str, parameters: list[str]) -> None:
         action = parameters[0].casefold() if parameters else ""

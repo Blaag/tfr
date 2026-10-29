@@ -736,6 +736,13 @@ once for the Gateway, PWA, and native UIs. Clients reload when required. Unknown
 screen-clear effects explain whether their plugin is unavailable, disabled,
 failed, or incompatible instead of reporting only an unknown name.
 
+The Gateway also compares verified plugin-source manifests with its known
+catalog. Attached native UIs receive one concise notice when a release adds a
+plugin; `/update` installs the verified source release. In `/config`, **Plugins
+› Enabled** opens **Manage plugins**, a checkbox list of every installed plugin.
+New plugins begin unchecked, Space toggles any number, and Apply atomically
+saves the enabled set. Discovery never enables or executes plugin code.
+
 In TFR, `/help` opens a concise topic index rather than a complete command wall.
 Use `/help TOPIC` to browse relevant commands or `/help COMMAND` for exact usage,
 examples, scope, availability, and related commands. `/config help` and

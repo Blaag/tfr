@@ -19,6 +19,7 @@ from tfr.gateway import (
     EventHistory,
     GatewayRuntime,
     GatewayServer,
+    _record_plugin_catalog,
     remove_stale_gateway_socket,
 )
 from tfr.gateway_protocol import MAX_MESSAGE_BYTES, encode_message, event_message, read_message
@@ -70,6 +71,15 @@ def test_stale_gateway_socket_cleanup_refuses_non_socket_path(tmp_path: Path) ->
         remove_stale_gateway_socket(path)
 
     assert path.read_text(encoding="utf-8") == "do not delete"
+
+
+def test_plugin_catalog_records_only_later_discoveries(tmp_path: Path) -> None:
+    assert _record_plugin_catalog(tmp_path, ("speaker_effects",)) == ()
+    assert _record_plugin_catalog(tmp_path, ("speaker_effects", "spotlight")) == (
+        "spotlight",
+    )
+    assert _record_plugin_catalog(tmp_path, ("speaker_effects", "spotlight")) == ()
+    assert stat.S_IMODE((tmp_path / "known-plugins.json").stat().st_mode) == 0o600
 
 
 async def test_history_assigns_global_cursors_and_reports_truncation() -> None:
