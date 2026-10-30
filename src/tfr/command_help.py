@@ -232,8 +232,8 @@ COMMAND_HELP = {
         ),
         _command(
             "diagnostics",
-            "Inspect bounded runtime diagnostics",
-            "/diagnostics [web|presentations|plugins|clear]",
+            "Inspect or manually export local, bounded runtime diagnostics",
+            "/diagnostics [CATEGORY|report|clear|export PATH]",
             "administration",
             "Gateway and UI",
             availability="gateway",

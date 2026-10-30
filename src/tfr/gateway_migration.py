@@ -7,6 +7,7 @@ import os
 import shutil
 import tempfile
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -395,6 +396,7 @@ class GatewayMigrationStore:
         actor_ui_id: str,
         actor_ui_name: str,
         secret_references: dict[str, str] | None = None,
+        validate: Callable[[GatewayConfigurationDocument], None] | None = None,
     ) -> int:
         with self._lock:
             if expected_revision != self.configuration.revision:
@@ -417,6 +419,8 @@ class GatewayMigrationStore:
                 destination[str(item["key"])] = copy.deepcopy(item["value"])
             for key, reference in (secret_references or {}).items():
                 proposed.secret_references[key] = reference
+            if validate is not None:
+                validate(proposed)
             previous_state = (
                 self.pre_migration_document,
                 self.backups,

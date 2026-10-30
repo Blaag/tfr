@@ -48,6 +48,7 @@ from tfr.configuration_values import (
 )
 from tfr.core import CommandBus, EventBus, UnknownSessionError
 from tfr.core_settings import core_configuration_registry
+from tfr.diagnostics import DiagnosticBuffer
 from tfr.eventlog import EventSink, JsonlEventSink
 from tfr.events import (
     Actor,
@@ -805,6 +806,24 @@ class GatewayRuntime:
             scope=plugin_scope,
             event_visibility=gag_policy.allows,
         )
+        loaded_diagnostics = plugins.diagnostics.entries()
+        plugins.diagnostics = DiagnosticBuffer(
+            path=bundle.main.plugins.state_directory / "diagnostics" / "gateway.jsonl"
+        )
+        for entry in loaded_diagnostics:
+            with contextlib.suppress(ValueError, OSError):
+                plugins.diagnostics.record(
+                    severity=entry.severity,
+                    component=entry.component,
+                    code=entry.code,
+                    message=entry.message,
+                    operation=entry.operation,
+                    client=entry.client,
+                    event_id=entry.event_id,
+                    device_id_suffix=entry.device_id_suffix,
+                    shell_version=entry.shell_version,
+                    ui_name=entry.ui_name,
+                )
         new_plugins = _record_plugin_catalog(
             bundle.main.plugins.state_directory,
             tuple(str(item["name"]) for item in plugins.catalog()),
@@ -981,6 +1000,18 @@ class GatewayRuntime:
             await self.stop()
             raise
         self._started = True
+        with contextlib.suppress(ValueError, OSError):
+            self.plugins.diagnostics.record(
+                severity="info",
+                component="gateway",
+                code="started",
+                message=(
+                    f"Gateway started; worlds={len(self.sessions)}; build={self.build.version}; "
+                    f"connector={'attached' if self.connector_bridge is not None else 'local'}"
+                ),
+                operation="startup",
+                event_id=str(self.gateway_id),
+            )
         if self.update_checker is not None and self.update_checker.config.enabled:
             self._update_task = asyncio.create_task(
                 self.update_checker.run_periodically(self._notify_update),
@@ -1237,6 +1268,15 @@ class GatewayRuntime:
             await self.event_bus.close()
             return
         self._started = False
+        with contextlib.suppress(ValueError, OSError):
+            self.plugins.diagnostics.record(
+                severity="info",
+                component="gateway",
+                code="stopping",
+                message=f"Gateway stopping; preserve_worlds={preserve_worlds}",
+                operation="shutdown",
+                event_id=str(self.gateway_id),
+            )
         if self._update_task is not None:
             self._update_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -1257,6 +1297,19 @@ class GatewayRuntime:
 
     def _notify_update(self, result: UpdateResult) -> None:
         channel = self.update_checker.config.channel if self.update_checker is not None else None
+        with contextlib.suppress(ValueError, OSError):
+            self.plugins.diagnostics.record(
+                severity="warning" if result.error else "info",
+                component="updates",
+                code="check_failed" if result.error else "check_completed",
+                message=(
+                    f"Update check failed: {result.error}"
+                    if result.error
+                    else "Update check completed"
+                )[:240],
+                operation="periodic_check",
+                event_id=str(self.gateway_id),
+            )
         print(
             format_update_status("Gateway", self.build, result, channel=channel),
             file=sys.stderr,
@@ -1625,6 +1678,22 @@ class GatewayServer:
         await checker.run_periodically(self._plugin_source_update_available)
 
     def _plugin_source_update_available(self, result: Any) -> None:
+        with contextlib.suppress(ValueError, OSError):
+            self.runtime.plugins.diagnostics.record(
+                severity="warning" if getattr(result, "error", None) else "info",
+                component="updates",
+                code=(
+                    "plugin_check_failed"
+                    if getattr(result, "error", None)
+                    else "plugin_check_completed"
+                ),
+                message=(
+                    f"Plugin update check failed: {getattr(result, 'error', 'unknown error')}"
+                    if getattr(result, "error", None)
+                    else "Plugin update check completed"
+                )[:240],
+                operation="plugin_periodic_check",
+            )
         latest_plugins = tuple(getattr(result, "latest_plugins", ()))
         bundle = getattr(self.runtime, "configuration_bundle", None)
         if bundle is None or not latest_plugins:
@@ -2120,6 +2189,17 @@ class GatewayServer:
                     raise ValueError("Gateway restart requires explicit confirmation")
                 result = {"restarting": True}
                 restart_gateway = True
+                diagnostics = getattr(getattr(self.runtime, "plugins", None), "diagnostics", None)
+                if diagnostics is not None:
+                    with contextlib.suppress(ValueError, OSError):
+                        diagnostics.record(
+                            severity="info",
+                            component="gateway",
+                            code="restart_requested",
+                            message="Application restart requested by an owner UI",
+                            operation="gateway_restart",
+                            event_id=str(request_id),
+                        )
             elif message_type == "configuration_applied":
                 if ui_id is None or self.ui_store is None:
                     raise ValueError("configuration acknowledgement requires a registered UI")
@@ -2847,6 +2927,9 @@ class GatewayServer:
                     choices=choices,
                     actor_ui_id=str(ui_id) if ui_id else "local-admin",
                     actor_ui_name=actor.display_name if actor else "Local administrator",
+                    validate=lambda document: apply_gateway_configuration(
+                        self.runtime.configuration_bundle, document
+                    ),
                 )
                 await self._broadcast_configuration()
                 result = {
@@ -3100,6 +3183,33 @@ class GatewayServer:
                             ui_name=actor.display_name if actor else None,
                         )
                 error += f". Details: /diagnostics {component}"
+            else:
+                diagnostic_components = {
+                    "agent": "agent",
+                    "update": "updates",
+                    "plugin": "plugin",
+                    "web": "web",
+                    "gateway": "gateway",
+                }
+                component = next(
+                    (
+                        name
+                        for prefix, name in diagnostic_components.items()
+                        if message_type.startswith(prefix)
+                    ),
+                    "gateway",
+                )
+                diagnostics = getattr(getattr(self.runtime, "plugins", None), "diagnostics", None)
+                if diagnostics is not None:
+                    with contextlib.suppress(ValueError, OSError):
+                        diagnostics.record(
+                            severity="error",
+                            component=component,
+                            code="request_failed",
+                            message=_redacted_request_error(exc)[:240],
+                            operation=message_type[:100],
+                            event_id=str(request_id),
+                        )
             await write_message(
                 writer,
                 {
@@ -3119,6 +3229,21 @@ class GatewayServer:
         if result is not None:
             acknowledgement["result"] = result
         await write_message(writer, acknowledgement, lock=write_lock)
+        if message_type.startswith("config"):
+            current_revision = (
+                configuration_store.revision if configuration_store is not None else None
+            )
+            diagnostics = getattr(getattr(self.runtime, "plugins", None), "diagnostics", None)
+            if diagnostics is not None:
+                with contextlib.suppress(ValueError, OSError):
+                    diagnostics.record(
+                        severity="info",
+                        component="configuration",
+                        code="request_completed",
+                        message=f"Configuration operation completed; revision={current_revision}",
+                        operation=message_type[:100],
+                        event_id=str(request_id),
+                    )
         if restart_gateway:
             self._application_restart.set()
         if start_update:

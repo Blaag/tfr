@@ -1854,6 +1854,53 @@ async def test_gateway_ui_runtime_recover_connection_gives_up_after_max_attempts
     assert "Use /gateway reconnect to retry manually." in notices[-1]
 
 
+async def test_expected_gateway_restart_recovers_immediately_and_retargets_plugins() -> None:
+    old_gateway = uuid4()
+    new_gateway = uuid4()
+    session = SimpleNamespace(
+        world="alpha", session_id=uuid4(), state=SimpleNamespace(value="connected")
+    )
+    event_bus = EventBus()
+    client = SimpleNamespace(
+        gateway_id=old_gateway,
+        sessions=[session],
+        event_bus=event_bus,
+        reconnect=AsyncMock(),
+    )
+
+    async def reconnect(*, allow_generation_reset: bool = False) -> int:
+        assert allow_generation_reset is True
+        client.gateway_id = new_gateway
+        session.session_id = uuid4()
+        return 2
+
+    client.reconnect.side_effect = reconnect
+    plugins = SimpleNamespace(
+        process_event=AsyncMock(),
+        lifecycle=AsyncMock(),
+        publish_session_state=AsyncMock(),
+        retarget=Mock(),
+    )
+    notices: list[str] = []
+    runtime = GatewayUiRuntime(
+        client,
+        plugins,
+        reconnect_config=GatewayReconnectConfig(max_attempts=3, retry_interval_seconds=0.01),
+        notify=notices.append,
+    )
+    runtime._gateway_connected = True
+    runtime._arm_restart("gateway_restart")
+
+    await runtime._recover_after_restart()
+
+    client.reconnect.assert_awaited_once_with(allow_generation_reset=True)
+    plugins.retarget.assert_called_once_with({"alpha": session.session_id})
+    assert runtime.diagnostic_status()["restart_phase"] == "reconnected"
+    assert any("restored 2 events" in notice for notice in notices)
+    assert runtime.connection_diagnostics.entries()[-1].code == "restart_completed"
+    await event_bus.close()
+
+
 async def test_gateway_ui_runtime_stop_cancels_the_supervisor_promptly() -> None:
     bus = EventBus()
     history = EventHistory(bus, {"alpha": 10})

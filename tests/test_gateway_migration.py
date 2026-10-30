@@ -374,6 +374,35 @@ def test_divergent_non_default_values_require_choice_and_apply_atomically(
     assert one.read_text(encoding="utf-8") == '{"directory":"/one"}'
 
 
+def test_migration_effective_validation_runs_before_commit(tmp_path: Path) -> None:
+    configuration = GatewayConfigurationStore(tmp_path / "state", core_configuration_registry())
+    migration = GatewayMigrationStore(tmp_path / "state", configuration)
+    source = tmp_path / "config.jsonc"
+    source.write_text('{"directory":"/invalid"}', encoding="utf-8")
+    submit(
+        migration,
+        ui_id=uuid4(),
+        ui_name="Terminal",
+        values={"logging.directory": "/invalid"},
+        source=source,
+    )
+
+    def reject(_document: object) -> None:
+        raise ValueError("invalid effective configuration")
+
+    with pytest.raises(ValueError, match="invalid effective configuration"):
+        migration.apply(
+            expected_revision=0,
+            choices=None,
+            actor_ui_id="admin",
+            actor_ui_name="Admin",
+            validate=reject,
+        )
+
+    assert configuration.revision == 0
+    assert configuration.get("logging.directory", scope="gateway")[0] is False
+
+
 def test_conflicting_same_name_world_can_be_renamed(tmp_path: Path) -> None:
     configuration = GatewayConfigurationStore(tmp_path / "state", core_configuration_registry())
     migration = GatewayMigrationStore(tmp_path / "state", configuration)
