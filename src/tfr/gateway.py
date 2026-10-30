@@ -9,6 +9,7 @@ import hmac
 import inspect
 import json
 import os
+import re
 import signal
 import socket
 import ssl
@@ -552,6 +553,21 @@ def remove_stale_gateway_socket(path: Path) -> bool:
 def _event_log_path(directory: Path) -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     return directory.expanduser() / f"tfr-{timestamp}-{os.getpid()}.jsonl"
+
+
+def _redacted_request_error(exc: BaseException) -> str:
+    if isinstance(exc, OSError):
+        detail = exc.strerror or type(exc).__name__
+        filename = Path(exc.filename).name if isinstance(exc.filename, str) else None
+        return f"{type(exc).__name__}: {detail}" + (f" ({filename})" if filename else "")
+    detail = str(exc) or type(exc).__name__
+    detail = detail.replace(str(Path.home()), "~")
+    detail = re.sub(
+        r"(?i)\b(password|token|secret|credential)\s*[:=]\s*\S+",
+        r"\1=[redacted]",
+        detail,
+    )
+    return f"{type(exc).__name__}: {detail}"[:180]
 
 
 def scrollback_for(bundle: ConfigurationBundle, alias: str) -> int:
@@ -2076,6 +2092,11 @@ class GatewayServer:
         request_id_value = message.get("request_id")
         result: dict[str, Any] | None = None
         start_update = False
+        message_type = str(message.get("type", "unknown"))
+        configuration_store = getattr(self.runtime, "gateway_configuration", None)
+        initial_revision = (
+            configuration_store.revision if configuration_store is not None else None
+        )
         try:
             request_id = UUID(str(request_id_value))
         except (TypeError, ValueError, AttributeError):
@@ -3029,14 +3050,46 @@ class GatewayServer:
                 result = {"device_id": str(device_id)}
             else:
                 raise ValueError(f"unsupported request type: {message_type}")
-        except (TypeError, UnknownSessionError, RuntimeError, ValueError) as exc:
+        except (OSError, TypeError, UnknownSessionError, RuntimeError, ValueError) as exc:
+            error = str(exc)
+            if message_type.startswith("config"):
+                component = (
+                    "configuration-migration"
+                    if message_type.startswith("config_migration")
+                    else "configuration"
+                )
+                current_revision = (
+                    configuration_store.revision if configuration_store is not None else None
+                )
+                actor = self.ui_store.get(ui_id) if self.ui_store and ui_id else None
+                revision_text = (
+                    f"revision {initial_revision}->{current_revision}; "
+                    if initial_revision is not None
+                    else ""
+                )
+                diagnostics = getattr(getattr(self.runtime, "plugins", None), "diagnostics", None)
+                if diagnostics is not None:
+                    with contextlib.suppress(ValueError):
+                        diagnostics.record(
+                            severity="error",
+                            component=component,
+                            code="request_failed",
+                            message=(
+                                f"{revision_text}{_redacted_request_error(exc)}; "
+                                f"committed={current_revision != initial_revision}"
+                            )[:240],
+                            operation=message_type[:100],
+                            event_id=str(request_id),
+                            ui_name=actor.display_name if actor else None,
+                        )
+                error += f". Details: /diagnostics {component}"
             await write_message(
                 writer,
                 {
                     "type": "ack",
                     "request_id": str(request_id),
                     "ok": False,
-                    "error": str(exc),
+                    "error": error,
                 },
                 lock=write_lock,
             )

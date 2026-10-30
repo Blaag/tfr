@@ -199,6 +199,32 @@ _SETTINGS_DIALOG_STYLE = merge_styles(
 )
 
 
+def _themed_settings_dialog_style(theme: ResolvedTheme) -> Style:
+    palette = theme.palette
+    return Style.from_dict(
+        {
+            "dialog": f"fg:{palette.text} bg:{palette.background}",
+            "dialog.body": f"fg:{palette.text} bg:{palette.surface}",
+            "dialog.body text-area": f"fg:{palette.text} bg:{palette.background}",
+            "dialog.body text-area last-line": "nounderline",
+            "dialog frame.label": f"fg:{palette.accent} bg:{palette.surface} bold",
+            "dialog shadow": f"bg:{palette.overlay}",
+            "dialog.body shadow": f"bg:{palette.overlay}",
+            "button": f"fg:{palette.text} bg:{palette.surface}",
+            "button.focused": (
+                f"fg:{palette.selected_text} bg:{palette.selection} bold"
+            ),
+            "radio": f"fg:{palette.text} bg:{palette.surface}",
+            "radio-checked": f"fg:{palette.accent} bold",
+            "checkbox": f"fg:{palette.text} bg:{palette.surface}",
+            "checkbox-checked": f"fg:{palette.accent} bold",
+            "validation-toolbar": f"fg:{palette.selected_text} bg:{palette.error}",
+            "scrollbar.background": f"bg:{palette.surface}",
+            "scrollbar.button": f"bg:{palette.overlay}",
+        }
+    )
+
+
 def _parse_web_pair_arguments(
     tokens: list[str],
 ) -> tuple[list[str], str | None, str | None]:
@@ -1429,7 +1455,11 @@ class TfrTui:
             full_screen=True,
             mouse_support=Condition(lambda: self.effective_mouse_mode == "tfr"),
             style=merge_styles(
-                [Style.from_dict(dict(self.theme.styles)), _SETTINGS_DIALOG_STYLE]
+                [
+                    Style.from_dict(dict(self.theme.styles)),
+                    _SETTINGS_DIALOG_STYLE,
+                    _themed_settings_dialog_style(self.theme),
+                ]
             ),
             before_render=self._before_render,
             input=input,

@@ -448,6 +448,36 @@ def test_interrupted_apply_keeps_active_configuration_and_clears_pending_state(
     assert migration.status()["applied_revision"] is None
 
 
+def test_unreadable_legacy_backup_does_not_block_atomic_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configuration = GatewayConfigurationStore(tmp_path / "state", core_configuration_registry())
+    migration = GatewayMigrationStore(tmp_path / "state", configuration)
+    source = tmp_path / "config.jsonc"
+    source.write_text("{}", encoding="utf-8")
+    submit(
+        migration,
+        ui_id=uuid4(),
+        ui_name="One",
+        values={"ui.spellcheck.enabled": True},
+        source=source,
+    )
+    def fail_copy(source_path, target_path):
+        del source_path, target_path
+        raise PermissionError("not readable on the Gateway host")
+
+    monkeypatch.setattr("tfr.gateway_migration.shutil.copyfile", fail_copy)
+
+    assert migration.apply(
+        expected_revision=0,
+        choices=None,
+        actor_ui_id="admin",
+        actor_ui_name="Admin",
+    ) == 1
+    assert migration.backups == ()
+    assert configuration.get("ui.spellcheck.enabled", scope="shared") == (True, True)
+
+
 def test_secret_proposals_never_include_plaintext(tmp_path: Path) -> None:
     registry = core_configuration_registry()
     secret_key = "providers.demo.api_key"

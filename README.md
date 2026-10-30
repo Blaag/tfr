@@ -703,6 +703,9 @@ cancel the current dialog. The keyboard cursor is shown as a bold reverse-video
 row independently of the `(*)` or `[*]` marker for the chosen value.
 Authenticated native Gateway connections use the
 owner administration interface; restricted PWA devices do not.
+Settings dialogs inherit the active theme's background, surface, text, accent,
+selection, button, input, scrollbar, and error roles while retaining the
+terminal-safe reverse-video keyboard cursor.
 
 Structured plugin settings use trusted declarative forms. For example, open
 `Plugin: Speaker Effects` to add, edit, reorder, delete, and preview speaker

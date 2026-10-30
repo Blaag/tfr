@@ -22,6 +22,7 @@ from tfr.config import (
 from tfr.configuration_values import ConfigurationValues
 from tfr.core import EventBus
 from tfr.core_settings import core_configuration_registry
+from tfr.diagnostics import DiagnosticBuffer
 from tfr.events import Actor, ActorType, CommandRequest, Direction, Event, EventKind
 from tfr.gateway import EventHistory, GatewayServer
 from tfr.gateway_client import (
@@ -719,6 +720,7 @@ async def test_gateway_configuration_mutation_preview_history_and_undo(tmp_path:
     registry = core_configuration_registry()
     runtime.configuration_values = ConfigurationValues(registry)
     runtime.gateway_configuration = GatewayConfigurationStore(tmp_path / "gateway-state", registry)
+    runtime.plugins = SimpleNamespace(diagnostics=DiagnosticBuffer())
     ui_store = UiStore(tmp_path / "ui-state")
     ui_id = UUID("11111111-1111-4111-8111-111111111111")
     socket_path = Path("/tmp") / f"tfr-config-mutation-{uuid4().hex[:8]}" / "gateway.sock"
@@ -770,6 +772,13 @@ async def test_gateway_configuration_mutation_preview_history_and_undo(tmp_path:
                 expected_revision=0,
                 confirm=True,
             )
+        diagnostic = runtime.plugins.diagnostics.entries()[-1]
+        assert diagnostic.component == "configuration"
+        assert diagnostic.code == "request_failed"
+        assert diagnostic.operation == "config_set"
+        assert diagnostic.event_id is not None
+        assert "revision 1->1" in diagnostic.message
+        assert "committed=False" in diagnostic.message
 
         changes = await client.config_changes()
         assert changes["changes"][0]["actor_ui_name"] == "office · Terminal"
