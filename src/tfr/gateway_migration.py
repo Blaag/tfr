@@ -20,6 +20,7 @@ from tfr.gateway_configuration import (
 
 MAX_MIGRATION_SETTINGS = 2_000
 MAX_MIGRATION_PROPOSALS = 64
+_SPEAKER_RULES_KEY = "plugins.config.speaker_effects.rules"
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +155,41 @@ def _collect_unknown_leaves(
         output.append(prefix)
 
 
+def _normalized_speaker_rules(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    output = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        rule = copy.deepcopy(raw)
+        kinds = rule.get("kinds")
+        if isinstance(kinds, list):
+            supported = [kind for kind in kinds if kind in {"say", "pose"}]
+            if supported:
+                rule["kinds"] = supported
+            else:
+                rule.pop("kinds", None)
+        output.append(rule)
+    return output
+
+
+def _merge_speaker_rules(current: object, candidates: list[object]) -> list[dict[str, object]]:
+    merged: list[dict[str, object]] = []
+    speakers: set[str] = set()
+    for value in [current, *candidates]:
+        for rule in _normalized_speaker_rules(value):
+            speaker = rule.get("speaker")
+            if not isinstance(speaker, str) or not speaker.strip():
+                continue
+            identity = speaker.strip().casefold()
+            if identity in speakers:
+                continue
+            speakers.add(identity)
+            merged.append(rule)
+    return merged
+
+
 def _flatten_plugin_config(
     output: dict[str, object],
     prefix: str,
@@ -234,8 +270,25 @@ class GatewayMigrationStore:
                 # Bootstrap metadata remains in the bootstrap files that were
                 # necessarily loaded before the managed store existed.
                 continue
-            managed, _managed_value = self.configuration.get(key, scope=scope, target=target)
+            managed, managed_value = self.configuration.get(key, scope=scope, target=target)
             if managed:
+                if key == _SPEAKER_RULES_KEY:
+                    merged = _merge_speaker_rules(
+                        managed_value, [setting.value for _proposal, setting in candidates]
+                    )
+                    if _canonical(merged) != _canonical(managed_value):
+                        restart_requirements.append(descriptor.restart.value)
+                        accepted.append(
+                            {
+                                "key": key,
+                                "scope": scope,
+                                "target": target,
+                                "value": merged,
+                                "source": "managed rules plus missing legacy speakers",
+                                "ui_id": "migration",
+                            }
+                        )
+                        continue
                 skipped.append(
                     {
                         "key": key,

@@ -13,6 +13,7 @@ from tfr.gateway_client import GatewayClient, _legacy_migration_values
 from tfr.gateway_configuration import GatewayConfigurationStore, apply_gateway_configuration
 from tfr.gateway_migration import (
     GatewayMigrationStore,
+    _merge_speaker_rules,
     collect_migration_settings,
     collect_omitted_migration_keys,
     new_proposal,
@@ -117,6 +118,28 @@ def test_speaker_rules_are_migrated_and_unknown_plugin_leaves_are_reported(
         "reason": "unrecognized setting; retained in the source file but not imported",
         "source": "Terminal",
     } in preview["skipped"]
+
+
+def test_speaker_rule_merge_keeps_managed_speakers_and_adds_missing_legacy_rules() -> None:
+    merged = _merge_speaker_rules(
+        [
+            {
+                "speaker": "Bob",
+                "effect": "combo_godlike",
+                "kinds": ["say", "pose", "page"],
+            }
+        ],
+        [
+            [
+                {"speaker": "Blood", "effect": "shimmer"},
+                {"speaker": "bob", "effect": "comet"},
+            ]
+        ],
+    )
+
+    assert [rule["speaker"] for rule in merged] == ["Bob", "Blood"]
+    assert merged[0]["effect"] == "combo_godlike"
+    assert merged[0]["kinds"] == ["say", "pose"]
 
 
 def test_bootstrap_metadata_is_silent_and_existing_secret_reference_is_preserved(

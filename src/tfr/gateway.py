@@ -2854,6 +2854,9 @@ class GatewayServer:
                     "applied": True,
                     "restart": preview.get("restart", "live"),
                 }
+                if result["restart"] == "gateway-restart":
+                    result["restarting"] = True
+                    restart_gateway = True
             elif message_type == "config_migration_status":
                 migration = self.runtime.gateway_migration
                 if migration is None:

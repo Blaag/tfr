@@ -140,6 +140,9 @@ def validate_speaker_rule(rule: Mapping[str, object]) -> dict[str, object]:
             not isinstance(entries, list) or any(not isinstance(item, str) for item in entries)
         ):
             raise ValueError(f"{field} must be a list of names")
+    kinds = value.get("kinds")
+    if isinstance(kinds, list) and not set(kinds) <= {"say", "pose"}:
+        raise ValueError("message kinds support only Say and Pose")
     return value
 
 
@@ -148,4 +151,12 @@ def speaker_rules(value: object) -> list[dict[str, object]]:
         return []
     if not isinstance(value, list) or any(not isinstance(item, Mapping) for item in value):
         raise ValueError("speaker effects rules are not a list of objects")
-    return [copy.deepcopy(dict(item)) for item in value]
+    rules = []
+    for index, item in enumerate(value):
+        try:
+            rules.append(validate_speaker_rule(item))
+        except ValueError as exc:
+            speaker = item.get("speaker") if isinstance(item, Mapping) else None
+            label = f" ({speaker})" if isinstance(speaker, str) and speaker else ""
+            raise ValueError(f"speaker rule {index + 1}{label}: {exc}") from exc
+    return rules

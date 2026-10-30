@@ -126,6 +126,29 @@ async def test_plugin_catalog_distinguishes_available_enabled_loaded_and_portabl
     assert "screen-clear" in item["capabilities"]
 
 
+async def test_plugin_load_diagnostic_includes_bounded_registration_cause() -> None:
+    manager = await PluginManager.load(
+        enabled=(),
+        config={},
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        discovered=(),
+        scope="gateway",
+    )
+
+    await manager.report_failure(
+        "speaker_effects",
+        "load",
+        PluginRegistrationError("speaker rule 1 (Bob): message kinds support only Say and Pose"),
+    )
+
+    entry = manager.diagnostics.entries()[-1]
+    assert entry.component == "plugin"
+    assert "speaker rule 1 (Bob)" in entry.message
+    assert "Say and Pose" in entry.message
+
+
 async def test_speaker_effects_catalog_includes_first_party_configuration_metadata() -> None:
     manager = await PluginManager.load(
         enabled=("speaker_effects",),

@@ -1165,11 +1165,15 @@ class PluginManager:
     ) -> None:
         error_type = type(error).__name__
         if not operation.startswith("presentation:"):
+            detail = str(error).replace("\r", " ").replace("\n", " ").strip()
+            message = f"{plugin} failed during {operation}: {error_type}"
+            if operation == "load" and detail:
+                message += f" — {detail}"
             self.diagnostics.record(
                 severity="error",
                 component="plugin",
                 code="operation_failed",
-                message=f"{plugin} failed during {operation}: {error_type}"[:240],
+                message=message[:240],
                 operation=operation[:100],
             )
         event = Event(

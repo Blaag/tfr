@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from tfr.config import AgentsConfig, ConfigurationBundle, MainConfig, WorldsConfig
 from tfr.configuration_registry import ConfigurationRegistry, SettingScope
+from tfr.settings_ui import speaker_rules
 
 MAX_GATEWAY_CONFIGURATION_BYTES = 1024 * 1024
 MAX_GATEWAY_AUDIT_ENTRIES = 500
@@ -187,6 +188,8 @@ class GatewayConfigurationStore:
         self._validate_target_key(key, scope, target)
         if not reset:
             descriptor.validate(value)
+            if key == "plugins.config.speaker_effects.rules":
+                speaker_rules(value)
         return {
             "key": key,
             "scope": scope,
@@ -211,6 +214,8 @@ class GatewayConfigurationStore:
         descriptor = self._descriptor(key, scope)
         self._validate_target_key(key, scope, target)
         descriptor.validate(value)
+        if key == "plugins.config.speaker_effects.rules":
+            speaker_rules(value)
         return self._mutate(
             "set",
             key,
@@ -354,6 +359,8 @@ class GatewayConfigurationStore:
             self._validate_target_key(key, scope, target)
             if operation == "set":
                 descriptor.validate(value)
+                if key == "plugins.config.speaker_effects.rules":
+                    speaker_rules(value)
             output.append((operation, key, value, scope, target, descriptor))
         return output
 

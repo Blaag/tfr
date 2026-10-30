@@ -199,27 +199,52 @@ _SETTINGS_DIALOG_STYLE = merge_styles(
 )
 
 
+def _color_contrast(first: str, second: str) -> float:
+    def luminance(color: str) -> float:
+        channels = [int(color[index : index + 2], 16) / 255 for index in (1, 3, 5)]
+        linear = [
+            channel / 12.92
+            if channel <= 0.04045
+            else ((channel + 0.055) / 1.055) ** 2.4
+            for channel in channels
+        ]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    light, dark = sorted((luminance(first), luminance(second)), reverse=True)
+    return (light + 0.05) / (dark + 0.05)
+
+
+def _best_contrast(foreground: str, *backgrounds: str) -> str:
+    return max(backgrounds, key=lambda background: _color_contrast(foreground, background))
+
+
 def _themed_settings_dialog_style(theme: ResolvedTheme) -> Style:
     palette = theme.palette
+    body_background = _best_contrast(
+        palette.text, palette.surface, palette.background, palette.overlay
+    )
+    selected_background = _best_contrast(
+        palette.selected_text, palette.selection, palette.accent, palette.overlay
+    )
     return Style.from_dict(
         {
             "dialog": f"fg:{palette.text} bg:{palette.background}",
-            "dialog.body": f"fg:{palette.text} bg:{palette.surface}",
+            "dialog.body": f"fg:{palette.text} bg:{body_background}",
             "dialog.body text-area": f"fg:{palette.text} bg:{palette.background}",
             "dialog.body text-area last-line": "nounderline",
-            "dialog frame.label": f"fg:{palette.accent} bg:{palette.surface} bold",
+            "dialog frame.label": f"fg:{palette.accent} bg:{body_background} bold",
             "dialog shadow": f"bg:{palette.overlay}",
             "dialog.body shadow": f"bg:{palette.overlay}",
-            "button": f"fg:{palette.text} bg:{palette.surface}",
+            "button": f"fg:{palette.text} bg:{body_background}",
             "button.focused": (
-                f"fg:{palette.selected_text} bg:{palette.selection} bold"
+                f"fg:{palette.selected_text} bg:{selected_background} bold"
             ),
-            "radio": f"fg:{palette.text} bg:{palette.surface}",
+            "radio": f"fg:{palette.text} bg:{body_background}",
             "radio-checked": f"fg:{palette.accent} bold",
-            "checkbox": f"fg:{palette.text} bg:{palette.surface}",
+            "checkbox": f"fg:{palette.text} bg:{body_background}",
             "checkbox-checked": f"fg:{palette.accent} bold",
             "validation-toolbar": f"fg:{palette.selected_text} bg:{palette.error}",
-            "scrollbar.background": f"bg:{palette.surface}",
+            "scrollbar.background": f"bg:{body_background}",
             "scrollbar.button": f"bg:{palette.overlay}",
         }
     )
@@ -3438,7 +3463,9 @@ class TfrTui:
                 self.restart_requested = True
                 get_app().exit(result=0)
         elif command == "gateway":
-            if parameters == ["reconnect"] and self.gateway_reconnect is None:
+            if parameters == ["restart"]:
+                await self._handle_gateway_profile_command(alias, parameters)
+            elif parameters == ["reconnect"] and self.gateway_reconnect is None:
                 self.add_notice(alias, "Gateway reconnect is available only in an attached UI")
             elif parameters == ["reconnect"]:
                 self.add_notice(alias, "Reconnecting to Gateway...")
@@ -4944,7 +4971,6 @@ class TfrTui:
             values=[
                 ("say", "When they say something"),
                 ("pose", "When they pose"),
-                ("page", "When they page"),
             ],
             defaults=[str(item) for item in rule.get("kinds", [])],
         )
@@ -5497,9 +5523,13 @@ class TfrTui:
                     self.add_notice(
                         alias,
                         f"Migration applied atomically at revision {result.get('revision')}. "
-                        f"Required action: "
-                        f"{self._settings_action_text(result.get('restart', 'live'))}. "
-                        "Clients will report convergence through /config status.",
+                        + (
+                            "Gateway restart requested automatically; reconnecting."
+                            if result.get("restarting") is True
+                            else f"Required action: "
+                            f"{self._settings_action_text(result.get('restart', 'live'))}. "
+                            "Clients will report convergence through /config status."
+                        ),
                     )
                     return
                 else:
