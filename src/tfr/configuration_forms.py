@@ -40,7 +40,7 @@ SPEAKER_EFFECTS_RULES_FORM: dict[str, object] = {
                 "key": "kinds",
                 "label": "Message kinds",
                 "type": "multi-select",
-                "choices": ["say", "pose", "page"],
+                "choices": ["say", "pose"],
             },
         ],
     },

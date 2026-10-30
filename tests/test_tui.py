@@ -257,10 +257,18 @@ def test_settings_dialog_uses_active_theme_roles() -> None:
     cursor = style.get_attrs_for_style_str("class:radio-selected")
 
     assert body.color == "cdd6f4"
-    assert body.bgcolor == "313244"
+    assert body.bgcolor == "1e1e2e"
     assert title.color == "89b4fa"
     assert button.bgcolor == "585b70"
     assert cursor.reverse is True and cursor.bold is True
+
+    default_tui = make_tui(theme=ThemeConfig(preset="default"))
+    default_body = default_tui.application.style.get_attrs_for_style_str(
+        "class:dialog.body"
+    )
+    assert default_body.color != default_body.bgcolor
+    assert default_body.color == "d7d7d7"
+    assert default_body.bgcolor == "000000"
 
 
 def test_output_color_overrides_theme_plain_text_color() -> None:
@@ -1911,7 +1919,8 @@ async def test_gateway_restart_command_is_immediate_for_owner_ui() -> None:
     runtime = SimpleNamespace(restart_gateway=AsyncMock(return_value={"restarting": True}))
     tui.service_runtime = runtime
 
-    await tui._handle_gateway_profile_command("alpha", ["restart"])
+    assert tui.gateway_profiles is None
+    await tui._handle_client_command("alpha", "/gateway restart")
 
     runtime.restart_gateway.assert_awaited_once_with()
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
@@ -1949,7 +1958,14 @@ async def test_config_migration_commands_submit_choose_apply_and_report_status()
             return_value={**preview, "conflicts": [], "accepted": [{}]}
         ),
         config_status=AsyncMock(return_value={"revision": 4}),
-        config_migration_apply=AsyncMock(return_value={"revision": 5, "applied": True}),
+        config_migration_apply=AsyncMock(
+            return_value={
+                "revision": 5,
+                "applied": True,
+                "restart": "gateway-restart",
+                "restarting": True,
+            }
+        ),
         config_migration_status=AsyncMock(
             return_value={
                 "revision": 5,
@@ -1988,6 +2004,8 @@ async def test_config_migration_commands_submit_choose_apply_and_report_status()
         fragment_list_to_text(row) for row in tui.active_view.display.rows
     )
     assert "Migration applied atomically at revision 5" in text
+    assert "Gateway restart requested" in text
+    assert "reconnecting" in text
     assert "proposals: 2" in text
 
 
