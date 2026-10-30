@@ -1554,6 +1554,29 @@ async def test_owner_client_can_request_gateway_application_restart() -> None:
         await bus.close()
 
 
+async def test_owner_restart_hands_off_to_connector_supervisor() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    handoff = AsyncMock()
+    socket_path = Path("/tmp") / f"tfr-restart-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(
+        runtime, socket_path, application_restart_factory=handoff  # type: ignore[arg-type]
+    )
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    client.start()
+    try:
+        assert await client.restart_gateway() == {"restarting": True}
+        handoff.assert_awaited_once_with()
+    finally:
+        await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+
+
 async def test_ping_and_verify_connection_confirm_a_live_gateway() -> None:
     bus = EventBus()
     history = EventHistory(bus, {"alpha": 10})
@@ -1899,6 +1922,25 @@ async def test_expected_gateway_restart_recovers_immediately_and_retargets_plugi
     assert any("restored 2 events" in notice for notice in notices)
     assert runtime.connection_diagnostics.entries()[-1].code == "restart_completed"
     await event_bus.close()
+
+
+async def test_expected_gateway_restart_reports_stalled_acknowledgement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SimpleNamespace(gateway_id=uuid4(), sessions=[], event_bus=EventBus())
+    plugins = SimpleNamespace(process_event=AsyncMock())
+    notices: list[str] = []
+    runtime = GatewayUiRuntime(client, plugins, notify=notices.append)
+    runtime._arm_restart("gateway_restart")
+    runtime._restart_phase = "acknowledged"
+    monkeypatch.setattr("tfr.gateway_client.asyncio.sleep", AsyncMock())
+
+    await runtime._watch_restart_acknowledgement()
+
+    assert runtime._restart_phase == "stalled"
+    assert "did not disconnect" in notices[-1]
+    assert runtime.connection_diagnostics.entries()[-1].code == "restart_stalled"
+    await client.event_bus.close()
 
 
 async def test_gateway_ui_runtime_stop_cancels_the_supervisor_promptly() -> None:

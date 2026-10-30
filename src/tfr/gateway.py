@@ -119,6 +119,7 @@ from tfr.world_connector import (
     GATEWAY_APPLICATION_RESTART_EXIT,
     connect_or_spawn_connector,
     connector_worlds,
+    request_gateway_restart,
 )
 
 MAX_COMMAND_CHARACTERS = 65_536
@@ -1530,6 +1531,7 @@ class GatewayServer:
         update_notice: Callable[[str], Awaitable[None]] | None = None,
         ui_settings_notice: Callable[[Mapping[str, bool]], Awaitable[None]] | None = None,
         configuration_notice: Callable[[], Awaitable[None]] | None = None,
+        application_restart_factory: Callable[[], Awaitable[None]] | None = None,
         ui_store: UiStore | None = None,
     ) -> None:
         if (
@@ -1573,6 +1575,7 @@ class GatewayServer:
         self.update_notice = update_notice
         self.ui_settings_notice = ui_settings_notice
         self.configuration_notice = configuration_notice
+        self.application_restart_factory = application_restart_factory
         self.ui_store = ui_store
         self._server: asyncio.Server | None = None
         self._tcp_server: asyncio.Server | None = None
@@ -3245,7 +3248,26 @@ class GatewayServer:
                         event_id=str(request_id),
                     )
         if restart_gateway:
-            self._application_restart.set()
+            if self.application_restart_factory is None:
+                self._application_restart.set()
+            else:
+                try:
+                    await self.application_restart_factory()
+                except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+                    diagnostics = getattr(
+                        getattr(self.runtime, "plugins", None), "diagnostics", None
+                    )
+                    if diagnostics is not None:
+                        with contextlib.suppress(ValueError, OSError):
+                            diagnostics.record(
+                                severity="error",
+                                component="connector",
+                                code="restart_handoff_failed",
+                                message=f"Supervisor restart handoff failed: {exc}"[:240],
+                                operation="gateway_restart",
+                                event_id=str(request_id),
+                            )
+                    self._application_restart.set()
         if start_update:
             self._update_task = asyncio.create_task(
                 self._coordinate_update(), name="tfr-gateway-coordinated-update"
@@ -3726,6 +3748,56 @@ def _stage_legacy_world_login_references(
     return references
 
 
+def _retire_gateway_legacy_sources(
+    migration: GatewayMigrationStore,
+    *,
+    main_path: Path,
+    state_directory: Path,
+) -> None:
+    """Replace a migrated Gateway config with a bootstrap and remove backed-up auxiliaries."""
+
+    backups = {
+        Path(item["source"]): (Path(item["backup"]), item["sha256"])
+        for item in migration.backups
+    }
+    sources = tuple(backups)
+    if main_path not in backups:
+        raise OSError("the legacy Gateway config was not backed up")
+    for source, (backup, expected_hash) in backups.items():
+        if not source.is_file() or source.is_symlink() or not backup.is_file():
+            raise OSError(f"legacy migration backup is incomplete for {source}")
+        source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+        backup_hash = hashlib.sha256(backup.read_bytes()).hexdigest()
+        if source_hash != expected_hash or backup_hash != expected_hash:
+            raise OSError(f"legacy source changed while it was being migrated: {source}")
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "state_directory": str(state_directory.expanduser().resolve()),
+        },
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{main_path.name}.", dir=main_path.parent)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, main_path)
+        directory = os.open(main_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    for source in sources:
+        if source != main_path:
+            source.unlink()
+
+
 async def run_gateway(
     bundle: ConfigurationBundle,
     path: Path | str | None = None,
@@ -3755,6 +3827,25 @@ async def run_gateway(
         defer_plugin_validation=True,
     )
     startup_document = startup_store.document
+    if bootstrap.legacy and any(
+        section for _scope, _target, section in startup_store._sections(startup_document)
+    ):
+        completed_migration = GatewayMigrationStore(
+            bundle.main.managed_settings.state_directory, startup_store
+        )
+        if completed_migration.applied_revision is not None and completed_migration.backups:
+            try:
+                _retire_gateway_legacy_sources(
+                    completed_migration,
+                    main_path=bootstrap.main_path,
+                    state_directory=bundle.main.managed_settings.state_directory,
+                )
+            except OSError as exc:
+                print(
+                    f"warning: migrated legacy configuration could not be retired: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
     if migration_source is not None and not any(
         section for _scope, _target, section in startup_store._sections(startup_document)
     ):
@@ -3812,6 +3903,18 @@ async def run_gateway(
             actor_ui_name="Legacy one-time import",
             secret_references=login_references,
         )
+        try:
+            _retire_gateway_legacy_sources(
+                migration,
+                main_path=migration_source.main_path,
+                state_directory=bundle.main.managed_settings.state_directory,
+            )
+        except OSError as exc:
+            print(
+                f"warning: migrated legacy configuration could not be retired: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
     bundle = apply_gateway_configuration(bundle, startup_store.document)
     gateway_path = Path(path).expanduser() if path is not None else default_gateway_socket()
     connector_path = gateway_path.with_name(f"{gateway_path.name}.worlds")
@@ -3902,6 +4005,7 @@ async def run_gateway(
         configuration_notice=(
             web_manager.notify_configuration if web_manager is not None else None
         ),
+        application_restart_factory=lambda: request_gateway_restart(connector_path),
         ui_store=ui_store,
     )
     stop = asyncio.Event()

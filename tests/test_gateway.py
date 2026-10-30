@@ -21,6 +21,7 @@ from tfr.gateway import (
     GatewayServer,
     _record_plugin_catalog,
     _redacted_request_error,
+    _retire_gateway_legacy_sources,
     remove_stale_gateway_socket,
 )
 from tfr.gateway_protocol import MAX_MESSAGE_BYTES, encode_message, event_message, read_message
@@ -62,6 +63,40 @@ def test_stale_gateway_socket_cleanup_refuses_active_socket(tmp_path: Path) -> N
     finally:
         listener.close()
         path.unlink()
+
+
+def test_retire_gateway_legacy_sources_rewrites_bootstrap_and_removes_auxiliaries(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.jsonc"
+    worlds = tmp_path / "worlds.jsonc"
+    config.write_text('{"worlds_file":"worlds.jsonc"}\n', encoding="utf-8")
+    worlds.write_text('{"worlds":{}}\n', encoding="utf-8")
+    backup_directory = tmp_path / "backups"
+    backup_directory.mkdir()
+    records = []
+    for source in (config, worlds):
+        backup = backup_directory / source.name
+        backup.write_bytes(source.read_bytes())
+        records.append(
+            {
+                "source": str(source),
+                "backup": str(backup),
+                "sha256": hashlib.sha256(backup.read_bytes()).hexdigest(),
+            }
+        )
+    migration = SimpleNamespace(backups=tuple(records))
+    state = tmp_path / "managed"
+
+    _retire_gateway_legacy_sources(
+        migration, main_path=config, state_directory=state  # type: ignore[arg-type]
+    )
+
+    assert config.stat().st_mode & 0o777 == 0o600
+    assert '"state_directory":' in config.read_text(encoding="utf-8")
+    assert str(state) in config.read_text(encoding="utf-8")
+    assert not worlds.exists()
+    assert all(Path(item["backup"]).is_file() for item in records)
 
 
 def test_stale_gateway_socket_cleanup_refuses_non_socket_path(tmp_path: Path) -> None:

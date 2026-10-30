@@ -73,3 +73,18 @@ def test_speaker_rules_validate_and_have_readable_labels() -> None:
         validate_speaker_rule({**rule, "kinds": ["say", "page"]})
     with pytest.raises(ValueError, match=r"speaker rule 1 \(Barnaby\)"):
         speaker_rules([{**rule, "kinds": ["page"]}])
+
+
+def test_speaker_rule_rejects_missing_base_color_and_effect_specific_fields() -> None:
+    adrick = {
+        "speaker": "Adrick",
+        "effect": "color_pulse",
+        "accent_color": "#5fd7ff",
+        "duration_seconds": 1.2,
+        "trail_width": 3,
+    }
+
+    with pytest.raises(ValueError, match="base color is required"):
+        validate_speaker_rule(adrick)
+    with pytest.raises(ValueError, match="trail width is supported only"):
+        validate_speaker_rule({**adrick, "color": "#005f87"})

@@ -361,6 +361,8 @@ class GatewayConfigurationStore:
                 descriptor.validate(value)
                 if key == "plugins.config.speaker_effects.rules":
                     speaker_rules(value)
+                if key == "plugins.config.speaker_effects.rules":
+                    speaker_rules(value)
             output.append((operation, key, value, scope, target, descriptor))
         return output
 

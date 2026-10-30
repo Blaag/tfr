@@ -6,6 +6,29 @@ import re
 from collections.abc import Mapping, Sequence
 
 _COLOR = re.compile(r"#[0-9a-fA-F]{6}")
+_ACCENT_EFFECTS = {
+    "shimmer",
+    "capitalization_roll",
+    "comet",
+    "sparkle",
+    "frost",
+    "color_pulse",
+    "case_wave",
+    "cylon",
+}
+_DURATION_EFFECTS = {
+    "comet",
+    "sparkle",
+    "underline_sweep",
+    "bold_sweep",
+    "ember",
+    "frost",
+    "rainbow_wave",
+    "color_pulse",
+    "reverse_sweep",
+    "age_decay",
+    "cylon",
+}
 
 
 def setting_category(setting: Mapping[str, object]) -> str:
@@ -123,6 +146,25 @@ def validate_speaker_rule(rule: Mapping[str, object]) -> dict[str, object]:
         color = value.get(field)
         if color is not None and (not isinstance(color, str) or _COLOR.fullmatch(color) is None):
             raise ValueError(f"{field.replace('_', ' ')} must be #RRGGBB")
+    if effect == "age_decay":
+        if "end_color" not in value:
+            raise ValueError("end color is required for age decay")
+        if "color" in value:
+            raise ValueError("age decay uses end color instead of base color")
+    elif effect != "cylon" and "color" not in value:
+        raise ValueError(f"base color is required for {effect.replace('_', ' ')}")
+    elif "end_color" in value:
+        raise ValueError("end color is supported only by age decay")
+    if "accent_color" in value and effect not in _ACCENT_EFFECTS:
+        raise ValueError(f"accent color is not supported by {effect.replace('_', ' ')}")
+    if "duration_seconds" in value and effect not in _DURATION_EFFECTS:
+        raise ValueError(f"duration is not supported by {effect.replace('_', ' ')}")
+    if "period_seconds" in value and effect != "shimmer":
+        raise ValueError("period is supported only by shimmer")
+    if "step_seconds" in value and effect not in {"capitalization_roll", "case_wave"}:
+        raise ValueError("step duration is supported only by capitalization effects")
+    if "trail_width" in value and effect not in {"comet", "cylon"}:
+        raise ValueError("trail width is supported only by comet and cylon")
     for field in ("duration_seconds", "period_seconds", "repeat_seconds", "step_seconds"):
         number = value.get(field)
         if number is not None and (
