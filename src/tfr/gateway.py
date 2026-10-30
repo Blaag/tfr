@@ -1538,6 +1538,7 @@ class GatewayServer:
         self._update_task: asyncio.Task[None] | None = None
         self._plugin_catalog_task: asyncio.Task[None] | None = None
         self._update_restart = asyncio.Event()
+        self._application_restart = asyncio.Event()
 
     async def start(self, *, start_serving: bool = True) -> None:
         if self._server is not None:
@@ -1654,6 +1655,9 @@ class GatewayServer:
 
     async def wait_update_restart(self) -> None:
         await self._update_restart.wait()
+
+    async def wait_application_restart(self) -> None:
+        await self._application_restart.wait()
 
     def _validate_socket_parent(self) -> None:
         if os.name != "posix":
@@ -2092,6 +2096,7 @@ class GatewayServer:
         request_id_value = message.get("request_id")
         result: dict[str, Any] | None = None
         start_update = False
+        restart_gateway = False
         message_type = str(message.get("type", "unknown"))
         configuration_store = getattr(self.runtime, "gateway_configuration", None)
         initial_revision = (
@@ -2106,7 +2111,16 @@ class GatewayServer:
             if message_type == "ack":
                 self._handle_update_ack(client_id, request_id, message)
                 return
-            if message_type == "configuration_applied":
+            if message_type == "gateway_restart":
+                if set(message) != {"type", "protocol", "request_id", "confirm"}:
+                    raise ValueError("gateway_restart has invalid fields")
+                if not configuration_admin:
+                    raise ValueError("restarting the Gateway requires owner/admin access")
+                if message.get("confirm") is not True:
+                    raise ValueError("Gateway restart requires explicit confirmation")
+                result = {"restarting": True}
+                restart_gateway = True
+            elif message_type == "configuration_applied":
                 if ui_id is None or self.ui_store is None:
                     raise ValueError("configuration acknowledgement requires a registered UI")
                 if set(message) != {
@@ -3102,6 +3116,8 @@ class GatewayServer:
         if result is not None:
             acknowledgement["result"] = result
         await write_message(writer, acknowledgement, lock=write_lock)
+        if restart_gateway:
+            self._application_restart.set()
         if start_update:
             self._update_task = asyncio.create_task(
                 self._coordinate_update(), name="tfr-gateway-coordinated-update"
@@ -3803,8 +3819,17 @@ async def run_gateway(
         application_restart_stop = asyncio.create_task(
             application_restart.wait(), name="tfr-gateway-application-restart-stop"
         )
+        requested_restart_stop = asyncio.create_task(
+            server.wait_application_restart(), name="tfr-gateway-requested-restart-stop"
+        )
         done, pending = await asyncio.wait(
-            {signal_stop, update_stop, connector_stop, application_restart_stop},
+            {
+                signal_stop,
+                update_stop,
+                connector_stop,
+                application_restart_stop,
+                requested_restart_stop,
+            },
             return_when=asyncio.FIRST_COMPLETED,
         )
         for task in pending:
@@ -3813,6 +3838,8 @@ async def run_gateway(
         for task in done:
             task.result()
         restart_requested = update_stop in done
+        if requested_restart_stop in done:
+            application_restart.set()
     finally:
         for handled_signal in installed_signals:
             loop.remove_signal_handler(handled_signal)

@@ -746,6 +746,10 @@ plugin; `/update` installs the verified source release. In `/config`, **Plugins
 New plugins begin unchecked, Space toggles any number, and Apply atomically
 saves the enabled set. Discovery never enables or executes plugin code.
 
+An authenticated native owner UI can restart the Gateway application with
+`/gateway restart`. The command acts immediately, world connections remain
+active in the connector process, and attached UIs reconnect automatically.
+
 In TFR, `/help` opens a concise topic index rather than a complete command wall.
 Use `/help TOPIC` to browse relevant commands or `/help COMMAND` for exact usage,
 examples, scope, availability, and related commands. `/config help` and
