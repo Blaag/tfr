@@ -247,6 +247,22 @@ def test_settings_keyboard_cursor_has_visible_terminal_independent_style() -> No
     assert checkbox.reverse is True and checkbox.bold is True
 
 
+def test_settings_dialog_uses_active_theme_roles() -> None:
+    tui = make_tui(theme=ThemeConfig(preset="catppuccin-mocha"))
+    style = tui.application.style
+
+    body = style.get_attrs_for_style_str("class:dialog.body")
+    title = style.get_attrs_for_style_str("class:dialog class:frame.label")
+    button = style.get_attrs_for_style_str("class:button.focused")
+    cursor = style.get_attrs_for_style_str("class:radio-selected")
+
+    assert body.color == "cdd6f4"
+    assert body.bgcolor == "313244"
+    assert title.color == "89b4fa"
+    assert button.bgcolor == "585b70"
+    assert cursor.reverse is True and cursor.bold is True
+
+
 def test_output_color_overrides_theme_plain_text_color() -> None:
     tui = make_tui(
         theme=ThemeConfig(preset="catppuccin-mocha"),

@@ -20,6 +20,7 @@ from tfr.gateway import (
     GatewayRuntime,
     GatewayServer,
     _record_plugin_catalog,
+    _redacted_request_error,
     remove_stale_gateway_socket,
 )
 from tfr.gateway_protocol import MAX_MESSAGE_BYTES, encode_message, event_message, read_message
@@ -80,6 +81,19 @@ def test_plugin_catalog_records_only_later_discoveries(tmp_path: Path) -> None:
     )
     assert _record_plugin_catalog(tmp_path, ("speaker_effects", "spotlight")) == ()
     assert stat.S_IMODE((tmp_path / "known-plugins.json").stat().st_mode) == 0o600
+
+
+def test_request_error_diagnostic_redacts_secrets_and_private_paths() -> None:
+    secret = _redacted_request_error(ValueError("password=hunter2 token:abc123"))
+    filesystem = _redacted_request_error(
+        PermissionError(13, "Permission denied", "/Users/private/config.jsonc")
+    )
+
+    assert "hunter2" not in secret
+    assert "abc123" not in secret
+    assert "[redacted]" in secret
+    assert "/Users/private" not in filesystem
+    assert "config.jsonc" in filesystem
 
 
 async def test_history_assigns_global_cursors_and_reports_truncation() -> None:

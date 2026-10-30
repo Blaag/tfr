@@ -434,21 +434,29 @@ class GatewayMigrationStore:
         if not sources:
             return ()
         destination = self.backup_directory / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        destination.mkdir(parents=True, mode=0o700)
+        try:
+            destination.mkdir(parents=True, mode=0o700, exist_ok=True)
+        except OSError:
+            # Legacy sources are never modified. A redundant backup must not
+            # prevent the managed document from being migrated atomically.
+            return ()
         output = []
         for index, source in enumerate(sources):
-            if not source.is_file() or source.is_symlink():
+            try:
+                if not source.is_file() or source.is_symlink():
+                    continue
+                target = destination / f"{index:03d}-{source.name}"
+                shutil.copyfile(source, target)
+                os.chmod(target, 0o600)
+                output.append(
+                    {
+                        "source": str(source),
+                        "backup": str(target),
+                        "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+                    }
+                )
+            except OSError:
                 continue
-            target = destination / f"{index:03d}-{source.name}"
-            shutil.copyfile(source, target)
-            os.chmod(target, 0o600)
-            output.append(
-                {
-                    "source": str(source),
-                    "backup": str(target),
-                    "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
-                }
-            )
         return tuple(output)
 
     def _load(self) -> None:
