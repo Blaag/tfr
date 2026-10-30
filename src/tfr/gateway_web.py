@@ -948,7 +948,19 @@ class WebGatewayServer:
         elif category == "presentations":
             entries = [entry for entry in entries if entry.component == "presentation"]
         elif category == "plugins":
-            entries = [entry for entry in entries if entry.component == "plugin"]
+            entries = [entry for entry in entries if entry.component in {"config", "plugin"}]
+        elif category == "gateway":
+            entries = [entry for entry in entries if entry.component in {"gateway", "connection"}]
+        elif category == "config":
+            entries = [
+                entry for entry in entries if entry.component.startswith("configuration")
+            ]
+        elif category == "updates":
+            entries = [entry for entry in entries if entry.component in {"update", "updates"}]
+        elif category == "agents":
+            entries = [entry for entry in entries if entry.component == "agent"]
+        elif category == "connector":
+            entries = [entry for entry in entries if entry.component == "connector"]
         ordered = sorted(entries, key=lambda item: item.timestamp)[-100:]
         return [entry.as_dict() for entry in ordered]
 

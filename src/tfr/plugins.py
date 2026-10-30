@@ -880,6 +880,15 @@ class PluginManager:
     def loaded_plugins(self) -> tuple[str, ...]:
         return tuple(self._loaded_plugins)
 
+    def retarget(self, targets: Mapping[str, UUID]) -> None:
+        """Refresh remote session identities after a Gateway application restart."""
+
+        if set(targets) != set(self.targets):
+            raise ValueError("plugin targets changed; reload the UI")
+        self.targets = MappingProxyType(dict(targets))
+        self._presentation_cache.clear()
+        self._presentation_source_cache.clear()
+
     @classmethod
     async def load(
         cls,

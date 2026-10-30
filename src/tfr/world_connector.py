@@ -1326,6 +1326,14 @@ async def supervise_gateway(
                 return 75
             if child_done.result() == 0:
                 return 0
+            if child_done.result() == 2:
+                print(
+                    "tfr: Gateway exited with a configuration or usage error; "
+                    "automatic restart is disabled until the service is started again",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return 2
             with contextlib.suppress(FileNotFoundError):
                 socket_stat = gateway_socket.stat(follow_symlinks=False)
                 if socket_stat.st_uid == os.geteuid() and stat.S_ISSOCK(socket_stat.st_mode):

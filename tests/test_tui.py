@@ -896,6 +896,34 @@ async def test_settings_escape_returns_one_navigation_level() -> None:
         "TFR Settings",
         "TFR Settings",
     ]
+    assert tui._settings_choice.await_args_list[3].kwargs["default"] == "Ui"
+    assert tui._settings_choice.await_args_list[4].kwargs["default"] == "browse"
+
+
+async def test_settings_browser_returns_to_last_selected_setting() -> None:
+    tui = make_tui()
+    tui.service_runtime = SimpleNamespace(
+        config_list=AsyncMock(
+            return_value=[
+                {
+                    "key": "ui.mouse_mode",
+                    "type": "string",
+                    "scope": "ui",
+                    "validation": {"choices": ["auto", "terminal", "tfr"]},
+                    "restart": "client-restart",
+                    "sensitive": False,
+                }
+            ]
+        )
+    )
+    choices = iter(["browse", "Ui", "ui.mouse_mode", None, None, None])
+    tui._settings_choice = AsyncMock(side_effect=lambda **_kwargs: next(choices))
+    tui._open_setting_editor = AsyncMock()
+
+    await tui._open_settings_menu("alpha")
+
+    tui._open_setting_editor.assert_awaited_once()
+    assert tui._settings_choice.await_args_list[3].kwargs["default"] == "ui.mouse_mode"
 
 
 async def test_plugins_enabled_uses_discovered_checkbox_manager() -> None:
@@ -3355,6 +3383,28 @@ async def test_effects_lab_effect_all_previews_every_effect_as_wilford_brimley()
     assert rendered.count('WilfordBrimley says, "') == len(TextEffectKind)
     for effect in TextEffectKind:
         assert f"{effect.value}: The quick brown fox previews this effect." in rendered
+
+
+def test_speaker_rule_effect_preview_targets_only_the_speaker_name() -> None:
+    tui = make_tui()
+
+    tui._show_text_effect_demo("shimmer", speaker="Blood", target_speaker=True)
+
+    rendered = fragment_list_to_text(tui.effects_display.formatted_text())
+    decoration = tui.effects_display._entry_decorations[-1][0]
+    assert rendered == 'Blood says, "shimmer: The quick brown fox previews this effect."'
+    assert (decoration.start, decoration.end) == (0, len("Blood"))
+
+
+def test_generic_effect_preview_continues_to_target_the_message_body() -> None:
+    tui = make_tui()
+
+    tui._show_text_effect_demo("shimmer", speaker="Blood")
+
+    rendered = fragment_list_to_text(tui.effects_display.formatted_text())
+    decoration = tui.effects_display._entry_decorations[-1][0]
+    sample = "shimmer: The quick brown fox previews this effect."
+    assert rendered[decoration.start : decoration.end] == sample
 
 
 async def test_effects_lab_full_streak_playback_is_cancellable() -> None:

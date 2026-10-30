@@ -296,6 +296,21 @@ manifest URL, and state directory under the top-level `updates` object. Only
 stable `vMAJOR.MINOR.PATCH` releases participate; prereleases and moving Git tags
 are not used.
 
+### Privacy and diagnostics
+
+TFR does not track users and does not contain telemetry or automatic diagnostic,
+crash-report, or usage-data submission. Runtime diagnostics are bounded, redacted,
+stored locally with private file permissions, and leave the machine only when a
+person deliberately copies or exports a report. `/diagnostics report` creates a
+copyable local report; `/diagnostics export PATH` explicitly writes one to a new
+private file. Neither command uploads anything.
+
+TFR's only automatic TFR-maintained network traffic is update discovery, including
+configured stable plugin manifests. Set `updates.enabled` to `false` to disable
+all periodic update checks. Connections explicitly configured by the operator—such
+as worlds, model providers, remote Gateways, and plugin repositories—remain under
+that operator's control.
+
 Set `updates.channel` to `"candidate"` to opt into immutable candidate releases.
 Candidate discovery uses GitHub prereleases named
 `vMAJOR.MINOR.PATCH-candidate.N`; its cache is isolated from the stable channel.

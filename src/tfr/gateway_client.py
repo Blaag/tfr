@@ -9,6 +9,7 @@ import socket
 import ssl
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -29,6 +30,7 @@ from tfr.configuration_registry import SettingDescriptor
 from tfr.configuration_sync import CONFIGURATION_SYNC_CAPABILITY, required_action
 from tfr.core import EventBus
 from tfr.core_settings import core_configuration_registry
+from tfr.diagnostics import DiagnosticBuffer, bounded_diagnostic_message
 from tfr.events import CommandRequest, Event
 from tfr.gateway import default_gateway_socket
 from tfr.gateway_protocol import (
@@ -771,7 +773,7 @@ class GatewayClient:
         with contextlib.suppress(Exception):
             await self.writer.wait_closed()
 
-    async def reconnect(self) -> int:
+    async def reconnect(self, *, allow_generation_reset: bool = False) -> int:
         if self._reconnect_factory is None:
             raise GatewayDisconnectedError("gateway connection cannot be re-established")
         async with self._reconnect_lock:
@@ -803,9 +805,14 @@ class GatewayClient:
             replacement_agents = (
                 set(replacement.agents.controllers) if replacement.agents is not None else set()
             )
+            incompatible_reset = replacement.history_reset and not allow_generation_reset
+            incompatible_sessions = session_identity_changed and not (
+                allow_generation_reset
+                and current_sessions.keys() == replacement_sessions.keys()
+            )
             if (
-                replacement.history_reset
-                or session_identity_changed
+                incompatible_reset
+                or incompatible_sessions
                 or aliases_changed
                 or current_agents != replacement_agents
             ):
@@ -817,6 +824,7 @@ class GatewayClient:
 
             for world, session in current_sessions.items():
                 updated = replacement_sessions[world]
+                session.session_id = updated.session_id
                 session.state = updated.state
                 session.connection_generation = updated.connection_generation
                 session.config = updated.config
@@ -843,6 +851,9 @@ class GatewayClient:
             self.gateway_speaker_effects_loaded = replacement.gateway_speaker_effects_loaded
             self.gateway_speaker_effects = replacement.gateway_speaker_effects
             self.gateway_build = replacement.gateway_build
+            self.configuration_revision = replacement.configuration_revision
+            self.effective_configuration = replacement.effective_configuration
+            self.configuration_requirements = replacement.configuration_requirements
             self._write_lock = asyncio.Lock()
             await replacement.event_bus.close()
             if self.connect_handler is not None:
@@ -1833,6 +1844,7 @@ class GatewayUiRuntime:
         update_config: UpdateConfig | None = None,
         plugin_update_checker: PluginUpdateChecker | None = None,
         notify: Callable[[str], None] | None = None,
+        diagnostic_path: Path | None = None,
     ) -> None:
         self.client = client
         self.plugins = plugins
@@ -1849,6 +1861,13 @@ class GatewayUiRuntime:
         self._gateway_state_lock = asyncio.Lock()
         self._reconnect_lock = asyncio.Lock()
         self._connection_tasks: set[asyncio.Task[None]] = set()
+        self.connection_diagnostics = DiagnosticBuffer(path=diagnostic_path)
+        self._restart_expected = False
+        self._restart_phase = "idle"
+        self._restart_requested_at: datetime | None = None
+        self._last_connection_transition = datetime.now(UTC)
+        self._last_connection_error: str | None = None
+        self._reconnect_attempt = 0
         self.client.connect_handler = self._handle_connected
         self.client.disconnect_handler = self._handle_disconnect
         self.client.update_prepare_handler = self._prepare_update
@@ -1862,6 +1881,7 @@ class GatewayUiRuntime:
         await self._set_gateway_connected(True)
         await self._reconcile_world_states()
         self.client.start()
+        self._record_connection("info", "connected", "Connected to the Gateway")
         if self.reconnect_config.enabled:
             self._supervisor_task = asyncio.create_task(
                 self._supervise(), name="tfr-gateway-reconnect-supervisor"
@@ -1915,7 +1935,18 @@ class GatewayUiRuntime:
         return await self.client.web_status()
 
     async def restart_gateway(self) -> dict[str, object]:
-        return await self.client.restart_gateway()
+        self._arm_restart("gateway_restart")
+        try:
+            result = await self.client.restart_gateway()
+        except BaseException as exc:
+            self._restart_expected = False
+            self._restart_phase = "request-failed"
+            self._last_connection_error = str(exc)
+            self._record_connection("error", "restart_request_failed", str(exc))
+            raise
+        self._restart_phase = "acknowledged"
+        self._record_connection("info", "restart_acknowledged", "Gateway acknowledged restart")
+        return result
 
     async def config_summary(self) -> dict[str, object]:
         return await self.client.config_summary()
@@ -1985,11 +2016,26 @@ class GatewayUiRuntime:
     async def config_migration_apply(
         self, *, expected_revision: int, choices: dict[str, str], confirm: bool
     ) -> dict[str, object]:
-        return await self.client.config_migration_apply(
-            expected_revision=expected_revision,
-            choices=choices,
-            confirm=confirm,
-        )
+        self._arm_restart("configuration_migration")
+        try:
+            result = await self.client.config_migration_apply(
+                expected_revision=expected_revision,
+                choices=choices,
+                confirm=confirm,
+            )
+        except BaseException:
+            self._restart_expected = False
+            self._restart_phase = "idle"
+            raise
+        if result.get("restarting") is not True:
+            self._restart_expected = False
+            self._restart_phase = "idle"
+        else:
+            self._restart_phase = "acknowledged"
+            self._record_connection(
+                "info", "restart_acknowledged", "Configuration migration requested restart"
+            )
+        return result
 
     async def config_migration_status(self) -> dict[str, object]:
         return await self.client.config_migration_status()
@@ -2043,10 +2089,56 @@ class GatewayUiRuntime:
         await self.client.revoke_web_device(device_id)
 
     async def diagnostics(self, category: str | None = None) -> list[dict[str, Any]]:
-        return await self.client.diagnostics(category)
+        local = [
+            entry.as_dict()
+            for entry in self.connection_diagnostics.entries()
+            if category in {None, "gateway"} or entry.component == category
+        ]
+        try:
+            remote = await self.client.diagnostics(category)
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            self._last_connection_error = str(exc)
+            self._record_connection("warning", "remote_diagnostics_unavailable", str(exc))
+            return [*local, self.connection_diagnostics.entries()[-1].as_dict()]
+        return [*remote, *local]
 
     async def clear_diagnostics(self) -> None:
-        await self.client.clear_diagnostics()
+        self.connection_diagnostics.clear()
+        with contextlib.suppress(ConnectionError, OSError, RuntimeError, ValueError):
+            await self.client.clear_diagnostics()
+
+    def diagnostic_status(self) -> dict[str, object]:
+        now = datetime.now(UTC)
+        gateway_build = getattr(self.client, "gateway_build", None)
+        return {
+            "connected": self._gateway_connected,
+            "gateway_id": str(self.client.gateway_id),
+            "gateway_build": (
+                gateway_build.as_dict() if gateway_build is not None else None
+            ),
+            "configuration_revision": getattr(self.client, "configuration_revision", None),
+            "restart_phase": self._restart_phase,
+            "restart_requested_at": (
+                self._restart_requested_at.isoformat().replace("+00:00", "Z")
+                if self._restart_requested_at is not None
+                else None
+            ),
+            "reconnect_attempt": self._reconnect_attempt,
+            "last_transition_at": self._last_connection_transition.isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "seconds_since_transition": max(
+                0, int((now - self._last_connection_transition).total_seconds())
+            ),
+            "last_error": self._last_connection_error,
+            "worlds": {
+                state: sum(1 for session in self.client.sessions if session.state.value == state)
+                for state in sorted({session.state.value for session in self.client.sessions})
+            },
+            "automatic_update_checks": bool(
+                self.update_config is not None and self.update_config.enabled
+            ),
+        }
 
     async def manage_gag(
         self,
@@ -2136,13 +2228,57 @@ class GatewayUiRuntime:
         self._staged_update = None
         self.notify(error)
 
+    def _record_connection(
+        self,
+        severity: str,
+        code: str,
+        message: str,
+        *,
+        operation: str | None = None,
+    ) -> None:
+        with contextlib.suppress(ValueError, OSError):
+            self.connection_diagnostics.record(
+                severity=severity,  # type: ignore[arg-type]
+                component="gateway",
+                code=code,
+                message=bounded_diagnostic_message(message),
+                operation=operation,
+                client="native-ui",
+                event_id=str(self.client.gateway_id),
+            )
+
+    def _arm_restart(self, operation: str) -> None:
+        self._restart_expected = True
+        self._restart_phase = "requested"
+        self._restart_requested_at = datetime.now(UTC)
+        self._reconnect_attempt = 0
+        self._last_connection_error = None
+        self._record_connection(
+            "info",
+            "restart_requested",
+            f"Gateway restart requested for {operation}",
+            operation=operation,
+        )
+
     async def _handle_connected(self) -> None:
         await self._set_gateway_connected(True)
 
-    def _handle_disconnect(self, _error: Exception) -> None:
+    def _handle_disconnect(self, error: Exception) -> None:
+        self._last_connection_transition = datetime.now(UTC)
+        self._last_connection_error = str(error)
+        self._record_connection("warning", "disconnected", str(error))
         if self._update_restart_expected and not self._stopping:
             task = asyncio.create_task(
                 self._recover_after_update(), name="tfr-gateway-update-reconnect"
+            )
+            self._connection_tasks.add(task)
+            task.add_done_callback(self._connection_task_done)
+            return
+        if self._restart_expected and not self._stopping:
+            self._restart_phase = "disconnected"
+            self.notify("Gateway stopped; reconnecting…")
+            task = asyncio.create_task(
+                self._recover_after_restart(), name="tfr-gateway-application-reconnect"
             )
             self._connection_tasks.add(task)
             task.add_done_callback(self._connection_task_done)
@@ -2154,6 +2290,72 @@ class GatewayUiRuntime:
         )
         self._connection_tasks.add(task)
         task.add_done_callback(self._connection_task_done)
+
+    async def _recover_after_restart(self) -> None:
+        async with self._reconnect_lock:
+            await self._set_gateway_connected(False)
+            config = self.reconnect_config
+            old_gateway = self.client.gateway_id
+            attempts = max(3, config.max_attempts)
+            last_error: Exception | None = None
+            for attempt in range(1, attempts + 1):
+                if self._stopping:
+                    return
+                self._restart_phase = "reconnecting"
+                self._reconnect_attempt = attempt
+                self.notify(f"Gateway restart reconnect attempt {attempt}/{attempts}…")
+                self._record_connection(
+                    "info",
+                    "reconnect_attempt",
+                    f"Reconnect attempt {attempt}/{attempts}",
+                    operation="gateway_restart",
+                )
+                try:
+                    restored = await self.client.reconnect(allow_generation_reset=True)
+                    self.plugins.retarget(
+                        {session.world: session.session_id for session in self.client.sessions}
+                    )
+                except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+                    last_error = exc
+                    self._last_connection_error = str(exc)
+                    self._record_connection(
+                        "warning",
+                        "reconnect_failed",
+                        f"Attempt {attempt}/{attempts}: {exc}",
+                        operation="gateway_restart",
+                    )
+                    if attempt < attempts:
+                        await asyncio.sleep(config.retry_interval_seconds)
+                    continue
+                self._restart_expected = False
+                self._restart_phase = "reconnected"
+                self._last_connection_transition = datetime.now(UTC)
+                self._last_connection_error = None
+                await self._set_gateway_connected(True)
+                await self._reconcile_world_states()
+                message = (
+                    f"Gateway restarted and reconnected; restored {restored} event"
+                    f"{'s' if restored != 1 else ''}"
+                )
+                self.notify(message)
+                self._record_connection(
+                    "info",
+                    "restart_completed",
+                    f"Gateway {old_gateway} -> {self.client.gateway_id}; restored={restored}",
+                    operation="gateway_restart",
+                )
+                return
+            self._restart_expected = False
+            self._restart_phase = "failed"
+            failure = (
+                f"Gateway restart recovery failed after {attempts} attempts"
+                + (f": {last_error}" if last_error is not None else "")
+                + ". Use /reload to rebuild the UI."
+            )
+            self.notify(failure)
+            self._record_connection(
+                "error", "restart_failed", failure, operation="gateway_restart"
+            )
 
     async def _recover_after_update(self) -> None:
         await self._set_gateway_connected(False)
@@ -2501,6 +2703,11 @@ async def run_gateway_ui(
         reconnect_config=configuration.main.ui.gateway_reconnect,
         update_config=configuration.main.updates,
         plugin_update_checker=plugin_update_checker,
+        diagnostic_path=(
+            configuration.main.plugins.state_directory
+            / "diagnostics"
+            / f"native-ui-{getattr(client, 'client_id', connection_options['client_id'])}.jsonl"
+        ),
     )
     # Remote UIs keep no authoritative preference file. Per-UI values arrive
     # in the Gateway configuration view and are changed with /config set.

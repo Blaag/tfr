@@ -388,6 +388,8 @@ class ServiceRuntime(Protocol):
 
     async def clear_diagnostics(self) -> None: ...
 
+    def diagnostic_status(self) -> dict[str, object]: ...
+
     async def manage_gag(
         self,
         world: str,
@@ -3885,6 +3887,7 @@ class TfrTui:
         name: str,
         *,
         speaker: str | None = None,
+        target_speaker: bool = False,
         base_color: str | None = None,
         accent_color: str | None = None,
         duration_seconds: float | None = None,
@@ -3905,9 +3908,14 @@ class TfrTui:
             if effect in {TextEffectKind.CAPITALIZATION_ROLL, TextEffectKind.CASE_WAVE}
             else 2.0
         )
+        target_start, target_end = (
+            (0, len(speaker))
+            if target_speaker and speaker is not None
+            else (start, start + len(sample))
+        )
         decoration = TextDecoration(
-            start=start,
-            end=start + len(sample),
+            start=target_start,
+            end=target_end,
             effect=effect,
             base_color=base_color or self.theme.output_color,
             accent_color=accent_color or "#ffffff",
@@ -5212,6 +5220,7 @@ class TfrTui:
                 self._show_text_effect_demo(
                     str(rule.get("effect", "")),
                     speaker=str(rule.get("speaker", "Speaker")),
+                    target_speaker=True,
                     base_color=(str(rule["color"]) if "color" in rule else None),
                     accent_color=(
                         str(rule["accent_color"]) if "accent_color" in rule else None
@@ -5308,6 +5317,10 @@ class TfrTui:
         if not settings:
             self.add_notice(alias, "No editable settings are available")
             return
+        last_operation: str | None = None
+        last_category: str | None = None
+        last_setting: dict[str, str] = {}
+        last_search_setting: str | None = None
         while True:
             operation = await self._settings_choice(
                 title="TFR Settings",
@@ -5317,9 +5330,11 @@ class TfrTui:
                     ("search", "Search settings"),
                     ("undo", "Undo latest change"),
                 ],
+                default=last_operation,
             )
             if operation is None:
                 return
+            last_operation = operation
             if operation == "undo":
                 status = await self.service_runtime.config_status()
                 preview = await self.service_runtime.config_undo(
@@ -5388,9 +5403,11 @@ class TfrTui:
                                 )
                                 for item in candidates
                             ],
+                            default=last_search_setting,
                         )
                         if key is None:
                             break
+                        last_search_setting = key
                         setting = next(item for item in candidates if item["key"] == key)
                         await self._open_setting_editor(alias, setting)
                 continue
@@ -5400,9 +5417,11 @@ class TfrTui:
                     title="TFR Settings",
                     text="Choose a category. Scope and target are selected automatically.",
                     values=[(name, name) for name in categories],
+                    default=last_category,
                 )
                 if category is None:
                     break
+                last_category = category
                 choices = [item for item in settings if setting_category(item) == category]
                 while True:
                     key = await self._settings_choice(
@@ -5412,9 +5431,11 @@ class TfrTui:
                             (str(item["key"]), setting_label(str(item["key"])))
                             for item in choices
                         ],
+                        default=last_setting.get(category),
                     )
                     if key is None:
                         break
+                    last_setting[category] = key
                     setting = next(item for item in choices if item["key"] == key)
                     await self._open_setting_editor(alias, setting)
 
@@ -5884,15 +5905,31 @@ class TfrTui:
         )
 
     async def _handle_diagnostics_command(self, alias: str, parameters: list[str]) -> None:
-        usage = "Usage: /diagnostics [web|presentations|plugins|clear]"
+        usage = (
+            "Usage: /diagnostics [gateway|config|plugins|presentations|web|updates|agents|"
+            "connector|report|clear|export PATH]"
+        )
         if self.service_runtime is None:
             self.add_notice(alias, "Diagnostics are available only in an attached UI")
             return
-        if len(parameters) > 1:
+        if len(parameters) > 2 or (len(parameters) == 2 and parameters[0].casefold() != "export"):
             self.add_notice(alias, usage)
             return
         category = parameters[0].casefold() if parameters else None
-        if category not in {None, "web", "presentations", "plugins", "clear"}:
+        if category not in {
+            None,
+            "gateway",
+            "config",
+            "plugins",
+            "presentations",
+            "web",
+            "updates",
+            "agents",
+            "connector",
+            "report",
+            "clear",
+            "export",
+        } or (category == "export" and len(parameters) != 2):
             self.add_notice(alias, usage)
             return
         try:
@@ -5900,34 +5937,84 @@ class TfrTui:
                 await self.service_runtime.clear_diagnostics()
                 self.add_notice(alias, "Cleared bounded runtime diagnostics")
                 return
-            entries = await self.service_runtime.diagnostics(category)
-            if category in {None, "plugins", "presentations"}:
+            query_category = None if category in {"report", "export"} else category
+            entries = await self.service_runtime.diagnostics(query_category)
+            if query_category in {None, "plugins", "presentations"}:
                 entries = [
                     *entries,
                     *(
                         entry.as_dict()
                         for entry in self.plugins.diagnostics.entries()
-                        if category is None
-                        or (category == "plugins" and entry.component in {"config", "plugin"})
-                        or (category == "presentations" and entry.component == "presentation")
+                        if query_category is None
+                        or (
+                            query_category == "plugins"
+                            and entry.component in {"config", "plugin"}
+                        )
+                        or (
+                            query_category == "presentations"
+                            and entry.component == "presentation"
+                        )
                     ),
                 ]
-            status = await self.service_runtime.web_status() if category is None else None
+            local_status = (
+                self.service_runtime.diagnostic_status()
+                if hasattr(self.service_runtime, "diagnostic_status")
+                else {}
+            )
+            web_status: dict[str, Any] | None = None
+            web_error: str | None = None
+            if query_category is None:
+                try:
+                    web_status = await self.service_runtime.web_status()
+                except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+                    web_error = str(exc)
         except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
             self.add_notice(alias, f"Diagnostics failed: {exc}")
             return
-        if not entries and status is None:
+        if not entries and not local_status and web_status is None:
             self.add_notice(alias, "No matching runtime diagnostics")
             return
-        lines = [f"Runtime diagnostics{f' — {category}' if category else ''}"]
-        if status is not None:
-            lines.append(
-                f"  Gateway connection: healthy; PWA: "
-                f"{'enabled' if status.get('enabled') else 'disabled'}; "
-                f"devices: {status.get('device_count', 'unknown')}"
+        report = category in {"report", "export"}
+        incident_id = str(uuid4()) if report else None
+        heading = f"Runtime diagnostics — incident {incident_id}" if incident_id else (
+            f"Runtime diagnostics — {category}" if category else "Runtime diagnostics"
+        )
+        lines = [heading]
+        if local_status:
+            connected = local_status.get("connected") is True
+            lines.extend(
+                (
+                    f"  Gateway connection: {'healthy' if connected else 'disconnected'}; "
+                    "last transition: "
+                    f"{local_status.get('seconds_since_transition', 'unknown')}s ago",
+                    f"  Gateway ID: {local_status.get('gateway_id', 'unknown')}; "
+                    f"config revision: {local_status.get('configuration_revision', 'unknown')}",
+                    f"  Restart phase: {local_status.get('restart_phase', 'unknown')}; "
+                    f"reconnect attempt: {local_status.get('reconnect_attempt', 0)}",
+                    "  World states: "
+                    + ", ".join(
+                        f"{state}={count}"
+                        for state, count in dict(local_status.get("worlds", {})).items()
+                    ),
+                    "  Automatic update checks: "
+                    + (
+                        "enabled"
+                        if local_status.get("automatic_update_checks") is True
+                        else "disabled"
+                    ),
+                )
             )
-            if not entries:
-                lines.append("  No recent diagnostic entries")
+            if local_status.get("last_error"):
+                lines.append(f"  Last connection error: {local_status['last_error']}")
+        if web_status is not None:
+            lines.append(
+                f"  PWA: {'enabled' if web_status.get('enabled') else 'disabled'}; "
+                f"devices: {web_status.get('device_count', 'unknown')}"
+            )
+        elif web_error is not None:
+            lines.append(f"  PWA diagnostics: unavailable — {web_error}")
+        if not entries:
+            lines.append("  No recent diagnostic entries")
         for entry in entries[-25:]:
             client = str(entry.get("client", "gateway"))
             if entry.get("ui_name"):
@@ -5938,7 +6025,40 @@ class TfrTui:
                 f"{source}  {entry.get('code', 'unknown')}\n"
                 f"    {entry.get('message', 'No message')}"
             )
-        self.add_notice(alias, "\n".join(lines))
+            context = ", ".join(
+                f"{key}={entry[key]}"
+                for key in ("operation", "event_id", "shell_version")
+                if entry.get(key) is not None
+            )
+            if context:
+                lines.append(f"    Context: {context}")
+        if report:
+            lines.extend(
+                (
+                    "",
+                    "Privacy: this report is local and has not been uploaded or transmitted.",
+                    "Share it only if you choose to do so.",
+                )
+            )
+        output = "\n".join(lines)
+        if category == "export":
+            destination = Path(parameters[1]).expanduser()
+            try:
+                descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                    stream.write(output + "\n")
+            except FileExistsError:
+                self.add_notice(alias, f"Diagnostics export already exists: {destination}")
+                return
+            except OSError as exc:
+                self.add_notice(alias, f"Diagnostics export failed: {exc}")
+                return
+            self.add_notice(
+                alias,
+                f"Wrote local diagnostics report to {destination}. Nothing was uploaded.",
+            )
+            return
+        self.add_notice(alias, output)
 
     async def _handle_update_command(self, alias: str, parameters: list[str]) -> None:
         if parameters not in ([], ["status"], ["check"], ["force"]):
