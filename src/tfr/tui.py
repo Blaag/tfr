@@ -4912,26 +4912,47 @@ class TfrTui:
         if effect is None:
             return None
         rule.update({"speaker": speaker, "effect": effect})
+        if effect not in {"comet", "cylon"}:
+            rule.pop("trail_width", None)
+        if effect != "shimmer":
+            rule.pop("period_seconds", None)
+        if effect not in {"capitalization_roll", "case_wave"}:
+            rule.pop("step_seconds", None)
+        color_key = "end_color" if effect == "age_decay" else "color"
+        obsolete_color = "color" if color_key == "end_color" else "end_color"
+        rule.pop(obsolete_color, None)
         color = await self._settings_color(
             title="Speaker effect",
-            label="Base color",
-            current=(str(rule["color"]) if "color" in rule else None),
+            label="End color" if effect == "age_decay" else "Base color",
+            current=(str(rule[color_key]) if color_key in rule else None),
         )
         if color is None:
             return None
         if color:
-            rule["color"] = color
+            rule[color_key] = color
         else:
-            rule.pop("color", None)
-        accent = await self._settings_color(
-            title="Speaker effect",
-            label="Accent color",
-            current=(str(rule["accent_color"]) if "accent_color" in rule else None),
-        )
-        if accent is None:
-            return None
-        if accent:
-            rule["accent_color"] = accent
+            rule.pop(color_key, None)
+        if effect in {
+            "shimmer",
+            "capitalization_roll",
+            "comet",
+            "sparkle",
+            "frost",
+            "color_pulse",
+            "case_wave",
+            "cylon",
+        }:
+            accent = await self._settings_color(
+                title="Speaker effect",
+                label="Accent color",
+                current=(str(rule["accent_color"]) if "accent_color" in rule else None),
+            )
+            if accent is None:
+                return None
+            if accent:
+                rule["accent_color"] = accent
+            else:
+                rule.pop("accent_color", None)
         else:
             rule.pop("accent_color", None)
         if effect == "comet":
@@ -5956,6 +5977,7 @@ class TfrTui:
                         )
                     ),
                 ]
+            entries.sort(key=lambda entry: str(entry.get("timestamp", "")))
             local_status = (
                 self.service_runtime.diagnostic_status()
                 if hasattr(self.service_runtime, "diagnostic_status")

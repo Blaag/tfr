@@ -982,6 +982,29 @@ async def test_speaker_effect_form_builds_comet_rule_without_json() -> None:
     }
 
 
+async def test_speaker_effect_form_removes_fields_invalid_for_new_effect() -> None:
+    tui = make_tui()
+    tui._settings_input = AsyncMock(return_value="Adrick")
+    tui._settings_choice = AsyncMock(return_value="color_pulse")
+    tui._settings_color = AsyncMock(side_effect=["#005f87", "#5fd7ff"])
+    tui._settings_multiselect = AsyncMock(side_effect=[["glob"], ["say", "pose"]])
+
+    rule = await tui._speaker_rule_form(
+        {
+            "speaker": "Adrick",
+            "effect": "comet",
+            "color": "#005f87",
+            "accent_color": "#5fd7ff",
+            "duration_seconds": 1.2,
+            "trail_width": 3,
+        }
+    )
+
+    assert rule is not None
+    assert rule["effect"] == "color_pulse"
+    assert "trail_width" not in rule
+
+
 async def test_unknown_command_suggests_correction_and_next_action() -> None:
     tui = make_tui()
 

@@ -1868,6 +1868,7 @@ class GatewayUiRuntime:
         self._last_connection_transition = datetime.now(UTC)
         self._last_connection_error: str | None = None
         self._reconnect_attempt = 0
+        self._restart_watchdog_task: asyncio.Task[None] | None = None
         self.client.connect_handler = self._handle_connected
         self.client.disconnect_handler = self._handle_disconnect
         self.client.update_prepare_handler = self._prepare_update
@@ -1889,6 +1890,11 @@ class GatewayUiRuntime:
 
     async def stop(self) -> None:
         self._stopping = True
+        if self._restart_watchdog_task is not None:
+            self._restart_watchdog_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._restart_watchdog_task
+            self._restart_watchdog_task = None
         if self._supervisor_task is not None:
             self._supervisor_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -1946,6 +1952,7 @@ class GatewayUiRuntime:
             raise
         self._restart_phase = "acknowledged"
         self._record_connection("info", "restart_acknowledged", "Gateway acknowledged restart")
+        self._start_restart_watchdog()
         return result
 
     async def config_summary(self) -> dict[str, object]:
@@ -2035,6 +2042,7 @@ class GatewayUiRuntime:
             self._record_connection(
                 "info", "restart_acknowledged", "Configuration migration requested restart"
             )
+            self._start_restart_watchdog()
         return result
 
     async def config_migration_status(self) -> dict[str, object]:
@@ -2100,7 +2108,9 @@ class GatewayUiRuntime:
             self._last_connection_error = str(exc)
             self._record_connection("warning", "remote_diagnostics_unavailable", str(exc))
             return [*local, self.connection_diagnostics.entries()[-1].as_dict()]
-        return [*remote, *local]
+        return sorted(
+            [*remote, *local], key=lambda entry: str(entry.get("timestamp", ""))
+        )[-100:]
 
     async def clear_diagnostics(self) -> None:
         self.connection_diagnostics.clear()
@@ -2248,6 +2258,9 @@ class GatewayUiRuntime:
             )
 
     def _arm_restart(self, operation: str) -> None:
+        if self._restart_watchdog_task is not None:
+            self._restart_watchdog_task.cancel()
+            self._restart_watchdog_task = None
         self._restart_expected = True
         self._restart_phase = "requested"
         self._restart_requested_at = datetime.now(UTC)
@@ -2260,10 +2273,37 @@ class GatewayUiRuntime:
             operation=operation,
         )
 
+    def _start_restart_watchdog(self) -> None:
+        if self._restart_watchdog_task is not None:
+            self._restart_watchdog_task.cancel()
+        task = asyncio.create_task(
+            self._watch_restart_acknowledgement(), name="tfr-gateway-restart-watchdog"
+        )
+        self._restart_watchdog_task = task
+
+    async def _watch_restart_acknowledgement(self) -> None:
+        try:
+            await asyncio.sleep(5)
+            if self._restart_expected and self._restart_phase == "acknowledged":
+                self._restart_phase = "stalled"
+                message = (
+                    "Gateway acknowledged restart but did not disconnect within 5 seconds. "
+                    "Use /diagnostics gateway and restart the service externally."
+                )
+                self.notify(message)
+                self._record_connection(
+                    "error", "restart_stalled", message, operation="gateway_restart"
+                )
+        except asyncio.CancelledError:
+            pass
+
     async def _handle_connected(self) -> None:
         await self._set_gateway_connected(True)
 
     def _handle_disconnect(self, error: Exception) -> None:
+        if self._restart_watchdog_task is not None:
+            self._restart_watchdog_task.cancel()
+            self._restart_watchdog_task = None
         self._last_connection_transition = datetime.now(UTC)
         self._last_connection_error = str(error)
         self._record_connection("warning", "disconnected", str(error))
@@ -2329,6 +2369,7 @@ class GatewayUiRuntime:
                     continue
                 self._restart_expected = False
                 self._restart_phase = "reconnected"
+                self._restart_watchdog_task = None
                 self._last_connection_transition = datetime.now(UTC)
                 self._last_connection_error = None
                 await self._set_gateway_connected(True)
