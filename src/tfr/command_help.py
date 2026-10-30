@@ -98,7 +98,7 @@ COMMAND_HELP = {
         _command(
             "gateway",
             "Manage Gateway connections and profiles",
-            "/gateway reconnect|setup|profiles|switch|rename|repair|forget",
+            "/gateway restart|reconnect|setup|profiles|switch|rename|repair|forget",
             "connections",
             "native Gateway UI",
             examples=("/gateway profiles", "/gateway repair home"),

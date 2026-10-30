@@ -948,6 +948,20 @@ class GatewayClient:
             raise GatewayProtocolError("Gateway returned an invalid configuration summary")
         return result
 
+    async def restart_gateway(self) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {
+                "type": "gateway_restart",
+                "request_id": str(request_id),
+                "confirm": True,
+            },
+            request_id,
+        )
+        if not isinstance(result, dict) or result.get("restarting") is not True:
+            raise GatewayProtocolError("Gateway restart response is invalid")
+        return result
+
     async def config_list(self, filter_value: str | None = None) -> list[dict[str, object]]:
         request_id = uuid4()
         message: dict[str, object] = {
@@ -1899,6 +1913,9 @@ class GatewayUiRuntime:
 
     async def web_status(self) -> dict[str, Any]:
         return await self.client.web_status()
+
+    async def restart_gateway(self) -> dict[str, object]:
+        return await self.client.restart_gateway()
 
     async def config_summary(self) -> dict[str, object]:
         return await self.client.config_summary()

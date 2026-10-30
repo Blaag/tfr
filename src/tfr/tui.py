@@ -3991,6 +3991,18 @@ class TfrTui:
         return "\n".join(lines)
 
     async def _handle_gateway_profile_command(self, alias: str, parameters: list[str]) -> None:
+        if parameters == ["restart"]:
+            runtime = self.service_runtime
+            if runtime is None or not hasattr(runtime, "restart_gateway"):
+                self.add_notice(alias, "Gateway restart is unavailable")
+                return
+            try:
+                await runtime.restart_gateway()
+            except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+                self.add_notice(alias, f"Gateway restart failed: {exc}")
+                return
+            self.add_notice(alias, "Gateway restart requested; reconnecting…")
+            return
         from tfr.gateway_profiles import (
             GatewayProfileStore,
             interactive_gateway_repair,
@@ -4002,7 +4014,8 @@ class TfrTui:
             self.add_notice(alias, "Gateway profiles are unavailable")
             return
         usage = (
-            "Usage: /gateway reconnect|setup|profiles [export]|switch NAME|rename NAME NEW-NAME|"
+            "Usage: /gateway restart|reconnect|setup|profiles [export]|switch NAME|"
+            "rename NAME NEW-NAME|"
             "repair NAME|forget NAME --confirm"
         )
         try:

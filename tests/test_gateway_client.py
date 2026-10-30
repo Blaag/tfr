@@ -1534,6 +1534,26 @@ async def test_client_reconnect_requires_reload_when_world_aliases_change() -> N
     socket_path.parent.rmdir()
 
 
+async def test_owner_client_can_request_gateway_application_restart() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    socket_path = Path("/tmp") / f"tfr-restart-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    client.start()
+    try:
+        assert await client.restart_gateway() == {"restarting": True}
+        await asyncio.wait_for(server.wait_application_restart(), timeout=1)
+    finally:
+        await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+
+
 async def test_ping_and_verify_connection_confirm_a_live_gateway() -> None:
     bus = EventBus()
     history = EventHistory(bus, {"alpha": 10})

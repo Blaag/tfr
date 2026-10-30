@@ -1906,6 +1906,18 @@ async def test_gateway_profile_commands_list_rename_export_and_forget(tmp_path: 
     assert "Forgot Gateway profile house" in text
 
 
+async def test_gateway_restart_command_is_immediate_for_owner_ui() -> None:
+    tui = make_tui()
+    runtime = SimpleNamespace(restart_gateway=AsyncMock(return_value={"restarting": True}))
+    tui.service_runtime = runtime
+
+    await tui._handle_gateway_profile_command("alpha", ["restart"])
+
+    runtime.restart_gateway.assert_awaited_once_with()
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Gateway restart requested" in text
+
+
 async def test_config_migration_commands_submit_choose_apply_and_report_status() -> None:
     tui = make_tui()
     preview = {
