@@ -857,6 +857,7 @@ class PluginManager:
         self.config: Mapping[str, Any] = MappingProxyType({})
         self._loaded_plugins: list[str] = []
         self._available_plugins: tuple[str, ...] = ()
+        self._discovered_plugins: dict[str, DiscoveredPlugin] = {}
         self.load_failures: dict[str, str] = {}
         self.diagnostics = DiagnosticBuffer()
         if scope != "gateway":
@@ -938,6 +939,7 @@ class PluginManager:
                 duplicates.add(point.name)
             else:
                 available[point.name] = point
+        manager._discovered_plugins = dict(available)
         for name in dict.fromkeys(enabled):
             if name in duplicates:
                 manager.load_failures[name] = "duplicate plugin entry points"
@@ -990,6 +992,39 @@ class PluginManager:
             else:
                 manager._loaded_plugins.append(name)
         return manager
+
+    async def reconfigure_speaker_effects(self, rules: object) -> None:
+        """Validate and atomically replace the Gateway speaker presentation decorator."""
+
+        name = "speaker_effects"
+        point = self._discovered_plugins.get(name)
+        if point is None or name not in self.requested_plugins:
+            raise ValueError("speaker_effects is not available and enabled on the Gateway")
+        temporary = PluginRegistry()
+        plugin = point.load()
+        register = getattr(plugin, "register", plugin)
+        result = register(
+            PluginRegistrar(name, temporary, self.scope),
+            MappingProxyType({"rules": rules}),
+        )
+        if inspect.isawaitable(result):
+            await result
+        replacements = {
+            key: value
+            for key, value in temporary.presentation_decorators.items()
+            if value[0] == name
+        }
+        retained = {
+            key: value
+            for key, value in self.registry.presentation_decorators.items()
+            if value[0] != name
+        }
+        retained.update(replacements)
+        config = dict(self.config)
+        config[name] = MappingProxyType({"rules": rules})
+        self.registry.presentation_decorators = retained
+        self.config = MappingProxyType(config)
+        self.load_failures.pop(name, None)
 
     def catalog(self) -> list[dict[str, object]]:
         output = []

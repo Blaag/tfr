@@ -980,6 +980,7 @@ async def test_speaker_effect_form_builds_comet_rule_without_json() -> None:
         "trail_width": 3.0,
         "kinds": ["say", "pose"],
     }
+    assert tui._settings_choice.await_args.kwargs["default"] is None
 
 
 async def test_speaker_effect_form_removes_fields_invalid_for_new_effect() -> None:
@@ -1003,6 +1004,25 @@ async def test_speaker_effect_form_removes_fields_invalid_for_new_effect() -> No
     assert rule is not None
     assert rule["effect"] == "color_pulse"
     assert "trail_width" not in rule
+    assert tui._settings_choice.await_args.kwargs["default"] == "comet"
+
+
+async def test_color_picker_shows_swatches_and_resolved_default() -> None:
+    tui = make_tui()
+    tui._settings_choice = AsyncMock(return_value="")
+
+    assert await tui._settings_color(
+        title="Speaker effect",
+        label="Accent color",
+        current=None,
+        default_color="#d7ffff",
+        default_label="Use effect default",
+    ) == ""
+
+    values = tui._settings_choice.await_args.kwargs["values"]
+    default_fragments = values[-1][1]
+    assert "#d7ffff" in fragment_list_to_text(default_fragments)
+    assert any("bg:#d7ffff" in style for style, _text in default_fragments)
 
 
 async def test_invalid_speaker_rule_can_be_deleted_from_recovery_editor() -> None:

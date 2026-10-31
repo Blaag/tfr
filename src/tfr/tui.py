@@ -90,6 +90,7 @@ from tfr.pager import (
     StaticStyleSpan,
     TransientStyleSpan,
     rows_to_formatted_text,
+    wrap_ansi_text,
 )
 from tfr.plugin_sources import (
     PluginUpdateChecker,
@@ -4358,10 +4359,11 @@ class TfrTui:
         *,
         title: str,
         text: str,
-        values: list[tuple[str, str]],
+        values: list[tuple[str, object]],
         default: str | None = None,
+        preview: Callable[[str], StyleAndTextTuples] | None = None,
     ) -> str | None:
-        choices = RadioList(values=values, default=default)
+        choices = RadioList(values=values, default=default, select_on_focus=preview is not None)
         activate = KeyBindings()
 
         @activate.add("enter", eager=True)
@@ -4373,21 +4375,26 @@ class TfrTui:
         choices.control.key_bindings = merge_key_bindings(
             [choices.control.key_bindings, activate]
         )
+        body: list[object] = [
+            Label(
+                text=(
+                    f"{text}\n\n"
+                    "↑/↓ move · Enter choose · Space mark · Esc cancel"
+                ),
+                dont_extend_height=True,
+            ),
+            choices,
+        ]
+        if preview is not None:
+            body.append(
+                Label(
+                    text=lambda: preview(choices.values[choices._selected_index][0]),
+                    dont_extend_height=True,
+                )
+            )
         dialog = Dialog(
             title=title,
-            body=HSplit(
-                [
-                    Label(
-                        text=(
-                            f"{text}\n\n"
-                            "↑/↓ move · Enter choose · Space mark · Esc cancel"
-                        ),
-                        dont_extend_height=True,
-                    ),
-                    choices,
-                ],
-                padding=1,
-            ),
+            body=HSplit(body, padding=1),
             buttons=[
                 Button(
                     text="Ok",
@@ -4397,7 +4404,23 @@ class TfrTui:
             ],
             with_background=True,
         )
-        result = await self._run_settings_dialog(dialog, focus=choices)
+        ticker: asyncio.Task[None] | None = None
+        if preview is not None:
+            async def animate_preview() -> None:
+                try:
+                    while True:
+                        await asyncio.sleep(1 / 20)
+                        self.application.invalidate()
+                except asyncio.CancelledError:
+                    pass
+
+            ticker = asyncio.create_task(animate_preview(), name="tfr-settings-preview")
+        try:
+            result = await self._run_settings_dialog(dialog, focus=choices)
+        finally:
+            if ticker is not None:
+                ticker.cancel()
+                await ticker
         return str(result) if isinstance(result, str) else None
 
     def _finish_settings_dialog(self, result: object) -> None:
@@ -4511,17 +4534,37 @@ class TfrTui:
         title: str,
         label: str,
         current: str | None,
+        default_color: str | None = None,
+        default_label: str = "Use effect default",
     ) -> str | None:
-        palette = [
-            ("#ffdd76", "Warm gold  #ffdd76"),
-            ("#ffffff", "White      #ffffff"),
-            ("#5fd7ff", "Sky blue   #5fd7ff"),
-            ("#ff87d7", "Pink       #ff87d7"),
-            ("#87d75f", "Green      #87d75f"),
-            ("custom", "Custom hexadecimal color"),
-            ("", "Use effect default"),
+        colors = [
+            ("#d70000", "Red"),
+            ("#ff8700", "Orange"),
+            ("#ffdd76", "Warm gold"),
+            ("#87d75f", "Green"),
+            ("#5fd7ff", "Sky blue"),
+            ("#5f87ff", "Blue"),
+            ("#af87ff", "Purple"),
+            ("#ff87d7", "Pink"),
+            ("#ffffff", "White"),
         ]
-        selected = await self._settings_choice(title=title, text=label, values=palette)
+
+        def swatch(color: str, text: str) -> StyleAndTextTuples:
+            return [(f"fg:{color} bg:{color}", "██"), ("", f" {text}  {color}")]
+
+        palette: list[tuple[str, object]] = []
+        if current is not None and all(current.casefold() != color for color, _name in colors):
+            palette.append((current, swatch(current, "Current custom color")))
+        palette.extend((color, swatch(color, name)) for color, name in colors)
+        palette.append(("custom", "Custom hexadecimal color"))
+        if default_color is not None:
+            palette.append(("", swatch(default_color, default_label)))
+        selected = await self._settings_choice(
+            title=title,
+            text=label,
+            values=palette,
+            default=current if current is not None else "" if default_color is not None else None,
+        )
         if selected is None:
             return None
         if selected != "custom":
@@ -4909,6 +4952,10 @@ class TfrTui:
             title="Speaker effect",
             text=f"Choose the effect for {speaker}.",
             values=[(name, name.replace("_", " ").title()) for name in effects],
+            default=(str(rule.get("effect")) if rule.get("effect") in effects else None),
+            preview=lambda selected: self._speaker_rule_preview(
+                {**rule, "speaker": speaker, "effect": selected}
+            ),
         )
         if effect is None:
             return None
@@ -4926,6 +4973,7 @@ class TfrTui:
             title="Speaker effect",
             label="End color" if effect == "age_decay" else "Base color",
             current=(str(rule[color_key]) if color_key in rule else None),
+            default_color=("#180000" if effect == "cylon" else None),
         )
         if color is None:
             return None
@@ -4947,6 +4995,14 @@ class TfrTui:
                 title="Speaker effect",
                 label="Accent color",
                 current=(str(rule["accent_color"]) if "accent_color" in rule else None),
+                default_color=(
+                    "#ff0000"
+                    if effect == "cylon"
+                    else "#d7ffff"
+                    if effect == "frost"
+                    else derive_bright_color(str(rule.get(color_key, "#ffffff")))
+                ),
+                default_label="Use derived accent",
             )
             if accent is None:
                 return None
@@ -5015,6 +5071,70 @@ class TfrTui:
         except ValueError as exc:
             await self._settings_message(title="Invalid speaker rule", text=str(exc))
             return None
+
+    def _speaker_rule_preview(self, rule: Mapping[str, object]) -> StyleAndTextTuples:
+        speaker = str(rule.get("speaker") or "Speaker")
+        effect_name = str(rule.get("effect") or "shimmer")
+        mapped_effect = "shimmer" if effect_name == "cylon" else effect_name
+        try:
+            effect = TextEffectKind(mapped_effect)
+        except ValueError:
+            return [("class:dialog.body", f"Preview unavailable: {effect_name}")]
+        base = str(
+            rule.get("end_color")
+            if effect_name == "age_decay"
+            else rule.get("color", "#180000" if effect_name == "cylon" else "#ffffff")
+        )
+        accent = str(
+            rule.get(
+                "accent_color",
+                "#ff0000"
+                if effect_name == "cylon"
+                else "#d7ffff"
+                if effect_name == "frost"
+                else derive_bright_color(base),
+            )
+        )
+        defaults = {
+            "shimmer": 1.4,
+            "comet": 1.2,
+            "sparkle": 1.2,
+            "ember": 1.8,
+            "frost": 1.6,
+            "rainbow_wave": 1.8,
+            "color_pulse": 1.2,
+            "age_decay": 30.0,
+        }
+        interval = float(
+            rule.get(
+                "period_seconds" if effect_name == "shimmer" else "duration_seconds",
+                defaults.get(effect_name, 1.0),
+            )
+        )
+        repeat = float(rule.get("repeat_seconds", max(10.0, interval + 1)))
+        try:
+            decoration = TextDecoration(
+                start=0,
+                end=len(speaker),
+                effect=effect,
+                base_color=base,
+                accent_color=accent,
+                interval_seconds=interval,
+                repeat_seconds=repeat,
+                phase_offset_seconds=-self._effects_animation_elapsed_seconds(),
+                loop=bool(rule.get("loop", True)),
+                effect_width=max(1, int(float(rule.get("trail_width", 3)))),
+            )
+            rows = wrap_ansi_text(
+                speaker,
+                max(1, len(speaker)),
+                decorations=(decoration,),
+                elapsed_seconds=self._effects_animation_elapsed_seconds(),
+                animations_enabled=True,
+            )
+        except (TypeError, ValueError):
+            return [("", f"Preview: {speaker}")]
+        return [("class:dialog.body", "Preview: "), *list(rows[0])]
 
     async def _declarative_item_form(
         self,
@@ -5183,6 +5303,22 @@ class TfrTui:
                 speaker = str(rule.get("speaker") or "Unnamed speaker")
                 return f"{speaker} — Invalid: {exc}"
 
+        def list_label(rule: dict[str, object]) -> object:
+            label = editor_label(rule)
+            color = (
+                rule.get("end_color")
+                if rule.get("effect") == "age_decay"
+                else rule.get("color")
+            )
+            if isinstance(color, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+                return [("", f"{label}  "), (f"fg:{color} bg:{color}", "██")]
+            return label
+
+        def highlighted_preview(selected: str) -> StyleAndTextTuples:
+            if not selected.startswith("rule:"):
+                return []
+            return self._speaker_rule_preview(rules[int(selected.split(":", 1)[1])])
+
         original = json.dumps(rules, sort_keys=True)
         plugin_status = "unknown"
         if self.service_runtime is not None and hasattr(self.service_runtime, "plugins_catalog"):
@@ -5201,7 +5337,7 @@ class TfrTui:
         while True:
             values = [("add", "Add speaker rule")]
             values.extend(
-                (f"rule:{index}", editor_label(rule))
+                (f"rule:{index}", list_label(rule))
                 for index, rule in enumerate(rules)
             )
             values.extend((("save", "Save changes"), ("cancel", "Cancel")))
@@ -5212,6 +5348,7 @@ class TfrTui:
                     f"{len(rules)} configured rule{'s' if len(rules) != 1 else ''}"
                 ),
                 values=values,
+                preview=highlighted_preview,
             )
             if selected in {None, "cancel"}:
                 return
@@ -5246,7 +5383,6 @@ class TfrTui:
                 text="Choose an action.",
                 values=[
                     ("edit", "Edit rule"),
-                    ("preview", "Preview rule in Effects Lab"),
                     ("up", "Move earlier"),
                     ("down", "Move later"),
                     ("delete", "Delete rule"),
@@ -5256,24 +5392,6 @@ class TfrTui:
                 replacement = await self._speaker_rule_form(rules[index])
                 if replacement is not None:
                     rules[index] = replacement
-            elif operation == "preview":
-                rule = rules[index]
-                self._open_effects_lab()
-                self._show_text_effect_demo(
-                    str(rule.get("effect", "")),
-                    speaker=str(rule.get("speaker", "Speaker")),
-                    target_speaker=True,
-                    base_color=(str(rule["color"]) if "color" in rule else None),
-                    accent_color=(
-                        str(rule["accent_color"]) if "accent_color" in rule else None
-                    ),
-                    duration_seconds=(
-                        float(rule["duration_seconds"])
-                        if "duration_seconds" in rule
-                        else None
-                    ),
-                    effect_width=(float(rule["trail_width"]) if "trail_width" in rule else None),
-                )
             elif operation == "delete" and await self._settings_confirm(
                 title="Delete speaker rule",
                 text=f"Delete {speaker_rule_label(rules[index])}?",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -59,6 +60,33 @@ async def test_gateway_diagnoses_unavailable_required_plugin() -> None:
     )
 
     assert manager.diagnostics.entries()[-1].code == "operation_failed"
+    await manager.event_bus.close()
+
+
+async def test_speaker_effect_rules_are_reconfigured_live() -> None:
+    class SpeakerPlugin:
+        def register(self, registrar: PluginRegistrar, config: Any) -> None:
+            rules = tuple(config.get("rules", ()))
+            registrar.register_presentation_decorator(
+                "speaker-effects", lambda _event, _text: rules
+            )
+
+    point = SimpleNamespace(name="speaker_effects", load=SpeakerPlugin)
+    manager = await PluginManager.load(
+        enabled=("speaker_effects",),
+        config={"speaker_effects": {"rules": [{"speaker": "Old"}]}},
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        discovered=(point,),
+        scope="gateway",
+    )
+
+    await manager.reconfigure_speaker_effects([{"speaker": "New"}])
+
+    _source, decorator = manager.registry.presentation_decorators["speaker-effects"]
+    assert decorator(None, "") == ({"speaker": "New"},)  # type: ignore[arg-type]
+    assert manager.config["speaker_effects"]["rules"] == [{"speaker": "New"}]
     await manager.event_bus.close()
 
 

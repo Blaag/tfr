@@ -2670,7 +2670,7 @@ class GatewayServer:
                         actor_ui_name=actor_name,
                     )
                     self._sync_gateway_configuration_value(mutation)
-                    self._apply_live_gateway_configuration(mutation)
+                    await self._apply_live_gateway_configuration(mutation)
                     await self._broadcast_configuration()
                     if key in {
                         "ui.spellcheck.enabled",
@@ -2743,7 +2743,7 @@ class GatewayServer:
                     )
                     for mutation in mutations:
                         self._sync_gateway_configuration_value(mutation)
-                        self._apply_live_gateway_configuration(mutation)
+                        await self._apply_live_gateway_configuration(mutation)
                     await self._broadcast_configuration()
                     if any(
                         mutation.key
@@ -2807,7 +2807,7 @@ class GatewayServer:
                     affected = undone_mutations if mutation.key == "batch" else (mutation,)
                     for affected_mutation in affected:
                         self._sync_gateway_configuration_value(affected_mutation)
-                        self._apply_live_gateway_configuration(affected_mutation)
+                        await self._apply_live_gateway_configuration(affected_mutation)
                     await self._broadcast_configuration()
                     if any(
                         item.key
@@ -3359,7 +3359,7 @@ class GatewayServer:
         else:
             values.clear(mutation.key, SettingProvenance.MANAGED)
 
-    def _apply_live_gateway_configuration(self, mutation: ConfigurationMutation) -> None:
+    async def _apply_live_gateway_configuration(self, mutation: ConfigurationMutation) -> None:
         if (
             mutation.key.endswith(".gag.patterns")
             and mutation.scope == "world"
@@ -3377,6 +3377,21 @@ class GatewayServer:
             if present:
                 worlds["worlds"][mutation.target]["gag"] = {"patterns": patterns}
             self.runtime.gag_policy.replace_configuration(WorldsConfig.model_validate(worlds))
+        if (
+            mutation.key == "plugins.config.speaker_effects.rules"
+            and self.runtime.gateway_configuration is not None
+        ):
+            present, rules = self.runtime.gateway_configuration.get(
+                mutation.key, scope=mutation.scope, target=mutation.target
+            )
+            await self.runtime.plugins.reconfigure_speaker_effects(rules if present else [])
+            self.runtime.plugins.diagnostics.record(
+                severity="info",
+                component="plugin",
+                code="configuration_reloaded",
+                message="speaker_effects rules applied live",
+                operation="reconfigure",
+            )
 
     async def _stage_gateway_update(self, *, force: bool = False) -> StagedManagedUpdate | None:
         async with self._update_lock:

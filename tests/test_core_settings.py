@@ -69,7 +69,7 @@ def test_ui_restart_metadata_and_speaker_editor_are_always_available() -> None:
     assert spellcheck is not None
     assert spellcheck.restart is RestartRequirement.LIVE
     assert speaker_rules is not None
-    assert speaker_rules.restart is RestartRequirement.GATEWAY_RESTART
+    assert speaker_rules.restart is RestartRequirement.LIVE
     assert speaker_rules.form is not None
     assert speaker_rules.form["editor"] == "collection"
 

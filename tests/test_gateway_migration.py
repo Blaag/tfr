@@ -112,7 +112,7 @@ def test_speaker_rules_are_migrated_and_unknown_plugin_leaves_are_reported(
     assert preview["accepted"][0]["key"] == "plugins.config.speaker_effects.rules"
     assert preview["accepted"][0]["value"][0]["speaker"] == "Barnaby"
     assert preview["conflicts"] == []
-    assert preview["restart"] == "gateway-restart"
+    assert preview["restart"] == "live"
     assert {
         "key": "plugins.config.unknown_plugin.nested.value",
         "reason": "unrecognized setting; retained in the source file but not imported",
@@ -214,7 +214,7 @@ def test_incremental_migration_preserves_existing_managed_values(tmp_path: Path)
     assert [item["key"] for item in preview["accepted"]] == [
         "plugins.config.speaker_effects.rules"
     ]
-    assert preview["restart"] == "gateway-restart"
+    assert preview["restart"] == "live"
     assert {
         "key": "ui.spellcheck.enabled",
         "reason": "already managed; the existing Gateway value is preserved",
