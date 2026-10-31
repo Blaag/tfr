@@ -497,7 +497,7 @@ def core_setting_descriptors() -> tuple[SettingDescriptor, ...]:
             [],
             SettingScope.PLUGIN,
             GATEWAY_AND_UI,
-            restart=RestartRequirement.GATEWAY_RESTART,
+            restart=RestartRequirement.LIVE,
         ),
         _setting(
             "plugins.sources",
