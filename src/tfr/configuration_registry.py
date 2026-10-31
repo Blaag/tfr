@@ -6,7 +6,7 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
@@ -254,6 +254,32 @@ class ConfigurationRegistry:
         if descriptor.key in self._descriptors:
             raise ValueError(f"duplicate setting descriptor: {descriptor.key}")
         self._descriptors[descriptor.key] = descriptor
+
+    def register_plugin(self, descriptor: SettingDescriptor) -> None:
+        """Register a plugin setting or overlay UI metadata on a compatible fallback."""
+
+        existing = self._descriptors.get(descriptor.key)
+        if existing is None:
+            self.register(descriptor)
+            return
+        compatible = (
+            existing.value_type == descriptor.value_type
+            and existing.scope == descriptor.scope
+            and existing.consumers == descriptor.consumers
+            and existing.sensitivity == descriptor.sensitivity
+            and existing.restart == descriptor.restart
+            and existing.default == descriptor.default
+        )
+        if not compatible:
+            raise ValueError(
+                f"plugin setting conflicts with built-in descriptor: {descriptor.key}"
+            )
+        if descriptor.form is not None:
+            self._descriptors[descriptor.key] = replace(
+                existing,
+                validation=descriptor.validation,
+                form=_thaw(descriptor.form),
+            )
 
     def descriptors(self) -> tuple[SettingDescriptor, ...]:
         return tuple(self._descriptors[key] for key in sorted(self._descriptors))

@@ -311,6 +311,23 @@ all periodic update checks. Connections explicitly configured by the operator—
 as worlds, model providers, remote Gateways, and plugin repositories—remain under
 that operator's control.
 
+### Declarative plugin settings
+
+Plugins can attach bounded, versioned `form` metadata to their existing
+`SettingDescriptor` registrations. Form schema version 1 supports generic
+collections and common string, number, boolean, color, choice, multi-select,
+and world-select fields, including `visible_when`, `clear_when_hidden`, fixed
+choices, resolved color defaults, labels, and descriptions. TFR renders these
+forms without importing plugin-specific UI code. Unsupported form schema
+versions fall back to the setting's ordinary bounded editor instead of blocking
+the plugin.
+
+When a core descriptor provides compatibility fallback metadata, a plugin may
+overlay its own form only when the key, type, default, scope, consumers,
+sensitivity, and restart contract remain compatible. Runtime compatibility is
+still enforced by managed plugin release manifests and their TFR/plugin-API
+ranges; there is no second version mapping.
+
 Set `updates.channel` to `"candidate"` to opt into immutable candidate releases.
 Candidate discovery uses GitHub prereleases named
 `vMAJOR.MINOR.PATCH-candidate.N`; its cache is isolated from the stable channel.

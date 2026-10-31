@@ -42,6 +42,51 @@ def test_descriptor_exposes_typed_bounded_metadata() -> None:
         descriptor.validate(True)
 
 
+def test_plugin_can_overlay_form_metadata_on_compatible_builtin_fallback() -> None:
+    fallback = SettingDescriptor(
+        key="plugins.config.example.rules",
+        value_type=SettingType.JSON,
+        default=(),
+        scope=SettingScope.PLUGIN,
+        consumers=("gateway", "native-ui"),
+        form={"schema_version": 1, "editor": "collection", "label": "Fallback"},
+    )
+    plugin = SettingDescriptor(
+        key=fallback.key,
+        value_type=fallback.value_type,
+        default=(),
+        scope=fallback.scope,
+        consumers=fallback.consumers,
+        form={"schema_version": 1, "editor": "collection", "label": "Plugin form"},
+    )
+    registry = ConfigurationRegistry((fallback,))
+
+    registry.register_plugin(plugin)
+
+    assert registry.get(fallback.key).as_dict()["form"]["label"] == "Plugin form"  # type: ignore[union-attr,index]
+
+
+def test_plugin_cannot_override_incompatible_builtin_setting_contract() -> None:
+    fallback = SettingDescriptor(
+        key="plugins.config.example.rules",
+        value_type=SettingType.JSON,
+        default=(),
+        scope=SettingScope.PLUGIN,
+        consumers=("gateway",),
+    )
+    plugin = SettingDescriptor(
+        key=fallback.key,
+        value_type=SettingType.STRING,
+        default="",
+        scope=fallback.scope,
+        consumers=fallback.consumers,
+    )
+    registry = ConfigurationRegistry((fallback,))
+
+    with pytest.raises(ValueError, match="conflicts with built-in"):
+        registry.register_plugin(plugin)
+
+
 def test_descriptor_validates_defaults_choices_and_patterns() -> None:
     descriptor = SettingDescriptor(
         key="gateway.updates.channel",
