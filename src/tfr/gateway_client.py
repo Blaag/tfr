@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+import jsonc
 from pydantic import BaseModel
 
 from tfr.agents import AgentInspection
@@ -27,6 +28,7 @@ from tfr.config import (
     WorldCapabilitiesConfig,
     WorldConfig,
     WorldDefaults,
+    load_ui_configuration,
 )
 from tfr.configuration_registry import SettingDescriptor
 from tfr.configuration_sync import CONFIGURATION_SYNC_CAPABILITY, required_action
@@ -84,6 +86,23 @@ _RESTART_WORLD = "TFR_RESTART_WORLD"
 _UPDATE_RESTART = "TFR_UPDATE_RESTART"
 
 
+def _local_plugin_bootstrap(path: Path) -> dict[str, object]:
+    try:
+        with path.open(encoding="utf-8") as stream:
+            value = jsonc.load(stream)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(value, dict) or not isinstance(value.get("plugins"), dict):
+        return {}
+    plugins = value["plugins"]
+    retained = {
+        key: plugins[key]
+        for key in ("sources", "state_directory")
+        if key in plugins
+    }
+    return {"plugins": retained} if retained else {}
+
+
 def _retire_local_migration_sources(sources: Sequence[str], revision: object) -> Path | None:
     paths = tuple(
         path
@@ -111,7 +130,8 @@ def _retire_local_migration_sources(sources: Sequence[str], revision: object) ->
                 "sha256": hashlib.sha256(backup.read_bytes()).hexdigest(),
             }
         )
-    payload = json.dumps({"schema_version": 1}, indent=2, sort_keys=True) + "\n"
+    bootstrap = {"schema_version": 1, **_local_plugin_bootstrap(main)}
+    payload = json.dumps(bootstrap, indent=2, sort_keys=True) + "\n"
     descriptor, temporary = tempfile.mkstemp(prefix=f".{main.name}.", dir=main.parent)
     try:
         os.fchmod(descriptor, 0o600)
@@ -146,7 +166,57 @@ def _local_configuration_is_retired(path: Path) -> bool:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
-    return isinstance(value, dict) and set(value) <= {"$schema", "schema_version"}
+    if not isinstance(value, dict) or not set(value) <= {"$schema", "schema_version", "plugins"}:
+        return False
+    plugins = value.get("plugins", {})
+    return isinstance(plugins, dict) and set(plugins) <= {"sources", "state_directory"}
+
+
+def _recover_local_plugin_bootstrap(main: Path, marker: Path) -> bool:
+    try:
+        marker_value = json.loads(marker.read_text(encoding="utf-8"))
+        records = marker_value.get("backups", [])
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return False
+    record = next(
+        (
+            item
+            for item in records
+            if isinstance(item, dict) and item.get("source") == str(main)
+        ),
+        None,
+    )
+    if record is None:
+        return False
+    backup = Path(str(record.get("backup", "")))
+    try:
+        content = backup.read_bytes()
+    except OSError:
+        return False
+    if hashlib.sha256(content).hexdigest() != record.get("sha256"):
+        return False
+    retained = _local_plugin_bootstrap(backup)
+    if not retained:
+        return False
+    try:
+        current = json.loads(main.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(current, dict):
+        return False
+    current.update(retained)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{main.name}.", dir=main.parent)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(current, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, main)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    return True
 
 
 class GatewayDisconnectedError(ConnectionError):
@@ -2684,6 +2754,13 @@ async def run_gateway_ui(
         # Preserve files on failure; a later startup can safely retry.
         with contextlib.suppress(OSError):
             _retire_local_migration_sources(local_sources, "previously-applied")
+    if (
+        local_migration_completed
+        and _local_configuration_is_retired(local_configuration.main_path)
+        and _recover_local_plugin_bootstrap(local_configuration.main_path, migration_marker)
+    ):
+        local_configuration = load_ui_configuration(local_configuration.main_path)
+        configuration = local_configuration
     resume_gateway_id, resume_world, update_restart = _restart_state_from_environment()
     build = current_build()
     platform_name = socket.gethostname().strip()

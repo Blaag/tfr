@@ -106,6 +106,7 @@ from tfr.plugins import (
 from tfr.presentation import ActiveEffectProgram, EffectProgram, effect_programs_from_dict
 from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.settings_ui import (
+    SPEAKER_EFFECT_NAMES,
     editable_settings,
     parse_setting_value,
     setting_category,
@@ -4903,7 +4904,7 @@ class TfrTui:
         )
         if speaker is None:
             return None
-        effects = [effect.value for effect in TextEffectKind]
+        effects = sorted(SPEAKER_EFFECT_NAMES)
         effect = await self._settings_choice(
             title="Speaker effect",
             text=f"Choose the effect for {speaker}.",
@@ -5164,11 +5165,24 @@ class TfrTui:
         setting: dict[str, object],
         detail: dict[str, object],
     ) -> None:
-        try:
-            rules = speaker_rules(detail.get("value"))
-        except ValueError as exc:
-            await self._settings_message(title="Speaker effects", text=str(exc))
+        raw_rules = detail.get("value")
+        if not isinstance(raw_rules, list) or any(
+            not isinstance(item, dict) for item in raw_rules
+        ):
+            await self._settings_message(
+                title="Speaker effects",
+                text="The current speaker rules are not a list of editable objects.",
+            )
             return
+        rules = [dict(item) for item in raw_rules]
+
+        def editor_label(rule: dict[str, object]) -> str:
+            try:
+                return speaker_rule_label(validate_speaker_rule(rule))
+            except ValueError as exc:
+                speaker = str(rule.get("speaker") or "Unnamed speaker")
+                return f"{speaker} — Invalid: {exc}"
+
         original = json.dumps(rules, sort_keys=True)
         plugin_status = "unknown"
         if self.service_runtime is not None and hasattr(self.service_runtime, "plugins_catalog"):
@@ -5187,7 +5201,7 @@ class TfrTui:
         while True:
             values = [("add", "Add speaker rule")]
             values.extend(
-                (f"rule:{index}", speaker_rule_label(rule))
+                (f"rule:{index}", editor_label(rule))
                 for index, rule in enumerate(rules)
             )
             values.extend((("save", "Save changes"), ("cancel", "Cancel")))
@@ -5204,6 +5218,13 @@ class TfrTui:
             if selected == "save":
                 if json.dumps(rules, sort_keys=True) == original:
                     return
+                try:
+                    rules = speaker_rules(rules)
+                except ValueError as exc:
+                    await self._settings_message(
+                        title="Cannot save speaker effects", text=str(exc)
+                    )
+                    continue
                 if await self._save_settings_batch(
                     alias, setting, rules, old_value=detail.get("value")
                 ):
@@ -5221,7 +5242,7 @@ class TfrTui:
                 continue
             index = int(selected.split(":", 1)[1])
             operation = await self._settings_choice(
-                title=speaker_rule_label(rules[index]),
+                title=editor_label(rules[index]),
                 text="Choose an action.",
                 values=[
                     ("edit", "Edit rule"),
@@ -5444,6 +5465,11 @@ class TfrTui:
                     break
                 last_category = category
                 choices = [item for item in settings if setting_category(item) == category]
+                if len(choices) == 1:
+                    key = str(choices[0]["key"])
+                    last_setting[category] = key
+                    await self._open_setting_editor(alias, choices[0])
+                    continue
                 while True:
                     key = await self._settings_choice(
                         title=category,

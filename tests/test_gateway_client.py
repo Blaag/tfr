@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import ssl
 from collections.abc import Callable
@@ -33,6 +34,7 @@ from tfr.gateway_client import (
     GatewayDisconnectedError,
     GatewayUiRuntime,
     RemoteWorldSession,
+    _recover_local_plugin_bootstrap,
     _retire_local_migration_sources,
     remote_speaker_effects_warning,
     run_gateway_ui,
@@ -80,6 +82,41 @@ def test_retire_local_migration_sources_backs_up_and_rewrites_config(tmp_path: P
     )
     assert marker["revision"] == 12
     assert len(marker["backups"]) == 2
+
+
+def test_recover_local_plugin_sources_from_verified_migration_backup(tmp_path: Path) -> None:
+    main = tmp_path / "config.jsonc"
+    main.write_text('{"schema_version":1}\n', encoding="utf-8")
+    backup = tmp_path / "backup.jsonc"
+    backup.write_text(
+        '{"plugins":{"sources":[{"repo":"owner/ui-effects"}],'
+        '"state_directory":"./plugins"}}\n',
+        encoding="utf-8",
+    )
+    marker = tmp_path / "config.jsonc.tfr-migrated"
+    marker.write_text(
+        json.dumps(
+            {
+                "revision": 12,
+                "backups": [
+                    {
+                        "source": str(main),
+                        "backup": str(backup),
+                        "sha256": hashlib.sha256(backup.read_bytes()).hexdigest(),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _recover_local_plugin_bootstrap(main, marker) is True
+
+    recovered = json.loads(main.read_text(encoding="utf-8"))
+    assert recovered["plugins"] == {
+        "sources": [{"repo": "owner/ui-effects"}],
+        "state_directory": "./plugins",
+    }
 
 
 async def test_missing_gateway_socket_reports_the_path() -> None:
