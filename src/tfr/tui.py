@@ -392,6 +392,8 @@ class ServiceRuntime(Protocol):
 
     def diagnostic_status(self) -> dict[str, object]: ...
 
+    def current_ui_name(self) -> str: ...
+
     async def manage_gag(
         self,
         world: str,
@@ -4648,11 +4650,25 @@ class TfrTui:
         )
         action = str(preview.get("restart", "live"))
         value_text = "Inherited/default value" if reset else json.dumps(value, ensure_ascii=False)
+        current_ui_name = (
+            self.service_runtime.current_ui_name()
+            if hasattr(self.service_runtime, "current_ui_name")
+            else "current UI"
+        )
+        target_text = (
+            f"This UI — {current_ui_name}"
+            if scope == "ui" and target is None
+            else "All terminal UIs"
+            if scope == "ui-type" and target == "terminal"
+            else f"Named UI — {target}"
+            if scope == "ui"
+            else f"{scope}{f' · {target}' if target else ''}"
+        )
         confirmed = await self._settings_confirm(
             title="Review configuration change",
             text=(
                 f"{setting_label(key)}\n\n"
-                f"Target: {scope}{f' · {target}' if target else ''}\n"
+                f"Apply to: {target_text}\n"
                 f"Current value: {json.dumps(old_value, ensure_ascii=False)}\n"
                 f"New value: {value_text}\n"
                 f"Required action: {self._settings_action_text(action)}"
@@ -4693,6 +4709,47 @@ class TfrTui:
             f"Required action: {self._settings_action_text(result.get('restart', action))}",
         )
         return True
+
+    async def _choose_settings_target(
+        self, setting: dict[str, object]
+    ) -> dict[str, object] | None:
+        current_ui_name = (
+            self.service_runtime.current_ui_name()
+            if self.service_runtime is not None
+            and hasattr(self.service_runtime, "current_ui_name")
+            else "current UI"
+        )
+        choice = await self._settings_choice(
+            title="Apply setting to",
+            text="Choose where the value you just selected should apply.",
+            values=[
+                ("current", f"This UI — {current_ui_name}"),
+                ("terminal", "All terminal UIs"),
+                ("named", "A different named UI"),
+            ],
+            default="current",
+        )
+        if choice is None:
+            return None
+        output = dict(setting)
+        if choice == "current":
+            output.update(edit_scope="ui", edit_target=None)
+        elif choice == "terminal":
+            output.update(edit_scope="ui-type", edit_target="terminal")
+        else:
+            uis = await self.service_runtime.list_uis() if self.service_runtime else []
+            name = await self._settings_choice(
+                title="Named UI",
+                text="Choose a UI.",
+                values=[
+                    (str(item.get("display_name")), str(item.get("display_name")))
+                    for item in uis
+                ],
+            )
+            if name is None:
+                return None
+            output.update(edit_scope="ui", edit_target=name)
+        return output
 
     @staticmethod
     def _settings_action_text(action: object) -> str:
@@ -4790,8 +4847,6 @@ class TfrTui:
         validation_value = setting.get("validation")
         if isinstance(validation_value, dict) and validation_value.get("nullable") is True:
             actions.append(("null", "Set explicit empty/null value"))
-        if str(setting.get("scope")) in {"ui", "ui-type"}:
-            actions.append(("target", "Choose which UI this applies to"))
         action = await self._settings_choice(
             title=setting_label(key),
             text=(
@@ -4804,43 +4859,22 @@ class TfrTui:
         )
         if action is None:
             return
-        if action == "target":
-            target_choice = await self._settings_choice(
-                title="Choose UI",
-                text="Choose which UI or group of UIs should use this value.",
-                values=[
-                    ("current", "This UI"),
-                    ("terminal", "All terminal UIs"),
-                    ("named", "A different named UI"),
-                ],
-            )
-            if target_choice is None:
-                return
-            setting = dict(setting)
-            if target_choice == "current":
-                setting.update(edit_scope="ui", edit_target=None)
-            elif target_choice == "terminal":
-                setting.update(edit_scope="ui-type", edit_target="terminal")
-            else:
-                uis = await self.service_runtime.list_uis() if self.service_runtime else []
-                name = await self._settings_choice(
-                    title="Named UI",
-                    text="Choose a UI.",
-                    values=[
-                        (str(item.get("display_name")), str(item.get("display_name")))
-                        for item in uis
-                    ],
-                )
-                if name is None:
-                    return
-                setting.update(edit_scope="ui", edit_target=name)
-            action = "edit"
         if action == "reset":
+            if str(setting.get("scope")) in {"ui", "ui-type"}:
+                targeted = await self._choose_settings_target(setting)
+                if targeted is None:
+                    return
+                setting = targeted
             await self._save_settings_value(
                 alias, setting, None, reset=True, old_value=detail.get("value")
             )
             return
         if action == "null":
+            if str(setting.get("scope")) in {"ui", "ui-type"}:
+                targeted = await self._choose_settings_target(setting)
+                if targeted is None:
+                    return
+                setting = targeted
             await self._save_settings_value(
                 alias, setting, None, old_value=detail.get("value")
             )
@@ -4951,6 +4985,11 @@ class TfrTui:
             except ValueError as exc:
                 await self._settings_message(title="Invalid value", text=str(exc))
                 return
+        if str(setting.get("scope")) in {"ui", "ui-type"}:
+            targeted = await self._choose_settings_target(setting)
+            if targeted is None:
+                return
+            setting = targeted
         await self._save_settings_value(alias, setting, value, old_value=detail.get("value"))
 
     async def _speaker_rule_form(
@@ -6694,6 +6733,13 @@ class TfrTui:
             self._combo_tracker = ComboTracker()
             self._clear_combo_visuals()
             self._sync_animation_task(restart=True)
+
+    def apply_mouse_mode(self, mode: str) -> None:
+        if mode not in {"auto", "terminal", "tfr"}:
+            raise ValueError("mouse mode is invalid")
+        self.mouse_mode = mode
+        self._mosh_detected = _running_under_mosh() if mode == "auto" else False
+        self.application.invalidate()
 
     async def _handle_gag_command(self, alias: str, parameters: list[str]) -> None:
         usage = "Usage: /gag list|add PATTERN|remove PATTERN|reset"

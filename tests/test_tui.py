@@ -315,6 +315,20 @@ async def test_mouse_mode_defaults_to_tfr_and_can_be_changed(
     assert "Mouse mode: auto (terminal; mosh-server detected)" in text
 
 
+def test_gateway_mouse_mode_update_applies_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    tui = make_tui(mouse_mode="tfr")
+    monkeypatch.setattr("tfr.tui._running_under_mosh", lambda: True)
+
+    tui.apply_mouse_mode("terminal")
+    assert tui.mouse_mode == "terminal"
+    assert tui.effective_mouse_mode == "terminal"
+
+    tui.apply_mouse_mode("auto")
+    assert tui.mouse_mode == "auto"
+    assert tui.effective_mouse_mode == "terminal"
+    assert tui.application.mouse_support() is False
+
+
 async def test_mouse_command_persists_only_in_local_ui_store(tmp_path: Path) -> None:
     store = LocalUiSettingsStore(tmp_path / "ui")
     tui = make_tui(local_ui_settings=store)
@@ -844,7 +858,7 @@ async def test_settings_browser_infers_current_ui_scope_and_saves_boolean() -> N
         ),
     )
     tui.service_runtime = runtime
-    choices = iter(["browse", "Ui", "edit", "true", None, None])
+    choices = iter(["browse", "Ui", "edit", "true", "current", None, None])
     tui._settings_choice = AsyncMock(side_effect=lambda **_kwargs: next(choices))
     tui._settings_confirm = AsyncMock(return_value=True)
 
@@ -862,6 +876,9 @@ async def test_settings_browser_infers_current_ui_scope_and_saves_boolean() -> N
     assert value_prompt["text"] == "Current value: Off"
     assert value_prompt["values"] == [("true", "On"), ("false", "Off")]
     assert value_prompt["default"] == "false"
+    target_prompt = tui._settings_choice.await_args_list[4].kwargs
+    assert target_prompt["title"] == "Apply setting to"
+    assert target_prompt["default"] == "current"
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
     assert "Saved Animations Enabled = true at revision 5" in text
 

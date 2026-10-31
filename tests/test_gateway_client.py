@@ -552,6 +552,8 @@ async def test_native_ui_registration_reuses_gateway_record(tmp_path: Path) -> N
             "id": str(ui_id),
             "name": "office-mac · Terminal",
         }
+        shown_current = await first.config_show("ui.mouse_mode")
+        assert shown_current["ui"] == shown_setting["ui"]
         secret_setting = await first.config_show("worlds.alpha.login.password")
         assert secret_setting["value"] is None
         assert secret_setting["sensitive"] is True
