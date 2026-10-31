@@ -4075,9 +4075,9 @@ async def run_gateway(
     finally:
         for handled_signal in installed_signals:
             loop.remove_signal_handler(handled_signal)
+        await server.stop()
         if web_manager is not None:
             await web_manager.stop()
-        await server.stop()
         await runtime.stop(preserve_worlds=restart_requested or application_restart.is_set())
     if application_restart.is_set():
         return GATEWAY_APPLICATION_RESTART_EXIT

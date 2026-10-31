@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import shutil
 import socket
 import ssl
 import sys
+import tempfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -80,6 +82,71 @@ _RESTART_WORLD = "TFR_RESTART_WORLD"
 
 
 _UPDATE_RESTART = "TFR_UPDATE_RESTART"
+
+
+def _retire_local_migration_sources(sources: Sequence[str], revision: object) -> Path | None:
+    paths = tuple(
+        path
+        for value in sources
+        if (path := Path(value).expanduser()).is_file() and not path.is_symlink()
+    )
+    if not paths:
+        return None
+    main = paths[0]
+    backup_root = main.parent / ".tfr-migration-backups"
+    backup_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    backup_directory = Path(
+        tempfile.mkdtemp(prefix=datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ-"), dir=backup_root)
+    )
+    os.chmod(backup_directory, 0o700)
+    records = []
+    for index, source in enumerate(paths):
+        backup = backup_directory / f"{index:03d}-{source.name}"
+        shutil.copyfile(source, backup)
+        os.chmod(backup, 0o600)
+        records.append(
+            {
+                "source": str(source),
+                "backup": str(backup),
+                "sha256": hashlib.sha256(backup.read_bytes()).hexdigest(),
+            }
+        )
+    payload = json.dumps({"schema_version": 1}, indent=2, sort_keys=True) + "\n"
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{main.name}.", dir=main.parent)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, main)
+        directory = os.open(main.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    for source in paths[1:]:
+        source.unlink()
+    marker = main.with_name(f"{main.name}.tfr-migrated")
+    marker.write_text(
+        json.dumps(
+            {"revision": revision, "backups": records}, sort_keys=True, separators=(",", ":")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(marker, 0o600)
+    return backup_directory
+
+
+def _local_configuration_is_retired(path: Path) -> bool:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(value, dict) and set(value) <= {"$schema", "schema_version"}
 
 
 class GatewayDisconnectedError(ConnectionError):
@@ -1224,12 +1291,12 @@ class GatewayClient:
         )
         if result is None or result.get("applied") is not True:
             raise GatewayProtocolError("Gateway returned an invalid migration result")
-        for source in getattr(self, "migration_source_files", ()):
-            path = Path(source)
-            if path.is_file() and not path.is_symlink():
-                marker = path.with_name(f"{path.name}.tfr-migrated")
-                marker.write_text(f"revision {result.get('revision')}\n", encoding="utf-8")
-                os.chmod(marker, 0o600)
+        sources = tuple(getattr(self, "migration_source_files", ()))
+        if sources:
+            try:
+                _retire_local_migration_sources(sources, result.get("revision"))
+            except OSError as exc:
+                result["local_cleanup_error"] = str(exc)[:240]
         return result
 
     async def config_migration_status(self) -> dict[str, object]:
@@ -2283,11 +2350,20 @@ class GatewayUiRuntime:
 
     async def _watch_restart_acknowledgement(self) -> None:
         try:
-            await asyncio.sleep(5)
+            await asyncio.sleep(10)
+            if self._restart_expected and self._restart_phase == "acknowledged":
+                message = (
+                    "Gateway restart is taking longer than expected; still waiting for shutdown…"
+                )
+                self.notify(message)
+                self._record_connection(
+                    "warning", "restart_slow", message, operation="gateway_restart"
+                )
+                await asyncio.sleep(10)
             if self._restart_expected and self._restart_phase == "acknowledged":
                 self._restart_phase = "stalled"
                 message = (
-                    "Gateway acknowledged restart but did not disconnect within 5 seconds. "
+                    "Gateway acknowledged restart but did not disconnect within 20 seconds. "
                     "Use /diagnostics gateway and restart the service externally."
                 )
                 self.notify(message)
@@ -2590,6 +2666,24 @@ async def run_gateway_ui(
     desired_ui_name: str | None = None,
 ) -> int:
     from tfr.tui import TfrTui
+    local_configuration = configuration
+    local_sources = tuple(
+        str(source)
+        for source in (local_configuration.main_path,)
+        if source.is_file()
+    )
+    migration_marker = local_configuration.main_path.with_name(
+        f"{local_configuration.main_path.name}.tfr-migrated"
+    )
+    local_migration_completed = migration_marker.is_file()
+    if (
+        local_migration_completed
+        and local_sources
+        and not _local_configuration_is_retired(local_configuration.main_path)
+    ):
+        # Preserve files on failure; a later startup can safely retry.
+        with contextlib.suppress(OSError):
+            _retire_local_migration_sources(local_sources, "previously-applied")
     resume_gateway_id, resume_world, update_restart = _restart_state_from_environment()
     build = current_build()
     platform_name = socket.gethostname().strip()
@@ -2697,10 +2791,12 @@ async def run_gateway_ui(
                 plugins.registry.configuration_descriptors() if hasattr(plugins, "registry") else ()
             )
             client.prepare_initial_configuration_ack(descriptors)
-            client.migration_values = _legacy_migration_values(configuration, descriptors)
-            client.migration_source_files = (
-                (str(configuration.main_path),) if configuration.main_path.is_file() else ()
+            client.migration_values = (
+                {}
+                if local_migration_completed
+                else _legacy_migration_values(local_configuration, descriptors)
             )
+            client.migration_source_files = local_sources
             client.start()
             await client.update_ui_capabilities(
                 tuple(
@@ -2864,7 +2960,9 @@ async def run_gateway_ui(
             gateway_loaded=getattr(client, "gateway_speaker_effects_loaded", None),
             gateway_speakers=getattr(client, "gateway_speaker_effects", ()),
         )
-        if hasattr(plugins, "configured_speaker_effect_rules")
+        if not local_migration_completed
+        and "plugins.config.speaker_effects.rules" in client.migration_values
+        and hasattr(plugins, "configured_speaker_effect_rules")
         else None
     )
     if speaker_effects_warning is not None:
