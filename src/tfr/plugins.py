@@ -56,6 +56,7 @@ PLUGIN_API_VERSION = 1
 PORTABLE_PLUGIN_NAMES = frozenset(
     {"acid_rain", "sandstorm", "spotlight", "terminal_reveal", "water"}
 )
+GATEWAY_REQUIRED_PLUGIN_NAMES = frozenset({"speaker_effects", "terminal_reveal"})
 PLUGIN_ENTRY_POINT_GROUP = "tfr.plugins.v1"
 _COMMAND_NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
 _MAX_BOSS_EVENTS = 200
@@ -946,6 +947,8 @@ class PluginManager:
             if point is None:
                 error = PluginNotFound(f"no {PLUGIN_ENTRY_POINT_GROUP} entry point named {name}")
                 manager.load_failures[name] = str(error)
+                if scope == "gateway" and name not in GATEWAY_REQUIRED_PLUGIN_NAMES:
+                    continue
                 await manager.report_failure(name, "load", error)
                 continue
             registrations = (

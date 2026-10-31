@@ -844,9 +844,7 @@ async def test_settings_browser_infers_current_ui_scope_and_saves_boolean() -> N
         ),
     )
     tui.service_runtime = runtime
-    choices = iter(
-        ["browse", "Ui", "ui.animations_enabled", "edit", "true", None, None, None]
-    )
+    choices = iter(["browse", "Ui", "edit", "true", None, None])
     tui._settings_choice = AsyncMock(side_effect=lambda **_kwargs: next(choices))
     tui._settings_confirm = AsyncMock(return_value=True)
 
@@ -860,7 +858,7 @@ async def test_settings_browser_infers_current_ui_scope_and_saves_boolean() -> N
         "confirm": False,
     }
     assert runtime.config_mutate.await_args_list[1].kwargs["confirm"] is True
-    value_prompt = tui._settings_choice.await_args_list[4].kwargs
+    value_prompt = tui._settings_choice.await_args_list[3].kwargs
     assert value_prompt["text"] == "Current value: Off"
     assert value_prompt["values"] == [("true", "On"), ("false", "Off")]
     assert value_prompt["default"] == "false"
@@ -886,21 +884,22 @@ async def test_settings_escape_returns_one_navigation_level() -> None:
     )
     choices = iter(["browse", "Ui", None, None, None])
     tui._settings_choice = AsyncMock(side_effect=lambda **_kwargs: next(choices))
+    tui._open_setting_editor = AsyncMock()
 
     await tui._open_settings_menu("alpha")
 
     assert [call.kwargs["title"] for call in tui._settings_choice.await_args_list] == [
         "TFR Settings",
         "TFR Settings",
-        "Ui",
         "TFR Settings",
         "TFR Settings",
     ]
-    assert tui._settings_choice.await_args_list[3].kwargs["default"] == "Ui"
-    assert tui._settings_choice.await_args_list[4].kwargs["default"] == "browse"
+    tui._open_setting_editor.assert_awaited_once()
+    assert tui._settings_choice.await_args_list[2].kwargs["default"] == "Ui"
+    assert tui._settings_choice.await_args_list[3].kwargs["default"] == "browse"
 
 
-async def test_settings_browser_returns_to_last_selected_setting() -> None:
+async def test_single_setting_category_opens_directly_and_returns_to_category() -> None:
     tui = make_tui()
     tui.service_runtime = SimpleNamespace(
         config_list=AsyncMock(
@@ -916,14 +915,15 @@ async def test_settings_browser_returns_to_last_selected_setting() -> None:
             ]
         )
     )
-    choices = iter(["browse", "Ui", "ui.mouse_mode", None, None, None])
+    choices = iter(["browse", "Ui", None, None])
     tui._settings_choice = AsyncMock(side_effect=lambda **_kwargs: next(choices))
     tui._open_setting_editor = AsyncMock()
 
     await tui._open_settings_menu("alpha")
 
     tui._open_setting_editor.assert_awaited_once()
-    assert tui._settings_choice.await_args_list[3].kwargs["default"] == "ui.mouse_mode"
+    assert tui._settings_choice.await_args_list[2].kwargs["default"] == "Ui"
+    assert all(call.kwargs["title"] != "Ui" for call in tui._settings_choice.await_args_list)
 
 
 async def test_plugins_enabled_uses_discovered_checkbox_manager() -> None:
@@ -1003,6 +1003,30 @@ async def test_speaker_effect_form_removes_fields_invalid_for_new_effect() -> No
     assert rule is not None
     assert rule["effect"] == "color_pulse"
     assert "trail_width" not in rule
+
+
+async def test_invalid_speaker_rule_can_be_deleted_from_recovery_editor() -> None:
+    tui = make_tui()
+    tui.service_runtime = SimpleNamespace(
+        plugins_catalog=AsyncMock(return_value=[{"name": "speaker_effects", "loaded": False}])
+    )
+    tui._settings_choice = AsyncMock(side_effect=["rule:0", "delete", "save"])
+    tui._settings_confirm = AsyncMock(return_value=True)
+    tui._save_settings_batch = AsyncMock(return_value=True)
+    setting = {"key": "plugins.config.speaker_effects.rules"}
+    invalid = {
+        "speaker": "Bob",
+        "effect": "combo_godlike",
+        "accent_color": "#ffffff",
+    }
+
+    await tui._edit_speaker_rules("alpha", setting, {"value": [invalid]})
+
+    first_values = tui._settings_choice.await_args_list[0].kwargs["values"]
+    assert "Invalid: unsupported speaker effect" in first_values[1][1]
+    tui._save_settings_batch.assert_awaited_once_with(
+        "alpha", setting, [], old_value=[invalid]
+    )
 
 
 async def test_unknown_command_suggests_correction_and_next_action() -> None:

@@ -31,6 +31,37 @@ from tfr.presentation import color_pulse
 from tfr.text_effects import TextDecoration, TextEffectKind
 
 
+async def test_gateway_does_not_diagnose_unavailable_ui_only_plugin() -> None:
+    manager = await PluginManager.load(
+        enabled=("acid_rain",),
+        config={},
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        discovered=(),
+        scope="gateway",
+    )
+
+    assert manager.load_failures["acid_rain"].startswith("no tfr.plugins.v1 entry point")
+    assert manager.diagnostics.entries() == ()
+    await manager.event_bus.close()
+
+
+async def test_gateway_diagnoses_unavailable_required_plugin() -> None:
+    manager = await PluginManager.load(
+        enabled=("speaker_effects",),
+        config={},
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        discovered=(),
+        scope="gateway",
+    )
+
+    assert manager.diagnostics.entries()[-1].code == "operation_failed"
+    await manager.event_bus.close()
+
+
 def test_effect_demo_registration_is_typed_bounded_and_discoverable() -> None:
     registry = PluginRegistry()
     registrar = PluginRegistrar("fixture", registry)

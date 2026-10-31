@@ -6,6 +6,24 @@ import re
 from collections.abc import Mapping, Sequence
 
 _COLOR = re.compile(r"#[0-9a-fA-F]{6}")
+SPEAKER_EFFECT_NAMES = frozenset(
+    {
+        "age_decay",
+        "bold_sweep",
+        "capitalization_roll",
+        "case_wave",
+        "color_pulse",
+        "comet",
+        "cylon",
+        "ember",
+        "frost",
+        "rainbow_wave",
+        "reverse_sweep",
+        "shimmer",
+        "sparkle",
+        "underline_sweep",
+    }
+)
 _ACCENT_EFFECTS = {
     "shimmer",
     "capitalization_roll",
@@ -141,6 +159,8 @@ def validate_speaker_rule(rule: Mapping[str, object]) -> dict[str, object]:
         raise ValueError("speaker name is required")
     if not isinstance(effect, str) or not effect:
         raise ValueError("effect is required")
+    if effect not in SPEAKER_EFFECT_NAMES:
+        raise ValueError(f"unsupported speaker effect: {effect.replace('_', ' ')}")
     value["speaker"] = speaker.strip()
     for field in ("color", "accent_color", "end_color"):
         color = value.get(field)
