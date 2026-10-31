@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import ssl
 from collections.abc import Callable
 from dataclasses import replace
@@ -32,6 +33,7 @@ from tfr.gateway_client import (
     GatewayDisconnectedError,
     GatewayUiRuntime,
     RemoteWorldSession,
+    _retire_local_migration_sources,
     remote_speaker_effects_warning,
     run_gateway_ui,
 )
@@ -59,6 +61,25 @@ def make_event(sequence: int) -> Event:
         canonical_text=f"line {sequence}",
         display_text=f"line {sequence}",
     )
+
+
+def test_retire_local_migration_sources_backs_up_and_rewrites_config(tmp_path: Path) -> None:
+    main = tmp_path / "config.jsonc"
+    auxiliary = tmp_path / "worlds.jsonc"
+    main.write_text('{"plugins":{"enabled":["speaker_effects"]}}\n', encoding="utf-8")
+    auxiliary.write_text('{"worlds":{}}\n', encoding="utf-8")
+
+    backup = _retire_local_migration_sources((str(main), str(auxiliary)), 12)
+
+    assert backup is not None and backup.is_dir()
+    assert json.loads(main.read_text(encoding="utf-8")) == {"schema_version": 1}
+    assert main.stat().st_mode & 0o777 == 0o600
+    assert not auxiliary.exists()
+    marker = json.loads(
+        main.with_name("config.jsonc.tfr-migrated").read_text(encoding="utf-8")
+    )
+    assert marker["revision"] == 12
+    assert len(marker["backups"]) == 2
 
 
 async def test_missing_gateway_socket_reports_the_path() -> None:

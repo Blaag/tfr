@@ -1306,7 +1306,7 @@ async def supervise_gateway(
                     else:
                         process.send_signal(signal.SIGUSR1)
                     with contextlib.suppress(TimeoutError):
-                        await asyncio.wait_for(asyncio.shield(child_done), timeout=5)
+                        await asyncio.wait_for(asyncio.shield(child_done), timeout=15)
                     if process.poll() is None:
                         process.kill()
                         await asyncio.shield(child_done)

@@ -5571,6 +5571,12 @@ class TfrTui:
                             else f"Required action: "
                             f"{self._settings_action_text(result.get('restart', 'live'))}. "
                             "Clients will report convergence through /config status."
+                        )
+                        + (
+                            f" Local legacy configuration was preserved because cleanup failed: "
+                            f"{result['local_cleanup_error']}"
+                            if result.get("local_cleanup_error")
+                            else ""
                         ),
                     )
                     return
@@ -6741,6 +6747,8 @@ class TfrTui:
             self._before_render(self.application)
             self._accept_combo_events = False
             for event in self.initial_events:
+                if not self.replay_mode and event.kind is EventKind.CONNECTION:
+                    continue
                 self.handle_event(event)
             self._accept_combo_events = True
             for alias, text in self._startup_notices:
