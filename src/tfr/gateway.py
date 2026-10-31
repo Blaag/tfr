@@ -2522,7 +2522,7 @@ class GatewayServer:
                     if ui_record is None:
                         raise ValueError(f"unknown UI: {ui_name}")
                 else:
-                    ui_record = None
+                    ui_record = self.ui_store.get(ui_id) if self.ui_store and ui_id else None
                 result = self.runtime.configuration_values.show(key)
                 if ui_record is not None:
                     store = getattr(self.runtime, "gateway_configuration", None)

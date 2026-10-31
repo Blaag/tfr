@@ -2317,6 +2317,10 @@ class GatewayUiRuntime:
             ),
         }
 
+    def current_ui_name(self) -> str:
+        record = getattr(self.client, "ui_record", None)
+        return record.display_name if record is not None else "current UI"
+
     async def manage_gag(
         self,
         world: str,
@@ -3017,7 +3021,11 @@ async def run_gateway_ui(
     def apply_configuration_update(
         changed: dict[str, object], requirements: dict[str, str]
     ) -> tuple[str, tuple[str, ...]]:
-        live_shared = {"ui.spellcheck.enabled", "ui.speaking_streaks.enabled"}
+        live_shared = {
+            "ui.mouse_mode",
+            "ui.spellcheck.enabled",
+            "ui.speaking_streaks.enabled",
+        }
         unsupported = tuple(
             f"live application is unsupported for {key}"
             for key in sorted(changed)
@@ -3035,6 +3043,8 @@ async def run_gateway_ui(
             client.speaking_streaks_enabled = bool(changed["ui.speaking_streaks.enabled"])
         if changed.keys() & live_shared and hasattr(tui, "apply_shared_ui_settings"):
             tui.apply_shared_ui_settings(client.spellcheck_enabled, client.speaking_streaks_enabled)
+        if "ui.mouse_mode" in changed and hasattr(tui, "apply_mouse_mode"):
+            tui.apply_mouse_mode(str(changed["ui.mouse_mode"]))
         action = required_action(requirements)
         if action == "reload-required":
             runtime.notify("Gateway configuration changed; use /reload to apply this revision.")
