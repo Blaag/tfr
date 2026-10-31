@@ -63,6 +63,21 @@ async def test_gateway_diagnoses_unavailable_required_plugin() -> None:
     await manager.event_bus.close()
 
 
+async def test_ui_plugin_failure_is_labeled_as_native_ui() -> None:
+    manager = await PluginManager.load(
+        enabled=("missing",),
+        config={},
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        discovered=(),
+        scope="ui",
+    )
+
+    assert manager.diagnostics.entries()[-1].client == "native-ui"
+    await manager.event_bus.close()
+
+
 async def test_speaker_effect_rules_are_reconfigured_live() -> None:
     class SpeakerPlugin:
         def register(self, registrar: PluginRegistrar, config: Any) -> None:

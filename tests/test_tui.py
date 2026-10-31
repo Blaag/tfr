@@ -3481,6 +3481,27 @@ def test_settings_speaker_preview_advances_with_modal_elapsed_time() -> None:
     assert fragment_list_to_text(first) == "Blood"
     assert fragment_list_to_text(later) == "Blood"
     assert first != later
+    assert all("noreverse" in style and "nobold" in style for style, _text in later)
+
+
+def test_settings_bold_preview_can_reenable_bold_after_selection_reset() -> None:
+    tui = make_tui()
+    rule = {
+        "speaker": "Noogies",
+        "effect": "bold_sweep",
+        "color": "#fafafa",
+        "duration_seconds": 1.0,
+        "repeat_seconds": 10,
+        "loop": True,
+    }
+
+    frames = [tui._speaker_rule_preview(rule, elapsed) for elapsed in (0.1, 0.5, 0.9)]
+
+    assert all(
+        all("noreverse" in style and "nobold" in style for style, _text in frame)
+        for frame in frames
+    )
+    assert any(" bold" in style for frame in frames for style, _text in frame)
 
 
 def test_generic_effect_preview_continues_to_target_the_message_body() -> None:

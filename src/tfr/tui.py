@@ -4363,19 +4363,27 @@ class TfrTui:
         default: str | None = None,
         row_preview: Callable[[str, float], object] | None = None,
     ) -> str | None:
-        preview_started_at = time.monotonic()
         choices = RadioList(
             values=values, default=default, select_on_focus=row_preview is not None
         )
         if row_preview is not None:
             original_values = tuple(choices.values)
+            preview_state: dict[str, object] = {
+                "value": choices.values[choices._selected_index][0],
+                "started_at": time.monotonic(),
+            }
 
             def dynamic_label(index: int, value: str, label: object) -> Callable[[], object]:
-                return lambda: (
-                    row_preview(value, time.monotonic() - preview_started_at)
-                    if choices._selected_index == index
-                    else label
-                )
+                def render() -> object:
+                    if choices._selected_index != index:
+                        return label
+                    now = time.monotonic()
+                    if preview_state["value"] != value:
+                        preview_state["value"] = value
+                        preview_state["started_at"] = now
+                    return row_preview(value, now - float(preview_state["started_at"]))
+
+                return render
 
             choices.values = [
                 (value, dynamic_label(index, value, label))
@@ -5149,7 +5157,10 @@ class TfrTui:
             )
         except (TypeError, ValueError):
             return [("", speaker)]
-        return list(rows[0])
+        return [
+            (f"noreverse nobold {style}".strip(), text)
+            for style, text in rows[0]
+        ]
 
     async def _declarative_item_form(
         self,

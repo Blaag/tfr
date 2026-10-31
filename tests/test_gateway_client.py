@@ -119,6 +119,27 @@ def test_recover_local_plugin_sources_from_verified_migration_backup(tmp_path: P
     }
 
 
+def test_recover_local_plugin_sources_from_legacy_marker_and_private_backup(
+    tmp_path: Path,
+) -> None:
+    main = tmp_path / "config.jsonc"
+    main.write_text('{"schema_version":1}\n', encoding="utf-8")
+    backup_directory = tmp_path / ".tfr-migration-backups" / "20261031T000000Z-test"
+    backup_directory.mkdir(parents=True)
+    backup = backup_directory / "000-config.jsonc"
+    backup.write_text(
+        '{"plugins":{"sources":[{"repo":"owner/ui-effects"}]}}\n',
+        encoding="utf-8",
+    )
+    marker = tmp_path / "config.jsonc.tfr-migrated"
+    marker.write_text("revision 12\n", encoding="utf-8")
+
+    assert _recover_local_plugin_bootstrap(main, marker) is True
+    assert json.loads(main.read_text(encoding="utf-8"))["plugins"]["sources"] == [
+        {"repo": "owner/ui-effects"}
+    ]
+
+
 async def test_missing_gateway_socket_reports_the_path() -> None:
     socket_path = Path("/tmp") / f"tfr-missing-{uuid4().hex[:8]}.sock"
 
