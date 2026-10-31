@@ -5,7 +5,8 @@ from dataclasses import replace
 from tfr.configuration_registry import SettingDescriptor
 
 SPEAKER_EFFECTS_RULES_FORM: dict[str, object] = {
-    "editor": "collection",
+    "schema_version": 1,
+    "editor": "speaker-rules",
     "label": "Speaker effects",
     "description": "Color and animate attributed speaker names.",
     "preview": "effects-lab",

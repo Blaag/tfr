@@ -71,7 +71,8 @@ def test_ui_restart_metadata_and_speaker_editor_are_always_available() -> None:
     assert speaker_rules is not None
     assert speaker_rules.restart is RestartRequirement.LIVE
     assert speaker_rules.form is not None
-    assert speaker_rules.form["editor"] == "collection"
+    assert speaker_rules.form["schema_version"] == 1
+    assert speaker_rules.form["editor"] == "speaker-rules"
 
 
 def test_core_registry_is_unique_sorted_and_read_only_metadata() -> None:

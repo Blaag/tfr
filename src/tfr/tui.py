@@ -4363,19 +4363,27 @@ class TfrTui:
         default: str | None = None,
         row_preview: Callable[[str, float], object] | None = None,
     ) -> str | None:
-        preview_started_at = time.monotonic()
         choices = RadioList(
             values=values, default=default, select_on_focus=row_preview is not None
         )
         if row_preview is not None:
             original_values = tuple(choices.values)
+            preview_state: dict[str, object] = {
+                "value": choices.values[choices._selected_index][0],
+                "started_at": time.monotonic(),
+            }
 
             def dynamic_label(index: int, value: str, label: object) -> Callable[[], object]:
-                return lambda: (
-                    row_preview(value, time.monotonic() - preview_started_at)
-                    if choices._selected_index == index
-                    else label
-                )
+                def render() -> object:
+                    if choices._selected_index != index:
+                        return label
+                    now = time.monotonic()
+                    if preview_state["value"] != value:
+                        preview_state["value"] = value
+                        preview_state["started_at"] = now
+                    return row_preview(value, now - float(preview_state["started_at"]))
+
+                return render
 
             choices.values = [
                 (value, dynamic_label(index, value, label))
@@ -5149,7 +5157,10 @@ class TfrTui:
             )
         except (TypeError, ValueError):
             return [("", speaker)]
-        return list(rows[0])
+        return [
+            (f"noreverse nobold {style}".strip(), text)
+            for style, text in rows[0]
+        ]
 
     async def _declarative_item_form(
         self,
@@ -5177,7 +5188,8 @@ class TfrTui:
                 for condition_key, allowed in condition.items()
                 if isinstance(allowed, list)
             ):
-                item.pop(key, None)
+                if raw_field.get("clear_when_hidden", True) is True:
+                    item.pop(key, None)
                 continue
             label = str(raw_field.get("label", key.replace("_", " ").title()))
             value: object | None
@@ -5186,6 +5198,12 @@ class TfrTui:
                     title=str(form.get("label", "Edit item")),
                     label=label,
                     current=(str(item[key]) if key in item else None),
+                    default_color=(
+                        str(raw_field["default_color"])
+                        if isinstance(raw_field.get("default_color"), str)
+                        else None
+                    ),
+                    default_label=str(raw_field.get("default_label", "Use effect default")),
                 )
             elif field_type in {"multi-select", "world-multi-select"}:
                 choices = self.aliases if field_type == "world-multi-select" else raw_field.get(
@@ -5202,12 +5220,22 @@ class TfrTui:
                     title=str(form.get("label", "Edit item")),
                     text=label,
                     values=[("true", "On"), ("false", "Off")],
+                    default=(
+                        "true"
+                        if item.get(key) is True
+                        else "false"
+                        if item.get(key) is False
+                        else None
+                    ),
                 )
                 value = None if selected is None else selected == "true"
             elif isinstance(raw_field.get("choices"), list):
                 encoded = [(json.dumps(choice), str(choice)) for choice in raw_field["choices"]]
                 selected = await self._settings_choice(
-                    title=str(form.get("label", "Edit item")), text=label, values=encoded
+                    title=str(form.get("label", "Edit item")),
+                    text=label,
+                    values=encoded,
+                    default=(json.dumps(item[key]) if key in item else None),
                 )
                 value = None if selected is None else json.loads(selected)
             else:
@@ -5445,11 +5473,11 @@ class TfrTui:
             raise RuntimeError("settings are unavailable without an attached Gateway")
         detail = await runtime.config_show(key)
         form = setting.get("form")
+        if isinstance(form, dict) and form.get("schema_version", 1) != 1:
+            form = None
         if key == "plugins.enabled":
             await self._edit_enabled_plugins(alias, setting, detail)
-        elif key == "plugins.config.speaker_effects.rules" or (
-            isinstance(form, dict) and form.get("editor") == "speaker-rules"
-        ):
+        elif isinstance(form, dict) and form.get("editor") == "speaker-rules":
             await self._edit_speaker_rules(alias, setting, detail)
         elif isinstance(form, dict) and form.get("editor") == "collection":
             await self._edit_structured_collection(alias, setting, detail, form)

@@ -1222,6 +1222,7 @@ class PluginManager:
                 code="operation_failed",
                 message=message[:240],
                 operation=operation[:100],
+                client="native-ui" if self.scope == "ui" else "gateway",
             )
         event = Event(
             session_id=self._session_id,

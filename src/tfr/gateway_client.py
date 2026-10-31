@@ -173,11 +173,12 @@ def _local_configuration_is_retired(path: Path) -> bool:
 
 
 def _recover_local_plugin_bootstrap(main: Path, marker: Path) -> bool:
+    candidates: list[tuple[Path, str | None]] = []
     try:
         marker_value = json.loads(marker.read_text(encoding="utf-8"))
         records = marker_value.get("backups", [])
     except (OSError, json.JSONDecodeError, AttributeError):
-        return False
+        records = []
     record = next(
         (
             item
@@ -187,15 +188,44 @@ def _recover_local_plugin_bootstrap(main: Path, marker: Path) -> bool:
         None,
     )
     if record is None:
-        return False
-    backup = Path(str(record.get("backup", "")))
-    try:
-        content = backup.read_bytes()
-    except OSError:
-        return False
-    if hashlib.sha256(content).hexdigest() != record.get("sha256"):
-        return False
-    retained = _local_plugin_bootstrap(backup)
+        record = next(
+            (
+                item
+                for item in records
+                if isinstance(item, dict)
+                and Path(str(item.get("source", ""))).name == main.name
+            ),
+            None,
+        )
+    if record is not None:
+        candidates.append(
+            (Path(str(record.get("backup", ""))), str(record.get("sha256", "")))
+        )
+    backup_root = main.parent / ".tfr-migration-backups"
+    with contextlib.suppress(OSError):
+        candidates.extend(
+            (candidate, None)
+            for candidate in sorted(
+                backup_root.glob(f"*/???-{main.name}"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+            if not candidate.is_symlink()
+            and all(candidate != existing for existing, _hash in candidates)
+        )
+    retained: dict[str, object] = {}
+    for backup, expected_hash in candidates:
+        try:
+            content = backup.read_bytes()
+        except OSError:
+            continue
+        if expected_hash and hashlib.sha256(content).hexdigest() != expected_hash:
+            continue
+        retained = _local_plugin_bootstrap(backup)
+        plugins = retained.get("plugins")
+        if isinstance(plugins, dict) and plugins.get("sources"):
+            break
+        retained = {}
     if not retained:
         return False
     try:

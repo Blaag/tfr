@@ -831,10 +831,7 @@ class GatewayRuntime:
         )
         configuration_registry = core_configuration_registry()
         for descriptor in plugins.registry.configuration_descriptors():
-            if not any(
-                item.key == descriptor.key for item in configuration_registry.descriptors()
-            ):
-                configuration_registry.register(with_builtin_form_metadata(descriptor))
+            configuration_registry.register_plugin(with_builtin_form_metadata(descriptor))
         gateway_configuration.registry = configuration_registry
         gateway_configuration.validate_current(defer_plugin_validation=True)
         gateway_migration = GatewayMigrationStore(
