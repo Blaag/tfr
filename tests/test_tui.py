@@ -3463,6 +3463,26 @@ def test_speaker_rule_effect_preview_targets_only_the_speaker_name() -> None:
     assert (decoration.start, decoration.end) == (0, len("Blood"))
 
 
+def test_settings_speaker_preview_advances_with_modal_elapsed_time() -> None:
+    tui = make_tui()
+    rule = {
+        "speaker": "Blood",
+        "effect": "shimmer",
+        "color": "#d70000",
+        "accent_color": "#ffffff",
+        "period_seconds": 1.4,
+        "repeat_seconds": 10,
+        "loop": True,
+    }
+
+    first = tui._speaker_rule_preview(rule, 0.0)
+    later = tui._speaker_rule_preview(rule, 0.7)
+
+    assert fragment_list_to_text(first) == "Blood"
+    assert fragment_list_to_text(later) == "Blood"
+    assert first != later
+
+
 def test_generic_effect_preview_continues_to_target_the_message_body() -> None:
     tui = make_tui()
 

@@ -4361,9 +4361,26 @@ class TfrTui:
         text: str,
         values: list[tuple[str, object]],
         default: str | None = None,
-        preview: Callable[[str], StyleAndTextTuples] | None = None,
+        row_preview: Callable[[str, float], object] | None = None,
     ) -> str | None:
-        choices = RadioList(values=values, default=default, select_on_focus=preview is not None)
+        preview_started_at = time.monotonic()
+        choices = RadioList(
+            values=values, default=default, select_on_focus=row_preview is not None
+        )
+        if row_preview is not None:
+            original_values = tuple(choices.values)
+
+            def dynamic_label(index: int, value: str, label: object) -> Callable[[], object]:
+                return lambda: (
+                    row_preview(value, time.monotonic() - preview_started_at)
+                    if choices._selected_index == index
+                    else label
+                )
+
+            choices.values = [
+                (value, dynamic_label(index, value, label))
+                for index, (value, label) in enumerate(original_values)
+            ]
         activate = KeyBindings()
 
         @activate.add("enter", eager=True)
@@ -4385,13 +4402,6 @@ class TfrTui:
             ),
             choices,
         ]
-        if preview is not None:
-            body.append(
-                Label(
-                    text=lambda: preview(choices.values[choices._selected_index][0]),
-                    dont_extend_height=True,
-                )
-            )
         dialog = Dialog(
             title=title,
             body=HSplit(body, padding=1),
@@ -4405,7 +4415,7 @@ class TfrTui:
             with_background=True,
         )
         ticker: asyncio.Task[None] | None = None
-        if preview is not None:
+        if row_preview is not None:
             async def animate_preview() -> None:
                 try:
                     while True:
@@ -4953,9 +4963,12 @@ class TfrTui:
             text=f"Choose the effect for {speaker}.",
             values=[(name, name.replace("_", " ").title()) for name in effects],
             default=(str(rule.get("effect")) if rule.get("effect") in effects else None),
-            preview=lambda selected: self._speaker_rule_preview(
-                {**rule, "speaker": speaker, "effect": selected}
-            ),
+            row_preview=lambda selected, elapsed: [
+                ("", f"{selected.replace('_', ' ').title():<22} "),
+                *self._speaker_rule_preview(
+                    {**rule, "speaker": speaker, "effect": selected}, elapsed
+                ),
+            ],
         )
         if effect is None:
             return None
@@ -5072,7 +5085,9 @@ class TfrTui:
             await self._settings_message(title="Invalid speaker rule", text=str(exc))
             return None
 
-    def _speaker_rule_preview(self, rule: Mapping[str, object]) -> StyleAndTextTuples:
+    def _speaker_rule_preview(
+        self, rule: Mapping[str, object], elapsed_seconds: float
+    ) -> StyleAndTextTuples:
         speaker = str(rule.get("speaker") or "Speaker")
         effect_name = str(rule.get("effect") or "shimmer")
         mapped_effect = "shimmer" if effect_name == "cylon" else effect_name
@@ -5121,7 +5136,7 @@ class TfrTui:
                 accent_color=accent,
                 interval_seconds=interval,
                 repeat_seconds=repeat,
-                phase_offset_seconds=-self._effects_animation_elapsed_seconds(),
+                phase_offset_seconds=0,
                 loop=bool(rule.get("loop", True)),
                 effect_width=max(1, int(float(rule.get("trail_width", 3)))),
             )
@@ -5129,12 +5144,12 @@ class TfrTui:
                 speaker,
                 max(1, len(speaker)),
                 decorations=(decoration,),
-                elapsed_seconds=self._effects_animation_elapsed_seconds(),
+                elapsed_seconds=elapsed_seconds,
                 animations_enabled=True,
             )
         except (TypeError, ValueError):
-            return [("", f"Preview: {speaker}")]
-        return [("class:dialog.body", "Preview: "), *list(rows[0])]
+            return [("", speaker)]
+        return list(rows[0])
 
     async def _declarative_item_form(
         self,
@@ -5314,10 +5329,29 @@ class TfrTui:
                 return [("", f"{label}  "), (f"fg:{color} bg:{color}", "██")]
             return label
 
-        def highlighted_preview(selected: str) -> StyleAndTextTuples:
+        def highlighted_preview(selected: str, elapsed: float) -> object:
             if not selected.startswith("rule:"):
-                return []
-            return self._speaker_rule_preview(rules[int(selected.split(":", 1)[1])])
+                return next((label for value, label in values if value == selected), selected)
+            rule = rules[int(selected.split(":", 1)[1])]
+            try:
+                validate_speaker_rule(rule)
+            except ValueError:
+                return list_label(rule)
+            speaker = str(rule.get("speaker") or "Unnamed speaker")
+            label = editor_label(rule)
+            suffix = label[len(speaker) :]
+            color = (
+                rule.get("end_color")
+                if rule.get("effect") == "age_decay"
+                else rule.get("color")
+            )
+            output: StyleAndTextTuples = [
+                *self._speaker_rule_preview(rule, elapsed),
+                ("", f"{suffix}  "),
+            ]
+            if isinstance(color, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+                output.append((f"fg:{color} bg:{color}", "██"))
+            return output
 
         original = json.dumps(rules, sort_keys=True)
         plugin_status = "unknown"
@@ -5348,7 +5382,7 @@ class TfrTui:
                     f"{len(rules)} configured rule{'s' if len(rules) != 1 else ''}"
                 ),
                 values=values,
-                preview=highlighted_preview,
+                row_preview=highlighted_preview,
             )
             if selected in {None, "cancel"}:
                 return
