@@ -137,6 +137,86 @@ test("spotlight validates its count and renders full and feathered light", () =>
   assert.ok(opacities.some((opacity) => opacity > 0 && opacity < 1));
 });
 
+test("acid rain uses sparse viewport drops and impact diffusion", () => {
+  const [effect] = validatedScreenClearConfig({
+    effects: [{
+      name: "acid_rain",
+      duration_ms: 3000,
+      frames_per_second: 24,
+      options: { density: 1, streak_length: 12 },
+    }],
+  }).effects;
+  const cells = Array.from({ length: 20 }, (_, column) => ({
+    text: "X",
+    x: column * 10,
+    y: 80,
+    width: 10,
+    height: 10,
+    color: "#ffffff",
+    fontFamily: "monospace",
+    fontSize: "10px",
+    fontStyle: "normal",
+    fontWeight: "400",
+  }));
+
+  function frames() {
+    const snapshot = { cells, width: 200, height: 100, seed: 7, effectState: null };
+    return [0.1, 0.2, 0.3, 0.4, 0.5, 0.6].map((progress) => {
+      const calls = [];
+      const context = {
+        fillStyle: "",
+        font: "",
+        fillText: (...arguments_) => calls.push(arguments_),
+      };
+      renderScreenClearFrame(context, snapshot, effect, progress);
+      return calls;
+    });
+  }
+
+  const first = frames();
+  const second = frames();
+  const glyphs = first.flat().map(([text]) => text);
+  assert.deepEqual(first, second, "the seeded schedule is deterministic");
+  assert.ok(glyphs.includes("•"), "compact drops spawn within the viewport");
+  assert.ok(!glyphs.includes("│"), "the old full-height streak is retired");
+  assert.ok(first.every((calls) => calls.filter(([text]) => ["•", "."].includes(text)).length <= 14));
+  assert.ok(first.some((calls) => {
+    const texts = calls.map(([text]) => text);
+    return texts.includes("X") && texts.some((text) => ["x", "#", "%", "*", ":", "."].includes(text));
+  }), "corrosion diffuses while unaffected text remains visible");
+});
+
+test("zero-density acid rain still clears without drawing drops", () => {
+  const [effect] = validatedScreenClearConfig({
+    effects: [{
+      name: "acid_rain",
+      duration_ms: 3000,
+      frames_per_second: 24,
+      options: { density: 0, streak_length: 4 },
+    }],
+  }).effects;
+  const cells = [{
+    text: "X",
+    x: 10,
+    y: 10,
+    width: 10,
+    height: 10,
+    color: "#ffffff",
+    fontFamily: "monospace",
+    fontSize: "10px",
+    fontStyle: "normal",
+    fontWeight: "400",
+  }];
+  const calls = [];
+  const context = { fillStyle: "", font: "", fillText: (...arguments_) => calls.push(arguments_) };
+  const snapshot = { cells, width: 100, height: 100, seed: 7, effectState: null };
+
+  renderScreenClearFrame(context, snapshot, effect, 0.15);
+
+  assert.ok(calls.length > 0);
+  assert.ok(calls.every(([text]) => text !== "•"));
+});
+
 test("cycle selection advances without repeating the previous effect", () => {
   const first = selectScreenClearEffect(null);
   const second = selectScreenClearEffect(null, first.name);

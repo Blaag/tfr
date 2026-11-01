@@ -365,97 +365,111 @@ function acidStage(local, cell, variation) {
   return null;
 }
 
-function acidRainState(snapshot) {
-  const columns = new Map();
-  const bandWidth = Math.max(4, snapshot.cells[0]?.width || 10);
+function acidRainState(snapshot, options) {
+  const reference = snapshot.cells[0] || null;
+  const cellWidth = Math.max(1, reference?.width || 10);
+  const cellHeight = Math.max(1, reference?.height || 18);
+  const width = Math.max(1, Math.ceil(snapshot.width / cellWidth));
+  const height = Math.max(1, Math.ceil(snapshot.height / cellHeight));
+  const targetsByColumn = new Map();
+  const occupied = new Set();
+  const positions = new Map();
   snapshot.cells.forEach((cell, index) => {
-    const column = Math.round((cell.x + cell.width / 2) / bandWidth);
-    const entries = columns.get(column) || [];
-    entries.push({ cell, index });
-    columns.set(column, entries);
-  });
-  const impacts = new Map();
-  for (const [column, entries] of columns) {
-    entries.sort((left, right) => left.cell.y - right.cell.y);
-    const top = entries[0].cell.y / Math.max(1, snapshot.height - entries[0].cell.height);
-    const firstImpact = 0.045 + top * 0.35 + hash(snapshot.seed, column, 1) * 0.025;
-    const slot = Math.max(0.01, (0.86 - firstImpact) / entries.length);
-    for (const [order, entry] of entries.entries()) {
-      const impact = firstImpact + order * slot + hash(snapshot.seed, column, order + 2) * slot * 0.12;
-      impacts.set(entry.index, impact);
+    const row = Math.min(height - 1, Math.max(0, Math.floor((cell.y + cell.height / 2) / cellHeight)));
+    const firstColumn = Math.min(width - 1, Math.max(0, Math.floor(cell.x / cellWidth)));
+    const columnSpan = Math.max(1, Math.round(cell.width / cellWidth));
+    positions.set(index, { row, column: firstColumn });
+    for (let offset = 0; offset < columnSpan && firstColumn + offset < width; offset += 1) {
+      const column = firstColumn + offset;
+      const rows = targetsByColumn.get(column) || [];
+      rows.push(row);
+      targetsByColumn.set(column, rows);
+      occupied.add(`${row}:${column}`);
     }
+  });
+
+  const drops = [];
+  const dropCount = options.density <= 0 ? 0 : Math.max(1, Math.ceil(width * options.density * 0.35));
+  for (let index = 0; index < dropCount; index += 1) {
+    const column = Math.min(width - 1, Math.floor(hash(snapshot.seed, index, 1) * width));
+    const spawnRow = Math.min(height - 1, Math.floor(hash(snapshot.seed, index, 2) * height));
+    const start = 0.025 + hash(snapshot.seed, index, 3) * 0.52;
+    const fallDuration = Math.min(0.18 + hash(snapshot.seed, index, 4) * 0.12, 0.68 - start);
+    const rowsPerProgress = Math.max(1, height - 1) / fallDuration;
+    const collisionRow = [...new Set(targetsByColumn.get(column) || [])]
+      .sort((left, right) => left - right)
+      .find((row) => row >= spawnRow) ?? null;
+    const impact = collisionRow === null
+      ? null
+      : start + (collisionRow - spawnRow) / rowsPerProgress;
+    drops.push({ column, spawnRow, start, rowsPerProgress, collisionRow, impact });
   }
-  return { bandWidth, columns, impacts };
+
+  const collisions = drops.filter((drop) => drop.collisionRow !== null && drop.impact !== null);
+  const impacts = new Map();
+  for (const [index, position] of positions) {
+    let impact;
+    if (collisions.length > 0) {
+      impact = Math.min(...collisions.map((drop) => (
+        drop.impact
+        + (Math.abs(position.row - drop.collisionRow) * 1.5
+          + Math.abs(position.column - drop.column)) * 0.035
+        + (position.row === drop.collisionRow && position.column === drop.column
+          ? 0
+          : hash(snapshot.seed, index, 5) * 0.025)
+      )));
+    } else {
+      impact = 0.045 + position.row / Math.max(1, height - 1) * 0.5
+        + hash(snapshot.seed, index, 5) * 0.025;
+    }
+    impacts.set(index, Math.min(0.7, impact));
+  }
+  return { cellWidth, cellHeight, height, drops, impacts, occupied, reference };
 }
 
-function drawAcidStreak(context, cell, progress, impact, seed, index, streakLength, height) {
-  const travelDuration = 0.1 + cell.y / Math.max(1, cell.height) / 400;
-  const hold = 0.045 + hash(seed, index, 59) * 0.035;
-  if (progress < impact - travelDuration || progress >= impact + hold) return;
-  const travel = Math.min(1, (progress - impact + travelDuration) / travelDuration);
-  const headY = -cell.height * streakLength + travel * (cell.y + cell.height * streakLength);
-  for (let offset = 0; offset < streakLength; offset += 1) {
-    const y = headY - offset * cell.height;
-    if (y < -cell.height || y >= height) continue;
-    drawCell(context, cell, {
-      text: offset === 0 ? "│" : offset < streakLength / 2 ? ":" : ".",
-      color: offset === 0 ? "#afff00" : offset < streakLength / 2 ? "#87d700" : "#5f8700",
-      x: cell.x,
-      y,
-      bold: offset === 0,
-    });
+function drawAcidRain(context, snapshot, progress, streakLength) {
+  const state = snapshot.effectState;
+  if (progress <= 0 || progress >= 1 || !state.reference) return;
+  for (const [index, drop] of state.drops.entries()) {
+    if (progress < drop.start) continue;
+    let head = drop.spawnRow + Math.floor((progress - drop.start) * drop.rowsPerProgress);
+    if (drop.collisionRow !== null && drop.impact !== null) {
+      const hold = 0.035 + hash(snapshot.seed, index, drop.collisionRow, 6) * 0.025;
+      if (progress >= drop.impact + hold) continue;
+      head = Math.min(head, drop.collisionRow);
+    } else if (head >= state.height + streakLength) continue;
+    const visibleLength = Math.min(streakLength, 2);
+    for (let offset = 0; offset < visibleLength; offset += 1) {
+      const row = head - offset;
+      if (row < 0 || row >= state.height || state.occupied.has(`${row}:${drop.column}`)) continue;
+      drawCell(context, state.reference, {
+        text: offset === 0 ? "•" : ".",
+        color: offset === 0 ? "#afff00" : "#5f8700",
+        x: drop.column * state.cellWidth,
+        y: row * state.cellHeight,
+        bold: offset === 0,
+      });
+    }
   }
 }
 
 function acidRainFrame(context, snapshot, progress, options) {
   const state = snapshot.effectState;
-  const streakLength = options.streak_length;
   for (const [index, cell] of snapshot.cells.entries()) {
     const impact = state.impacts.get(index) ?? 0.72;
-    drawAcidStreak(
-      context,
-      cell,
-      progress,
-      impact,
-      snapshot.seed,
-      index,
-      streakLength,
-      snapshot.height,
-    );
     if (progress < impact) {
       drawCell(context, cell);
       continue;
     }
-    const column = Math.round((cell.x + cell.width / 2) / state.bandWidth);
-    const ordered = state.columns.get(column) || [];
-    const position = ordered.findIndex((entry) => entry.index === index);
-    const nextImpact = position >= 0 && position + 1 < ordered.length
-      ? state.impacts.get(ordered[position + 1].index)
-      : null;
     const duration = Math.min(
-      0.3,
+      0.22 + hash(snapshot.seed, index, 3) * 0.08,
       Math.max(0.01, (1 - impact) / 0.91),
-      nextImpact === null ? Infinity : Math.max(0.01, (nextImpact - impact) * 0.88),
     );
     const local = (progress - impact) / duration;
     const stage = acidStage(local, cell, hash(snapshot.seed, index, 90));
     if (stage) drawCell(context, cell, stage);
   }
-  const spacing = state.bandWidth;
-  const decorativeColumns = Math.min(120, Math.ceil(snapshot.width / spacing));
-  for (let column = 0; column < decorativeColumns; column += 1) {
-    if (hash(snapshot.seed, column, 101) > options.density) continue;
-    const x = column * snapshot.width / decorativeColumns;
-    if (state.columns.has(Math.round(x / spacing))) continue;
-    const cycle = 1.1 + hash(snapshot.seed, column, 102) * 1.4;
-    const phase = hash(snapshot.seed, column, 103);
-    const y = ((progress * cycle + phase) % 1) * (snapshot.height + 4 * spacing) - 4 * spacing;
-    const cell = snapshot.cells[0];
-    if (!cell) continue;
-    drawCell(context, cell, { text: "│", color: "#afff00", x, y, bold: true });
-    drawCell(context, cell, { text: ":", color: "#87d700", x, y: y - cell.height });
-    drawCell(context, cell, { text: ".", color: "#5f8700", x, y: y - cell.height * 2 });
-  }
+  drawAcidRain(context, snapshot, progress, options.streak_length);
 }
 
 function flameFrame(context, snapshot, progress) {
@@ -600,7 +614,7 @@ function waterFrame(context, snapshot, progress, options) {
 }
 
 function prepareEffectState(snapshot, effect) {
-  if (effect.name === "acid_rain") return acidRainState(snapshot);
+  if (effect.name === "acid_rain") return acidRainState(snapshot, effect.options);
   if (effect.name === "film_burn") return filmBurnState(snapshot, effect.options);
   if (effect.name === "spotlight") return spotlightState(snapshot, effect.options);
   return null;
