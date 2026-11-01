@@ -37,6 +37,7 @@ from tfr.core_settings import core_configuration_registry
 from tfr.diagnostics import DiagnosticBuffer, bounded_diagnostic_message
 from tfr.events import CommandRequest, Event
 from tfr.gateway import default_gateway_socket
+from tfr.gateway_migration import register_legacy_plugin_config_descriptors
 from tfr.gateway_protocol import (
     MAX_MESSAGE_BYTES,
     MAX_SNAPSHOT_EVENTS,
@@ -2723,6 +2724,9 @@ def _legacy_migration_values(
     for descriptor in plugin_descriptors:
         if not any(item.key == descriptor.key for item in registry.descriptors()):
             registry.register(descriptor)
+    register_legacy_plugin_config_descriptors(
+        {"plugins.config": configuration.main.plugins.config}, registry
+    )
     output: dict[str, object] = {}
 
     def record_plugin(prefix: str, value: object) -> None:

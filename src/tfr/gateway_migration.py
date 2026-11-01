@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -13,7 +14,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from tfr.configuration_registry import NO_DEFAULT, ConfigurationRegistry, SettingScope
+from tfr.configuration_registry import (
+    NO_DEFAULT,
+    ConfigurationRegistry,
+    RestartRequirement,
+    SettingDescriptor,
+    SettingScope,
+    SettingType,
+)
 from tfr.gateway_configuration import (
     GatewayConfigurationDocument,
     GatewayConfigurationStore,
@@ -22,6 +30,39 @@ from tfr.gateway_configuration import (
 MAX_MIGRATION_SETTINGS = 2_000
 MAX_MIGRATION_PROPOSALS = 64
 _SPEAKER_RULES_KEY = "plugins.config.speaker_effects.rules"
+_PLUGIN_CONFIG_NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+
+def register_legacy_plugin_config_descriptors(
+    values: dict[str, object], registry: ConfigurationRegistry
+) -> None:
+    """Register opaque plugin roots only when no bounded descendant is known."""
+
+    raw_config = values.get("plugins.config")
+    plugin_values: dict[str, object] = dict(raw_config) if isinstance(raw_config, dict) else {}
+    for key, value in values.items():
+        prefix = "plugins.config."
+        if key.startswith(prefix) and "." not in key[len(prefix) :]:
+            plugin_values.setdefault(key[len(prefix) :], value)
+    known_keys = tuple(descriptor.key for descriptor in registry.descriptors())
+    for plugin, value in plugin_values.items():
+        if not isinstance(plugin, str) or _PLUGIN_CONFIG_NAME.fullmatch(plugin) is None:
+            continue
+        key = f"plugins.config.{plugin}"
+        if registry.get(key) is not None or any(
+            known.startswith(f"{key}.") for known in known_keys
+        ):
+            continue
+        registry.register(
+            SettingDescriptor(
+                key=key,
+                value_type=SettingType.OBJECT if isinstance(value, dict) else SettingType.JSON,
+                default=NO_DEFAULT,
+                scope=SettingScope.PLUGIN,
+                consumers=("gateway", "native-ui", "pwa"),
+                restart=RestartRequirement.GATEWAY_RESTART,
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,7 +150,7 @@ def collect_migration_settings(
         elif descriptor.scope is SettingScope.PLUGIN:
             scope = "plugin"
             parts = key.split(".")
-            target = parts[2] if len(parts) > 3 else None
+            target = parts[2] if len(parts) > 2 else None
         elif descriptor.scope is SettingScope.BOOTSTRAP:
             scope = "bootstrap"
         elif descriptor.scope is SettingScope.SECRET:
