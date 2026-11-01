@@ -23,13 +23,18 @@ def test_settings_are_grouped_and_world_templates_bind_to_active_world() -> None
             "key": "plugins.config.speaker_effects.rules",
             "scope": "plugin",
             "type": "json",
+            "form": {"schema_version": 1, "editor": "speaker-rules"},
         },
+        {"key": "plugins.config", "scope": "plugin", "type": "object"},
+        {"key": "ui.spellcheck.worlds", "scope": "shared", "type": "object"},
+        {"key": "plugins.sources", "scope": "gateway", "type": "json"},
     ]
 
     editable = editable_settings(settings, worlds=("alpha",))
 
     assert [item["key"] for item in editable] == [
         "plugins.config.speaker_effects.rules",
+        "plugins.sources",
         "ui.animations_enabled",
         "worlds.alpha.reconnect",
     ]

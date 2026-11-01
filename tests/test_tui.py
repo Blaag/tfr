@@ -859,7 +859,7 @@ async def test_settings_browser_infers_current_ui_scope_and_saves_boolean() -> N
         ),
     )
     tui.service_runtime = runtime
-    choices = iter(["browse", "Ui", "edit", "true", "current", None, None])
+    choices = iter(["browse", "Ui", "true", "current", None, None])
     tui._settings_choice = AsyncMock(side_effect=lambda **_kwargs: next(choices))
     tui._settings_confirm = AsyncMock(return_value=True)
 
@@ -873,15 +873,90 @@ async def test_settings_browser_infers_current_ui_scope_and_saves_boolean() -> N
         "confirm": False,
     }
     assert runtime.config_mutate.await_args_list[1].kwargs["confirm"] is True
-    value_prompt = tui._settings_choice.await_args_list[3].kwargs
-    assert value_prompt["text"] == "Current value: Off"
+    value_prompt = tui._settings_choice.await_args_list[2].kwargs
+    assert "Current value: Off" in value_prompt["text"]
+    assert "Source: default" in value_prompt["text"]
     assert value_prompt["values"] == [("true", "On"), ("false", "Off")]
     assert value_prompt["default"] == "false"
-    target_prompt = tui._settings_choice.await_args_list[4].kwargs
+    target_prompt = tui._settings_choice.await_args_list[3].kwargs
     assert target_prompt["title"] == "Apply setting to"
     assert target_prompt["default"] == "current"
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
-    assert "Saved Animations Enabled = true at revision 5" in text
+    assert "Saved Animations Enabled = On at revision 5" in text
+
+
+async def test_structured_setting_never_opens_raw_json_input() -> None:
+    tui = make_tui()
+    tui._settings_input = AsyncMock()
+    tui._settings_message = AsyncMock()
+
+    await tui._edit_generic_setting(
+        "alpha",
+        {"key": "example.structured", "type": "json", "scope": "shared"},
+        {"value": {"unsafe": "blob"}, "source": "managed"},
+    )
+
+    tui._settings_input.assert_not_awaited()
+    assert "cannot be edited as raw JSON" in tui._settings_message.await_args.kwargs["text"]
+
+
+async def test_plugin_sources_can_add_official_source_once() -> None:
+    tui = make_tui()
+    tui._settings_choice = AsyncMock(side_effect=["official", "save"])
+    tui._save_settings_batch = AsyncMock(return_value=True)
+    setting = {"key": "plugins.sources", "scope": "gateway", "default": []}
+
+    await tui._edit_plugin_sources("alpha", setting, {"value": []})
+
+    saved = tui._save_settings_batch.await_args.args[2]
+    assert saved == [
+        {
+            "repo": "Blaag/tfr-plugins-public",
+            "path": ".",
+            "auto_update": False,
+            "policy": "stable-auto",
+            "manifest_url": (
+                "https://github.com/Blaag/tfr-plugins-public/releases/latest/download/"
+                "plugin-manifest.json"
+            ),
+        }
+    ]
+
+
+async def test_plugin_sources_hide_official_action_for_equivalent_repository() -> None:
+    tui = make_tui()
+    tui._settings_choice = AsyncMock(return_value="cancel")
+    source = {
+        "repo": "https://github.com/blaag/tfr-plugins-public.git",
+        "path": ".",
+        "policy": "legacy",
+    }
+
+    await tui._edit_plugin_sources(
+        "alpha",
+        {"key": "plugins.sources", "scope": "gateway", "default": []},
+        {"value": [source]},
+    )
+
+    values = tui._settings_choice.await_args.kwargs["values"]
+    assert all(value != "official" for value, _label in values)
+
+
+def test_reset_labels_state_concrete_outcome() -> None:
+    tui = make_tui()
+
+    assert (
+        tui._reset_setting_text(
+            {"key": "updates.channel", "scope": "gateway", "default": "stable"}
+        )
+        == "Reset to built-in default — stable"
+    )
+    assert (
+        tui._reset_setting_text(
+            {"key": "plugins.sources", "scope": "gateway", "default": []}
+        )
+        == "Remove all plugin sources"
+    )
 
 
 async def test_settings_escape_returns_one_navigation_level() -> None:
@@ -3522,6 +3597,18 @@ def test_settings_speaker_preview_accepts_incomplete_new_and_cylon_drafts() -> N
             assert all(isinstance(style, str) and isinstance(text, str) for style, text in preview)
         age_decay = tui._speaker_rule_preview({**draft, "effect": "age_decay"}, 0.5)
         assert fragment_list_to_text(age_decay) == str(draft["speaker"])
+
+
+def test_new_speaker_effect_previews_use_visible_sample_colors() -> None:
+    tui = make_tui()
+
+    for effect in SPEAKER_EFFECT_NAMES:
+        draft = tui._speaker_preview_draft({}, "New speaker", effect)
+        base = str(draft.get("end_color") or draft.get("color"))
+        accent = str(draft["accent_color"])
+        assert base != "#ffffff"
+        assert base != accent
+        assert tui._speaker_rule_preview(draft, 0.5)
 
 
 def test_settings_cylon_preview_returns_and_repeats_like_live_effect() -> None:
