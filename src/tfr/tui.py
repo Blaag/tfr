@@ -104,7 +104,14 @@ from tfr.plugins import (
     PluginWorldInfo,
     ProjectedEffectDemo,
 )
-from tfr.presentation import ActiveEffectProgram, EffectProgram, effect_programs_from_dict
+from tfr.presentation import (
+    ActiveEffectProgram,
+    EffectProgram,
+    PresentationStyle,
+    character_sweep,
+    effect_programs_from_dict,
+)
+from tfr.presentation_events import infer_presentation_speaker
 from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.settings_ui import (
     SPEAKER_EFFECT_NAMES,
@@ -2756,32 +2763,6 @@ class TfrTui:
             particle for particle in self._firework_particles if now - particle.started_at < 2.2
         ]
 
-    @staticmethod
-    def _inferred_display_speaker(event: Event, event_text: str | None) -> Event:
-        if (
-            event_text is None
-            or event.parser_name not in {"bare", "generic"}
-            or event.provenance is not None
-            or event.kind not in {EventKind.RAW_OUTPUT, EventKind.SAY}
-        ):
-            return event
-        plain_text = terminal_plain_text(event_text).lstrip()
-        token = plain_text.split(maxsplit=1)[0] if plain_text else ""
-        if token.casefold().endswith(("'s", "’s")):
-            token = token[:-2]
-        if not token or len(token) > _MAX_OBSERVED_SPEAKER_LENGTH:
-            return event
-        return replace(
-            event,
-            kind=EventKind.POSE if event.kind is EventKind.RAW_OUTPUT else event.kind,
-            provenance=Provenance(
-                sender_name=token,
-                adapter=event.parser_name,
-                confidence=Confidence.INFERRED,
-            ),
-            confidence=Confidence.INFERRED,
-        )
-
     def handle_event(self, event: Event) -> None:
         self.plugins.observe_ui_event(event)
         view = self.views.get(event.world)
@@ -2843,7 +2824,7 @@ class TfrTui:
                 else event_text
             )
             if display_text is not None:
-                effect_event = self._inferred_display_speaker(display_event, event_text)
+                effect_event = infer_presentation_speaker(display_event, event_text)
                 decorations = (
                     self.plugins.decorate_display(effect_event, display_text)
                     if self.plugins is not None and self.gateway_reconnect is None
@@ -4008,7 +3989,10 @@ class TfrTui:
         return build.version
 
     def _version_text(self) -> str:
-        lines = [f"UI:      {self._format_build(current_build())}"]
+        channel = (
+            self.update_checker.config.channel if self.update_checker is not None else "stable"
+        )
+        lines = [f"Channel: {channel}", f"UI:      {self._format_build(current_build())}"]
         if self.gateway_build is not None:
             lines.append(f"Gateway: {self._format_build(self.gateway_build)}")
         else:
@@ -4383,7 +4367,12 @@ class TfrTui:
                     if preview_state["value"] != value:
                         preview_state["value"] = value
                         preview_state["started_at"] = now
-                    return row_preview(value, now - float(preview_state["started_at"]))
+                    try:
+                        return row_preview(value, now - float(preview_state["started_at"]))
+                    except Exception:
+                        # Preview content is optional. A malformed draft or preview must
+                        # not escape through prompt-toolkit's redraw callback.
+                        return label
 
                 return render
 
@@ -5136,45 +5125,69 @@ class TfrTui:
         self, rule: Mapping[str, object], elapsed_seconds: float
     ) -> StyleAndTextTuples:
         speaker = str(rule.get("speaker") or "Speaker")
-        effect_name = str(rule.get("effect") or "shimmer")
-        mapped_effect = "shimmer" if effect_name == "cylon" else effect_name
         try:
-            effect = TextEffectKind(mapped_effect)
-        except ValueError:
-            return [("class:dialog.body", f"Preview unavailable: {effect_name}")]
-        base = str(
-            rule.get("end_color")
-            if effect_name == "age_decay"
-            else rule.get("color", "#180000" if effect_name == "cylon" else "#ffffff")
-        )
-        accent = str(
-            rule.get(
-                "accent_color",
-                "#ff0000"
-                if effect_name == "cylon"
-                else "#d7ffff"
-                if effect_name == "frost"
-                else derive_bright_color(base),
+            effect_name = str(rule.get("effect") or "shimmer")
+            if effect_name == "cylon":
+                base = str(rule.get("color", "#180000"))
+                accent = str(rule.get("accent_color", "#ff0000"))
+                duration = float(rule.get("duration_seconds", 2.0))
+                repeat = float(rule.get("repeat_seconds", 2.0))
+                loop = bool(rule.get("loop", True))
+                repeat_count = min(20, int(300 // repeat)) if loop else 1
+                program = character_sweep(
+                    0,
+                    len(speaker),
+                    base_color=base,
+                    head_color=accent,
+                    trail_width=float(rule.get("trail_width", 3)),
+                    uppercase_head=True,
+                    duration_seconds=duration,
+                    repeat_seconds=repeat if loop else duration,
+                    repeat_count=repeat_count,
+                    frames_per_second=float(rule.get("frames_per_second", 20.0)),
+                    reduced_motion=PresentationStyle(foreground=accent, bold=True),
+                )
+                rows = wrap_ansi_text(
+                    speaker,
+                    max(1, len(speaker)),
+                    presentations=(ActiveEffectProgram(program),),
+                    elapsed_seconds=elapsed_seconds,
+                    animations_enabled=True,
+                )
+                return [
+                    (f"noreverse nobold {style}".strip(), text) for style, text in rows[0]
+                ]
+
+            effect = TextEffectKind(effect_name)
+            base_value = (
+                rule.get("end_color", "#ffffff")
+                if effect_name == "age_decay"
+                else rule.get("color", "#ffffff")
             )
-        )
-        defaults = {
-            "shimmer": 1.4,
-            "comet": 1.2,
-            "sparkle": 1.2,
-            "ember": 1.8,
-            "frost": 1.6,
-            "rainbow_wave": 1.8,
-            "color_pulse": 1.2,
-            "age_decay": 30.0,
-        }
-        interval = float(
-            rule.get(
-                "period_seconds" if effect_name == "shimmer" else "duration_seconds",
-                defaults.get(effect_name, 1.0),
+            base = str(base_value if base_value is not None else "#ffffff")
+            accent = str(
+                rule.get(
+                    "accent_color",
+                    "#d7ffff" if effect_name == "frost" else derive_bright_color(base),
+                )
             )
-        )
-        repeat = float(rule.get("repeat_seconds", max(10.0, interval + 1)))
-        try:
+            defaults = {
+                "shimmer": 1.4,
+                "comet": 1.2,
+                "sparkle": 1.2,
+                "ember": 1.8,
+                "frost": 1.6,
+                "rainbow_wave": 1.8,
+                "color_pulse": 1.2,
+                "age_decay": 30.0,
+            }
+            interval = float(
+                rule.get(
+                    "period_seconds" if effect_name == "shimmer" else "duration_seconds",
+                    defaults.get(effect_name, 1.0),
+                )
+            )
+            repeat = float(rule.get("repeat_seconds", max(10.0, interval + 1)))
             decoration = TextDecoration(
                 start=0,
                 end=len(speaker),
@@ -5194,7 +5207,7 @@ class TfrTui:
                 elapsed_seconds=elapsed_seconds,
                 animations_enabled=True,
             )
-        except (TypeError, ValueError):
+        except (ArithmeticError, TypeError, ValueError):
             return [("", speaker)]
         return [
             (f"noreverse nobold {style}".strip(), text)

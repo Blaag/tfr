@@ -64,6 +64,7 @@ from tfr.plugin_sources import PluginSourceNotice, PluginUpdateChecker, PluginUp
 from tfr.plugins import BossViewEvent, PluginManager, ProjectedEffectDemo
 from tfr.presentation import EffectProgram, effect_programs_as_dict
 from tfr.sessions import SessionManager, SessionState, WorldSession
+from tfr.settings_ui import SPEAKER_EFFECT_NAMES
 from tfr.tui import (
     _MAX_OBSERVED_SPEAKER_LENGTH,
     _MAX_OBSERVED_SPEAKERS,
@@ -3501,6 +3502,52 @@ def test_settings_speaker_preview_advances_with_modal_elapsed_time() -> None:
     assert all("noreverse" in style and "nobold" in style for style, _text in later)
 
 
+def test_settings_speaker_preview_accepts_incomplete_new_and_cylon_drafts() -> None:
+    tui = make_tui()
+    drafts = (
+        {"speaker": "New speaker"},
+        {
+            "speaker": "Noogies",
+            "effect": "cylon",
+            "color": "#ff8700",
+            "accent_color": "#ffffff",
+            "trail_width": 3,
+        },
+    )
+
+    for draft in drafts:
+        for effect in SPEAKER_EFFECT_NAMES:
+            preview = tui._speaker_rule_preview({**draft, "effect": effect}, 0.5)
+            assert preview
+            assert all(isinstance(style, str) and isinstance(text, str) for style, text in preview)
+        age_decay = tui._speaker_rule_preview({**draft, "effect": "age_decay"}, 0.5)
+        assert fragment_list_to_text(age_decay) == str(draft["speaker"])
+
+
+def test_settings_cylon_preview_returns_and_repeats_like_live_effect() -> None:
+    tui = make_tui()
+    rule = {
+        "speaker": "Noogies",
+        "effect": "cylon",
+        "color": "#180000",
+        "accent_color": "#ff8700",
+        "duration_seconds": 2.0,
+        "repeat_seconds": 2.0,
+        "trail_width": 2,
+        "loop": True,
+    }
+
+    outbound_near = tui._speaker_rule_preview(rule, 0.25)
+    outbound_far = tui._speaker_rule_preview(rule, 0.75)
+    returning_far = tui._speaker_rule_preview(rule, 1.25)
+    returning_near = tui._speaker_rule_preview(rule, 1.75)
+    repeated = tui._speaker_rule_preview(rule, 2.25)
+
+    assert outbound_near != outbound_far
+    assert outbound_near == returning_near == repeated
+    assert outbound_far == returning_far
+
+
 def test_settings_bold_preview_can_reenable_bold_after_selection_reset() -> None:
     tui = make_tui()
     rule = {
@@ -5834,7 +5881,18 @@ async def test_version_command_reports_ui_and_gateway_builds() -> None:
     await tui._handle_client_command("alpha", "/version")
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
     assert "UI:" in text
+    assert "Channel: stable" in text
     assert "Gateway: 0.1.54 (" + "a" * 12 + ")" in text
+
+
+async def test_version_command_reports_candidate_release_channel() -> None:
+    checker = SimpleNamespace(config=SimpleNamespace(channel="candidate"))
+    tui = make_tui(update_checker=checker)  # type: ignore[arg-type]
+
+    await tui._handle_client_command("alpha", "/version")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Channel: candidate" in text
 
 
 async def test_version_command_without_gateway_reports_not_attached() -> None:

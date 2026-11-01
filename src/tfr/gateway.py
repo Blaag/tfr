@@ -100,6 +100,7 @@ from tfr.managed_updates import (
 from tfr.plugin_sources import PluginSourceNotice, PluginUpdateChecker, load_plugin_sources
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.presentation import effect_programs_as_dict
+from tfr.presentation_events import infer_presentation_speaker
 from tfr.sessions import (
     ConnectorSessionBridge,
     ConnectorWorldSession,
@@ -2033,7 +2034,8 @@ class GatewayServer:
         text = terminal_plain_text(
             event.display_text or event.plain_text or event.canonical_text or ""
         )
-        groups = plugins.presentation_programs_by_plugin(event, text)
+        presentation_event = infer_presentation_speaker(event, text)
+        groups = plugins.presentation_programs_by_plugin(presentation_event, text)
         presentations = [
             {"source": source, "presentation": effect_programs_as_dict(programs)}
             for source, programs in groups

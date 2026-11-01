@@ -14,7 +14,15 @@ from uuid import UUID, uuid4
 import pytest
 
 from tfr.core import CommandBus, EventBus
-from tfr.events import Actor, ActorType, Direction, Event, EventKind, SpoofAssessment, SpoofStatus
+from tfr.events import (
+    Actor,
+    ActorType,
+    Direction,
+    Event,
+    EventKind,
+    SpoofAssessment,
+    SpoofStatus,
+)
 from tfr.gateway import (
     EventHistory,
     GatewayRuntime,
@@ -482,6 +490,57 @@ def test_native_gateway_event_groups_portable_programs_by_plugin() -> None:
     assert message["presentations"][0]["source"] == "speaker_effects"
     assert message["presentations"][0]["presentation"]["programs"][0]["start"] == 0
     assert message["presentation_text"] == "alpha 0"
+
+
+@pytest.mark.parametrize("text", ["Alice waves.", "Alice   00:12   3m   connected"])
+@pytest.mark.parametrize("parser_name", ["bare", "tinymux"])
+def test_native_gateway_infers_speakers_for_pose_and_who_presentations(
+    text: str, parser_name: str
+) -> None:
+    history = SimpleNamespace()
+    runtime = FakeRuntime(history)  # type: ignore[arg-type]
+    plugins = PluginManager(
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        scope="gateway",
+    )
+    observed: list[Event] = []
+
+    def present(event: Event, _text: str):
+        observed.append(event)
+        if (
+            event.kind is EventKind.POSE
+            and event.provenance is not None
+            and event.provenance.sender_name == "Alice"
+        ):
+            return (color_pulse(0, 5, base_color="#112233", accent_color="#ffffff"),)
+        return ()
+
+    plugins._registrar("speaker_effects").register_presentation_decorator("speaker", present)
+    runtime.plugins = plugins
+    server = GatewayServer(runtime, Path("/unused"))  # type: ignore[arg-type]
+    original = Event(
+        session_id=UUID("63f755aa-e407-4f78-ae05-f9d62c23f765"),
+        world="alpha",
+        connection_generation=1,
+        sequence=1,
+        direction=Direction.INBOUND,
+        kind=EventKind.RAW_OUTPUT,
+        canonical_text=text,
+        plain_text=text,
+        display_text=text,
+        parser_name=parser_name,
+    )
+
+    message = server._native_event_message(1, original)
+
+    assert message["presentations"][0]["source"] == "speaker_effects"
+    assert observed[0].kind is EventKind.POSE
+    assert observed[0].provenance is not None
+    assert observed[0].provenance.sender_name == "Alice"
+    assert original.kind is EventKind.RAW_OUTPUT
+    assert original.provenance is None
 
 
 def test_runtime_world_descriptors_include_switch_aliases() -> None:
