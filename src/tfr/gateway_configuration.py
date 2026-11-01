@@ -597,6 +597,7 @@ class GatewayConfigurationStore:
         if (
             scope == "plugin"
             and target is not None
+            and key != f"plugins.config.{target}"
             and not key.startswith(f"plugins.config.{target}.")
         ):
             raise GatewayConfigurationError("plugin target does not match the setting key")

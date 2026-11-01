@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 
 from tfr.config import AgentsConfig, ConfigurationBundle, MainConfig, WorldsConfig
+from tfr.configuration_values import configuration_values_from_bundle
 from tfr.core_settings import core_configuration_registry
 from tfr.gateway import _stage_legacy_world_login_references
 from tfr.gateway_client import GatewayClient, _legacy_migration_values
@@ -17,6 +18,7 @@ from tfr.gateway_migration import (
     collect_migration_settings,
     collect_omitted_migration_keys,
     new_proposal,
+    register_legacy_plugin_config_descriptors,
 )
 
 
@@ -46,6 +48,132 @@ def submit(
             ),
         )
     )
+
+
+def test_v067_public_plugin_configuration_migrates_losslessly(tmp_path: Path) -> None:
+    plugin_config = {
+        "acid_rain": {
+            "density": 0.71,
+            "duration_seconds": 4.5,
+            "frames_per_second": 20,
+            "streak_length": 7,
+        },
+        "film_burn": {"minimum_holes": 2, "maximum_holes": 5},
+        "water": {"color_mode": "dynamic", "slosh_strength": 0.42},
+        "speaker_effects": {
+            "rules": [
+                {
+                    "speaker": "Barnaby",
+                    "effect": "cylon",
+                    "color": "#180000",
+                    "accent_color": "#ff0000",
+                }
+            ]
+        },
+    }
+    main = MainConfig.model_validate(
+        {
+            "plugins": {
+                "enabled": ["acid_rain", "film_burn", "water", "speaker_effects"],
+                "sources": [
+                    {
+                        "repo": "Blaag/tfr-plugins-public",
+                        "policy": "stable-auto",
+                        "manifest_url": (
+                            "https://github.com/Blaag/tfr-plugins-public/releases/latest/"
+                            "download/plugin-manifest.json"
+                        ),
+                    }
+                ],
+                "config": plugin_config,
+            }
+        }
+    )
+    bundle = ConfigurationBundle(
+        main_path=tmp_path / "config.jsonc",
+        worlds_path=tmp_path / "worlds.jsonc",
+        agents_path=tmp_path / "agents.jsonc",
+        main=main,
+        worlds=WorldsConfig(),
+        agents=AgentsConfig(),
+    )
+    registry = core_configuration_registry()
+    register_legacy_plugin_config_descriptors(
+        {"plugins.config": plugin_config}, registry
+    )
+    values = _legacy_migration_values(
+        bundle  # type: ignore[arg-type]
+    )
+    # The client collector builds the same fallback descriptors from its local model.
+    register_legacy_plugin_config_descriptors(values, registry)
+
+    assert values["plugins.config.acid_rain"] == plugin_config["acid_rain"]
+    assert values["plugins.config.film_burn"] == plugin_config["film_burn"]
+    assert values["plugins.config.water"] == plugin_config["water"]
+    assert values["plugins.config.speaker_effects.rules"] == plugin_config["speaker_effects"][
+        "rules"
+    ]
+    assert collect_omitted_migration_keys(values, registry) == ()
+    gateway_values = configuration_values_from_bundle(
+        bundle, registry
+    ).jsonc_proposal_values()
+    assert gateway_values["plugins.config"] == plugin_config
+    assert collect_omitted_migration_keys(gateway_values, registry) == ()
+
+    configuration = GatewayConfigurationStore(tmp_path / "state", registry)
+    migration = GatewayMigrationStore(tmp_path / "state", configuration)
+    migration.submit(
+        new_proposal(
+            ui_id=uuid4(),
+            ui_name="v0.1.67 terminal",
+            base_revision=0,
+            settings=collect_migration_settings(
+                values, registry, ui_id=uuid4(), source="v0.1.67 config.jsonc"
+            ),
+        )
+    )
+    preview = migration.preview()
+
+    assert preview["conflicts"] == []
+    assert preview["restart"] == "gateway-restart"
+    assert {item["key"] for item in preview["accepted"]} >= {
+        "plugins.config.acid_rain",
+        "plugins.config.film_burn",
+        "plugins.config.water",
+        "plugins.config.speaker_effects.rules",
+    }
+    migration.apply(
+        expected_revision=0,
+        choices=None,
+        actor_ui_id="migration",
+        actor_ui_name="migration test",
+        validate=lambda document: apply_gateway_configuration(
+            ConfigurationBundle(
+                main_path=bundle.main_path,
+                worlds_path=bundle.worlds_path,
+                agents_path=bundle.agents_path,
+                main=MainConfig(),
+                worlds=WorldsConfig(),
+                agents=AgentsConfig(),
+            ),
+            document,
+        ),
+    )
+    effective = apply_gateway_configuration(
+        ConfigurationBundle(
+            main_path=bundle.main_path,
+            worlds_path=bundle.worlds_path,
+            agents_path=bundle.agents_path,
+            main=MainConfig(),
+            worlds=WorldsConfig(),
+            agents=AgentsConfig(),
+        ),
+        configuration.document,
+    )
+
+    assert effective.main.plugins.config == plugin_config
+    assert effective.main.plugins.sources == main.plugins.sources
+    assert effective.main.plugins.enabled == main.plugins.enabled
 
 
 def test_matching_shared_values_deduplicate_and_ui_values_remain_separate(

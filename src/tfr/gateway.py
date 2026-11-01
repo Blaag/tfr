@@ -71,6 +71,7 @@ from tfr.gateway_migration import (
     collect_migration_settings,
     collect_omitted_migration_keys,
     new_proposal,
+    register_legacy_plugin_config_descriptors,
 )
 from tfr.gateway_protocol import (
     MAX_MESSAGE_BYTES,
@@ -833,6 +834,9 @@ class GatewayRuntime:
         configuration_registry = core_configuration_registry()
         for descriptor in plugins.registry.configuration_descriptors():
             configuration_registry.register_plugin(with_builtin_form_metadata(descriptor))
+        register_legacy_plugin_config_descriptors(
+            {"plugins.config": source_bundle.main.plugins.config}, configuration_registry
+        )
         gateway_configuration.registry = configuration_registry
         gateway_configuration.validate_current(defer_plugin_validation=True)
         gateway_migration = GatewayMigrationStore(
@@ -2861,6 +2865,7 @@ class GatewayServer:
                 record = self.ui_store.get(ui_id)
                 if record is None:
                     raise ValueError("current UI identity is unavailable")
+                register_legacy_plugin_config_descriptors(values, store.registry)
                 settings = collect_migration_settings(
                     values,
                     store.registry,
@@ -3866,6 +3871,9 @@ async def run_gateway(
         # Phase-9 compatibility performs a one-time import, not a legacy
         # precedence overlay. From this commit onward the managed document is
         # the only source used to construct runtime state.
+        register_legacy_plugin_config_descriptors(
+            {"plugins.config": migration_source.main.plugins.config}, startup_store.registry
+        )
         startup_values = configuration_values_from_bundle(
             migration_source, startup_store.registry
         ).jsonc_proposal_values()

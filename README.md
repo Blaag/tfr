@@ -711,6 +711,10 @@ confirm`. `/config migration-status` reports collected and applied revisions;
 when no later configuration change makes rollback unsafe. Legacy files are
 copied before submission and are never rewritten; a separate marker records a
 successful migration. Secret plaintext is omitted from proposals and previews.
+Legacy plugin configuration is preserved as an opaque, plugin-scoped value when
+the plugin does not publish a bounded configuration descriptor. This keeps
+custom effect settings intact without exposing raw JSON in `/config`; known
+structured settings such as speaker rules continue to use their dedicated form.
 After migration, legacy files no longer participate in precedence. Gateway
 startup performs a one-time ordinary-value import only when its managed document
 is empty, warns about every unmigrated legacy main file, and thereafter builds
