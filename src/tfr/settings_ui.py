@@ -78,6 +78,12 @@ def editable_settings(
             continue
         item = copy.deepcopy(dict(source))
         key = str(item.get("key", ""))
+        if item.get("type") in {"json", "object"} and not (
+            isinstance(item.get("form"), Mapping) or key == "plugins.sources"
+        ):
+            # Structured settings require bounded forms. Structural namespaces and
+            # unsupported objects must never fall through to free-form JSON editing.
+            continue
         if "*" in key:
             if not worlds or not key.startswith("worlds.*."):
                 continue

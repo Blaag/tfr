@@ -59,7 +59,13 @@ from tfr.borders import BorderEdge, border_cell
 from tfr.clear_effects import ScreenClearContext
 from tfr.combo import Combo, ComboTracker
 from tfr.command_help import COMMAND_HELP, TOPIC_SUMMARIES, CommandHelp, suggest_help
-from tfr.config import ConfigurationBundle, SpellcheckConfig, ThemeConfig, TypingGlowConfig
+from tfr.config import (
+    ConfigurationBundle,
+    PluginSource,
+    SpellcheckConfig,
+    ThemeConfig,
+    TypingGlowConfig,
+)
 from tfr.core import CommandBus, EventBus, UnknownSessionError
 from tfr.events import (
     Actor,
@@ -192,6 +198,10 @@ _MAX_OBSERVED_SPEAKERS = 1_000
 _MAX_OBSERVED_SPEAKER_LENGTH = 64
 _MAX_PENDING_SPELLCHECK_ECHOES = 32
 _SPELLCHECK_ECHO_TIMEOUT_SECONDS = 10.0
+_OFFICIAL_PLUGIN_REPOSITORY = "Blaag/tfr-plugins-public"
+_OFFICIAL_PLUGIN_MANIFEST = (
+    "https://github.com/Blaag/tfr-plugins-public/releases/latest/download/plugin-manifest.json"
+)
 _SETTINGS_DIALOG_STYLE = merge_styles(
     [
         default_ui_style(),
@@ -4501,6 +4511,66 @@ class TfrTui:
         result = await self._run_settings_dialog(dialog, focus=field)
         return str(result) if isinstance(result, str) else None
 
+    async def _settings_input_with_reset(
+        self,
+        *,
+        title: str,
+        text: str,
+        default: str,
+        reset_label: str | None,
+        null_label: str | None = None,
+    ) -> tuple[str, str | None] | None:
+        field = TextArea(
+            text=default,
+            multiline=False,
+            accept_handler=lambda buffer: self._finish_settings_dialog(("set", buffer.text)),
+        )
+        buttons = [
+            Button(text="Save", handler=lambda: self._finish_settings_dialog(("set", field.text)))
+        ]
+        if reset_label is not None:
+            buttons.append(
+                Button(
+                    text="Reset",
+                    handler=lambda: self._finish_settings_dialog(("reset", None)),
+                )
+            )
+        if null_label is not None:
+            buttons.append(
+                Button(
+                    text=null_label,
+                    handler=lambda: self._finish_settings_dialog(("null", None)),
+                )
+            )
+        buttons.append(Button(text="Cancel", handler=lambda: self._finish_settings_dialog(None)))
+        dialog = Dialog(
+            title=title,
+            body=HSplit(
+                [
+                    Label(
+                        text=(
+                            f"{text}\nReset action: {reset_label}"
+                            if reset_label is not None
+                            else text
+                        ),
+                        dont_extend_height=True,
+                    ),
+                    field,
+                ],
+                padding=1,
+            ),
+            buttons=buttons,
+            with_background=True,
+        )
+        result = await self._run_settings_dialog(dialog, focus=field)
+        if (
+            not isinstance(result, tuple)
+            or len(result) != 2
+            or result[0] not in {"set", "reset", "null"}
+        ):
+            return None
+        return str(result[0]), str(result[1]) if result[1] is not None else None
+
     async def _settings_multiselect(
         self,
         *,
@@ -4545,6 +4615,7 @@ class TfrTui:
         current: str | None,
         default_color: str | None = None,
         default_label: str = "Use effect default",
+        reset_label: str | None = None,
     ) -> str | None:
         colors = [
             ("#d70000", "Red"),
@@ -4568,6 +4639,8 @@ class TfrTui:
         palette.append(("custom", "Custom hexadecimal color"))
         if default_color is not None:
             palette.append(("", swatch(default_color, default_label)))
+        if reset_label is not None:
+            palette.append(("__reset__", reset_label))
         selected = await self._settings_choice(
             title=title,
             text=label,
@@ -4638,7 +4711,11 @@ class TfrTui:
             confirm=False,
         )
         action = str(preview.get("restart", "live"))
-        value_text = "Inherited/default value" if reset else json.dumps(value, ensure_ascii=False)
+        value_text = (
+            self._reset_setting_text(setting, scope=scope)
+            if reset
+            else self._migration_value_summary(key, value)
+        )
         current_ui_name = (
             self.service_runtime.current_ui_name()
             if hasattr(self.service_runtime, "current_ui_name")
@@ -4658,7 +4735,7 @@ class TfrTui:
             text=(
                 f"{setting_label(key)}\n\n"
                 f"Apply to: {target_text}\n"
-                f"Current value: {json.dumps(old_value, ensure_ascii=False)}\n"
+                f"Current value: {self._migration_value_summary(key, old_value)}\n"
                 f"New value: {value_text}\n"
                 f"Required action: {self._settings_action_text(action)}"
             ),
@@ -4749,8 +4826,53 @@ class TfrTui:
             "gateway-restart": "Restart the Gateway",
         }.get(str(action), str(action))
 
+    @classmethod
+    def _reset_setting_text(
+        cls,
+        setting: Mapping[str, object],
+        *,
+        scope: str | None = None,
+    ) -> str:
+        key = str(setting.get("key", ""))
+        if key == "plugins.sources":
+            return "Remove all plugin sources"
+        if key == "plugins.enabled":
+            return "Disable all configured plugins"
+        if key == "plugins.config.speaker_effects.rules":
+            return "Remove all speaker rules"
+        effective_scope = scope or str(setting.get("scope", ""))
+        if effective_scope in {"ui", "ui-type"}:
+            return "Remove this UI override and use the broader UI setting"
+        if effective_scope == "world":
+            return "Remove this world override and use the world default"
+        if "default" in setting:
+            summary = cls._migration_value_summary(key, setting["default"])
+            return f"Reset to built-in default — {summary}"
+        return "Remove the managed value"
+
+    @staticmethod
+    def _setting_editor_summary(setting: Mapping[str, object], detail: Mapping[str, object]) -> str:
+        value = detail.get("value")
+        current = TfrTui._migration_value_summary(str(setting.get("key", "")), value)
+        return (
+            f"Current value: {current}\n"
+            f"Source: {detail.get('source')}\n"
+            f"Required action: "
+            f"{TfrTui._settings_action_text(setting.get('restart', 'live'))}"
+        )
+
     @staticmethod
     def _migration_value_summary(key: str, value: object) -> str:
+        if key == "plugins.sources" and isinstance(value, list):
+            if not value:
+                return "no plugin sources"
+            labels = [
+                TfrTui._plugin_source_label(source)
+                for source in value[:4]
+                if isinstance(source, Mapping)
+            ]
+            suffix = f", +{len(value) - 4} more" if len(value) > 4 else ""
+            return f"{len(value)} plugin sources: {', '.join(labels)}{suffix}"
         if key == "plugins.config.speaker_effects.rules" and isinstance(value, list):
             if not value:
                 return "no speaker rules"
@@ -4770,6 +4892,8 @@ class TfrTui:
             return "empty"
         if isinstance(value, bool):
             return "On" if value else "Off"
+        if key.endswith("_seconds") and isinstance(value, (int, float)):
+            return f"{value:g} seconds ({_format_elapsed(float(value))})"
         text = str(value)
         return text if len(text) <= 80 else text[:77] + "..."
 
@@ -4804,8 +4928,8 @@ class TfrTui:
             title="Review configuration changes",
             text=(
                 f"{setting_label(key)}\n\n"
-                f"Current value: {json.dumps(old_value, ensure_ascii=False)}\n"
-                f"New value: {json.dumps(value, ensure_ascii=False)}\n"
+                f"Current value: {self._migration_value_summary(key, old_value)}\n"
+                f"New value: {self._migration_value_summary(key, value)}\n"
                 f"Required action: "
                 f"{self._settings_action_text(preview.get('restart', 'live'))}"
             ),
@@ -4832,66 +4956,71 @@ class TfrTui:
         detail: dict[str, object],
     ) -> None:
         key = str(setting["key"])
-        actions = [("edit", "Change value"), ("reset", "Use inherited/default value")]
         validation_value = setting.get("validation")
-        if isinstance(validation_value, dict) and validation_value.get("nullable") is True:
-            actions.append(("null", "Set explicit empty/null value"))
-        action = await self._settings_choice(
-            title=setting_label(key),
-            text=(
-                f"Current value: {detail.get('value')!r}\n"
-                f"Source: {detail.get('source')}\n"
-                f"Required action: "
-                f"{self._settings_action_text(setting.get('restart', 'live'))}"
-            ),
-            values=actions,
+        nullable = (
+            isinstance(validation_value, dict) and validation_value.get("nullable") is True
         )
-        if action is None:
-            return
-        if action == "reset":
+        reset_label = (
+            None
+            if detail.get("source") == "default"
+            else self._reset_setting_text(setting)
+        )
+
+        async def save_special(action: str) -> bool:
+            nonlocal setting
+            if action not in {"reset", "null"}:
+                return False
             if str(setting.get("scope")) in {"ui", "ui-type"}:
                 targeted = await self._choose_settings_target(setting)
                 if targeted is None:
-                    return
+                    return True
                 setting = targeted
             await self._save_settings_value(
-                alias, setting, None, reset=True, old_value=detail.get("value")
+                alias,
+                setting,
+                None,
+                reset=action == "reset",
+                old_value=detail.get("value"),
             )
-            return
-        if action == "null":
-            if str(setting.get("scope")) in {"ui", "ui-type"}:
-                targeted = await self._choose_settings_target(setting)
-                if targeted is None:
-                    return
-                setting = targeted
-            await self._save_settings_value(
-                alias, setting, None, old_value=detail.get("value")
-            )
-            return
+            return True
+
         value_type = str(setting.get("type", "json"))
         validation = setting.get("validation")
         choices = validation.get("choices") if isinstance(validation, dict) else None
         value: object
         if value_type == "boolean":
+            options = [("true", "On"), ("false", "Off")]
+            if reset_label is not None:
+                options.append(("__reset__", reset_label))
+            if nullable:
+                options.append(("__null__", "Set explicit empty value"))
             selected = await self._settings_choice(
                 title=setting_label(key),
-                text=f"Current value: {'On' if detail.get('value') is True else 'Off'}",
-                values=[("true", "On"), ("false", "Off")],
+                text=self._setting_editor_summary(setting, detail),
+                values=options,
                 default="true" if detail.get("value") is True else "false",
             )
             if selected is None:
                 return
+            if await save_special(selected.removeprefix("__").removesuffix("__")):
+                return
             value = selected == "true"
         elif isinstance(choices, list) and choices:
             encoded = [(json.dumps(item), str(item)) for item in choices]
+            if reset_label is not None:
+                encoded.append(("__reset__", reset_label))
+            if nullable:
+                encoded.append(("__null__", "Set explicit empty value"))
             current = json.dumps(detail.get("value"))
             selected = await self._settings_choice(
                 title=setting_label(key),
-                text=f"Current value: {detail.get('value')!r}\nChoose a new value.",
+                text=self._setting_editor_summary(setting, detail),
                 values=encoded,
                 default=current if any(value == current for value, _label in encoded) else None,
             )
             if selected is None:
+                return
+            if await save_special(selected.removeprefix("__").removesuffix("__")):
                 return
             value = json.loads(selected)
         elif value_type == "string-list":
@@ -4904,6 +5033,7 @@ class TfrTui:
                     text=f"{len(entries)} entries",
                     values=[("add", "Add entry")]
                     + [(f"entry:{index}", entry) for index, entry in enumerate(entries)]
+                    + ([('reset', reset_label)] if reset_label is not None else [])
                     + [("save", "Save list"), ("cancel", "Cancel")],
                 )
                 if selected in {None, "cancel"}:
@@ -4913,6 +5043,9 @@ class TfrTui:
                         return
                     value = entries
                     break
+                if selected == "reset":
+                    await save_special("reset")
+                    return
                 if selected == "add":
                     entry = await self._settings_input(
                         title=setting_label(key), text="New list entry"
@@ -4954,19 +5087,39 @@ class TfrTui:
                 title=setting_label(key),
                 label="Choose a color",
                 current=(str(detail["value"]) if detail.get("value") is not None else None),
+                reset_label=reset_label,
             )
             if selected_color is None:
                 return
+            if selected_color == "__reset__":
+                await save_special("reset")
+                return
             value = selected_color
+        elif value_type in {"json", "object"}:
+            await self._settings_message(
+                title="Structured editor required",
+                text=(
+                    "This structured setting cannot be edited as raw JSON. "
+                    "Use its dedicated form."
+                ),
+            )
+            return
         else:
-            raw = await self._settings_input(
+            result = await self._settings_input_with_reset(
                 title=setting_label(key),
                 text=(
-                    "Enter the new value. Lists and structured values use JSON.\n"
+                    f"{self._setting_editor_summary(setting, detail)}\n"
                     f"Type: {value_type}"
                 ),
                 default=setting_value_text(detail.get("value"), value_type),
+                reset_label=reset_label,
+                null_label="Set explicit empty value" if nullable else None,
             )
+            if result is None:
+                return
+            action, raw = result
+            if await save_special(action):
+                return
             if raw is None:
                 return
             try:
@@ -4980,6 +5133,37 @@ class TfrTui:
                 return
             setting = targeted
         await self._save_settings_value(alias, setting, value, old_value=detail.get("value"))
+
+    @staticmethod
+    def _recommended_speaker_accent(base: str, effect: str) -> str:
+        if effect == "cylon":
+            return "#ff0000"
+        if effect == "frost":
+            return "#d7ffff"
+        derived = derive_bright_color(base)
+        if _color_contrast(base, derived) >= 1.35:
+            return derived
+        return _best_contrast(base, "#000000", "#ffffff")
+
+    @classmethod
+    def _speaker_preview_draft(
+        cls,
+        rule: Mapping[str, object],
+        speaker: str,
+        effect: str,
+    ) -> dict[str, object]:
+        preview = dict(rule)
+        preview.update(speaker=speaker, effect=effect)
+        if effect == "age_decay":
+            preview.pop("color", None)
+            preview.setdefault("end_color", "#5f87ff")
+            base = str(preview["end_color"])
+        else:
+            preview.pop("end_color", None)
+            preview.setdefault("color", "#180000" if effect == "cylon" else "#5f87ff")
+            base = str(preview["color"])
+        preview.setdefault("accent_color", cls._recommended_speaker_accent(base, effect))
+        return preview
 
     async def _speaker_rule_form(
         self,
@@ -4996,13 +5180,16 @@ class TfrTui:
         effects = sorted(SPEAKER_EFFECT_NAMES)
         effect = await self._settings_choice(
             title="Speaker effect",
-            text=f"Choose the effect for {speaker}.",
+            text=(
+                f"Choose the effect for {speaker}. Preview colors are high-contrast samples; "
+                "choose the saved colors next."
+            ),
             values=[(name, name.replace("_", " ").title()) for name in effects],
             default=(str(rule.get("effect")) if rule.get("effect") in effects else None),
             row_preview=lambda selected, elapsed: [
                 ("", f"{selected.replace('_', ' ').title():<22} "),
                 *self._speaker_rule_preview(
-                    {**rule, "speaker": speaker, "effect": selected}, elapsed
+                    self._speaker_preview_draft(rule, speaker, selected), elapsed
                 ),
             ],
         )
@@ -5040,25 +5227,21 @@ class TfrTui:
             "case_wave",
             "cylon",
         }:
+            base = str(rule.get(color_key, "#180000" if effect == "cylon" else "#ffffff"))
+            recommended_accent = self._recommended_speaker_accent(base, effect)
             accent = await self._settings_color(
                 title="Speaker effect",
                 label="Accent color",
                 current=(str(rule["accent_color"]) if "accent_color" in rule else None),
-                default_color=(
-                    "#ff0000"
-                    if effect == "cylon"
-                    else "#d7ffff"
-                    if effect == "frost"
-                    else derive_bright_color(str(rule.get(color_key, "#ffffff")))
-                ),
-                default_label="Use derived accent",
+                default_color=recommended_accent,
+                default_label="Recommended high-contrast accent",
             )
             if accent is None:
                 return None
             if accent:
                 rule["accent_color"] = accent
             else:
-                rule.pop("accent_color", None)
+                rule["accent_color"] = recommended_accent
         else:
             rule.pop("accent_color", None)
         if effect == "comet":
@@ -5374,6 +5557,211 @@ class TfrTui:
             elif operation == "delete":
                 items.pop(index)
 
+    @staticmethod
+    def _plugin_repository_identity(value: object) -> str:
+        repository = str(value or "").strip().casefold()
+        for prefix in ("https://github.com/", "http://github.com/", "git@github.com:"):
+            if repository.startswith(prefix):
+                repository = repository[len(prefix) :]
+                break
+        return repository.removesuffix(".git").strip("/")
+
+    @classmethod
+    def _is_official_plugin_source(cls, source: Mapping[str, object]) -> bool:
+        current = cls._plugin_repository_identity(source.get("repo"))
+        official = cls._plugin_repository_identity(_OFFICIAL_PLUGIN_REPOSITORY)
+        return current == official
+
+    @staticmethod
+    def _plugin_source_label(source: Mapping[str, object]) -> str:
+        repository = str(source.get("repo") or "Unnamed repository")
+        policy = str(source.get("policy") or "legacy")
+        path = str(source.get("path") or ".")
+        suffix = f" · {path}" if path != "." else ""
+        return f"{repository} — {policy}{suffix}"
+
+    async def _plugin_source_form(
+        self,
+        existing: Mapping[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        source = dict(existing or {})
+        repository = await self._settings_input(
+            title="Plugin source",
+            text="Repository (OWNER/REPO, HTTPS, or SSH URL)",
+            default=str(source.get("repo", "")),
+        )
+        if repository is None:
+            return None
+        policy = await self._settings_choice(
+            title="Plugin source",
+            text="Choose how TFR obtains releases from this repository.",
+            values=[
+                ("stable-auto", "Stable auto — install compatible verified releases"),
+                ("stable-notify", "Stable notify — report compatible verified releases"),
+                ("pinned", "Pinned — use one exact commit"),
+                ("legacy", "Legacy — use a branch, tag, or repository default"),
+            ],
+            default=str(source.get("policy", "legacy")),
+        )
+        if policy is None:
+            return None
+        path = await self._settings_input(
+            title="Plugin source",
+            text="Repository subdirectory (use . for the repository root)",
+            default=str(source.get("path", ".")),
+        )
+        if path is None:
+            return None
+        candidate: dict[str, object] = {"repo": repository, "policy": policy, "path": path or "."}
+        if policy in {"stable-auto", "stable-notify"}:
+            manifest = await self._settings_input(
+                title="Plugin source",
+                text="HTTPS release manifest URL",
+                default=str(source.get("manifest_url", "")),
+            )
+            if manifest is None:
+                return None
+            candidate["manifest_url"] = manifest
+        elif policy == "pinned":
+            reference = await self._settings_input(
+                title="Plugin source",
+                text="Exact lowercase 40-character commit",
+                default=str(source.get("ref", "")),
+            )
+            if reference is None:
+                return None
+            candidate["ref"] = reference
+        else:
+            reference = await self._settings_input(
+                title="Plugin source",
+                text="Optional branch, tag, or commit (blank uses the repository default)",
+                default=str(source.get("ref", "")),
+            )
+            if reference is None:
+                return None
+            if reference:
+                candidate["ref"] = reference
+            auto_update = await self._settings_choice(
+                title="Plugin source",
+                text="Automatically fast-forward this legacy source when TFR starts?",
+                values=[("false", "No"), ("true", "Yes")],
+                default="true" if source.get("auto_update") is True else "false",
+            )
+            if auto_update is None:
+                return None
+            candidate["auto_update"] = auto_update == "true"
+        try:
+            return PluginSource.model_validate(candidate).model_dump(
+                mode="json", exclude_none=True
+            )
+        except ValueError as exc:
+            await self._settings_message(title="Invalid plugin source", text=str(exc))
+            return None
+
+    async def _edit_plugin_sources(
+        self,
+        alias: str,
+        setting: dict[str, object],
+        detail: dict[str, object],
+    ) -> None:
+        raw_sources = detail.get("value")
+        if not isinstance(raw_sources, list) or any(
+            not isinstance(item, dict) for item in raw_sources
+        ):
+            await self._settings_message(
+                title="Plugin sources",
+                text="The current plugin sources are not a list of editable entries.",
+            )
+            return
+        sources = [dict(item) for item in raw_sources]
+        original = json.dumps(sources, sort_keys=True)
+        while True:
+            has_official = any(self._is_official_plugin_source(source) for source in sources)
+            values: list[tuple[str, str]] = []
+            if not has_official:
+                values.append(("official", "Add official TFR public plugins (recommended)"))
+            values.append(("add", "Add plugin source"))
+            values.extend(
+                (f"source:{index}", self._plugin_source_label(source))
+                for index, source in enumerate(sources)
+            )
+            if sources:
+                values.append(("clear", "Remove all plugin sources"))
+            values.extend((("save", "Save changes"), ("cancel", "Cancel")))
+            selected = await self._settings_choice(
+                title="Plugin sources",
+                text=f"{len(sources)} configured sources. Raw JSON editing is disabled.",
+                values=values,
+            )
+            if selected in {None, "cancel"}:
+                return
+            if selected == "save":
+                if json.dumps(sources, sort_keys=True) != original:
+                    await self._save_settings_batch(
+                        alias, setting, sources, old_value=detail.get("value")
+                    )
+                return
+            if selected == "official":
+                official = PluginSource.model_validate(
+                    {
+                        "repo": _OFFICIAL_PLUGIN_REPOSITORY,
+                        "policy": "stable-auto",
+                        "manifest_url": _OFFICIAL_PLUGIN_MANIFEST,
+                    }
+                ).model_dump(mode="json", exclude_none=True)
+                sources.append(official)
+                continue
+            if selected == "add":
+                source = await self._plugin_source_form()
+                if source is not None:
+                    identity = self._plugin_repository_identity(source.get("repo"))
+                    if any(
+                        self._plugin_repository_identity(item.get("repo")) == identity
+                        and str(item.get("path", ".")) == str(source.get("path", "."))
+                        for item in sources
+                    ):
+                        await self._settings_message(
+                            title="Plugin source already exists",
+                            text=(
+                                "Edit the existing repository source instead of adding a "
+                                "duplicate."
+                            ),
+                        )
+                    else:
+                        sources.append(source)
+                continue
+            if selected == "clear":
+                if await self._settings_confirm(
+                    title="Remove all plugin sources",
+                    text=(
+                        "No external plugin repositories will remain configured. "
+                        "You can add the official TFR public plugins again from this screen."
+                    ),
+                ):
+                    sources.clear()
+                continue
+            index = int(selected.split(":", 1)[1])
+            operation = await self._settings_choice(
+                title=self._plugin_source_label(sources[index]),
+                text="Choose an action.",
+                values=[
+                    ("edit", "Edit fields"),
+                    ("up", "Move earlier"),
+                    ("down", "Move later"),
+                    ("delete", "Delete source"),
+                ],
+            )
+            if operation == "edit":
+                replacement = await self._plugin_source_form(sources[index])
+                if replacement is not None:
+                    sources[index] = replacement
+            elif operation == "up" and index > 0:
+                sources[index - 1], sources[index] = sources[index], sources[index - 1]
+            elif operation == "down" and index + 1 < len(sources):
+                sources[index + 1], sources[index] = sources[index], sources[index + 1]
+            elif operation == "delete":
+                sources.pop(index)
+
     async def _edit_speaker_rules(
         self,
         alias: str,
@@ -5529,6 +5917,8 @@ class TfrTui:
             form = None
         if key == "plugins.enabled":
             await self._edit_enabled_plugins(alias, setting, detail)
+        elif key == "plugins.sources":
+            await self._edit_plugin_sources(alias, setting, detail)
         elif isinstance(form, dict) and form.get("editor") == "speaker-rules":
             await self._edit_speaker_rules(alias, setting, detail)
         elif isinstance(form, dict) and form.get("editor") == "collection":
