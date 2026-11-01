@@ -1370,12 +1370,12 @@ source tag. Prefixes are retained in canonical logs even when hidden from the
 display. Set the initial behavior with `provenance.show_prefix`, then use
 `/nospoof show`, `/nospoof hide`, or `/nospoof status` at runtime. This affects
 future display only and never removes provenance from canonical logs.
-For bare and generic output without sender provenance, the terminal presentation
-pipeline offers the first visible word (with an optional possessive removed) as
-an inferred pose speaker to display decorators. This lets configured speaker
-effects cover lines such as `Hamilton smokes a cig`, at the cost of an occasional
-visual false positive. The inference never changes event history, logs, agents,
-spoof checks, or plugin event observers.
+For output without sender provenance, the presentation pipeline offers the first
+visible word (with an optional possessive removed) as an inferred pose speaker to
+display decorators. This lets configured speaker effects cover lines such as
+`Hamilton smokes a cig` and matching names in WHO output, at the cost of an
+occasional visual false positive. The inference never changes event history,
+logs, agents, spoof checks, or plugin event observers.
 When NOSPOOF is enabled, TFR also compares apparent say and known pose speakers
 with server attribution. Spoofed speaker names use a persistent inverse marker
 in both the terminal UI and PWA, independent of normal text effects.

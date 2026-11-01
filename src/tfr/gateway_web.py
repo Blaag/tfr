@@ -39,6 +39,7 @@ from tfr.gateway_uis import UiRecord, UiStore
 from tfr.multiline import PreparedMultiline, prepare_multiline_text
 from tfr.plugins import PluginManager
 from tfr.presentation import effect_programs_as_dict
+from tfr.presentation_events import infer_presentation_speaker
 
 WEB_PROTOCOL_VERSION = 1
 SESSION_COOKIE = "__Host-tfr_session"
@@ -621,7 +622,8 @@ def browser_event(
     if text_runs is not None:
         value["event"]["text_runs"] = text_runs
     if plugins is not None:
-        programs = plugins.presentation_programs(event, text)
+        presentation_event = infer_presentation_speaker(event, text)
+        programs = plugins.presentation_programs(presentation_event, text)
         if programs:
             value["event"]["presentation"] = effect_programs_as_dict(programs)
     if event.kind is EventKind.CONNECTION:

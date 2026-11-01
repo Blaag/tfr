@@ -485,6 +485,7 @@ def make_event(
     world: str = "alpha",
     actor: Actor | None = None,
     generation: int = 1,
+    parser_name: str = "unknown",
 ) -> Event:
     return Event(
         session_id=UUID("63f755aa-e407-4f78-ae05-f9d62c23f765"),
@@ -495,6 +496,7 @@ def make_event(
         kind=kind,
         canonical_text=text,
         actor=actor,
+        parser_name=parser_name,
     )
 
 
@@ -848,6 +850,37 @@ def test_browser_projection_emits_bounded_portable_presentation() -> None:
             }
         ],
     }
+
+
+def test_browser_projection_infers_bare_speaker_for_who_presentation() -> None:
+    manager = PluginManager(
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        scope="gateway",
+    )
+
+    def present(event: Event, _text: str):
+        if (
+            event.kind is EventKind.POSE
+            and event.provenance is not None
+            and event.provenance.sender_name == "Alice"
+        ):
+            return (color_pulse(0, 5, base_color="#a9914a", accent_color="#fff08a"),)
+        return ()
+
+    manager._registrar("fixture").register_presentation_decorator("speaker", present)
+
+    projected = browser_event(
+        1,
+        make_event(text="Alice   00:12   3m   connected", parser_name="rhost"),
+        manager,
+    )
+
+    assert projected is not None
+    assert "presentation" in projected["event"]
+    assert projected["event"]["kind"] == "raw_output"
+    assert "provenance" not in projected["event"]
 
 
 def test_browser_projection_omits_invalid_presentation_without_dropping_text() -> None:
