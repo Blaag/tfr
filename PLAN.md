@@ -771,6 +771,43 @@ Acceptance criteria:
 
 ## Future Work
 
+- [ ] Add portable Gateway-managed configuration export/import. Export a
+  versioned document with shared, Gateway, UI-type, named-UI, world, plugin, and
+  plugin-source settings while omitting secrets by default and listing omitted
+  keys. Import only through a complete validation and change preview, create a
+  private pre-import backup, commit one audited atomic revision after explicit
+  confirmation, restart when required, and permit rollback until a later
+  mutation makes it unsafe. Never require users to replace the live managed
+  document manually.
+- [ ] Add one unified, privacy-preserving notification policy consumed by PWA
+  and native terminal transports. Support all or selected worlds, pages,
+  mentions, speech/poses, or any activity; suppress notifications while the
+  relevant UI is active by default; make lock-screen message previews opt-in;
+  provide batching, per-world replacement, quiet hours, and rate limits; and
+  exclude outbound, internal, redacted, gagged, and sensitive events.
+- [ ] Add standards-based PWA Web Push for installed iOS/iPadOS and compatible
+  browsers. Generate and privately retain a Gateway VAPID key pair, bind each
+  Push API subscription to an authenticated paired device and its allowed
+  worlds, remove subscriptions on device revocation or HTTP 404/410, focus or
+  open the relevant world from notification clicks, and omit VAPID private keys
+  and subscription endpoints from portable exports. Keep foreground-only
+  Notification API behavior as a fallback, not as a substitute for Web Push.
+- [ ] Add native-TUI desktop notifications without per-distribution or
+  per-window-manager implementations. Prefer terminal protocols such as OSC 9
+  on capable terminals including Ghostty, with terminal-owned application icons
+  and BEL fallback. On Linux, optionally use the standard
+  `org.freedesktop.Notifications` D-Bus interface through an available
+  `notify-send`; this should work with compliant notification daemons on GNOME,
+  KDE, Hyprland/Omarchy, and similar desktops, while failing quietly when no
+  daemon is present. On macOS Terminal, retain BEL as the portable baseline and
+  make `osascript` an explicit opt-in. Never silently execute an external
+  notifier in automatic mode, and do not promise custom icons or click-to-world
+  routing where the transport cannot support them.
+- [ ] Add post-migration guidance for providers, agents, and other settings
+  whose plaintext secrets are intentionally omitted. List each missing secret
+  reference, explain `env:`, private `file:`, and macOS Keychain options, keep
+  dependent agents inactive until validation succeeds, and confirm readiness
+  before retiring the migration workflow.
 - [x] Convert `/boss` into a plugin with dynamic display content and an API for
   other components or plugins to emit events into the active boss view.
 - [x] Publish gateway- and UI-detected operational activity as plugin-visible
