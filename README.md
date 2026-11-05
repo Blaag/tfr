@@ -155,7 +155,10 @@ Normal updates replace only the application process, so worlds stay connected.
 The connector survives a failed application restart for 30 minutes and buffers
 bounded replay data (1 MiB per world, 16 MiB globally). If either limit is
 exceeded, the replacement Gateway and its UIs receive an explicit history-gap
-warning. A clean service stop closes everything immediately.
+warning. A clean service stop closes everything immediately. After an unclean
+host shutdown, startup safely probes and removes dead owner-controlled Gateway
+and world-connector Unix sockets while refusing to replace active, foreign-owned,
+or non-socket paths.
 Within an attached UI, `/reload` (or `/restart`) replaces only the UI process
 and reloads retained Gateway history to rebuild the display; the gateway and
 world sessions continue running.

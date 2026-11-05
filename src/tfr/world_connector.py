@@ -4,6 +4,7 @@ import asyncio
 import base64
 import codecs
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -38,6 +39,41 @@ class ConnectorReplacementRequired(ProtocolError):
         super().__init__(f"world connector replacement required: {reason}")
         self.reason = reason
         self.existing_build_id = existing_build_id
+
+
+class ActiveConnectorSocketError(RuntimeError):
+    """Raised when a live connector already owns the configured Unix socket."""
+
+
+def remove_stale_connector_socket(path: Path) -> bool:
+    """Remove an owner-controlled dead connector socket without stealing a live one."""
+
+    if not os.path.lexists(path):
+        return False
+    current = path.stat(follow_symlinks=False)
+    if not stat.S_ISSOCK(current.st_mode):
+        raise RuntimeError(f"connector socket path is not a socket: {path}")
+    if os.name == "posix" and current.st_uid != os.geteuid():
+        raise RuntimeError(f"connector socket is not owned by this user: {path}")
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(0.2)
+    try:
+        probe.connect(str(path))
+    except OSError as exc:
+        if exc.errno not in {errno.ECONNREFUSED, errno.ENOENT}:
+            raise RuntimeError(f"cannot validate existing connector socket: {path}: {exc}") from exc
+    else:
+        raise ActiveConnectorSocketError(f"an active connector already owns socket: {path}")
+    finally:
+        probe.close()
+    if not os.path.lexists(path):
+        return False
+    confirmed = path.stat(follow_symlinks=False)
+    if (confirmed.st_dev, confirmed.st_ino) != (current.st_dev, current.st_ino):
+        raise RuntimeError(f"connector socket changed during stale validation: {path}")
+    path.unlink()
+    print(f"tfr: removed stale world connector socket: {path}", file=sys.stderr, flush=True)
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -579,8 +615,7 @@ class WorldConnectorServer:
             raise RuntimeError("connector server is already started")
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._validate_socket_parent()
-        if os.path.lexists(self.path):
-            raise RuntimeError(f"connector socket already exists: {self.path}")
+        remove_stale_connector_socket(self.path)
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             listener.bind(str(self.path))
@@ -800,9 +835,7 @@ class WorldConnectorServer:
                 raise ProtocolError("invalid frame acknowledgement")
             self.replay.acknowledge(world, sequence)
             async with self._ack_changed:
-                self._acknowledgements[world] = max(
-                    sequence, self._acknowledgements.get(world, 0)
-                )
+                self._acknowledgements[world] = max(sequence, self._acknowledgements.get(world, 0))
                 self._ack_changed.notify_all()
         elif message_type == "ack_overflow":
             notice_id = message.get("notice_id")
@@ -1045,9 +1078,7 @@ class WorldConnectorClient:
         return message
 
     async def acknowledge(self, world: str, sequence: int) -> None:
-        await self._write(
-            {"type": "ack", "world": world, "sequence": sequence}
-        )
+        await self._write({"type": "ack", "world": world, "sequence": sequence})
 
     async def acknowledge_overflow(self, notice_id: int) -> None:
         await self._write({"type": "ack_overflow", "notice_id": notice_id})
@@ -1178,13 +1209,11 @@ async def connect_or_spawn_connector(
             if time.monotonic() >= deadline:
                 raise TimeoutError("timed out connecting to world connector") from None
             if os.path.lexists(path) and not spawned:
-                path_stat = path.stat(follow_symlinks=False)
-                if (
-                    not stat.S_ISSOCK(path_stat.st_mode)
-                    or (os.name == "posix" and path_stat.st_uid != os.geteuid())
-                ):
-                    raise RuntimeError("unsafe stale world connector socket") from None
-                path.unlink()
+                try:
+                    remove_stale_connector_socket(path)
+                except ActiveConnectorSocketError:
+                    await asyncio.sleep(0.05)
+                    continue
             if not os.path.lexists(path) and not spawned:
                 subprocess.Popen(
                     [
@@ -1224,10 +1253,7 @@ def _current_python(initial_python: str) -> str:
         return initial_python
     executable = "python.exe" if os.name == "nt" else "python"
     candidate = (
-        Path(managed_root)
-        / "current"
-        / ("Scripts" if os.name == "nt" else "bin")
-        / executable
+        Path(managed_root) / "current" / ("Scripts" if os.name == "nt" else "bin") / executable
     )
     return str(candidate) if candidate.is_file() else initial_python
 
@@ -1242,9 +1268,7 @@ async def supervise_gateway(
 
     server = WorldConnectorServer(connector_path)
     await server.start()
-    gateway_socket = connector_path.with_name(
-        connector_path.name.removesuffix(".worlds")
-    )
+    gateway_socket = connector_path.with_name(connector_path.name.removesuffix(".worlds"))
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     installed_signals: list[signal.Signals] = []
@@ -1375,6 +1399,7 @@ def launch_gateway_supervisor(
 
 def main() -> None:
     import argparse
+
     parser = argparse.ArgumentParser(description="Internal TFR world connector process.")
     parser.add_argument("--socket", type=Path, required=True)
     parser.add_argument("--supervise", action="store_true")
