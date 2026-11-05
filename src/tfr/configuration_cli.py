@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import secrets
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -49,6 +51,24 @@ def build_config_parser() -> argparse.ArgumentParser:
     changes.add_argument("--limit", type=int, default=50)
     undo = commands.add_parser("undo", help="preview or undo the latest batch")
     undo.add_argument("--apply", action="store_true", help="persist the undo")
+    export = commands.add_parser("export", help="write a portable configuration backup")
+    export.add_argument("path", type=Path)
+    export.add_argument("--include-secrets", action="store_true")
+    import_parser = commands.add_parser("import", help="preview or restore a portable backup")
+    import_parser.add_argument("path", type=Path)
+    import_parser.add_argument("--apply", action="store_true", help="persist the import")
+    commands.add_parser("import-status", help="show import rollback and pending UI status")
+    rollback = commands.add_parser("rollback-import", help="preview or roll back the latest import")
+    rollback.add_argument("--apply", action="store_true", help="persist the rollback")
+    commands.add_parser("ui-profiles", help="review active, pending, and dead UI settings")
+    remove_profile = commands.add_parser("remove-ui-profile", help="remove a dead UI's settings")
+    remove_profile.add_argument("profile_id")
+    remove_profile.add_argument("--apply", action="store_true", help="persist the removal")
+    claim_profile = commands.add_parser(
+        "claim-ui-profile", help="restore pending settings to this connected UI"
+    )
+    claim_profile.add_argument("profile_id")
+    claim_profile.add_argument("--apply", action="store_true", help="persist the claim")
     return parser
 
 
@@ -138,12 +158,60 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             if not 1 <= args.limit <= 1_000:
                 raise ValueError("--limit must be between 1 and 1000")
             return {"action": "changes", **await client.config_changes(args.limit)}
+        if args.action == "export":
+            document = await client.config_export(
+                include_secrets=args.include_secrets,
+                confirm=args.include_secrets,
+            )
+            write_configuration_archive(args.path, document)
+            secrets_section = document.get("secrets", {})
+            return {
+                "action": "export",
+                "path": str(args.path.expanduser()),
+                "included_secrets": args.include_secrets,
+                "omitted_keys": (
+                    secrets_section.get("omitted_keys", [])
+                    if isinstance(secrets_section, dict)
+                    else []
+                ),
+            }
+        if args.action == "import":
+            document = read_configuration_archive(args.path)
+            preview = await client.config_import_preview(document)
+            if not args.apply:
+                return {"action": "import", "applied": False, **preview}
+            result = await client.config_import_apply(
+                document,
+                expected_revision=int(preview["base_revision"]),
+                expected_digest=str(preview["digest"]),
+                confirm=True,
+            )
+            return {"action": "import", "applied": True, **result}
+        if args.action == "import-status":
+            return {"action": "import-status", **await client.config_import_status()}
+        if args.action == "rollback-import":
+            status = await client.config_import_status()
+            result = await client.config_import_rollback(
+                expected_revision=int(status["revision"]), confirm=args.apply
+            )
+            return {"action": "rollback-import", "applied": args.apply, **result}
+        if args.action == "ui-profiles":
+            return {"action": "ui-profiles", **await client.config_ui_profiles()}
+        if args.action == "remove-ui-profile":
+            status = await client.config_ui_profiles()
+            result = await client.config_ui_profile_remove(
+                args.profile_id,
+                expected_revision=int(status["revision"]),
+                confirm=args.apply,
+            )
+            return {"action": "remove-ui-profile", "applied": args.apply, **result}
+        if args.action == "claim-ui-profile":
+            result = await client.config_ui_profile_claim(args.profile_id, confirm=args.apply)
+            return {"action": "claim-ui-profile", "applied": args.apply, **result}
         status = await client.config_status()
         revision = int(status["revision"])
         if args.action == "undo":
-            result = await client.config_undo(
-                expected_revision=revision, confirm=args.apply
-            )
+            result = await client.config_undo(expected_revision=revision, confirm=args.apply)
             return {"action": "undo", "applied": args.apply, **result}
         settings = {str(item["key"]): item for item in await client.config_list(None)}
         if args.action == "reset":
@@ -172,9 +240,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         "target": target,
                     }
                 )
-        result = await client.config_batch(
-            changes, expected_revision=revision, confirm=args.apply
-        )
+        result = await client.config_batch(changes, expected_revision=revision, confirm=args.apply)
         return {
             "action": args.action,
             "applied": args.apply,
@@ -186,9 +252,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         await client.stop()
 
 
-def _known_setting(
-    settings: dict[str, dict[str, object]], key: str
-) -> dict[str, object]:
+def _known_setting(settings: dict[str, dict[str, object]], key: str) -> dict[str, object]:
     try:
         return settings[key]
     except KeyError as exc:
@@ -209,9 +273,7 @@ def _assignments(values: list[str]) -> list[tuple[str, str]]:
     return output
 
 
-def _destination(
-    setting: dict[str, object], args: argparse.Namespace
-) -> tuple[str, str | None]:
+def _destination(setting: dict[str, object], args: argparse.Namespace) -> tuple[str, str | None]:
     key = str(setting["key"])
     if args.ui:
         return "ui", args.ui
@@ -241,10 +303,12 @@ def _human_output(result: dict[str, Any]) -> str:
     action = result["action"]
     if action == "list":
         settings = result["settings"]
-        return "\n".join(
-            f"{item.get('key')}  [{item.get('type')}; {item.get('scope')}]"
-            for item in settings
-        ) or "No matching settings."
+        return (
+            "\n".join(
+                f"{item.get('key')}  [{item.get('type')}; {item.get('scope')}]" for item in settings
+            )
+            or "No matching settings."
+        )
     if action == "get":
         item = result["setting"]
         return "\n".join(
@@ -268,4 +332,79 @@ def _human_output(result: dict[str, Any]) -> str:
         if result.get("applied"):
             lines.append(f"Revision: {result.get('revision')}")
         return "\n".join(lines)
+    if action == "export":
+        warning = (
+            " WARNING: this file contains plaintext secrets."
+            if result.get("included_secrets")
+            else ""
+        )
+        omitted = result.get("omitted_keys", [])
+        return (
+            f"Configuration exported to {result.get('path')}.{warning}\n"
+            f"Omitted secret keys: {len(omitted) if isinstance(omitted, list) else 0}"
+        )
+    if action == "import":
+        state = "Imported" if result.get("applied") else "Preview only; add --apply to restore"
+        return "\n".join(
+            (
+                state,
+                f"Changes: {result.get('change_count', 0)}",
+                f"Pending UI profiles: {len(result.get('pending_profiles', []))}",
+                f"Missing secrets: {len(result.get('missing_secret_keys', []))}",
+                f"Required action: {result.get('restart', 'live')}",
+            )
+        )
+    if action == "ui-profiles":
+        profiles = result.get("profiles", [])
+        lines = []
+        for item in profiles:
+            state = (
+                "pending" if item.get("pending") else "claimed" if item.get("claimed") else "dead"
+            )
+            lines.append(
+                f"{item.get('display_name') or '(unnamed)'}  {item.get('profile_id')}  "
+                f"[{item.get('settings')} settings; {state}]"
+            )
+        return "\n".join(lines) or "No individual-UI configuration profiles."
     return json.dumps({key: value for key, value in result.items() if key != "action"}, indent=2)
+
+
+def read_configuration_archive(path: Path) -> dict[str, object]:
+    path = path.expanduser()
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"configuration import must be a regular file: {path}")
+    if path.stat().st_size > 4 * 1024 * 1024:
+        raise ValueError("configuration import exceeds 4 MiB")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read configuration import: {path}") from exc
+    if not isinstance(value, dict):
+        raise ValueError("configuration import must contain a JSON object")
+    return value
+
+
+def write_configuration_archive(path: Path, value: dict[str, object]) -> None:
+    path = path.expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or path.is_symlink():
+        raise ValueError(f"refusing to overwrite existing export: {path}")
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = -1
+            json.dump(value, stream, ensure_ascii=True, sort_keys=True, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)

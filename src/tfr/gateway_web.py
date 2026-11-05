@@ -954,9 +954,7 @@ class WebGatewayServer:
         elif category == "gateway":
             entries = [entry for entry in entries if entry.component in {"gateway", "connection"}]
         elif category == "config":
-            entries = [
-                entry for entry in entries if entry.component.startswith("configuration")
-            ]
+            entries = [entry for entry in entries if entry.component.startswith("configuration")]
         elif category == "updates":
             entries = [entry for entry in entries if entry.component in {"update", "updates"}]
         elif category == "agents":
@@ -1059,6 +1057,11 @@ class WebGatewayServer:
                 store,
                 client_type="pwa",
                 ui_id=device.ui_id,
+                configuration_profile_id=(
+                    self.ui_store.configuration_profile_id(device.ui_id)
+                    if self.ui_store is not None
+                    else device.ui_id
+                ),
             ).as_dict()
             sends.extend(
                 self._send_bounded(
@@ -1676,6 +1679,11 @@ class WebGatewayServer:
                 gateway_configuration,
                 client_type="pwa",
                 ui_id=device.ui_id,
+                configuration_profile_id=(
+                    self.ui_store.configuration_profile_id(device.ui_id)
+                    if self.ui_store is not None
+                    else device.ui_id
+                ),
             ).as_dict()
         if not await self._send_if_active(
             socket,

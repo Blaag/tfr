@@ -761,6 +761,28 @@ tfr config set ui.typing_glow.enabled=off ui.typing_glow.duration_seconds=0.25 -
 tfr config reset ui.typing_glow.enabled --apply
 ```
 
+Portable Gateway backups use the same connected owner interface. Export omits
+secrets by default and records their setting keys; `--include-secrets` writes
+their resolved plaintext values to a new owner-only file, so protect that file
+as you would the original credentials. Import always previews first and commits
+one complete validated snapshot only with `--apply`:
+
+```bash
+tfr config export tfr-backup.json
+tfr config export tfr-private-backup.json --include-secrets
+tfr config import tfr-backup.json
+tfr config import tfr-backup.json --apply
+tfr config import-status
+tfr config rollback-import --apply
+```
+
+Individual-UI settings for offline machines remain as pending named profiles.
+After rebuilding and connecting that UI, use `tfr config ui-profiles` to review
+profiles and `tfr config claim-ui-profile PROFILE_ID --apply` from that UI to
+restore its overrides. Administrators can remove obsolete settings with
+`tfr config remove-ui-profile PROFILE_ID --apply`; this does not require manual
+editing of the live managed document.
+
 Use `--json` for stable machine-readable output, `--ui`, `--ui-type`, `--world`,
 or `--shared` for explicit targeting, and `--gateway-profile NAME` for a stored
 authenticated remote Gateway profile. Local commands use the owner Unix socket

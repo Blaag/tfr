@@ -213,6 +213,7 @@ class UiStore:
         self.path = self.state_directory / "uis.json"
         self._clock = clock or (lambda: datetime.now(UTC))
         self._records: dict[UUID, UiRecord] = {}
+        self._configuration_profiles: dict[UUID, UUID] = {}
         self._configuration_reports: dict[UUID, tuple[int, str, tuple[str, ...]]] = {}
         self._lock = asyncio.Lock()
         self._load()
@@ -222,6 +223,53 @@ class UiStore:
 
     def records(self) -> tuple[UiRecord, ...]:
         return tuple(sorted(self._records.values(), key=lambda item: item.display_name.casefold()))
+
+    def configuration_profile_id(self, ui_id: UUID) -> UUID:
+        """Return the managed-configuration profile claimed by a UI."""
+
+        return self._configuration_profiles.get(ui_id, ui_id)
+
+    def profile_claims(self) -> dict[UUID, UUID]:
+        return dict(self._configuration_profiles)
+
+    async def claim_configuration_profile(self, ui_id: UUID, profile_id: UUID) -> None:
+        """Link a rebuilt UI to one unclaimed imported configuration profile."""
+
+        async with self._lock:
+            if ui_id not in self._records:
+                raise ValueError(f"unknown UI ID: {ui_id}")
+            if any(
+                owner != ui_id and claimed == profile_id
+                for owner, claimed in self._configuration_profiles.items()
+            ):
+                raise ValueError("configuration profile is already claimed by another UI")
+            previous = self._configuration_profiles.get(ui_id)
+            if profile_id == ui_id:
+                self._configuration_profiles.pop(ui_id, None)
+            else:
+                self._configuration_profiles[ui_id] = profile_id
+            try:
+                self._save()
+            except BaseException:
+                if previous is None:
+                    self._configuration_profiles.pop(ui_id, None)
+                else:
+                    self._configuration_profiles[ui_id] = previous
+                raise
+
+    async def clear_configuration_profile(self, profile_id: UUID) -> None:
+        async with self._lock:
+            previous = dict(self._configuration_profiles)
+            self._configuration_profiles = {
+                ui_id: claimed
+                for ui_id, claimed in self._configuration_profiles.items()
+                if claimed != profile_id
+            }
+            try:
+                self._save()
+            except BaseException:
+                self._configuration_profiles = previous
+                raise
 
     def configuration_report(self, ui_id: UUID) -> tuple[int, str, tuple[str, ...]] | None:
         return self._configuration_reports.get(ui_id)
@@ -417,10 +465,13 @@ class UiStore:
             if target is None:
                 raise ValueError(f"unknown UI: {target_name}")
             del self._records[target.ui_id]
+            previous_profile = self._configuration_profiles.pop(target.ui_id, None)
             try:
                 self._save()
             except BaseException:
                 self._records[target.ui_id] = target
+                if previous_profile is not None:
+                    self._configuration_profiles[target.ui_id] = previous_profile
                 raise
             return target
 
@@ -457,9 +508,12 @@ class UiStore:
                 value = json.load(state_file)
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 raise ValueError(f"cannot read UI state: {self.path}") from exc
-        if not isinstance(value, dict) or set(value) != {"schema_version", "uis"}:
+        if not isinstance(value, dict) or set(value) not in (
+            {"schema_version", "uis"},
+            {"schema_version", "uis", "configuration_profiles"},
+        ):
             raise ValueError("UI state has invalid fields")
-        if value["schema_version"] != 1 or not isinstance(value["uis"], list):
+        if value["schema_version"] not in {1, 2} or not isinstance(value["uis"], list):
             raise ValueError("UI state has an unsupported schema")
         records = [UiRecord.from_dict(item) for item in value["uis"]]
         if len({record.ui_id for record in records}) != len(records):
@@ -467,6 +521,18 @@ class UiStore:
         if len({record.display_name.casefold() for record in records}) != len(records):
             raise ValueError("UI state contains duplicate display names")
         self._records = {record.ui_id: record for record in records}
+        raw_profiles = value.get("configuration_profiles", {})
+        if not isinstance(raw_profiles, dict):
+            raise ValueError("UI configuration profiles are invalid")
+        try:
+            profiles = {UUID(key): UUID(str(profile)) for key, profile in raw_profiles.items()}
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("UI configuration profiles are invalid") from exc
+        if any(ui_id not in self._records for ui_id in profiles):
+            raise ValueError("UI configuration profile refers to an unknown UI")
+        if len(set(profiles.values())) != len(profiles):
+            raise ValueError("UI configuration profile is claimed more than once")
+        self._configuration_profiles = profiles
 
     def _ensure_private_directory(self) -> None:
         try:
@@ -517,11 +583,17 @@ class UiStore:
             descriptor = self._open_private_file()
             os.close(descriptor)
         value = {
-            "schema_version": 1,
+            "schema_version": 2,
             "uis": [
                 record.as_dict()
                 for record in sorted(self._records.values(), key=lambda item: str(item.ui_id))
             ],
+            "configuration_profiles": {
+                str(ui_id): str(profile_id)
+                for ui_id, profile_id in sorted(
+                    self._configuration_profiles.items(), key=lambda item: str(item[0])
+                )
+            },
         }
         temporary = self.path.with_name(f".{self.path.name}.{secrets.token_hex(8)}.tmp")
         flags = (

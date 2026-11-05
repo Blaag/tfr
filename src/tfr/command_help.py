@@ -24,9 +24,7 @@ class CommandHelp:
         if self.examples:
             lines.extend(("Examples:", *(f"  {item}" for item in self.examples)))
         if self.related:
-            lines.append(
-                "More help: " + ", ".join(f"/help {name}" for name in self.related)
-            )
+            lines.append("More help: " + ", ".join(f"/help {name}" for name in self.related))
         return "\n".join(lines)
 
 
@@ -125,10 +123,16 @@ COMMAND_HELP = {
             "config",
             "Open settings or manage Gateway configuration",
             "/config [summary|status|list|show|set|reset|changes|undo|migrate|"
-            "migration-status|rollback-migration]",
+            "migration-status|rollback-migration|export|import|import-status|"
+            "rollback-import|ui-profiles|claim-ui-profile|remove-ui-profile]",
             "configuration",
             "Gateway-managed configuration",
-            examples=("/config", "/config show ui.theme.preset", "/config status"),
+            examples=(
+                "/config",
+                "/config show ui.theme.preset",
+                "/config export ~/tfr-backup.json",
+                "/config ui-profiles",
+            ),
             availability="gateway",
             related=("plugins", "ui"),
         ),

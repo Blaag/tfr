@@ -13,6 +13,8 @@ The installed command is `tfr`.
 
 - [Gateway-managed configuration](GATEWAY-MANAGED-CONFIGURATION.md) — active phased
   implementation tracker for centralized configuration and stable UI identity.
+- [Codebase maintenance](CODEBASE-MAINTENANCE.md) — incremental architecture,
+  compatibility, persistence, protocol, and repository-hygiene improvements.
 
 ## Product Decisions
 
@@ -771,7 +773,7 @@ Acceptance criteria:
 
 ## Future Work
 
-- [ ] Add portable Gateway-managed configuration export/import. Export a
+- [x] Add portable Gateway-managed configuration export/import. Export a
   versioned document with shared, Gateway, UI-type, named-UI, world, plugin, and
   plugin-source settings while omitting secrets by default and listing omitted
   keys. Import only through a complete validation and change preview, create a
@@ -779,6 +781,10 @@ Acceptance criteria:
   confirmation, restart when required, and permit rollback until a later
   mutation makes it unsafe. Never require users to replace the live managed
   document manually.
+  Imported individual-UI settings retain named pending profiles when replacement
+  UIs have not connected yet. A rebuilt UI can explicitly claim its old profile
+  without changing its new stable identity; administrators can review claimed,
+  pending, and dead profiles and remove obsolete settings atomically.
 - [ ] Add one unified, privacy-preserving notification policy consumed by PWA
   and native terminal transports. Support all or selected worlds, pages,
   mentions, speech/poses, or any activity; suppress notifications while the
