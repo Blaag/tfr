@@ -375,14 +375,16 @@ class GatewayConfigurationStore:
     ) -> ConfigurationMutation:
         with self._mutation_lock():
             self._check_revision(expected_revision)
-            previous_changes = [
-                item for item in self._history if item.revision == self.revision
-            ]
+            previous_changes = [item for item in self._history if item.revision == self.revision]
             if not previous_changes:
                 raise GatewayConfigurationError(
                     "there is no committed configuration change to undo"
                 )
             previous = previous_changes[-1]
+            if previous.key == "document":
+                raise GatewayConfigurationError(
+                    "whole-document changes cannot use generic undo; use their dedicated rollback"
+                )
             if len(previous_changes) > 1:
                 proposed = GatewayConfigurationDocument.from_dict(self._document.as_dict())
                 for item in reversed(previous_changes):
@@ -477,7 +479,26 @@ class GatewayConfigurationStore:
         actor_ui_name: str,
         operation: str = "migration",
     ) -> ConfigurationMutation:
-        """Atomically replace all managed sections as one audited revision."""
+        return self.replace_document(
+            document,
+            expected_revision=expected_revision,
+            actor_ui_id=actor_ui_id,
+            actor_ui_name=actor_ui_name,
+            operation=operation,
+            restart="client-reload",
+        )
+
+    def replace_document(
+        self,
+        document: GatewayConfigurationDocument,
+        *,
+        expected_revision: int,
+        actor_ui_id: str,
+        actor_ui_name: str,
+        operation: str,
+        restart: str,
+    ) -> ConfigurationMutation:
+        """Atomically replace every managed section as one audited revision."""
 
         with self._mutation_lock():
             self._check_revision(expected_revision)
@@ -487,7 +508,7 @@ class GatewayConfigurationStore:
             mutation = ConfigurationMutation(
                 revision=proposed.revision,
                 operation=operation,
-                key="migration",
+                key="document",
                 scope="shared",
                 target=None,
                 previous_present=True,
@@ -497,7 +518,50 @@ class GatewayConfigurationStore:
                 actor_ui_id=actor_ui_id,
                 actor_ui_name=actor_ui_name,
                 timestamp=_utc_now(),
-                restart="client-reload",
+                restart=restart,
+            )
+            self._commit(proposed, mutation)
+            return mutation
+
+    def remove_ui_profile(
+        self,
+        profile_id: str,
+        *,
+        expected_revision: int,
+        actor_ui_id: str,
+        actor_ui_name: str,
+    ) -> ConfigurationMutation:
+        """Remove one dead UI's complete override section atomically."""
+
+        if not isinstance(profile_id, str) or not profile_id:
+            raise GatewayConfigurationError("UI configuration profile ID is invalid")
+        with self._mutation_lock():
+            self._check_revision(expected_revision)
+            if profile_id not in self._document.uis:
+                raise GatewayConfigurationError("UI configuration profile has no settings")
+            proposed = GatewayConfigurationDocument.from_dict(self._document.as_dict())
+            removed = proposed.uis.pop(profile_id)
+            proposed.revision = self.revision + 1
+            self._validate_document(proposed)
+            restart = _maximum_restart(
+                self.registry.get(key).restart.value
+                for key in removed
+                if self.registry.get(key) is not None
+            )
+            mutation = ConfigurationMutation(
+                revision=proposed.revision,
+                operation="remove-ui-profile",
+                key="document",
+                scope="ui",
+                target=profile_id,
+                previous_present=True,
+                previous_value={"settings": len(removed)},
+                value_present=False,
+                value=None,
+                actor_ui_id=actor_ui_id,
+                actor_ui_name=actor_ui_name,
+                timestamp=_utc_now(),
+                restart=restart,
             )
             self._commit(proposed, mutation)
             return mutation
@@ -842,12 +906,14 @@ def _utc_now() -> str:
 
 def _maximum_restart(values) -> str:
     ranks = {"live": 0, "client-reload": 1, "client-restart": 2, "gateway-restart": 3}
-    return max(values, key=lambda value: ranks.get(value, 4))
+    return max(values, key=lambda value: ranks.get(value, 4), default="live")
 
 
 def apply_gateway_configuration(
     bundle: ConfigurationBundle,
     document: GatewayConfigurationDocument,
+    *,
+    secret_values: dict[str, str] | None = None,
 ) -> ConfigurationBundle:
     """Apply persisted desired values before runtime objects are constructed."""
 
@@ -868,7 +934,12 @@ def apply_gateway_configuration(
     for key, reference in document.secret_references.items():
         if not isinstance(reference, str):  # already enforced by document validation
             raise GatewayConfigurationError("secret reference is invalid")
-        _apply_key(main, worlds, agents, key, _resolve_secret_reference(reference))
+        resolved = (
+            secret_values[key]
+            if secret_values is not None and key in secret_values
+            else _resolve_secret_reference(reference)
+        )
+        _apply_key(main, worlds, agents, key, resolved)
     try:
         return bundle.model_copy(
             update={

@@ -41,6 +41,7 @@ from tfr.configuration_sync import (
     effective_client_configuration,
     validate_configuration_ack,
 )
+from tfr.configuration_transfer import GatewayConfigurationTransfer
 from tfr.configuration_values import (
     ConfigurationValues,
     SettingProvenance,
@@ -628,6 +629,7 @@ class GatewayRuntime:
         gateway_configuration: GatewayConfigurationStore | None = None,
         configuration_bundle: ConfigurationBundle | None = None,
         gateway_migration: GatewayMigrationStore | None = None,
+        base_configuration_bundle: ConfigurationBundle | None = None,
         new_plugins: tuple[str, ...] = (),
     ) -> None:
         self.event_bus = event_bus
@@ -651,6 +653,7 @@ class GatewayRuntime:
         self.gateway_configuration = gateway_configuration
         self.configuration_bundle = configuration_bundle
         self.gateway_migration = gateway_migration
+        self.base_configuration_bundle = base_configuration_bundle or configuration_bundle
         self.new_plugins = new_plugins
         self.gateway_id = uuid4()
         self._started = False
@@ -685,9 +688,7 @@ class GatewayRuntime:
             f"worlds.{name}.login.password"
             for name, world in source_bundle.worlds.worlds.items()
             if world.login is not None
-            and not gateway_configuration.get(
-                f"worlds.{name}.login.password", scope="secret"
-            )[0]
+            and not gateway_configuration.get(f"worlds.{name}.login.password", scope="secret")[0]
         }
         if missing_login_keys:
             references = _stage_legacy_world_login_references(
@@ -1036,8 +1037,10 @@ class GatewayRuntime:
             if world not in self.configuration_bundle.worlds.worlds:
                 raise ValueError(f"unknown world: {world}")
             present, stored = self.gateway_configuration.get(key, scope="world", target=world)
-            patterns = list(stored) if present and isinstance(stored, list) else list(
-                self.configuration_bundle.worlds.worlds[world].gag.patterns
+            patterns = (
+                list(stored)
+                if present and isinstance(stored, list)
+                else list(self.configuration_bundle.worlds.worlds[world].gag.patterns)
             )
             if operation == "list":
                 if pattern is not None or expected_revision is not None:
@@ -1579,6 +1582,20 @@ class GatewayServer:
         self.configuration_notice = configuration_notice
         self.application_restart_factory = application_restart_factory
         self.ui_store = ui_store
+        managed_configuration = getattr(runtime, "gateway_configuration", None)
+        base_configuration = getattr(runtime, "base_configuration_bundle", None)
+        self.configuration_transfer = (
+            GatewayConfigurationTransfer(
+                managed_configuration.state_directory,
+                managed_configuration,
+                ui_store,
+                base_configuration,
+            )
+            if managed_configuration is not None
+            and base_configuration is not None
+            and ui_store is not None
+            else None
+        )
         self._server: asyncio.Server | None = None
         self._tcp_server: asyncio.Server | None = None
         self._socket_identity: tuple[int, int] | None = None
@@ -1924,12 +1941,21 @@ class GatewayServer:
             }
             if ui_record is not None:
                 hello_response["ui"] = ui_record.as_dict()
+                if self.configuration_transfer is not None:
+                    hello_response["pending_configuration_profiles"] = (
+                        self.configuration_transfer.pending_candidates(ui_record)
+                    )
                 if CONFIGURATION_SYNC_CAPABILITY in ui_record.capabilities:
                     hello_response["configuration"] = effective_client_configuration(
                         self.runtime.configuration_values,
                         self.runtime.gateway_configuration,
                         client_type=ui_record.client_type,
                         ui_id=ui_record.ui_id,
+                        configuration_profile_id=(
+                            self.ui_store.configuration_profile_id(ui_record.ui_id)
+                            if self.ui_store is not None
+                            else ui_record.ui_id
+                        ),
                     ).as_dict()
             await write_message(
                 writer,
@@ -2174,9 +2200,7 @@ class GatewayServer:
         restart_gateway = False
         message_type = str(message.get("type", "unknown"))
         configuration_store = getattr(self.runtime, "gateway_configuration", None)
-        initial_revision = (
-            configuration_store.revision if configuration_store is not None else None
-        )
+        initial_revision = configuration_store.revision if configuration_store is not None else None
         try:
             request_id = UUID(str(request_id_value))
         except (TypeError, ValueError, AttributeError):
@@ -2749,8 +2773,7 @@ class GatewayServer:
                         await self._apply_live_gateway_configuration(mutation)
                     await self._broadcast_configuration()
                     if any(
-                        mutation.key
-                        in {"ui.spellcheck.enabled", "ui.speaking_streaks.enabled"}
+                        mutation.key in {"ui.spellcheck.enabled", "ui.speaking_streaks.enabled"}
                         for mutation in mutations
                     ):
                         await self._broadcast_ui_settings()
@@ -2813,8 +2836,7 @@ class GatewayServer:
                         await self._apply_live_gateway_configuration(affected_mutation)
                     await self._broadcast_configuration()
                     if any(
-                        item.key
-                        in {"ui.spellcheck.enabled", "ui.speaking_streaks.enabled"}
+                        item.key in {"ui.spellcheck.enabled", "ui.speaking_streaks.enabled"}
                         for item in affected
                     ):
                         await self._broadcast_ui_settings()
@@ -2824,14 +2846,169 @@ class GatewayServer:
                         "requires_confirmation": False,
                     }
             elif message_type == "config_export":
-                store = self.runtime.gateway_configuration
-                if store is None:
+                transfer = self.configuration_transfer
+                if transfer is None:
                     raise ValueError("Gateway configuration export is unavailable")
                 if not configuration_admin:
                     raise ValueError("configuration export requires owner/admin access")
-                if set(message) != {"type", "protocol", "request_id"}:
+                if set(message) != {"type", "protocol", "request_id", "include_secrets", "confirm"}:
                     raise ValueError("config_export has invalid fields")
-                result = {"document": store.export()}
+                include_secrets = message.get("include_secrets")
+                confirm = message.get("confirm")
+                if not isinstance(include_secrets, bool) or not isinstance(confirm, bool):
+                    raise ValueError("configuration export options are invalid")
+                if include_secrets and not confirm:
+                    raise ValueError("exporting plaintext secrets requires explicit confirmation")
+                result = {"document": transfer.export(include_secrets=include_secrets)}
+            elif message_type == "config_import_preview":
+                transfer = self.configuration_transfer
+                if transfer is None:
+                    raise ValueError("Gateway configuration import is unavailable")
+                if not configuration_admin:
+                    raise ValueError("configuration import requires owner/admin access")
+                if set(message) != {"type", "protocol", "request_id", "document"}:
+                    raise ValueError("config_import_preview has invalid fields")
+                result = transfer.preview_import(message.get("document")).preview
+            elif message_type == "config_import_apply":
+                transfer = self.configuration_transfer
+                if transfer is None:
+                    raise ValueError("Gateway configuration import is unavailable")
+                if not configuration_admin:
+                    raise ValueError("configuration import requires owner/admin access")
+                if set(message) != {
+                    "type",
+                    "protocol",
+                    "request_id",
+                    "document",
+                    "expected_revision",
+                    "expected_digest",
+                    "confirm",
+                }:
+                    raise ValueError("config_import_apply has invalid fields")
+                expected = message.get("expected_revision")
+                digest = message.get("expected_digest")
+                if (
+                    not isinstance(expected, int)
+                    or isinstance(expected, bool)
+                    or not isinstance(digest, str)
+                    or message.get("confirm") is not True
+                ):
+                    raise ValueError("configuration import confirmation is invalid")
+                actor = self.ui_store.get(ui_id) if self.ui_store and ui_id else None
+                result = await transfer.apply_import(
+                    message.get("document"),
+                    expected_revision=expected,
+                    expected_digest=digest,
+                    actor_ui_id=str(ui_id) if ui_id else "local-admin",
+                    actor_ui_name=actor.display_name if actor else "Local administrator",
+                )
+                await self._broadcast_configuration()
+                if result.get("restart") == "gateway-restart":
+                    result["restarting"] = True
+                    restart_gateway = True
+            elif message_type == "config_import_status":
+                transfer = self.configuration_transfer
+                if transfer is None or not configuration_admin:
+                    raise ValueError("configuration import status requires owner/admin access")
+                if set(message) != {"type", "protocol", "request_id"}:
+                    raise ValueError("config_import_status has invalid fields")
+                result = transfer.status()
+            elif message_type == "config_import_rollback":
+                transfer = self.configuration_transfer
+                if transfer is None or not configuration_admin:
+                    raise ValueError("configuration import rollback requires owner/admin access")
+                if set(message) != {
+                    "type",
+                    "protocol",
+                    "request_id",
+                    "expected_revision",
+                    "confirm",
+                }:
+                    raise ValueError("config_import_rollback has invalid fields")
+                expected = message.get("expected_revision")
+                if not isinstance(expected, int) or isinstance(expected, bool):
+                    raise ValueError("configuration import rollback revision is invalid")
+                if message.get("confirm") is not True:
+                    result = {**transfer.status(), "requires_confirmation": True}
+                else:
+                    actor = self.ui_store.get(ui_id) if self.ui_store and ui_id else None
+                    result = await transfer.rollback(
+                        expected_revision=expected,
+                        actor_ui_id=str(ui_id) if ui_id else "local-admin",
+                        actor_ui_name=actor.display_name if actor else "Local administrator",
+                    )
+                    await self._broadcast_configuration()
+                    if result.get("restart") == "gateway-restart":
+                        result["restarting"] = True
+                        restart_gateway = True
+            elif message_type == "config_ui_profiles":
+                transfer = self.configuration_transfer
+                if transfer is None or not configuration_admin:
+                    raise ValueError("UI configuration profiles require owner/admin access")
+                if set(message) != {"type", "protocol", "request_id"}:
+                    raise ValueError("config_ui_profiles has invalid fields")
+                result = {
+                    "revision": transfer.configuration.revision,
+                    "profiles": transfer.profiles(),
+                }
+            elif message_type == "config_ui_profile_claim":
+                transfer = self.configuration_transfer
+                if transfer is None or ui_id is None:
+                    raise ValueError("claiming a UI configuration profile requires a registered UI")
+                if set(message) != {"type", "protocol", "request_id", "profile_id", "confirm"}:
+                    raise ValueError("config_ui_profile_claim has invalid fields")
+                try:
+                    profile_id = UUID(str(message.get("profile_id")))
+                except (ValueError, TypeError, AttributeError) as exc:
+                    raise ValueError("UI configuration profile ID is invalid") from exc
+                if message.get("confirm") is not True:
+                    result = {"profile_id": str(profile_id), "requires_confirmation": True}
+                else:
+                    result = await transfer.claim(ui_id, profile_id)
+                    await self._broadcast_configuration()
+            elif message_type == "config_ui_profile_remove":
+                transfer = self.configuration_transfer
+                if transfer is None or not configuration_admin:
+                    raise ValueError(
+                        "removing UI configuration profiles requires owner/admin access"
+                    )
+                if set(message) != {
+                    "type",
+                    "protocol",
+                    "request_id",
+                    "profile_id",
+                    "expected_revision",
+                    "confirm",
+                }:
+                    raise ValueError("config_ui_profile_remove has invalid fields")
+                try:
+                    profile_id = UUID(str(message.get("profile_id")))
+                except (ValueError, TypeError, AttributeError) as exc:
+                    raise ValueError("UI configuration profile ID is invalid") from exc
+                expected = message.get("expected_revision")
+                if not isinstance(expected, int) or isinstance(expected, bool):
+                    raise ValueError("UI configuration profile revision is invalid")
+                profile = next(
+                    (item for item in transfer.profiles() if item["profile_id"] == str(profile_id)),
+                    None,
+                )
+                if profile is None:
+                    raise ValueError("UI configuration profile is unavailable")
+                if message.get("confirm") is not True:
+                    result = {
+                        "revision": transfer.configuration.revision,
+                        "profile": profile,
+                        "requires_confirmation": True,
+                    }
+                else:
+                    actor = self.ui_store.get(ui_id) if self.ui_store and ui_id else None
+                    result = await transfer.remove_profile(
+                        profile_id,
+                        expected_revision=expected,
+                        actor_ui_id=str(ui_id) if ui_id else "local-admin",
+                        actor_ui_name=actor.display_name if actor else "Local administrator",
+                    )
+                    await self._broadcast_configuration()
             elif message_type == "config_migrate":
                 migration = self.runtime.gateway_migration
                 store = self.runtime.gateway_configuration
@@ -3312,6 +3489,11 @@ class GatewayServer:
                 store,
                 client_type=record.client_type,
                 ui_id=record.ui_id,
+                configuration_profile_id=(
+                    self.ui_store.configuration_profile_id(record.ui_id)
+                    if self.ui_store is not None
+                    else record.ui_id
+                ),
             ).as_dict()
             messages.append(
                 write_message(
@@ -3333,13 +3515,15 @@ class GatewayServer:
         if target is None:
             if ui_id is None:
                 raise ValueError("UI scope requires a registered current UI or --ui target")
-            return str(ui_id)
+            if self.ui_store is None:
+                return str(ui_id)
+            return str(self.ui_store.configuration_profile_id(ui_id))
         if self.ui_store is None:
             raise ValueError("UI inventory is unavailable")
         record = self.ui_store.find_by_name(target)
         if record is None:
             raise ValueError(f"unknown UI: {target}")
-        return str(record.ui_id)
+        return str(self.ui_store.configuration_profile_id(record.ui_id))
 
     def _sync_gateway_configuration_value(self, mutation: ConfigurationMutation) -> None:
         values = self.runtime.configuration_values
@@ -3776,8 +3960,7 @@ def _retire_gateway_legacy_sources(
     """Replace a migrated Gateway config with a bootstrap and remove backed-up auxiliaries."""
 
     backups = {
-        Path(item["source"]): (Path(item["backup"]), item["sha256"])
-        for item in migration.backups
+        Path(item["source"]): (Path(item["backup"]), item["sha256"]) for item in migration.backups
     }
     sources = tuple(backups)
     if main_path not in backups:
@@ -3789,14 +3972,17 @@ def _retire_gateway_legacy_sources(
         backup_hash = hashlib.sha256(backup.read_bytes()).hexdigest()
         if source_hash != expected_hash or backup_hash != expected_hash:
             raise OSError(f"legacy source changed while it was being migrated: {source}")
-    payload = json.dumps(
-        {
-            "schema_version": 1,
-            "state_directory": str(state_directory.expanduser().resolve()),
-        },
-        indent=2,
-        sort_keys=True,
-    ) + "\n"
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "state_directory": str(state_directory.expanduser().resolve()),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
     descriptor, temporary = tempfile.mkstemp(prefix=f".{main_path.name}.", dir=main_path.parent)
     try:
         os.fchmod(descriptor, 0o600)
@@ -3840,6 +4026,7 @@ async def run_gateway(
         warnings=bundle.warnings,
     )
     bundle = gateway_bootstrap_bundle(bootstrap)
+    base_configuration_bundle = bundle
     startup_store = GatewayConfigurationStore(
         bundle.main.managed_settings.state_directory,
         core_configuration_registry(),
@@ -3952,6 +4139,7 @@ async def run_gateway(
             migration_source_bundle=migration_source,
             legacy_precedence=False,
         )
+        runtime.base_configuration_bundle = base_configuration_bundle
     except BaseException:
         await connector_client.close()
         raise

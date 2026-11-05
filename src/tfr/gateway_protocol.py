@@ -11,7 +11,10 @@ from tfr.events import Event
 from tfr.replay import event_from_dict
 
 PROTOCOL_VERSION = 2
-MAX_MESSAGE_BYTES = 1_048_576
+# Portable owner-authorized configuration archives include a managed document,
+# identity metadata, and optionally resolved secrets. Keep the transport bounded
+# while allowing the explicitly capped 4 MiB archive envelope.
+MAX_MESSAGE_BYTES = 5 * 1_048_576
 MAX_SNAPSHOT_EVENTS = 1_000_000
 WRITE_TIMEOUT_SECONDS = 10
 

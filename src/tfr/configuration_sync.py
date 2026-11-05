@@ -32,15 +32,17 @@ def effective_client_configuration(
     *,
     client_type: str,
     ui_id: UUID,
+    configuration_profile_id: UUID | None = None,
 ) -> EffectiveClientConfiguration:
     """Return the non-secret Gateway-authoritative view for one named UI."""
 
     consumer = "native-ui" if client_type == "terminal" else "pwa"
     document = store.document
+    profile_id = configuration_profile_id or ui_id
     keys = set(values.inventory_keys())
     keys.update(document.shared)
     keys.update(document.ui_types.get(client_type, ()))
-    keys.update(document.uis.get(str(ui_id), ()))
+    keys.update(document.uis.get(str(profile_id), ()))
     settings: dict[str, object] = {}
     requirements: dict[str, str] = {}
     for key in sorted(keys):
@@ -62,8 +64,8 @@ def effective_client_configuration(
             value = document.shared[key]
         if key in document.ui_types.get(client_type, {}):
             value = document.ui_types[client_type][key]
-        if key in document.uis.get(str(ui_id), {}):
-            value = document.uis[str(ui_id)][key]
+        if key in document.uis.get(str(profile_id), {}):
+            value = document.uis[str(profile_id)][key]
         descriptor.validate(value)
         settings[key] = copy.deepcopy(value)
         requirements[key] = descriptor.restart.value

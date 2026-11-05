@@ -66,6 +66,7 @@ from tfr.config import (
     ThemeConfig,
     TypingGlowConfig,
 )
+from tfr.configuration_cli import read_configuration_archive, write_configuration_archive
 from tfr.core import CommandBus, EventBus, UnknownSessionError
 from tfr.events import (
     Actor,
@@ -222,9 +223,7 @@ def _color_contrast(first: str, second: str) -> float:
     def luminance(color: str) -> float:
         channels = [int(color[index : index + 2], 16) / 255 for index in (1, 3, 5)]
         linear = [
-            channel / 12.92
-            if channel <= 0.04045
-            else ((channel + 0.055) / 1.055) ** 2.4
+            channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
             for channel in channels
         ]
         return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
@@ -255,9 +254,7 @@ def _themed_settings_dialog_style(theme: ResolvedTheme) -> Style:
             "dialog shadow": f"bg:{palette.overlay}",
             "dialog.body shadow": f"bg:{palette.overlay}",
             "button": f"fg:{palette.text} bg:{body_background}",
-            "button.focused": (
-                f"fg:{palette.selected_text} bg:{selected_background} bold"
-            ),
+            "button.focused": (f"fg:{palette.selected_text} bg:{selected_background} bold"),
             "radio": f"fg:{palette.text} bg:{body_background}",
             "radio-checked": f"fg:{palette.accent} bold",
             "checkbox": f"fg:{palette.text} bg:{body_background}",
@@ -386,6 +383,37 @@ class ServiceRuntime(Protocol):
     async def config_changes(self, limit: int = 50) -> dict[str, object]: ...
 
     async def config_undo(self, *, expected_revision: int, confirm: bool) -> dict[str, object]: ...
+
+    async def config_export(
+        self, *, include_secrets: bool = False, confirm: bool = False
+    ) -> dict[str, object]: ...
+
+    async def config_import_preview(self, document: dict[str, object]) -> dict[str, object]: ...
+
+    async def config_import_apply(
+        self,
+        document: dict[str, object],
+        *,
+        expected_revision: int,
+        expected_digest: str,
+        confirm: bool,
+    ) -> dict[str, object]: ...
+
+    async def config_import_status(self) -> dict[str, object]: ...
+
+    async def config_import_rollback(
+        self, *, expected_revision: int, confirm: bool
+    ) -> dict[str, object]: ...
+
+    async def config_ui_profiles(self) -> dict[str, object]: ...
+
+    async def config_ui_profile_claim(
+        self, profile_id: str, *, confirm: bool
+    ) -> dict[str, object]: ...
+
+    async def config_ui_profile_remove(
+        self, profile_id: str, *, expected_revision: int, confirm: bool
+    ) -> dict[str, object]: ...
 
     async def pair_web_device(self, label: str) -> str | dict[str, Any]: ...
 
@@ -2990,9 +3018,7 @@ class TfrTui:
             timestamp = _format_transition_timestamp(event.timestamp)
             if state == SessionState.CONNECTED.value:
                 view.clear_selection()
-                view.display.append(
-                    self.theme.ansi_text("success", f"Connected · [{timestamp}]")
-                )
+                view.display.append(self.theme.ansi_text("success", f"Connected · [{timestamp}]"))
                 should_count = True
             elif state == SessionState.DISCONNECTED.value:
                 view.clear_selection()
@@ -3860,9 +3886,7 @@ class TfrTui:
                 f"No configured effect demo for {speaker}", recallable=False
             )
             return
-        self.effects_display.append(
-            f"Configured speaker preview: {speaker}", recallable=False
-        )
+        self.effects_display.append(f"Configured speaker preview: {speaker}", recallable=False)
         world = next((candidate for candidate in demo.worlds if candidate in self.views), None)
         for sample in demo.samples:
             if isinstance(demo, ProjectedEffectDemo):
@@ -4359,9 +4383,7 @@ class TfrTui:
         default: str | None = None,
         row_preview: Callable[[str, float], object] | None = None,
     ) -> str | None:
-        choices = RadioList(
-            values=values, default=default, select_on_focus=row_preview is not None
-        )
+        choices = RadioList(values=values, default=default, select_on_focus=row_preview is not None)
         if row_preview is not None:
             original_values = tuple(choices.values)
             preview_state: dict[str, object] = {
@@ -4398,15 +4420,10 @@ class TfrTui:
             choices.current_value = value
             self._finish_settings_dialog(value)
 
-        choices.control.key_bindings = merge_key_bindings(
-            [choices.control.key_bindings, activate]
-        )
+        choices.control.key_bindings = merge_key_bindings([choices.control.key_bindings, activate])
         body: list[object] = [
             Label(
-                text=(
-                    f"{text}\n\n"
-                    "↑/↓ move · Enter choose · Space mark · Esc cancel"
-                ),
+                text=(f"{text}\n\n↑/↓ move · Enter choose · Space mark · Esc cancel"),
                 dont_extend_height=True,
             ),
             choices,
@@ -4425,6 +4442,7 @@ class TfrTui:
         )
         ticker: asyncio.Task[None] | None = None
         if row_preview is not None:
+
             async def animate_preview() -> None:
                 try:
                     while True:
@@ -4501,9 +4519,7 @@ class TfrTui:
             title=title,
             body=HSplit([Label(text=text, dont_extend_height=True), field], padding=1),
             buttons=[
-                Button(
-                    text="Ok", handler=lambda: self._finish_settings_dialog(field.text)
-                ),
+                Button(text="Ok", handler=lambda: self._finish_settings_dialog(field.text)),
                 Button(text="Cancel", handler=lambda: self._finish_settings_dialog(None)),
             ],
             with_background=True,
@@ -4596,9 +4612,7 @@ class TfrTui:
             buttons=[
                 Button(
                     text=apply_text,
-                    handler=lambda: self._finish_settings_dialog(
-                        list(choices.current_values)
-                    ),
+                    handler=lambda: self._finish_settings_dialog(list(choices.current_values)),
                 ),
                 Button(text="Cancel", handler=lambda: self._finish_settings_dialog(None)),
             ],
@@ -4776,13 +4790,10 @@ class TfrTui:
         )
         return True
 
-    async def _choose_settings_target(
-        self, setting: dict[str, object]
-    ) -> dict[str, object] | None:
+    async def _choose_settings_target(self, setting: dict[str, object]) -> dict[str, object] | None:
         current_ui_name = (
             self.service_runtime.current_ui_name()
-            if self.service_runtime is not None
-            and hasattr(self.service_runtime, "current_ui_name")
+            if self.service_runtime is not None and hasattr(self.service_runtime, "current_ui_name")
             else "current UI"
         )
         choice = await self._settings_choice(
@@ -4808,8 +4819,7 @@ class TfrTui:
                 title="Named UI",
                 text="Choose a UI.",
                 values=[
-                    (str(item.get("display_name")), str(item.get("display_name")))
-                    for item in uis
+                    (str(item.get("display_name")), str(item.get("display_name"))) for item in uis
                 ],
             )
             if name is None:
@@ -4957,13 +4967,9 @@ class TfrTui:
     ) -> None:
         key = str(setting["key"])
         validation_value = setting.get("validation")
-        nullable = (
-            isinstance(validation_value, dict) and validation_value.get("nullable") is True
-        )
+        nullable = isinstance(validation_value, dict) and validation_value.get("nullable") is True
         reset_label = (
-            None
-            if detail.get("source") == "default"
-            else self._reset_setting_text(setting)
+            None if detail.get("source") == "default" else self._reset_setting_text(setting)
         )
 
         async def save_special(action: str) -> bool:
@@ -5033,7 +5039,7 @@ class TfrTui:
                     text=f"{len(entries)} entries",
                     values=[("add", "Add entry")]
                     + [(f"entry:{index}", entry) for index, entry in enumerate(entries)]
-                    + ([('reset', reset_label)] if reset_label is not None else [])
+                    + ([("reset", reset_label)] if reset_label is not None else [])
                     + [("save", "Save list"), ("cancel", "Cancel")],
                 )
                 if selected in {None, "cancel"}:
@@ -5078,10 +5084,7 @@ class TfrTui:
                     entries.pop(index)
         elif value_type == "string" and (
             "color" in key
-            or (
-                isinstance(validation, dict)
-                and validation.get("pattern") == r"#[0-9a-fA-F]{6}"
-            )
+            or (isinstance(validation, dict) and validation.get("pattern") == r"#[0-9a-fA-F]{6}")
         ):
             selected_color = await self._settings_color(
                 title=setting_label(key),
@@ -5099,18 +5102,14 @@ class TfrTui:
             await self._settings_message(
                 title="Structured editor required",
                 text=(
-                    "This structured setting cannot be edited as raw JSON. "
-                    "Use its dedicated form."
+                    "This structured setting cannot be edited as raw JSON. Use its dedicated form."
                 ),
             )
             return
         else:
             result = await self._settings_input_with_reset(
                 title=setting_label(key),
-                text=(
-                    f"{self._setting_editor_summary(setting, detail)}\n"
-                    f"Type: {value_type}"
-                ),
+                text=(f"{self._setting_editor_summary(setting, detail)}\nType: {value_type}"),
                 default=setting_value_text(detail.get("value"), value_type),
                 reset_label=reset_label,
                 null_label="Set explicit empty value" if nullable else None,
@@ -5337,9 +5336,7 @@ class TfrTui:
                     elapsed_seconds=elapsed_seconds,
                     animations_enabled=True,
                 )
-                return [
-                    (f"noreverse nobold {style}".strip(), text) for style, text in rows[0]
-                ]
+                return [(f"noreverse nobold {style}".strip(), text) for style, text in rows[0]]
 
             effect = TextEffectKind(effect_name)
             base_value = (
@@ -5392,10 +5389,7 @@ class TfrTui:
             )
         except (ArithmeticError, TypeError, ValueError):
             return [("", speaker)]
-        return [
-            (f"noreverse nobold {style}".strip(), text)
-            for style, text in rows[0]
-        ]
+        return [(f"noreverse nobold {style}".strip(), text) for style, text in rows[0]]
 
     async def _declarative_item_form(
         self,
@@ -5441,8 +5435,10 @@ class TfrTui:
                     default_label=str(raw_field.get("default_label", "Use effect default")),
                 )
             elif field_type in {"multi-select", "world-multi-select"}:
-                choices = self.aliases if field_type == "world-multi-select" else raw_field.get(
-                    "choices", []
+                choices = (
+                    self.aliases
+                    if field_type == "world-multi-select"
+                    else raw_field.get("choices", [])
                 )
                 value = await self._settings_multiselect(
                     title=str(form.get("label", "Edit item")),
@@ -5507,9 +5503,7 @@ class TfrTui:
         original = json.dumps(items, sort_keys=True)
         item_schema = form.get("item")
         label_field = (
-            str(item_schema.get("label_field", "name"))
-            if isinstance(item_schema, dict)
-            else "name"
+            str(item_schema.get("label_field", "name")) if isinstance(item_schema, dict) else "name"
         )
         while True:
             selected = await self._settings_choice(
@@ -5651,9 +5645,7 @@ class TfrTui:
                 return None
             candidate["auto_update"] = auto_update == "true"
         try:
-            return PluginSource.model_validate(candidate).model_dump(
-                mode="json", exclude_none=True
-            )
+            return PluginSource.model_validate(candidate).model_dump(mode="json", exclude_none=True)
         except ValueError as exc:
             await self._settings_message(title="Invalid plugin source", text=str(exc))
             return None
@@ -5723,8 +5715,7 @@ class TfrTui:
                         await self._settings_message(
                             title="Plugin source already exists",
                             text=(
-                                "Edit the existing repository source instead of adding a "
-                                "duplicate."
+                                "Edit the existing repository source instead of adding a duplicate."
                             ),
                         )
                     else:
@@ -5769,9 +5760,7 @@ class TfrTui:
         detail: dict[str, object],
     ) -> None:
         raw_rules = detail.get("value")
-        if not isinstance(raw_rules, list) or any(
-            not isinstance(item, dict) for item in raw_rules
-        ):
+        if not isinstance(raw_rules, list) or any(not isinstance(item, dict) for item in raw_rules):
             await self._settings_message(
                 title="Speaker effects",
                 text="The current speaker rules are not a list of editable objects.",
@@ -5789,9 +5778,7 @@ class TfrTui:
         def list_label(rule: dict[str, object]) -> object:
             label = editor_label(rule)
             color = (
-                rule.get("end_color")
-                if rule.get("effect") == "age_decay"
-                else rule.get("color")
+                rule.get("end_color") if rule.get("effect") == "age_decay" else rule.get("color")
             )
             if isinstance(color, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", color):
                 return [("", f"{label}  "), (f"fg:{color} bg:{color}", "██")]
@@ -5809,9 +5796,7 @@ class TfrTui:
             label = editor_label(rule)
             suffix = label[len(speaker) :]
             color = (
-                rule.get("end_color")
-                if rule.get("effect") == "age_decay"
-                else rule.get("color")
+                rule.get("end_color") if rule.get("effect") == "age_decay" else rule.get("color")
             )
             output: StyleAndTextTuples = [
                 *self._speaker_rule_preview(rule, elapsed),
@@ -5825,9 +5810,7 @@ class TfrTui:
         plugin_status = "unknown"
         if self.service_runtime is not None and hasattr(self.service_runtime, "plugins_catalog"):
             catalog = await self.service_runtime.plugins_catalog("available")
-            plugin = next(
-                (item for item in catalog if item.get("name") == "speaker_effects"), None
-            )
+            plugin = next((item for item in catalog if item.get("name") == "speaker_effects"), None)
             if isinstance(plugin, dict):
                 plugin_status = (
                     "loaded"
@@ -5838,10 +5821,7 @@ class TfrTui:
                 )
         while True:
             values = [("add", "Add speaker rule")]
-            values.extend(
-                (f"rule:{index}", list_label(rule))
-                for index, rule in enumerate(rules)
-            )
+            values.extend((f"rule:{index}", list_label(rule)) for index, rule in enumerate(rules))
             values.extend((("save", "Save changes"), ("cancel", "Cancel")))
             selected = await self._settings_choice(
                 title="Speaker effects",
@@ -5860,9 +5840,7 @@ class TfrTui:
                 try:
                     rules = speaker_rules(rules)
                 except ValueError as exc:
-                    await self._settings_message(
-                        title="Cannot save speaker effects", text=str(exc)
-                    )
+                    await self._settings_message(title="Cannot save speaker effects", text=str(exc))
                     continue
                 if await self._save_settings_batch(
                     alias, setting, rules, old_value=detail.get("value")
@@ -5904,9 +5882,7 @@ class TfrTui:
             elif operation == "down" and index + 1 < len(rules):
                 rules[index + 1], rules[index] = rules[index], rules[index + 1]
 
-    async def _open_setting_editor(
-        self, alias: str, setting: dict[str, object]
-    ) -> None:
+    async def _open_setting_editor(self, alias: str, setting: dict[str, object]) -> None:
         key = str(setting["key"])
         runtime = self.service_runtime
         if runtime is None:
@@ -5941,9 +5917,7 @@ class TfrTui:
         catalog = await runtime.plugins_catalog("available")
         current_value = detail.get("value")
         current = [str(item) for item in current_value] if isinstance(current_value, list) else []
-        by_name = {
-            str(item.get("name")): item for item in catalog if isinstance(item, dict)
-        }
+        by_name = {str(item.get("name")): item for item in catalog if isinstance(item, dict)}
         names = sorted(set(by_name) | set(current), key=str.casefold)
         values = []
         for name in names:
@@ -6062,8 +6036,7 @@ class TfrTui:
                             values=[
                                 (
                                     str(item["key"]),
-                                    f"{setting_category(item)} · "
-                                    f"{setting_label(str(item['key']))}",
+                                    f"{setting_category(item)} · {setting_label(str(item['key']))}",
                                 )
                                 for item in candidates
                             ],
@@ -6097,8 +6070,7 @@ class TfrTui:
                         title=category,
                         text="Choose a setting.",
                         values=[
-                            (str(item["key"]), setting_label(str(item["key"])))
-                            for item in choices
+                            (str(item["key"]), setting_label(str(item["key"]))) for item in choices
                         ],
                         default=last_setting.get(category),
                     )
@@ -6123,6 +6095,13 @@ class TfrTui:
         valid_migrate = action == "migrate"
         valid_migration_status = action == "migration-status" and len(parameters) == 1
         valid_rollback_migration = action == "rollback-migration" and len(parameters) <= 2
+        valid_export = action == "export" and 2 <= len(parameters) <= 3
+        valid_import = action == "import" and 2 <= len(parameters) <= 3
+        valid_import_status = action == "import-status" and len(parameters) == 1
+        valid_rollback_import = action == "rollback-import" and len(parameters) <= 2
+        valid_ui_profiles = action == "ui-profiles" and len(parameters) == 1
+        valid_claim_profile = action == "claim-ui-profile" and 2 <= len(parameters) <= 3
+        valid_remove_profile = action == "remove-ui-profile" and 2 <= len(parameters) <= 3
         if parameters and not (
             valid_status
             or valid_summary
@@ -6135,11 +6114,19 @@ class TfrTui:
             or valid_migrate
             or valid_migration_status
             or valid_rollback_migration
+            or valid_export
+            or valid_import
+            or valid_import_status
+            or valid_rollback_import
+            or valid_ui_profiles
+            or valid_claim_profile
+            or valid_remove_profile
         ):
             self.add_notice(
                 alias,
                 "Usage: /config [summary|status|list|show|set|reset|changes|undo|migrate|"
-                "migration-status|rollback-migration]",
+                "migration-status|rollback-migration|export|import|import-status|"
+                "rollback-import|ui-profiles|claim-ui-profile|remove-ui-profile]",
             )
             return
         if self.service_runtime is None:
@@ -6148,6 +6135,135 @@ class TfrTui:
         try:
             if not parameters:
                 await self._open_settings_menu(alias)
+                return
+            if valid_export:
+                include_secrets = len(parameters) == 3 and parameters[2] == "--include-secrets"
+                if len(parameters) == 3 and not include_secrets:
+                    raise ValueError("export accepts only --include-secrets")
+                document = await self.service_runtime.config_export(
+                    include_secrets=include_secrets,
+                    confirm=include_secrets,
+                )
+                write_configuration_archive(Path(parameters[1]), document)
+                secrets_section = document.get("secrets", {})
+                omitted = (
+                    secrets_section.get("omitted_keys", [])
+                    if isinstance(secrets_section, dict)
+                    else []
+                )
+                self.add_notice(
+                    alias,
+                    f"Configuration exported to {parameters[1]}. "
+                    + (
+                        "WARNING: the private file contains plaintext secrets."
+                        if include_secrets
+                        else f"Omitted {len(omitted)} secret key(s)."
+                    ),
+                )
+                return
+            if valid_import:
+                document = read_configuration_archive(Path(parameters[1]))
+                preview = await self.service_runtime.config_import_preview(document)
+                apply = len(parameters) == 3 and parameters[2].casefold() == "confirm"
+                if len(parameters) == 3 and not apply:
+                    raise ValueError("confirm an import with: /config import PATH confirm")
+                if not apply:
+                    self.add_notice(
+                        alias,
+                        f"Import preview: {preview.get('change_count', 0)} change(s), "
+                        f"{len(preview.get('pending_profiles', []))} pending UI profile(s), "
+                        f"{len(preview.get('missing_secret_keys', []))} missing secret(s). "
+                        f"Required action: {preview.get('restart', 'live')}. "
+                        f"Apply with: /config import {shlex.quote(parameters[1])} confirm",
+                    )
+                    return
+                result = await self.service_runtime.config_import_apply(
+                    document,
+                    expected_revision=int(preview["base_revision"]),
+                    expected_digest=str(preview["digest"]),
+                    confirm=True,
+                )
+                self.add_notice(
+                    alias,
+                    f"Configuration imported at revision {result.get('revision')}; "
+                    f"pending UI profiles: {len(result.get('pending_profiles', []))}."
+                    + (" Gateway is restarting." if result.get("restarting") else ""),
+                )
+                return
+            if valid_import_status:
+                status = await self.service_runtime.config_import_status()
+                self.add_notice(
+                    alias,
+                    f"Import status — revision {status.get('revision')}; rollback "
+                    f"{'available' if status.get('rollback_safe') else 'unavailable'}; "
+                    f"pending UI profiles: {len(status.get('pending_profiles', []))}.",
+                )
+                return
+            if valid_rollback_import:
+                status = await self.service_runtime.config_import_status()
+                confirm = len(parameters) == 2 and parameters[1].casefold() == "confirm"
+                result = await self.service_runtime.config_import_rollback(
+                    expected_revision=int(status["revision"]), confirm=confirm
+                )
+                if not confirm:
+                    self.add_notice(
+                        alias,
+                        "Roll back the latest import with: /config rollback-import confirm",
+                    )
+                else:
+                    self.add_notice(
+                        alias, f"Import rolled back at revision {result.get('revision')}."
+                    )
+                return
+            if valid_ui_profiles:
+                result = await self.service_runtime.config_ui_profiles()
+                lines = [f"UI configuration profiles — revision {result.get('revision')}"]
+                for profile in result.get("profiles", []):
+                    if isinstance(profile, dict):
+                        state = (
+                            "pending"
+                            if profile.get("pending")
+                            else "claimed"
+                            if profile.get("claimed")
+                            else "dead"
+                        )
+                        lines.append(
+                            f"  {profile.get('display_name') or '(unnamed)'} · "
+                            f"{profile.get('profile_id')} · "
+                            f"{profile.get('settings')} settings · {state}"
+                        )
+                self.add_notice(alias, "\n".join(lines))
+                return
+            if valid_claim_profile:
+                confirm = len(parameters) == 3 and parameters[2].casefold() == "confirm"
+                result = await self.service_runtime.config_ui_profile_claim(
+                    parameters[1], confirm=confirm
+                )
+                self.add_notice(
+                    alias,
+                    (
+                        f"UI settings restored from {result.get('display_name') or parameters[1]}."
+                        if confirm
+                        else f"Confirm with: /config claim-ui-profile {parameters[1]} confirm"
+                    ),
+                )
+                return
+            if valid_remove_profile:
+                confirm = len(parameters) == 3 and parameters[2].casefold() == "confirm"
+                profiles = await self.service_runtime.config_ui_profiles()
+                result = await self.service_runtime.config_ui_profile_remove(
+                    parameters[1],
+                    expected_revision=int(profiles["revision"]),
+                    confirm=confirm,
+                )
+                self.add_notice(
+                    alias,
+                    (
+                        f"Removed UI configuration profile {parameters[1]}."
+                        if confirm
+                        else f"Confirm with: /config remove-ui-profile {parameters[1]} confirm"
+                    ),
+                )
                 return
             if valid_migration_status:
                 status = await self.service_runtime.config_migration_status()
@@ -6278,9 +6394,7 @@ class TfrTui:
                 ]
                 if problems:
                     lines.append(f"Could not import {len(problems)} settings:")
-                    lines.extend(
-                        f"  {item.get('key')}: {item.get('reason')}" for item in problems
-                    )
+                    lines.extend(f"  {item.get('key')}: {item.get('reason')}" for item in problems)
                 lines.extend(
                     [
                         f"Required action: "
@@ -6621,14 +6735,8 @@ class TfrTui:
                         entry.as_dict()
                         for entry in self.plugins.diagnostics.entries()
                         if query_category is None
-                        or (
-                            query_category == "plugins"
-                            and entry.component in {"config", "plugin"}
-                        )
-                        or (
-                            query_category == "presentations"
-                            and entry.component == "presentation"
-                        )
+                        or (query_category == "plugins" and entry.component in {"config", "plugin"})
+                        or (query_category == "presentations" and entry.component == "presentation")
                     ),
                 ]
             entries.sort(key=lambda entry: str(entry.get("timestamp", "")))
@@ -6652,8 +6760,10 @@ class TfrTui:
             return
         report = category in {"report", "export"}
         incident_id = str(uuid4()) if report else None
-        heading = f"Runtime diagnostics — incident {incident_id}" if incident_id else (
-            f"Runtime diagnostics — {category}" if category else "Runtime diagnostics"
+        heading = (
+            f"Runtime diagnostics — incident {incident_id}"
+            if incident_id
+            else (f"Runtime diagnostics — {category}" if category else "Runtime diagnostics")
         )
         lines = [heading]
         if local_status:

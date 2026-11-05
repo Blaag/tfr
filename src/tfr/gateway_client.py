@@ -96,11 +96,7 @@ def _local_plugin_bootstrap(path: Path) -> dict[str, object]:
     if not isinstance(value, dict) or not isinstance(value.get("plugins"), dict):
         return {}
     plugins = value["plugins"]
-    retained = {
-        key: plugins[key]
-        for key in ("sources", "state_directory")
-        if key in plugins
-    }
+    retained = {key: plugins[key] for key in ("sources", "state_directory") if key in plugins}
     return {"plugins": retained} if retained else {}
 
 
@@ -181,11 +177,7 @@ def _recover_local_plugin_bootstrap(main: Path, marker: Path) -> bool:
     except (OSError, json.JSONDecodeError, AttributeError):
         records = []
     record = next(
-        (
-            item
-            for item in records
-            if isinstance(item, dict) and item.get("source") == str(main)
-        ),
+        (item for item in records if isinstance(item, dict) and item.get("source") == str(main)),
         None,
     )
     if record is None:
@@ -193,15 +185,12 @@ def _recover_local_plugin_bootstrap(main: Path, marker: Path) -> bool:
             (
                 item
                 for item in records
-                if isinstance(item, dict)
-                and Path(str(item.get("source", ""))).name == main.name
+                if isinstance(item, dict) and Path(str(item.get("source", ""))).name == main.name
             ),
             None,
         )
     if record is not None:
-        candidates.append(
-            (Path(str(record.get("backup", ""))), str(record.get("sha256", "")))
-        )
+        candidates.append((Path(str(record.get("backup", ""))), str(record.get("sha256", ""))))
     backup_root = main.parent / ".tfr-migration-backups"
     with contextlib.suppress(OSError):
         candidates.extend(
@@ -508,6 +497,7 @@ class GatewayClient:
         effective_configuration: dict[str, object] | None = None,
         configuration_requirements: dict[str, str] | None = None,
         new_plugins: tuple[str, ...] = (),
+        pending_configuration_profiles: tuple[dict[str, object], ...] = (),
     ) -> None:
         self.reader = reader
         self.writer = writer
@@ -532,6 +522,7 @@ class GatewayClient:
         self.effective_configuration = effective_configuration or {}
         self.configuration_requirements = configuration_requirements or {}
         self.new_plugins = new_plugins
+        self.pending_configuration_profiles = pending_configuration_profiles
         self.command_bus = RemoteCommandBus(self)
         self.agents: RemoteAgentRuntime | None = None
         self._write_lock = asyncio.Lock()
@@ -760,6 +751,14 @@ class GatewayClient:
             configuration_revision, effective_configuration, configuration_requirements = (
                 cls._configuration(hello.get("configuration"))
             )
+            raw_pending_profiles = hello.get("pending_configuration_profiles", [])
+            if not isinstance(raw_pending_profiles, list) or not all(
+                isinstance(item, dict)
+                and isinstance(item.get("profile_id"), str)
+                and isinstance(item.get("display_name"), str)
+                for item in raw_pending_profiles
+            ):
+                raise GatewayProtocolError("Gateway pending UI configuration profiles are invalid")
             event_bus = EventBus()
             client = cls(
                 reader=reader,
@@ -789,6 +788,7 @@ class GatewayClient:
                 effective_configuration=effective_configuration,
                 configuration_requirements=configuration_requirements,
                 new_plugins=tuple(raw_new_plugins),
+                pending_configuration_profiles=tuple(raw_pending_profiles),
             )
             try:
                 client.sessions.extend(
@@ -975,8 +975,7 @@ class GatewayClient:
             )
             incompatible_reset = replacement.history_reset and not allow_generation_reset
             incompatible_sessions = session_identity_changed and not (
-                allow_generation_reset
-                and current_sessions.keys() == replacement_sessions.keys()
+                allow_generation_reset and current_sessions.keys() == replacement_sessions.keys()
             )
             if (
                 incompatible_reset
@@ -1022,6 +1021,7 @@ class GatewayClient:
             self.configuration_revision = replacement.configuration_revision
             self.effective_configuration = replacement.effective_configuration
             self.configuration_requirements = replacement.configuration_requirements
+            self.pending_configuration_profiles = replacement.pending_configuration_profiles
             self._write_lock = asyncio.Lock()
             await replacement.event_bus.close()
             if self.connect_handler is not None:
@@ -1337,6 +1337,126 @@ class GatewayClient:
         )
         if result is None or not isinstance(result.get("requires_confirmation"), bool):
             raise GatewayProtocolError("Gateway returned an invalid configuration undo")
+        return result
+
+    async def config_export(
+        self, *, include_secrets: bool = False, confirm: bool = False
+    ) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {
+                "type": "config_export",
+                "request_id": str(request_id),
+                "include_secrets": include_secrets,
+                "confirm": confirm,
+            },
+            request_id,
+        )
+        document = result.get("document") if result else None
+        if not isinstance(document, dict):
+            raise GatewayProtocolError("Gateway returned an invalid configuration export")
+        return document
+
+    async def config_import_preview(self, document: dict[str, object]) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "config_import_preview", "request_id": str(request_id), "document": document},
+            request_id,
+        )
+        if result is None or not isinstance(result.get("digest"), str):
+            raise GatewayProtocolError("Gateway returned an invalid configuration import preview")
+        return result
+
+    async def config_import_apply(
+        self,
+        document: dict[str, object],
+        *,
+        expected_revision: int,
+        expected_digest: str,
+        confirm: bool,
+    ) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {
+                "type": "config_import_apply",
+                "request_id": str(request_id),
+                "document": document,
+                "expected_revision": expected_revision,
+                "expected_digest": expected_digest,
+                "confirm": confirm,
+            },
+            request_id,
+        )
+        if result is None or result.get("applied") is not True:
+            raise GatewayProtocolError("Gateway returned an invalid configuration import result")
+        return result
+
+    async def config_import_status(self) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "config_import_status", "request_id": str(request_id)}, request_id
+        )
+        if result is None or not isinstance(result.get("revision"), int):
+            raise GatewayProtocolError("Gateway returned invalid configuration import status")
+        return result
+
+    async def config_import_rollback(
+        self, *, expected_revision: int, confirm: bool
+    ) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {
+                "type": "config_import_rollback",
+                "request_id": str(request_id),
+                "expected_revision": expected_revision,
+                "confirm": confirm,
+            },
+            request_id,
+        )
+        if result is None or not isinstance(result, dict):
+            raise GatewayProtocolError("Gateway returned invalid configuration import rollback")
+        return result
+
+    async def config_ui_profiles(self) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "config_ui_profiles", "request_id": str(request_id)}, request_id
+        )
+        if result is None or not isinstance(result.get("profiles"), list):
+            raise GatewayProtocolError("Gateway returned invalid UI configuration profiles")
+        return result
+
+    async def config_ui_profile_claim(self, profile_id: str, *, confirm: bool) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {
+                "type": "config_ui_profile_claim",
+                "request_id": str(request_id),
+                "profile_id": profile_id,
+                "confirm": confirm,
+            },
+            request_id,
+        )
+        if result is None:
+            raise GatewayProtocolError("Gateway returned invalid UI profile claim")
+        return result
+
+    async def config_ui_profile_remove(
+        self, profile_id: str, *, expected_revision: int, confirm: bool
+    ) -> dict[str, object]:
+        request_id = uuid4()
+        result = await self._request(
+            {
+                "type": "config_ui_profile_remove",
+                "request_id": str(request_id),
+                "profile_id": profile_id,
+                "expected_revision": expected_revision,
+                "confirm": confirm,
+            },
+            request_id,
+        )
+        if result is None:
+            raise GatewayProtocolError("Gateway returned invalid UI profile removal")
         return result
 
     async def config_migrate(
@@ -2178,6 +2298,79 @@ class GatewayUiRuntime:
             confirm=confirm,
         )
 
+    async def config_export(
+        self, *, include_secrets: bool = False, confirm: bool = False
+    ) -> dict[str, object]:
+        return await self.client.config_export(include_secrets=include_secrets, confirm=confirm)
+
+    async def config_import_preview(self, document: dict[str, object]) -> dict[str, object]:
+        return await self.client.config_import_preview(document)
+
+    async def config_import_apply(
+        self,
+        document: dict[str, object],
+        *,
+        expected_revision: int,
+        expected_digest: str,
+        confirm: bool,
+    ) -> dict[str, object]:
+        self._arm_restart("configuration_import")
+        try:
+            result = await self.client.config_import_apply(
+                document,
+                expected_revision=expected_revision,
+                expected_digest=expected_digest,
+                confirm=confirm,
+            )
+        except BaseException:
+            self._restart_expected = False
+            self._restart_phase = "idle"
+            raise
+        if result.get("restarting") is not True:
+            self._restart_expected = False
+            self._restart_phase = "idle"
+        else:
+            self._restart_phase = "acknowledged"
+            self._start_restart_watchdog()
+        return result
+
+    async def config_import_status(self) -> dict[str, object]:
+        return await self.client.config_import_status()
+
+    async def config_import_rollback(
+        self, *, expected_revision: int, confirm: bool
+    ) -> dict[str, object]:
+        if confirm:
+            self._arm_restart("configuration_import_rollback")
+        try:
+            result = await self.client.config_import_rollback(
+                expected_revision=expected_revision, confirm=confirm
+            )
+        except BaseException:
+            self._restart_expected = False
+            self._restart_phase = "idle"
+            raise
+        if result.get("restarting") is True:
+            self._restart_phase = "acknowledged"
+            self._start_restart_watchdog()
+        else:
+            self._restart_expected = False
+            self._restart_phase = "idle"
+        return result
+
+    async def config_ui_profiles(self) -> dict[str, object]:
+        return await self.client.config_ui_profiles()
+
+    async def config_ui_profile_claim(self, profile_id: str, *, confirm: bool) -> dict[str, object]:
+        return await self.client.config_ui_profile_claim(profile_id, confirm=confirm)
+
+    async def config_ui_profile_remove(
+        self, profile_id: str, *, expected_revision: int, confirm: bool
+    ) -> dict[str, object]:
+        return await self.client.config_ui_profile_remove(
+            profile_id, expected_revision=expected_revision, confirm=confirm
+        )
+
     async def config_migrate(self) -> dict[str, object]:
         values = getattr(self.client, "migration_values", {})
         sources = getattr(self.client, "migration_source_files", ())
@@ -2276,9 +2469,7 @@ class GatewayUiRuntime:
             self._last_connection_error = str(exc)
             self._record_connection("warning", "remote_diagnostics_unavailable", str(exc))
             return [*local, self.connection_diagnostics.entries()[-1].as_dict()]
-        return sorted(
-            [*remote, *local], key=lambda entry: str(entry.get("timestamp", ""))
-        )[-100:]
+        return sorted([*remote, *local], key=lambda entry: str(entry.get("timestamp", "")))[-100:]
 
     async def clear_diagnostics(self) -> None:
         self.connection_diagnostics.clear()
@@ -2291,9 +2482,7 @@ class GatewayUiRuntime:
         return {
             "connected": self._gateway_connected,
             "gateway_id": str(self.client.gateway_id),
-            "gateway_build": (
-                gateway_build.as_dict() if gateway_build is not None else None
-            ),
+            "gateway_build": (gateway_build.as_dict() if gateway_build is not None else None),
             "configuration_revision": getattr(self.client, "configuration_revision", None),
             "restart_phase": self._restart_phase,
             "restart_requested_at": (
@@ -2575,9 +2764,7 @@ class GatewayUiRuntime:
                 + ". Use /reload to rebuild the UI."
             )
             self.notify(failure)
-            self._record_connection(
-                "error", "restart_failed", failure, operation="gateway_restart"
-            )
+            self._record_connection("error", "restart_failed", failure, operation="gateway_restart")
 
     async def _recover_after_update(self) -> None:
         await self._set_gateway_connected(False)
@@ -2774,11 +2961,10 @@ async def run_gateway_ui(
     desired_ui_name: str | None = None,
 ) -> int:
     from tfr.tui import TfrTui
+
     local_configuration = configuration
     local_sources = tuple(
-        str(source)
-        for source in (local_configuration.main_path,)
-        if source.is_file()
+        str(source) for source in (local_configuration.main_path,) if source.is_file()
     )
     migration_marker = local_configuration.main_path.with_name(
         f"{local_configuration.main_path.name}.tfr-migrated"
@@ -3074,6 +3260,13 @@ async def run_gateway_ui(
             "New plugins available: "
             + ", ".join(client.new_plugins)
             + ". Use /plugins available or /config to enable them.",
+        )
+    for profile in getattr(client, "pending_configuration_profiles", ()):
+        tui.queue_startup_notice(
+            tui.active_alias,
+            f"A configuration backup contains settings for {profile['display_name']}. "
+            f"Review with /config ui-profiles and restore with "
+            f"/config claim-ui-profile {profile['profile_id']} confirm.",
         )
     speaker_effects_warning = (
         remote_speaker_effects_warning(

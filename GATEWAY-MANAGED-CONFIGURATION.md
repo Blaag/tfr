@@ -491,4 +491,17 @@ a person without JSON, registry-key, scope, or target knowledge.
 - 2026-10-29: `/gateway restart` is an immediate owner/admin command with no redundant confirmation. The Gateway acknowledges before restarting its application, preserves world connections in the connector process, and lets attached UIs reconnect automatically.
 - 2026-10-30: Migration apply automatically requests its required Gateway restart after acknowledging the atomic commit. Incremental Speaker Effects recovery keeps managed speakers authoritative, appends missing legacy speakers by case-insensitive name, and removes the unsupported legacy `page` message kind. New saves accept only Say and Pose.
 - 2026-10-30: Settings dialog theme mapping chooses the highest-contrast background among trusted palette roles when a theme assigns identical or near-identical text and surface colors, fixing default-theme invisible labels without weakening reverse-bold keyboard focus.
+- 2026-11-04: Portable configuration archives capture shared, Gateway, UI-type,
+  named-UI, world, plugin, and plugin-source settings. Normal exports list and omit
+  secrets; explicitly sensitive private exports resolve secret references to actual
+  values, while import stages those values back into Gateway-owned private files.
+  Import validates and previews a full snapshot replacement, creates a dedicated
+  private pre-import backup, commits one audited revision, coordinates required
+  restart, and allows rollback only until a later mutation makes it unsafe.
+- 2026-11-04: Disaster recovery retains offline individual-UI settings as named
+  pending configuration profiles. Rebuilt UIs keep their new stable identities and
+  may explicitly claim a matching old profile after connecting. Profile inventory
+  distinguishes claimed, pending, and dead settings, and obsolete profiles can be
+  removed through a revision-checked audited mutation rather than accumulating
+  indefinitely.
 - 2026-10-28: The authenticated native TLS token is an owner credential and grants the same configuration administration available on the local Unix socket. Restricted PWA device credentials remain on their separate limited protocol and cannot use owner configuration mutations.
