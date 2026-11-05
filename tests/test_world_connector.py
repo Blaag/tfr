@@ -18,6 +18,7 @@ from tfr.events import Actor, ActorType, CommandRequest, Event
 from tfr.sessions import ConnectorSessionBridge, ConnectorWorldSession, SessionState
 from tfr.world_connector import (
     CONNECTOR_GRACE_SECONDS,
+    ActiveConnectorSocketError,
     ConnectorLease,
     FrameDecoder,
     ProtocolError,
@@ -27,12 +28,47 @@ from tfr.world_connector import (
     connect_or_spawn_connector,
     connector_build_id,
     encode_message,
+    remove_stale_connector_socket,
     request_gateway_restart,
 )
 
 
 def test_connector_grace_period_is_thirty_minutes() -> None:
     assert CONNECTOR_GRACE_SECONDS == 30 * 60
+
+
+def test_stale_connector_socket_is_removed_safely(tmp_path: Path) -> None:
+    path = _socket_path(tmp_path).with_suffix(".worlds")
+    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale.bind(str(path))
+    stale.close()
+
+    assert remove_stale_connector_socket(path) is True
+    assert not path.exists()
+
+
+def test_connector_socket_cleanup_refuses_active_listener(tmp_path: Path) -> None:
+    path = _socket_path(tmp_path).with_suffix(".worlds")
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(path))
+    listener.listen(1)
+    try:
+        with pytest.raises(ActiveConnectorSocketError, match="active connector"):
+            remove_stale_connector_socket(path)
+        assert path.exists()
+    finally:
+        listener.close()
+        path.unlink()
+
+
+def test_connector_socket_cleanup_refuses_non_socket_path(tmp_path: Path) -> None:
+    path = tmp_path / "gateway.sock.worlds"
+    path.write_text("do not delete", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="not a socket"):
+        remove_stale_connector_socket(path)
+
+    assert path.read_text(encoding="utf-8") == "do not delete"
 
 
 def test_lease_stays_alive_while_attached() -> None:
@@ -553,9 +589,7 @@ async def test_gateway_session_objects_can_be_replaced_without_world_reconnect(
     commands: asyncio.Queue[bytes] = asyncio.Queue()
     world_writers: list[asyncio.StreamWriter] = []
 
-    async def accept_world(
-        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
+    async def accept_world(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         nonlocal connections
         connections += 1
         world_writers.append(writer)
@@ -631,9 +665,13 @@ async def test_gateway_session_objects_can_be_replaced_without_world_reconnect(
         await asyncio.wait_for(first_bridge.close(preserve_worlds=True), timeout=1)
         del first_client, first_bus
 
-        second_client, second_bridge, second_session, second_bus, second_sink = (
-            await gateway_session()
-        )
+        (
+            second_client,
+            second_bridge,
+            second_session,
+            second_bus,
+            second_sink,
+        ) = await gateway_session()
         try:
             for _attempt in range(100):
                 if second_session.state is SessionState.CONNECTED:
@@ -665,9 +703,7 @@ async def test_gateway_session_objects_can_be_replaced_without_world_reconnect(
             )
         finally:
             await asyncio.wait_for(second_session.stop(), timeout=1)
-            await asyncio.wait_for(
-                second_bridge.close(preserve_worlds=False), timeout=1
-            )
+            await asyncio.wait_for(second_bridge.close(preserve_worlds=False), timeout=1)
             del second_client
     finally:
         await asyncio.wait_for(connector.stop(), timeout=1)
@@ -705,9 +741,7 @@ async def test_world_socket_survives_gateway_client_replacement(tmp_path: Path) 
     world_reader: asyncio.StreamReader | None = None
     received: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
 
-    async def accept_world(
-        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
+    async def accept_world(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         nonlocal connections, world_reader
         connections += 1
         world_reader = reader
@@ -767,9 +801,7 @@ async def test_idle_command_continues_while_gateway_is_detached(tmp_path: Path) 
 
     received: asyncio.Queue[bytes] = asyncio.Queue()
 
-    async def accept_world(
-        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
+    async def accept_world(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             while line := await reader.readline():
                 await received.put(line)
@@ -819,9 +851,7 @@ async def test_connector_reconnect_replays_configured_login_and_startup_commands
     received: asyncio.Queue[bytes] = asyncio.Queue()
     connections = 0
 
-    async def accept_world(
-        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
+    async def accept_world(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         nonlocal connections
         connections += 1
         try:
@@ -878,9 +908,7 @@ async def test_human_quit_does_not_reconnect_world(tmp_path: Path) -> None:
 
     connections = 0
 
-    async def accept_world(
-        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
+    async def accept_world(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         nonlocal connections
         connections += 1
         await reader.readline()
@@ -964,9 +992,7 @@ async def test_tfr_gateway_supervisor_restarts_app_without_world_reconnect(
     connections = 0
     connected = asyncio.Event()
 
-    async def accept_world(
-        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
+    async def accept_world(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         nonlocal connections
         connections += 1
         connected.set()
@@ -995,9 +1021,7 @@ async def test_tfr_gateway_supervisor_restarts_app_without_world_reconnect(
         ),
         encoding="utf-8",
     )
-    (tmp_path / "agents.jsonc").write_text(
-        '{"schema_version":1}', encoding="utf-8"
-    )
+    (tmp_path / "agents.jsonc").write_text('{"schema_version":1}', encoding="utf-8")
     config.write_text(
         json.dumps(
             {
@@ -1017,7 +1041,11 @@ async def test_tfr_gateway_supervisor_restarts_app_without_world_reconnect(
     stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     stale.bind(str(gateway_socket))
     stale.close()
+    stale_connector = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale_connector.bind(str(connector_socket))
+    stale_connector.close()
     assert gateway_socket.exists()
+    assert connector_socket.exists()
     process = subprocess.Popen(
         [
             sys.executable,
@@ -1092,5 +1120,6 @@ async def test_tfr_gateway_supervisor_restarts_app_without_world_reconnect(
         await asyncio.wait_for(world_server.wait_closed(), timeout=2)
         assert process.returncode == 0
     assert "removed stale Gateway socket" in error
+    assert "removed stale world connector socket" in error
     assert "Gateway application restart requested" in error
     assert "exited with status 75; restarting" in error
