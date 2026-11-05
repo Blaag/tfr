@@ -110,6 +110,12 @@ elif args and args[0] == "version" and len(args) > 1:
     )
     Path("uv.lock").write_text(f'version = "{version}"\n', encoding="utf-8")
 elif args and args[0] == "build":
+    state = Path(os.environ["TFR_FAKE_STATE"])
+    calls = state / "build-calls"
+    count = int(calls.read_text() or "0") if calls.exists() else 0
+    calls.write_text(str(count + 1), encoding="utf-8")
+    if os.environ.get("TFR_FAKE_FAIL_VERSION_BUILD") == "1" and count >= 1:
+        raise SystemExit(9)
     target = Path(args[args.index("--out-dir") + 1])
     target.mkdir(parents=True, exist_ok=True)
     (target / "fake.whl").touch()
@@ -617,6 +623,45 @@ def test_release_end_to_end_rerun_continues_after_merged_pr_and_missed_tag_promp
     assert returncode == 0, output
     assert "Detected: version PR merged; candidate tag absent" in output
     assert "Test this candidate in the candidate channel" in output
+
+
+def test_release_end_to_end_recovers_incomplete_local_version_preparation(
+    tmp_path: Path,
+) -> None:
+    repository, environment = create_fixture(tmp_path)
+    feature = git(repository, "rev-parse", "feature")
+    git(repository, "switch", "--quiet", "main")
+    git(repository, "cherry-pick", "--quiet", feature)
+    git(repository, "push", "--quiet", "origin", "main")
+    release_base = git(repository, "rev-parse", "HEAD")
+    git(repository, "switch", "--quiet", "-c", "release/v0.1.1")
+    (repository / "pyproject.toml").write_text(
+        '[project]\nname = "tfr"\nversion = "0.1.1"\n', encoding="utf-8"
+    )
+    (repository / "uv.lock").write_text('version = "0.1.1"\n', encoding="utf-8")
+
+    returncode, output = run_with_confirmations(
+        repository, environment, ["v0.1.1", "v0.1.1"]
+    )
+
+    assert returncode == 0, output
+    assert "incomplete local v0.1.1 version preparation" in output
+    assert release_base in git(repository, "log", "--all", "--format=%H")
+    assert git(repository, "status", "--porcelain") == ""
+
+
+def test_release_end_to_end_cleans_failed_local_version_preparation(tmp_path: Path) -> None:
+    repository, environment = create_fixture(tmp_path)
+    environment["TFR_FAKE_FAIL_VERSION_BUILD"] = "1"
+
+    returncode, output = run_with_confirmations(repository, environment, [])
+
+    assert returncode == 9, output
+    assert "Cleaning incomplete local v0.1.1 version preparation" in output
+    assert git(repository, "branch", "--show-current") == "main"
+    assert git(repository, "status", "--porcelain") == ""
+    branches = git(repository, "branch", "--format=%(refname:short)").splitlines()
+    assert "release/v0.1.1" not in branches
 
 
 def test_release_end_to_end_rerun_continues_after_candidate_tag_push(

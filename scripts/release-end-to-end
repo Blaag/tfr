@@ -50,6 +50,43 @@ assert_clean_checkout() {
     done
 }
 
+recover_partial_version_preparation() {
+    current=$(git branch --show-current)
+    [ "$current" = "$release_branch" ] || return 0
+    [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || return 0
+    changed=$(git status --porcelain=v1 --untracked-files=all | cut -c4- | sort)
+    [ "$changed" = "pyproject.toml
+uv.lock" ] || return 0
+    [ "$(uv version --short)" = "$version" ] || return 0
+    uv lock --check >/dev/null 2>&1 || return 0
+
+    printf '\nDetected: incomplete local %s version preparation; recovering automatically.\n' \
+        "$tag"
+    git restore --staged --worktree -- pyproject.toml uv.lock
+    git switch main
+    git merge --ff-only origin/main
+    git branch -D "$release_branch"
+}
+
+cleanup_partial_version_preparation() {
+    [ "${version_preparation_pending:-false}" = true ] || return 0
+    [ "$(git branch --show-current 2>/dev/null || true)" = "$release_branch" ] || return 0
+    [ "$(git rev-parse HEAD 2>/dev/null || true)" = "${release_base:-}" ] || return 0
+    printf '\nCleaning incomplete local %s version preparation.\n' "$tag" >&2
+    git restore --staged --worktree -- pyproject.toml uv.lock >/dev/null 2>&1 || true
+    git switch main >/dev/null 2>&1 || true
+    git merge --ff-only origin/main >/dev/null 2>&1 || true
+    git branch -D "$release_branch" >/dev/null 2>&1 || true
+}
+
+cleanup() {
+    status=$?
+    trap - 0 HUP INT TERM
+    cleanup_partial_version_preparation
+    rm -rf "$temporary_directory"
+    exit "$status"
+}
+
 run_local_checks() {
     printf '\n==> Running local CI and security checks\n'
     uv sync --frozen
@@ -476,8 +513,13 @@ git_root=$(git -C "$repository" rev-parse --show-toplevel 2>/dev/null) || \
 cd "$repository"
 
 temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/tfr-release.XXXXXX")
-trap 'rm -rf "$temporary_directory"' 0 HUP INT TERM
+version_preparation_pending=false
+release_base=
+trap cleanup 0
+trap 'exit 130' HUP INT TERM
 
+git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+recover_partial_version_preparation
 assert_clean_checkout
 gh auth status >/dev/null
 actual_repository=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
@@ -492,7 +534,6 @@ fi
 
 current_branch=$(git branch --show-current)
 [ -n "$current_branch" ] || fail "detached HEAD cannot be released"
-git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
 if [ "$current_branch" = "$release_branch" ]; then
     git switch main
     current_branch=main
@@ -618,6 +659,8 @@ if [ "$current_branch" != main ]; then
 fi
 
 git switch --create "$release_branch" --track "origin/main"
+release_base=$(git rev-parse HEAD)
+version_preparation_pending=true
 
 printf '\n==> Preparing %s\n' "$tag"
 uv version "$version" --no-sync
@@ -637,6 +680,7 @@ run_local_checks
 git diff --check
 git add pyproject.toml uv.lock
 git commit -m "release: $tag"
+version_preparation_pending=false
 assert_clean_checkout
 release_head=$(git rev-parse HEAD)
 git push --set-upstream origin "$release_branch"
