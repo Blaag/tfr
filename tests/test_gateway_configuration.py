@@ -171,6 +171,42 @@ def test_batch_validates_and_commits_related_values_as_one_revision(tmp_path: Pa
     assert configuration.get("ui.show_nospoof_prefix", scope="shared") == (False, None)
 
 
+def test_batch_reset_skips_absent_related_values_but_commits_present_ones(tmp_path: Path) -> None:
+    configuration = store(tmp_path)
+    configuration.set(
+        "ui.notifications.enabled",
+        True,
+        scope="ui",
+        target="one",
+        expected_revision=0,
+        actor_ui_id="one",
+        actor_ui_name="One",
+    )
+
+    mutations = configuration.batch(
+        [
+            {
+                "operation": "reset",
+                "key": "ui.notifications.transport",
+                "scope": "ui",
+                "target": "one",
+            },
+            {
+                "operation": "reset",
+                "key": "ui.notifications.enabled",
+                "scope": "ui",
+                "target": "one",
+            },
+        ],
+        expected_revision=1,
+        actor_ui_id="one",
+        actor_ui_name="One",
+    )
+
+    assert [mutation.key for mutation in mutations] == ["ui.notifications.enabled"]
+    assert configuration.revision == 2
+
+
 def test_revision_conflict_prevents_lost_update(tmp_path: Path) -> None:
     configuration = store(tmp_path)
     configuration.set(

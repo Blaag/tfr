@@ -130,6 +130,62 @@
       "title": "ManagedSettingsConfig",
       "type": "object"
     },
+    "NotificationConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "any_activity": {
+          "default": false,
+          "title": "Any Activity",
+          "type": "boolean"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "mentions": {
+          "default": true,
+          "title": "Mentions",
+          "type": "boolean"
+        },
+        "pages": {
+          "default": true,
+          "title": "Pages",
+          "type": "boolean"
+        },
+        "preview": {
+          "default": "private",
+          "enum": [
+            "private",
+            "full"
+          ],
+          "title": "Preview",
+          "type": "string"
+        },
+        "transport": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "osc-9",
+            "bell",
+            "herdr"
+          ],
+          "title": "Transport",
+          "type": "string"
+        },
+        "worlds": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 256,
+          "title": "Worlds",
+          "type": "array"
+        }
+      },
+      "title": "NotificationConfig",
+      "type": "object"
+    },
     "PagerConfig": {
       "additionalProperties": false,
       "properties": {
@@ -615,6 +671,9 @@
           ],
           "title": "Mouse Mode",
           "type": "string"
+        },
+        "notifications": {
+          "$ref": "#/$defs/NotificationConfig"
         },
         "output_color": {
           "anyOf": [

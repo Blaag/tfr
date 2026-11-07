@@ -177,9 +177,7 @@ def collect_omitted_migration_keys(
     for key, value in values.items():
         if key == "plugins.config" and isinstance(value, dict):
             for plugin, plugin_value in value.items():
-                _collect_unknown_leaves(
-                    omitted, f"plugins.config.{plugin}", plugin_value, registry
-                )
+                _collect_unknown_leaves(omitted, f"plugins.config.{plugin}", plugin_value, registry)
         elif registry.get(key) is None:
             _collect_unknown_leaves(omitted, key, value, registry)
     return tuple(sorted(set(omitted)))
@@ -207,7 +205,7 @@ def _normalized_speaker_rules(value: object) -> list[dict[str, object]]:
         rule = copy.deepcopy(raw)
         kinds = rule.get("kinds")
         if isinstance(kinds, list):
-            supported = [kind for kind in kinds if kind in {"say", "pose"}]
+            supported = [kind for kind in kinds if kind in {"say", "pose", "page"}]
             if supported:
                 rule["kinds"] = supported
             else:
@@ -338,9 +336,7 @@ class GatewayMigrationStore:
                     }
                 )
                 continue
-            if scope == "secret" or any(
-                setting.sensitive for _proposal, setting in candidates
-            ):
+            if scope == "secret" or any(setting.sensitive for _proposal, setting in candidates):
                 skipped.append(
                     {"key": key, "reason": "secure storage could not be prepared automatically"}
                 )
@@ -362,9 +358,7 @@ class GatewayMigrationStore:
                         if _canonical(candidate[1].value) != _canonical(descriptor.default)
                     ]
                 )
-                non_default_values = {
-                    _canonical(candidate[1].value) for candidate in non_default
-                }
+                non_default_values = {_canonical(candidate[1].value) for candidate in non_default}
                 selected = non_default[0] if len(non_default_values) == 1 else None
                 choice = choices.get(key)
                 selected_choice = choice

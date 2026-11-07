@@ -809,6 +809,14 @@ Acceptance criteria:
   make `osascript` an explicit opt-in. Never silently execute an external
   notifier in automatic mode, and do not promise custom icons or click-to-world
   routing where the transport cannot support them.
+  - [x] macOS-first native phase: individual-UI policy and reset, strict
+    focus-out gating, one notification per unfocused interval, private/contextual
+    previews, OSC 9, BEL fallback, tmux wrapping, Herdr delivery, diagnostics,
+    and automated policy/transport/focus tests.
+  - [ ] Complete live Ghostty/tmux acceptance testing and add Linux notification
+    delivery after the PWA phase.
+  - [x] Cover singular pages and known Alien/MUSH multipage formats; retain a
+    permissive bounded fallback for other MU* page formats and add fixtures as found.
 - [ ] Add post-migration guidance for providers, agents, and other settings
   whose plaintext secrets are intentionally omitted. List each missing secret
   reference, explain `env:`, private `file:`, and macOS Keychain options, keep
