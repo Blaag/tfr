@@ -815,7 +815,8 @@ Acceptance criteria:
     and automated policy/transport/focus tests.
   - [ ] Complete live Ghostty/tmux acceptance testing and add Linux notification
     delivery after the PWA phase.
-  - [ ] Add multipage parser fixtures when representative server output is available.
+  - [x] Cover singular pages and known Alien/MUSH multipage formats; retain a
+    permissive bounded fallback for other MU* page formats and add fixtures as found.
 - [ ] Add post-migration guidance for providers, agents, and other settings
   whose plaintext secrets are intentionally omitted. List each missing secret
   reference, explain `env:`, private `file:`, and macOS Keychain options, keep

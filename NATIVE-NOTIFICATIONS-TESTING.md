@@ -50,5 +50,8 @@ activity`. With **Full**, it may identify the world and activity class, but neve
 sender names or message content. Redacted, outbound, and internal events must not
 notify.
 
-Multipage syntax remains a follow-up fixture once representative server output is
-available; singular `Alice pages: message` is covered now.
+Singular pages plus Alien (`Wedge pages (black Blood): message`) and MUSH
+(`To (Black, wedge), Blood pages: message`) multipages are covered. Unknown MU*
+page formats use deliberately permissive bounded speaker attribution so configured
+speaker effects are more likely to apply; additional representative formats should
+be added as fixtures when encountered.

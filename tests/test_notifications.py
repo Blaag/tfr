@@ -1,12 +1,25 @@
 from __future__ import annotations
 
+import os
+import pty
+import select
+import shlex
+import shutil
+import subprocess
+import time
 from dataclasses import replace
 from unittest.mock import Mock
 from uuid import UUID
 
+import pytest
+
 from tfr.config import NotificationConfig
 from tfr.events import Confidence, Direction, Event, EventKind, Provenance
-from tfr.notifications import NotificationPolicy, TerminalNotificationTransport
+from tfr.notifications import (
+    NotificationPolicy,
+    TerminalNotificationTransport,
+    _tmux_passthrough,
+)
 
 
 def event(
@@ -143,3 +156,55 @@ def test_herdr_focused_pane_suppression_is_not_reported_as_delivery(monkeypatch)
 
     assert transport.send("TFR has activity") is False
     assert transport.sent == 0
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is not installed")
+def test_tmux_live_passthrough_reaches_outer_terminal(tmp_path) -> None:
+    socket_name = f"tfr-notify-{os.getpid()}"
+    sequence = _tmux_passthrough("\x1b]9;TFR tmux test\x1b\\")
+    script = (
+        "import os,time; time.sleep(.2); "
+        f"os.write(1,bytes.fromhex('{sequence.encode().hex()}')); time.sleep(.2)"
+    )
+    command = f"python3 -c {shlex.quote(script)}"
+    subprocess.run(
+        ["tmux", "-L", socket_name, "-f", "/dev/null", "new-session", "-d", command],
+        check=True,
+    )
+    subprocess.run(
+        ["tmux", "-L", socket_name, "set-option", "-g", "allow-passthrough", "on"],
+        check=True,
+    )
+    terminal, slave = pty.openpty()
+    process = subprocess.Popen(
+        ["tmux", "-L", socket_name, "attach-session"],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        env={**os.environ, "TERM": "xterm-256color"},
+    )
+    os.close(slave)
+    output = bytearray()
+    deadline = time.monotonic() + 5
+    try:
+        while time.monotonic() < deadline and process.poll() is None:
+            ready, _, _ = select.select([terminal], [], [], 0.1)
+            if ready:
+                try:
+                    output.extend(os.read(terminal, 4096))
+                except OSError:
+                    break
+        process.wait(timeout=2)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        os.close(terminal)
+        subprocess.run(
+            ["tmux", "-L", socket_name, "kill-server"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    assert b"\x1b]9;TFR tmux test\x1b\\" in output
