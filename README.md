@@ -757,6 +757,29 @@ notifications` reports detected terminal, multiplexer, focus state, transport,
 delivery count, and errors. The menu includes a test and one atomic **Reset
 notifications to defaults** action.
 
+The recommended macOS setup is Ghostty with notifications allowed in **System
+Settings → Notifications → Ghostty**. For tmux 3.3 or newer, add this to
+`~/.tmux.conf` before starting tmux:
+
+```tmux
+set -g focus-events on
+set -g allow-passthrough on
+```
+
+A new tmux server reads that file automatically; `tmux source-file ~/.tmux.conf`
+is needed only to update an already-running server. TFR wraps OSC 9 for tmux,
+so the outer Ghostty instance owns the macOS notification. With SSH or mosh,
+delivery still happens on the local terminal when every intermediate layer
+passes OSC 9 and focus reporting; use `/diagnostics notifications` to verify the
+detected path and force the per-UI transport to `osc-9` if remote environment
+detection cannot identify Ghostty.
+
+Apple Terminal and Alacritty do not receive direct macOS notifications from
+TFR. Automatic mode sends BEL, whose result depends on that terminal profile:
+it may sound, flash, mark a tab or Dock icon, or do nothing. TFR never invokes
+`osascript` or another system notifier. See `NATIVE-NOTIFICATIONS-TESTING.md`
+for configuration, behavior, and acceptance tests.
+
 Structured plugin settings use trusted declarative forms. For example, open
 `Plugin: Speaker Effects` to add, edit, reorder, delete, and preview speaker
 rules with color, effect-specific, world, and message-kind controls. Saving

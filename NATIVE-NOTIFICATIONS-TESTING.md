@@ -1,5 +1,45 @@
 # Native Notification Testing
 
+## Expected behavior
+
+Notifications are individual-UI settings under `/config` → **Notifications**.
+They are disabled by default. TFR sends nothing until the terminal reports that
+the TFR surface is unfocused, then sends at most one notification until focus
+returns. Activity in another world while TFR remains focused never produces a
+desktop notification. **Private** preview says only `TFR has activity`;
+**Full** identifies the world and activity class but never includes chat text or
+sender names.
+
+Triggers can be enabled independently for all activity, selected worlds,
+mentions of that world's configured character, and pages. The menu provides a
+transport test and an atomic **Reset to defaults** action.
+
+## Recommended macOS setup
+
+Use Ghostty and enable it under **System Settings → Notifications → Ghostty**.
+TFR's `auto` transport chooses OSC 9 for detected Ghostty/iTerm2/Kitty/WezTerm/
+Warp sessions. The terminal—not TFR—posts the macOS notification.
+
+Apple Terminal and Alacritty receive BEL in automatic mode. Depending on the
+terminal profile this may sound, flash, mark a tab/Dock icon, or do nothing. It
+is not expected to create a Notification Center banner. TFR deliberately has no
+`osascript` or direct macOS-notification fallback.
+
+Example owner CLI configuration for a named UI:
+
+```bash
+tfr config set \
+  ui.notifications.enabled=true \
+  ui.notifications.transport=auto \
+  --ui "Office Mac · Terminal" --apply
+
+tfr config set ui.notifications.worlds='["alien","mush"]' \
+  --ui "Office Mac · Terminal" --apply
+
+tfr config set ui.notifications.enabled=false \
+  --ui "Office Mac · Terminal" --apply
+```
+
 Automated coverage verifies focus parsing, one-notification-per-unfocused-period,
 policy matching, privacy, OSC 9 encoding, tmux wrapping, Herdr invocation,
 configuration reset, diagnostics, and singular-page speaker effects.
@@ -28,7 +68,15 @@ set -g focus-events on
 set -g allow-passthrough on
 ```
 
+A new tmux server loads `~/.tmux.conf` automatically. Run `tmux source-file
+~/.tmux.conf` only after editing the file while a server is already running.
 Repeat the direct matrix inside tmux. Diagnostics must report `multiplexer=tmux`.
+
+For Ghostty → mosh/SSH → tmux → TFR, both OSC 9 output and focus reports must
+survive every layer. If remote environment variables do not identify Ghostty,
+set this UI's transport to **OSC 9** explicitly. Mosh support varies by version,
+so verify with **Send test notification**, then verify real focus gating by
+switching local Ghostty tabs/apps and checking `/diagnostics notifications`.
 
 ## Herdr
 
@@ -40,8 +88,10 @@ delivery = "terminal"
 ```
 
 Run TFR in a Herdr pane and repeat the focus matrix. Diagnostics must report
-`multiplexer=herdr` and `resolved=herdr`. Switching away from the TFR pane must
-produce a focus-out diagnostic before any notification is eligible.
+`multiplexer=herdr` and `resolved=herdr`. Herdr owns pane and outer-terminal
+focus; its JSON response tells TFR whether it actually showed or suppressed the
+notification. Keyboard input in the TFR pane starts a fresh future notification
+interval.
 
 ## Privacy
 
