@@ -43,9 +43,7 @@ def submit(
             base_revision=migration.configuration.revision,
             settings=settings,
             source_files=(str(source),),
-            omitted_keys=collect_omitted_migration_keys(
-                values, core_configuration_registry()
-            ),
+            omitted_keys=collect_omitted_migration_keys(values, core_configuration_registry()),
         )
     )
 
@@ -98,9 +96,7 @@ def test_v067_public_plugin_configuration_migrates_losslessly(tmp_path: Path) ->
         agents=AgentsConfig(),
     )
     registry = core_configuration_registry()
-    register_legacy_plugin_config_descriptors(
-        {"plugins.config": plugin_config}, registry
-    )
+    register_legacy_plugin_config_descriptors({"plugins.config": plugin_config}, registry)
     values = _legacy_migration_values(
         bundle  # type: ignore[arg-type]
     )
@@ -110,13 +106,11 @@ def test_v067_public_plugin_configuration_migrates_losslessly(tmp_path: Path) ->
     assert values["plugins.config.acid_rain"] == plugin_config["acid_rain"]
     assert values["plugins.config.film_burn"] == plugin_config["film_burn"]
     assert values["plugins.config.water"] == plugin_config["water"]
-    assert values["plugins.config.speaker_effects.rules"] == plugin_config["speaker_effects"][
-        "rules"
-    ]
+    assert (
+        values["plugins.config.speaker_effects.rules"] == plugin_config["speaker_effects"]["rules"]
+    )
     assert collect_omitted_migration_keys(values, registry) == ()
-    gateway_values = configuration_values_from_bundle(
-        bundle, registry
-    ).jsonc_proposal_values()
+    gateway_values = configuration_values_from_bundle(bundle, registry).jsonc_proposal_values()
     assert gateway_values["plugins.config"] == plugin_config
     assert collect_omitted_migration_keys(gateway_values, registry) == ()
 
@@ -267,7 +261,7 @@ def test_speaker_rule_merge_keeps_managed_speakers_and_adds_missing_legacy_rules
 
     assert [rule["speaker"] for rule in merged] == ["Bob", "Blood"]
     assert merged[0]["effect"] == "combo_godlike"
-    assert merged[0]["kinds"] == ["say", "pose"]
+    assert merged[0]["kinds"] == ["say", "pose", "page"]
 
 
 def test_bootstrap_metadata_is_silent_and_existing_secret_reference_is_preserved(
@@ -329,9 +323,7 @@ def test_incremental_migration_preserves_existing_managed_values(tmp_path: Path)
         values={
             "ui.spellcheck.enabled": True,
             "plugins.config": {
-                "speaker_effects": {
-                    "rules": [{"speaker": "Barnaby", "effect": "comet"}]
-                }
+                "speaker_effects": {"rules": [{"speaker": "Barnaby", "effect": "comet"}]}
             },
         },
         source=tmp_path / "config.jsonc",
@@ -339,9 +331,7 @@ def test_incremental_migration_preserves_existing_managed_values(tmp_path: Path)
 
     preview = migration.preview()
 
-    assert [item["key"] for item in preview["accepted"]] == [
-        "plugins.config.speaker_effects.rules"
-    ]
+    assert [item["key"] for item in preview["accepted"]] == ["plugins.config.speaker_effects.rules"]
     assert preview["restart"] == "live"
     assert {
         "key": "ui.spellcheck.enabled",
@@ -373,12 +363,15 @@ def test_gateway_import_keeps_per_ui_settings_out_of_ui_type_scope(tmp_path: Pat
         )
     )
 
-    assert migration.apply(
-        expected_revision=0,
-        choices=None,
-        actor_ui_id="migration",
-        actor_ui_name="Legacy one-time import",
-    ) == 1
+    assert (
+        migration.apply(
+            expected_revision=0,
+            choices=None,
+            actor_ui_id="migration",
+            actor_ui_name="Legacy one-time import",
+        )
+        == 1
+    )
     assert configuration.get("ui.animations_enabled", scope="ui", target=str(ui_id)) == (
         True,
         False,
@@ -583,12 +576,15 @@ def test_older_proposal_rebases_without_overriding_managed_values(tmp_path: Path
         actor_ui_name="Owner",
     )
 
-    assert migration.apply(
-        expected_revision=1,
-        choices=None,
-        actor_ui_id="admin",
-        actor_ui_name="Admin",
-    ) == 2
+    assert (
+        migration.apply(
+            expected_revision=1,
+            choices=None,
+            actor_ui_id="admin",
+            actor_ui_name="Admin",
+        )
+        == 2
+    )
 
     assert configuration.get("ui.spellcheck.enabled", scope="shared") == (True, True)
     assert configuration.get("logging.directory", scope="gateway") == (
@@ -642,18 +638,22 @@ def test_unreadable_legacy_backup_does_not_block_atomic_apply(
         values={"ui.spellcheck.enabled": True},
         source=source,
     )
+
     def fail_copy(source_path, target_path):
         del source_path, target_path
         raise PermissionError("not readable on the Gateway host")
 
     monkeypatch.setattr("tfr.gateway_migration.shutil.copyfile", fail_copy)
 
-    assert migration.apply(
-        expected_revision=0,
-        choices=None,
-        actor_ui_id="admin",
-        actor_ui_name="Admin",
-    ) == 1
+    assert (
+        migration.apply(
+            expected_revision=0,
+            choices=None,
+            actor_ui_id="admin",
+            actor_ui_name="Admin",
+        )
+        == 1
+    )
     assert migration.backups == ()
     assert configuration.get("ui.spellcheck.enabled", scope="shared") == (True, True)
 

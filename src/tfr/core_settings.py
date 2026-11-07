@@ -199,6 +199,36 @@ def core_setting_descriptors() -> tuple[SettingDescriptor, ...]:
         _setting("ui.show_nospoof_prefix", SettingType.BOOLEAN, False, SettingScope.SHARED, ALL_UI),
         _setting("ui.animations_enabled", SettingType.BOOLEAN, True, SettingScope.UI, NATIVE),
         _setting("ui.low_bandwidth", SettingType.BOOLEAN, False, SettingScope.UI, NATIVE),
+        _setting("ui.notifications.enabled", SettingType.BOOLEAN, False, SettingScope.UI, NATIVE),
+        _setting(
+            "ui.notifications.transport",
+            SettingType.STRING,
+            "auto",
+            SettingScope.UI,
+            NATIVE,
+            choices=("auto", "osc-9", "bell", "herdr"),
+        ),
+        _setting(
+            "ui.notifications.any_activity", SettingType.BOOLEAN, False, SettingScope.UI, NATIVE
+        ),
+        _setting(
+            "ui.notifications.worlds",
+            SettingType.STRING_LIST,
+            [],
+            SettingScope.UI,
+            NATIVE,
+            maximum_length=256,
+        ),
+        _setting("ui.notifications.mentions", SettingType.BOOLEAN, True, SettingScope.UI, NATIVE),
+        _setting("ui.notifications.pages", SettingType.BOOLEAN, True, SettingScope.UI, NATIVE),
+        _setting(
+            "ui.notifications.preview",
+            SettingType.STRING,
+            "private",
+            SettingScope.UI,
+            NATIVE,
+            choices=("private", "full"),
+        ),
         _setting("ui.pager.enabled", SettingType.BOOLEAN, True, SettingScope.UI_TYPE, NATIVE),
         _setting(
             "ui.pager.overlap_lines",

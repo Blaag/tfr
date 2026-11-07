@@ -2476,6 +2476,20 @@ class GatewayUiRuntime:
         with contextlib.suppress(ConnectionError, OSError, RuntimeError, ValueError):
             await self.client.clear_diagnostics()
 
+    def record_notification_diagnostic(
+        self, code: str, message: str, status: Mapping[str, object]
+    ) -> None:
+        detail = json.dumps(status, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        self.connection_diagnostics.record(
+            severity="warning" if code == "delivery_failed" else "info",
+            component="notifications",
+            code=code,
+            message=f"{message}; {detail}"[:240],
+            operation="desktop_notification",
+            client="native-ui",
+            ui_name=(self.client.ui_record.display_name if self.client.ui_record else None),
+        )
+
     def diagnostic_status(self) -> dict[str, object]:
         now = datetime.now(UTC)
         gateway_build = getattr(self.client, "gateway_build", None)
@@ -3180,6 +3194,7 @@ async def run_gateway_ui(
             "speaking_streaks_enabled",
             configuration.main.ui.speaking_streaks.enabled,
         ),
+        notifications=configuration.main.ui.notifications,
         output_color=configuration.main.ui.output_color,
         theme=configuration.main.ui.theme,
         screen_clear_mode=configuration.main.ui.screen_clear.mode,
@@ -3215,6 +3230,13 @@ async def run_gateway_ui(
             "ui.mouse_mode",
             "ui.spellcheck.enabled",
             "ui.speaking_streaks.enabled",
+            "ui.notifications.enabled",
+            "ui.notifications.transport",
+            "ui.notifications.any_activity",
+            "ui.notifications.worlds",
+            "ui.notifications.mentions",
+            "ui.notifications.pages",
+            "ui.notifications.preview",
         }
         unsupported = tuple(
             f"live application is unsupported for {key}"
@@ -3235,6 +3257,8 @@ async def run_gateway_ui(
             tui.apply_shared_ui_settings(client.spellcheck_enabled, client.speaking_streaks_enabled)
         if "ui.mouse_mode" in changed and hasattr(tui, "apply_mouse_mode"):
             tui.apply_mouse_mode(str(changed["ui.mouse_mode"]))
+        if any(key.startswith("ui.notifications.") for key in changed):
+            tui.apply_notification_configuration(changed)
         action = required_action(requirements)
         if action == "reload-required":
             runtime.notify("Gateway configuration changed; use /reload to apply this revision.")

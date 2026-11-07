@@ -186,6 +186,24 @@ class SpeakingStreaksConfig(StrictModel):
     enabled: bool = True
 
 
+class NotificationConfig(StrictModel):
+    enabled: bool = False
+    transport: Literal["auto", "osc-9", "bell", "herdr"] = "auto"
+    any_activity: bool = False
+    worlds: tuple[str, ...] = Field(default=(), max_length=256)
+    mentions: bool = True
+    pages: bool = True
+    preview: Literal["private", "full"] = "private"
+
+    @model_validator(mode="after")
+    def valid_worlds(self) -> NotificationConfig:
+        if len(set(self.worlds)) != len(self.worlds) or any(
+            not world.strip() or len(world) > 100 for world in self.worlds
+        ):
+            raise ValueError("notification worlds must be unique non-empty world names")
+        return self
+
+
 class UiConfig(StrictModel):
     scrollback_lines: PositiveInt = 20_000
     recent_input_lines: int = Field(default=3, ge=0, le=20)
@@ -195,6 +213,7 @@ class UiConfig(StrictModel):
     spellcheck: SpellcheckConfig = Field(default_factory=SpellcheckConfig)
     typing_glow: TypingGlowConfig = Field(default_factory=TypingGlowConfig)
     speaking_streaks: SpeakingStreaksConfig = Field(default_factory=SpeakingStreaksConfig)
+    notifications: NotificationConfig = Field(default_factory=NotificationConfig)
     show_nospoof_prefix: bool = False
     animations_enabled: bool = True
     low_bandwidth: bool = False
@@ -317,9 +336,7 @@ class WebGatewayConfig(StrictModel):
         # arguments are not visible to this model. If one of the pair is given,
         # the other must be too.
         if (self.tls_cert is None) != (self.tls_key is None):
-            raise ValueError(
-                "web_gateway.tls_cert and web_gateway.tls_key must be set together"
-            )
+            raise ValueError("web_gateway.tls_cert and web_gateway.tls_key must be set together")
         host = str(self.direct_host).strip()
         if not host:
             raise ValueError("web_gateway.direct_host cannot be empty")
@@ -692,9 +709,7 @@ def load_gateway_bootstrap(main_path: Path | str | None = None) -> GatewayBootst
     if set(data) <= bootstrap_fields:
         unknown_version = data.get("schema_version", 1)
         if unknown_version != 1:
-            raise ConfigurationError(
-                f"invalid {resolved}: schema_version: expected 1"
-            )
+            raise ConfigurationError(f"invalid {resolved}: schema_version: expected 1")
         state = data.get("state_directory", ManagedSettingsConfig().state_directory)
         if not isinstance(state, str) or not state:
             raise ConfigurationError(

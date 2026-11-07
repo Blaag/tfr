@@ -307,7 +307,7 @@ class GatewayConfigurationStore:
                     destination.pop(key, None)
                     value_present = False
                 if previous_present == value_present and previous_value == value:
-                    raise GatewayConfigurationError(f"batch change for {key} would have no effect")
+                    continue
                 mutations.append(
                     ConfigurationMutation(
                         revision=revision,
@@ -325,6 +325,8 @@ class GatewayConfigurationStore:
                         restart=descriptor.restart.value,
                     )
                 )
+            if not mutations:
+                raise GatewayConfigurationError("configuration batch would have no effect")
             proposed.revision = revision
             self._validate_document(proposed)
             self._commit(proposed, tuple(mutations))

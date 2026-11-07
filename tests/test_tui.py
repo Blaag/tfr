@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from uuid import UUID, uuid4
 
 import pytest
@@ -28,6 +28,7 @@ from tfr.config import (
     ConfigurationBundle,
     LoginConfig,
     MainConfig,
+    NotificationConfig,
     PluginSource,
     SpellcheckConfig,
     ThemeConfig,
@@ -228,9 +229,7 @@ async def test_settings_dialog_uses_main_renderer_and_keyboard_navigation() -> N
             tui.application.exit(result=0)
 
         dialog_task = asyncio.create_task(exercise_dialog())
-        result = await asyncio.wait_for(
-            tui.application.run_async(pre_run=started.set), timeout=2
-        )
+        result = await asyncio.wait_for(tui.application.run_async(pre_run=started.set), timeout=2)
         await dialog_task
 
         assert result == 0
@@ -264,9 +263,7 @@ def test_settings_dialog_uses_active_theme_roles() -> None:
     assert cursor.reverse is True and cursor.bold is True
 
     default_tui = make_tui(theme=ThemeConfig(preset="default"))
-    default_body = default_tui.application.style.get_attrs_for_style_str(
-        "class:dialog.body"
-    )
+    default_body = default_tui.application.style.get_attrs_for_style_str("class:dialog.body")
     assert default_body.color != default_body.bgcolor
     assert default_body.color == "d7d7d7"
     assert default_body.bgcolor == "000000"
@@ -946,15 +943,11 @@ def test_reset_labels_state_concrete_outcome() -> None:
     tui = make_tui()
 
     assert (
-        tui._reset_setting_text(
-            {"key": "updates.channel", "scope": "gateway", "default": "stable"}
-        )
+        tui._reset_setting_text({"key": "updates.channel", "scope": "gateway", "default": "stable"})
         == "Reset to built-in default — stable"
     )
     assert (
-        tui._reset_setting_text(
-            {"key": "plugins.sources", "scope": "gateway", "default": []}
-        )
+        tui._reset_setting_text({"key": "plugins.sources", "scope": "gateway", "default": []})
         == "Remove all plugin sources"
     )
 
@@ -1034,9 +1027,7 @@ async def test_plugins_enabled_uses_discovered_checkbox_manager() -> None:
     tui._save_settings_value = AsyncMock(return_value=True)
     setting = {"key": "plugins.enabled", "scope": "shared", "type": "string-list"}
 
-    await tui._edit_enabled_plugins(
-        "alpha", setting, {"value": ["speaker_effects"]}
-    )
+    await tui._edit_enabled_plugins("alpha", setting, {"value": ["speaker_effects"]})
 
     prompt = tui._settings_multiselect.await_args.kwargs
     assert prompt["title"] == "Manage plugins"
@@ -1104,13 +1095,16 @@ async def test_color_picker_shows_swatches_and_resolved_default() -> None:
     tui = make_tui()
     tui._settings_choice = AsyncMock(return_value="")
 
-    assert await tui._settings_color(
-        title="Speaker effect",
-        label="Accent color",
-        current=None,
-        default_color="#d7ffff",
-        default_label="Use effect default",
-    ) == ""
+    assert (
+        await tui._settings_color(
+            title="Speaker effect",
+            label="Accent color",
+            current=None,
+            default_color="#d7ffff",
+            default_label="Use effect default",
+        )
+        == ""
+    )
 
     values = tui._settings_choice.await_args.kwargs["values"]
     default_fragments = values[-1][1]
@@ -1137,9 +1131,7 @@ async def test_invalid_speaker_rule_can_be_deleted_from_recovery_editor() -> Non
 
     first_values = tui._settings_choice.await_args_list[0].kwargs["values"]
     assert "Invalid: unsupported speaker effect" in first_values[1][1]
-    tui._save_settings_batch.assert_awaited_once_with(
-        "alpha", setting, [], old_value=[invalid]
-    )
+    tui._save_settings_batch.assert_awaited_once_with("alpha", setting, [], old_value=[invalid])
 
 
 async def test_unknown_command_suggests_correction_and_next_action() -> None:
@@ -2188,9 +2180,7 @@ async def test_config_migration_commands_submit_choose_apply_and_report_status()
         choices={"plugins.config.speaker_effects.rules": "Gateway"},
         confirm=True,
     )
-    text = "\n".join(
-        fragment_list_to_text(row) for row in tui.active_view.display.rows
-    )
+    text = "\n".join(fragment_list_to_text(row) for row in tui.active_view.display.rows)
     assert "Migration applied atomically at revision 5" in text
     assert "Gateway restart requested" in text
     assert "reconnecting" in text
@@ -5633,6 +5623,40 @@ async def test_application_starts_and_quits_from_keyboard() -> None:
         assert request.text == "look"
         input.send_bytes(b"\x11")
 
+        assert await asyncio.wait_for(running, timeout=1) == 0
+
+
+async def test_terminal_focus_sequences_control_notification_delivery() -> None:
+    with create_pipe_input() as input:
+        tui = make_tui(input=input)
+        tui.notification_policy.reconfigure(NotificationConfig(enabled=True, any_activity=True))
+        delivered = Mock(return_value=True)
+        tui.notification_transport.send = delivered
+        running = asyncio.create_task(tui.run())
+        await asyncio.sleep(0)
+
+        input.send_bytes(b"\x1b[O")
+        while tui.notification_policy.focused is not False:
+            await asyncio.sleep(0.005)
+        tui.handle_event(
+            Event(
+                session_id=tui.active_view.session.session_id,
+                world="alpha",
+                connection_generation=1,
+                sequence=1,
+                direction=Direction.INBOUND,
+                kind=EventKind.RAW_OUTPUT,
+                canonical_text="activity",
+                plain_text="activity",
+                display_text="activity",
+            )
+        )
+        delivered.assert_called_once_with("TFR has activity")
+
+        input.send_bytes(b"\x1b[I")
+        while tui.notification_policy.focused is not True:
+            await asyncio.sleep(0.005)
+        input.send_bytes(b"\x11")
         assert await asyncio.wait_for(running, timeout=1) == 0
 
 

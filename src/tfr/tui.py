@@ -33,6 +33,7 @@ from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input import Input
+from prompt_toolkit.input.vt100_parser import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_bindings import merge_key_bindings
 from prompt_toolkit.keys import Keys
@@ -61,6 +62,7 @@ from tfr.combo import Combo, ComboTracker
 from tfr.command_help import COMMAND_HELP, TOPIC_SUMMARIES, CommandHelp, suggest_help
 from tfr.config import (
     ConfigurationBundle,
+    NotificationConfig,
     PluginSource,
     SpellcheckConfig,
     ThemeConfig,
@@ -90,6 +92,14 @@ from tfr.image_art import (
 )
 from tfr.managed_updates import activate_managed_update, stage_managed_update
 from tfr.multiline import prepare_emit_lines, prepare_multiline_text
+from tfr.notifications import (
+    DISABLE_FOCUS_REPORTING,
+    ENABLE_FOCUS_REPORTING,
+    FOCUS_IN_SEQUENCE,
+    FOCUS_OUT_SEQUENCE,
+    NotificationPolicy,
+    TerminalNotificationTransport,
+)
 from tfr.pager import (
     DisplayBuffer,
     FormattedRow,
@@ -317,6 +327,11 @@ def _parse_web_pair_arguments(
 
 _WEB_GATEWAY_TARGET = re.compile(r"^[^\s/@]+:\d{1,5}$")
 
+_FOCUS_IN_KEY = "\ue000"
+_FOCUS_OUT_KEY = "\ue001"
+ANSI_SEQUENCES.setdefault(FOCUS_IN_SEQUENCE, _FOCUS_IN_KEY)
+ANSI_SEQUENCES.setdefault(FOCUS_OUT_SEQUENCE, _FOCUS_OUT_KEY)
+
 
 def pairing_qr_code(value: str) -> str:
     code = qrcode.QRCode(
@@ -434,6 +449,10 @@ class ServiceRuntime(Protocol):
     async def diagnostics(self, category: str | None = None) -> list[dict[str, Any]]: ...
 
     async def clear_diagnostics(self) -> None: ...
+
+    def record_notification_diagnostic(
+        self, code: str, message: str, status: Mapping[str, object]
+    ) -> None: ...
 
     def diagnostic_status(self) -> dict[str, object]: ...
 
@@ -1111,6 +1130,7 @@ class TfrTui:
         spellcheck: SpellcheckConfig | None = None,
         typing_glow: TypingGlowConfig | None = None,
         speaking_streaks_enabled: bool = True,
+        notifications: NotificationConfig | None = None,
         input: Input | None = None,
         output: Output | None = None,
     ) -> None:
@@ -1159,6 +1179,15 @@ class TfrTui:
         self.theme: ResolvedTheme = resolve_theme(theme, output_color=output_color)
         self.typing_glow = typing_glow or TypingGlowConfig()
         self.speaking_streaks_enabled = speaking_streaks_enabled
+        self.notification_policy = NotificationPolicy(
+            notifications or NotificationConfig(),
+            characters={session.world: session.character_name for session in sessions},
+        )
+        self.notification_transport = TerminalNotificationTransport(
+            self.notification_policy.config.transport,
+            write_raw=self._write_terminal_control,
+        )
+        self._notifications_ready = False
         resolved_output_color = self.theme.output_color if theme is not None else output_color
         self._animation_epoch = time.monotonic()
         self._animation_paused_at = self._animation_epoch if low_bandwidth else None
@@ -1574,6 +1603,16 @@ class TfrTui:
     def _create_bindings(self) -> KeyBindings:
         bindings = KeyBindings()
         settings_dialog_active = Condition(lambda: self._settings_dialog is not None)
+
+        @bindings.add(_FOCUS_IN_KEY, is_global=True)
+        def terminal_focus_in(_event: Any) -> None:
+            self.notification_policy.focus_in()
+            self._record_notification_diagnostic("focus_in", "TFR terminal surface is focused")
+
+        @bindings.add(_FOCUS_OUT_KEY, is_global=True)
+        def terminal_focus_out(_event: Any) -> None:
+            self.notification_policy.focus_out()
+            self._record_notification_diagnostic("focus_out", "TFR terminal surface is unfocused")
 
         @bindings.add("escape", filter=settings_dialog_active, is_global=True)
         def cancel_settings_dialog(_event: Any) -> None:
@@ -2806,6 +2845,20 @@ class TfrTui:
         view = self.views.get(event.world)
         if view is None:
             return
+        notification = (
+            self.notification_policy.evaluate(event) if self._notifications_ready else None
+        )
+        if notification is not None:
+            delivered = self.notification_transport.send(notification.message)
+            if delivered:
+                self.notification_policy.mark_delivered()
+            self._record_notification_diagnostic(
+                "delivered" if delivered else "delivery_failed",
+                (
+                    f"notification {notification.reason} through "
+                    f"{self.notification_transport.resolved}"
+                ),
+            )
         should_count = False
         if event.direction is Direction.INBOUND:
             view.last_inbound_at = time.monotonic()
@@ -3150,6 +3203,11 @@ class TfrTui:
         return [("", "\n".join(lines))]
 
     async def submit_text(self, alias: str, text: str) -> None:
+        if self.notification_transport.multiplexer == "herdr":
+            # Herdr owns outer focus. Keyboard input proves this pane was
+            # revisited and starts a fresh future unfocused interval.
+            self.notification_policy.focus_in()
+            self.notification_policy.focus_out()
         if alias in self._active_multiline_pastes:
             self.add_notice(alias, "A paced transfer is active; input was not sent")
             return
@@ -4959,6 +5017,71 @@ class TfrTui:
         )
         return True
 
+    async def _reset_notification_settings(
+        self, alias: str, settings: Sequence[dict[str, object]]
+    ) -> None:
+        if self.service_runtime is None:
+            return
+        notification_settings = [
+            item for item in settings if str(item.get("key", "")).startswith("ui.notifications.")
+        ]
+        if not notification_settings:
+            await self._settings_message(
+                title="Notifications", text="Notification settings are unavailable."
+            )
+            return
+        if not await self._settings_confirm(
+            title="Reset notifications to defaults",
+            text=(
+                "Remove every notification override for this UI and restore the built-in "
+                "defaults? Notifications will be disabled."
+            ),
+        ):
+            return
+        changes = [
+            {
+                "operation": "reset",
+                "key": str(item["key"]),
+                "scope": "ui",
+                "target": None,
+            }
+            for item in notification_settings
+        ]
+        status = await self.service_runtime.config_status()
+        try:
+            result = await self.service_runtime.config_batch(
+                changes,
+                expected_revision=int(status["revision"]),
+                confirm=True,
+            )
+        except ValueError as exc:
+            if "no effect" not in str(exc):
+                raise
+            await self._settings_message(
+                title="Notifications", text="Notifications already use the defaults."
+            )
+            return
+        self.add_command_report(
+            alias,
+            "/config",
+            f"Reset notifications to defaults at revision {result.get('revision')}.",
+        )
+
+    async def _test_notification(self) -> None:
+        delivered = self.notification_transport.send("TFR test notification")
+        self._record_notification_diagnostic(
+            "test_delivered" if delivered else "delivery_failed",
+            f"test notification through {self.notification_transport.resolved}",
+        )
+        await self._settings_message(
+            title="Test notification",
+            text=(
+                "Sent a test notification."
+                if delivered
+                else ("The test notification could not be sent. Check /diagnostics notifications.")
+            ),
+        )
+
     async def _edit_generic_setting(
         self,
         alias: str,
@@ -4994,7 +5117,18 @@ class TfrTui:
         validation = setting.get("validation")
         choices = validation.get("choices") if isinstance(validation, dict) else None
         value: object
-        if value_type == "boolean":
+        if key == "ui.notifications.worlds":
+            current = detail.get("value")
+            selected_worlds = await self._settings_multiselect(
+                title="Notification worlds",
+                text="Notify for activity in these worlds while TFR is unfocused.",
+                values=[(world, world) for world in self.aliases],
+                defaults=([str(item) for item in current] if isinstance(current, list) else []),
+            )
+            if selected_worlds is None:
+                return
+            value = selected_worlds
+        elif value_type == "boolean":
             options = [("true", "On"), ("false", "Off")]
             if reset_label is not None:
                 options.append(("__reset__", reset_label))
@@ -5288,6 +5422,7 @@ class TfrTui:
             values=[
                 ("say", "When they say something"),
                 ("pose", "When they pose"),
+                ("page", "When they page"),
             ],
             defaults=[str(item) for item in rule.get("kinds", [])],
         )
@@ -6071,11 +6206,25 @@ class TfrTui:
                         text="Choose a setting.",
                         values=[
                             (str(item["key"]), setting_label(str(item["key"]))) for item in choices
-                        ],
+                        ]
+                        + (
+                            [
+                                ("__test_notifications__", "Send test notification"),
+                                ("__reset_notifications__", "Reset to defaults"),
+                            ]
+                            if category == "Notifications"
+                            else []
+                        ),
                         default=last_setting.get(category),
                     )
                     if key is None:
                         break
+                    if key == "__test_notifications__":
+                        await self._test_notification()
+                        continue
+                    if key == "__reset_notifications__":
+                        await self._reset_notification_settings(alias, settings)
+                        continue
                     last_setting[category] = key
                     setting = next(item for item in choices if item["key"] == key)
                     await self._open_setting_editor(alias, setting)
@@ -6695,8 +6844,8 @@ class TfrTui:
 
     async def _handle_diagnostics_command(self, alias: str, parameters: list[str]) -> None:
         usage = (
-            "Usage: /diagnostics [gateway|config|plugins|presentations|web|updates|agents|"
-            "connector|report|clear|export PATH]"
+            "Usage: /diagnostics [gateway|config|plugins|presentations|notifications|web|"
+            "updates|agents|connector|report|clear|export PATH]"
         )
         if self.service_runtime is None:
             self.add_notice(alias, "Diagnostics are available only in an attached UI")
@@ -6711,6 +6860,7 @@ class TfrTui:
             "config",
             "plugins",
             "presentations",
+            "notifications",
             "web",
             "updates",
             "agents",
@@ -7254,6 +7404,41 @@ class TfrTui:
         self._mosh_detected = _running_under_mosh() if mode == "auto" else False
         self.application.invalidate()
 
+    def apply_notification_configuration(self, values: Mapping[str, object]) -> None:
+        current = self.notification_policy.config.model_dump(mode="python")
+        prefix = "ui.notifications."
+        for key, value in values.items():
+            if key.startswith(prefix):
+                current[key.removeprefix(prefix)] = value
+        config = NotificationConfig.model_validate(current)
+        self.notification_policy.reconfigure(config)
+        self.notification_transport = TerminalNotificationTransport(
+            config.transport,
+            write_raw=self._write_terminal_control,
+        )
+        self._record_notification_diagnostic(
+            "reconfigured", "notification settings applied to this UI"
+        )
+
+    def notification_status(self) -> dict[str, object]:
+        return {
+            "enabled": self.notification_policy.config.enabled,
+            **self.notification_transport.status(
+                focused=self.notification_policy.focused,
+                latched=self.notification_policy.notified_while_unfocused,
+            ),
+        }
+
+    def _write_terminal_control(self, value: str) -> None:
+        output = self.application.output
+        output.write_raw(value)
+        output.flush()
+
+    def _record_notification_diagnostic(self, code: str, message: str) -> None:
+        runtime = self.service_runtime
+        if runtime is not None and hasattr(runtime, "record_notification_diagnostic"):
+            runtime.record_notification_diagnostic(code, message, self.notification_status())
+
     async def _handle_gag_command(self, alias: str, parameters: list[str]) -> None:
         usage = "Usage: /gag list|add PATTERN|remove PATTERN|reset"
         if self.service_runtime is None:
@@ -7509,6 +7694,11 @@ class TfrTui:
         loop = asyncio.get_running_loop()
         installed_signals: list[signal.Signals] = []
         try:
+            self._write_terminal_control(ENABLE_FOCUS_REPORTING)
+            self._record_notification_diagnostic(
+                "initialized",
+                "notification transport " + json.dumps(self.notification_status(), sort_keys=True),
+            )
             self._before_render(self.application)
             self._accept_combo_events = False
             for event in self.initial_events:
@@ -7546,6 +7736,11 @@ class TfrTui:
                 )
             self._animations_started = True
             self._sync_animation_task()
+            if self.notification_transport.multiplexer == "herdr":
+                # Herdr consumes outer focus events and authoritatively suppresses
+                # notifications for the calling focused pane.
+                self.notification_policy.focus_out()
+            self._notifications_ready = not self.replay_mode
             handled_signals = [signal.SIGTERM]
             if hasattr(signal, "SIGHUP"):
                 handled_signals.append(signal.SIGHUP)
@@ -7564,6 +7759,7 @@ class TfrTui:
                     pass
             return await self.application.run_async()
         finally:
+            self._write_terminal_control(DISABLE_FOCUS_REPORTING)
             self._animations_started = False
             animation_task = self._animation_task
             self._animation_task = None
@@ -7641,6 +7837,7 @@ async def run_client(bundle: ConfigurationBundle) -> int:
             animations_enabled=bundle.main.ui.animations_enabled,
             low_bandwidth=bundle.main.ui.low_bandwidth,
             speaking_streaks_enabled=shared_ui["speaking_streaks_enabled"],
+            notifications=getattr(bundle.main.ui, "notifications", NotificationConfig()),
             output_color=bundle.main.ui.output_color,
             theme=bundle.main.ui.theme,
             screen_clear_mode=bundle.main.ui.screen_clear.mode,

@@ -74,10 +74,14 @@ def test_speaker_rules_validate_and_have_readable_labels() -> None:
     assert speaker_rules([rule]) == [rule]
     with pytest.raises(ValueError, match="#RRGGBB"):
         validate_speaker_rule({**rule, "color": "yellow"})
-    with pytest.raises(ValueError, match="only Say and Pose"):
-        validate_speaker_rule({**rule, "kinds": ["say", "page"]})
+    assert validate_speaker_rule({**rule, "kinds": ["say", "page"]})["kinds"] == [
+        "say",
+        "page",
+    ]
+    with pytest.raises(ValueError, match="Say, Pose, and Page"):
+        validate_speaker_rule({**rule, "kinds": ["say", "channel"]})
     with pytest.raises(ValueError, match=r"speaker rule 1 \(Barnaby\)"):
-        speaker_rules([{**rule, "kinds": ["page"]}])
+        speaker_rules([{**rule, "kinds": ["channel"]}])
 
 
 def test_speaker_rule_rejects_missing_base_color_and_effect_specific_fields() -> None:

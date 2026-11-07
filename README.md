@@ -746,6 +746,17 @@ Settings dialogs inherit the active theme's background, surface, text, accent,
 selection, button, input, scrollbar, and error roles while retaining the
 terminal-safe reverse-video keyboard cursor.
 
+Native terminal UIs can enable individual-UI desktop notifications under
+**Notifications** in `/config`. TFR notifies only after the terminal reports
+that its surface lost focus, sends at most one notification until focus returns,
+and defaults to the private text `TFR has activity`. Automatic delivery uses
+OSC 9 in Ghostty, iTerm2, Kitty, WezTerm, and Warp; tmux output is wrapped for
+passthrough, unknown terminals receive BEL, and Herdr uses `herdr notification
+show` (configure Herdr `ui.toast.delivery = "terminal"`). `/diagnostics
+notifications` reports detected terminal, multiplexer, focus state, transport,
+delivery count, and errors. The menu includes a test and one atomic **Reset
+notifications to defaults** action.
+
 Structured plugin settings use trusted declarative forms. For example, open
 `Plugin: Speaker Effects` to add, edit, reorder, delete, and preview speaker
 rules with color, effect-specific, world, and message-kind controls. Saving

@@ -52,6 +52,8 @@ _DURATION_EFFECTS = {
 def setting_category(setting: Mapping[str, object]) -> str:
     key = str(setting.get("key", ""))
     parts = key.split(".")
+    if len(parts) >= 2 and parts[:2] == ["ui", "notifications"]:
+        return "Notifications"
     if len(parts) >= 3 and parts[:2] == ["plugins", "config"]:
         return f"Plugin: {parts[2].replace('_', ' ').title()}"
     return (parts[0] if parts else "other").replace("_", " ").title()
@@ -209,8 +211,8 @@ def validate_speaker_rule(rule: Mapping[str, object]) -> dict[str, object]:
         ):
             raise ValueError(f"{field} must be a list of names")
     kinds = value.get("kinds")
-    if isinstance(kinds, list) and not set(kinds) <= {"say", "pose"}:
-        raise ValueError("message kinds support only Say and Pose")
+    if isinstance(kinds, list) and not set(kinds) <= {"say", "pose", "page"}:
+        raise ValueError("message kinds support only Say, Pose, and Page")
     return value
 
 
