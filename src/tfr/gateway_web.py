@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import ssl
 import stat
@@ -34,12 +35,13 @@ from tfr.core import UnknownSessionError
 from tfr.diagnostics import DiagnosticBuffer
 from tfr.events import Actor, ActorType, Confidence, Direction, Event, EventKind, Provenance
 from tfr.gateway import GatewayRuntime, HistorySubscription, SequencedEvent
-from tfr.gateway_devices import DeviceRecord, DeviceStore
+from tfr.gateway_devices import DeviceRecord, DeviceStore, PushPreferences
 from tfr.gateway_uis import UiRecord, UiStore
 from tfr.multiline import PreparedMultiline, prepare_multiline_text
 from tfr.plugins import PluginManager
 from tfr.presentation import effect_programs_as_dict
 from tfr.presentation_events import infer_presentation_speaker
+from tfr.web_push import VapidKeyStore, WebPushSender
 
 WEB_PROTOCOL_VERSION = 1
 SESSION_COOKIE = "__Host-tfr_session"
@@ -68,6 +70,7 @@ MAX_WEB_SNAPSHOT_SOURCE_BYTES = 8_388_608
 MAX_WEB_FRAMES_PER_MINUTE = 120
 MAX_WEB_CONNECTIONS_PER_MINUTE = 12
 MAX_WEB_DIAGNOSTICS_PER_MINUTE = 20
+MAX_PUSH_CHANGES_PER_MINUTE = 12
 MAX_WEB_PASTE_SOURCE_BYTES = 65_536
 MAX_WEB_PASTE_LINES = 100
 MAX_WEB_PASTE_COMMAND_BYTES = 7_000
@@ -121,6 +124,20 @@ _VISIBLE_EVENT_KINDS = {
     EventKind.CONNECTION,
 }
 
+_PUSH_EVENT_KINDS = frozenset(
+    {
+        EventKind.RAW_OUTPUT,
+        EventKind.SPEECH,
+        EventKind.SAY,
+        EventKind.POSE,
+        EventKind.PAGE,
+        EventKind.CHANNEL,
+        EventKind.EMIT,
+        EventKind.SYSTEM,
+    }
+)
+_PUSH_MENTION_KINDS = frozenset({EventKind.SPEECH, EventKind.SAY, EventKind.POSE})
+
 _ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
@@ -141,6 +158,7 @@ _ASSETS = {
     "/pairing.mjs": ("pairing.mjs", "text/javascript; charset=utf-8"),
     "/paste.mjs": ("paste.mjs", "text/javascript; charset=utf-8"),
     "/presentation.mjs": ("presentation.mjs", "text/javascript; charset=utf-8"),
+    "/push.mjs": ("push.mjs", "text/javascript; charset=utf-8"),
     "/scroll-restoration.mjs": ("scroll-restoration.mjs", "text/javascript; charset=utf-8"),
     "/screen-clear.mjs": ("screen-clear.mjs", "text/javascript; charset=utf-8"),
     "/swipe.mjs": ("swipe.mjs", "text/javascript; charset=utf-8"),
@@ -827,6 +845,35 @@ def _browser_event_class_allowed(kind: EventKind, actor_type: ActorType | None) 
     )
 
 
+def _push_event_matches(
+    event: Event,
+    preferences: PushPreferences,
+    *,
+    character_name: str | None,
+) -> bool:
+    if (
+        event.direction is not Direction.INBOUND
+        or event.redacted
+        or event.kind not in _PUSH_EVENT_KINDS
+        or event.metadata.get("sensitive") is True
+    ):
+        return False
+    if preferences.any_activity or event.world in preferences.worlds:
+        return True
+    if preferences.pages and event.kind is EventKind.PAGE:
+        return True
+    if not preferences.mentions or event.kind not in _PUSH_MENTION_KINDS or not character_name:
+        return False
+    sender = event.provenance.sender_name if event.provenance is not None else None
+    if not sender or sender.casefold() == character_name.casefold():
+        return False
+    text = event.plain_text or event.canonical_text or ""
+    escaped = re.escape(character_name.strip())
+    return bool(escaped) and re.search(
+        rf"(?<![\w]){escaped}(?![\w])", text, re.IGNORECASE
+    ) is not None
+
+
 class WebGatewayServer:
     def __init__(
         self,
@@ -878,10 +925,19 @@ class WebGatewayServer:
         self.snapshot_events = snapshot_events
         self.speaking_streaks_enabled = speaking_streaks_enabled
         self.ui_store = ui_store
-        self.devices = DeviceStore(state_directory, self.origin)
+        private_state = Path(state_directory).expanduser()
+        self.devices = DeviceStore(private_state, self.origin)
+        self.push_keys = VapidKeyStore(private_state, self.origin)
+        self.push_sender = WebPushSender(self.push_keys)
+        self._push_subscription: HistorySubscription | None = None
+        self._push_task: asyncio.Task[None] | None = None
+        self._push_retry_after: dict[UUID, float] = {}
+        self._push_last_result: dict[UUID, dict[str, object]] = {}
+        self._push_change_times: dict[UUID, deque[float]] = defaultdict(deque)
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self._active_sockets: dict[UUID, set[web.WebSocketResponse]] = defaultdict(set)
+        self._visible_sockets: set[web.WebSocketResponse] = set()
         self._connection_counts: dict[UUID, int] = defaultdict(int)
         self._command_history: dict[UUID, OrderedDict[UUID, tuple[str, dict[str, Any]]]] = (
             defaultdict(OrderedDict)
@@ -992,6 +1048,21 @@ class WebGatewayServer:
             raise
         self._runner = runner
         self._site = site
+        try:
+            self._push_subscription = await self.runtime.history.subscribe(
+                None,
+                include_history=False,
+                event_filter=lambda event: event.kind in _PUSH_EVENT_KINDS,
+            )
+        except BaseException:
+            await runner.cleanup()
+            self._runner = None
+            self._site = None
+            raise
+        self._push_task = asyncio.create_task(
+            self._run_push_notifications(self._push_subscription),
+            name="tfr-web-push",
+        )
 
     def application(self) -> web.Application:
         application = web.Application(
@@ -1006,11 +1077,14 @@ class WebGatewayServer:
                 web.post("/pair", self._pair_page),
                 web.post("/api/logout", self._logout),
                 web.post("/api/diagnostics", self._report_diagnostic),
+                web.get("/api/push", self._push_status),
+                web.put("/api/push", self._register_push),
+                web.delete("/api/push", self._remove_push),
                 web.get("/ws", self._websocket),
                 web.get(
                     "/{asset:index.html|app.mjs|bootstrap.mjs|command.mjs|connection-lifecycle.mjs|"
                     "diagnostics.mjs|event-details.mjs|effects-lab.mjs|history-notice.mjs|linkify.mjs|motion.mjs|pairing.mjs|paste.mjs|"
-                    "presentation.mjs|scroll-restoration.mjs|screen-clear.mjs|combo.mjs|swipe.mjs|text-runs.mjs|"
+                    "presentation.mjs|push.mjs|scroll-restoration.mjs|screen-clear.mjs|combo.mjs|swipe.mjs|text-runs.mjs|"
                     "transcript-events.mjs|styles.css|manifest.webmanifest|"
                     "repair.html|repair.css|repair.mjs|sw.js|icon.svg|icon-512.png|"
                     "apple-touch-icon.png}",
@@ -1022,6 +1096,16 @@ class WebGatewayServer:
         return application
 
     async def stop(self) -> None:
+        push_task = getattr(self, "_push_task", None)
+        if push_task is not None:
+            push_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await push_task
+            self._push_task = None
+        push_subscription = getattr(self, "_push_subscription", None)
+        if push_subscription is not None:
+            await self.runtime.history.unsubscribe(push_subscription)
+            self._push_subscription = None
         await asyncio.gather(
             *(
                 self._cancel_paste(device_id, reason="gateway_stopping")
@@ -1037,6 +1121,8 @@ class WebGatewayServer:
             )
         )
         self._active_sockets.clear()
+        if hasattr(self, "_visible_sockets"):
+            self._visible_sockets.clear()
         if self._runner is not None:
             await self._runner.cleanup()
         self._site = None
@@ -1182,6 +1268,83 @@ class WebGatewayServer:
         if device is not None and refreshed and token is not None:
             self._set_session_cookie(response, token, device)
         return response
+
+    async def _push_status(self, request: web.Request) -> web.Response:
+        self._validate_public_request(request, require_origin=False)
+        device = self._authenticate(request)
+        if device is None:
+            raise web.HTTPUnauthorized(text="Pair this device first")
+        push = device.push
+        return self._json_response(
+            {
+                "supported": True,
+                "public_key": self.push_keys.public_key,
+                "subscribed": push is not None,
+                "latched": push.latched if push is not None else False,
+                "preferences": (
+                    push.preferences.as_dict() if push is not None else PushPreferences().as_dict()
+                ),
+                "last_result": self._push_last_result.get(device.device_id),
+            }
+        )
+
+    async def _register_push(self, request: web.Request) -> web.Response:
+        self._validate_public_request(request, require_origin=True)
+        device = self._authenticate(request)
+        if device is None:
+            raise web.HTTPUnauthorized(text="Pair this device first")
+        self._record_push_change(device.device_id)
+        try:
+            value = await request.json(loads=json.loads)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            raise web.HTTPBadRequest(text="Invalid push subscription") from None
+        if not isinstance(value, dict) or set(value) != {"subscription", "preferences"}:
+            raise web.HTTPBadRequest(text="Invalid push subscription")
+        subscription = value["subscription"]
+        if not isinstance(subscription, dict) or set(subscription) != {"endpoint", "keys"}:
+            raise web.HTTPBadRequest(text="Invalid push subscription")
+        keys = subscription["keys"]
+        if not isinstance(keys, dict) or set(keys) != {"p256dh", "auth"}:
+            raise web.HTTPBadRequest(text="Invalid push subscription")
+        try:
+            preferences = PushPreferences.from_dict(value["preferences"], device.allowed_worlds)
+            updated = await self.devices.set_push_subscription(
+                device.device_id,
+                endpoint=subscription["endpoint"],
+                p256dh=keys["p256dh"],
+                auth=keys["auth"],
+                preferences=preferences,
+            )
+        except (KeyError, TypeError, ValueError):
+            raise web.HTTPBadRequest(text="Invalid push subscription") from None
+        self._push_retry_after.pop(device.device_id, None)
+        self._push_last_result.pop(device.device_id, None)
+        return self._json_response(
+            {
+                "subscribed": updated.push is not None,
+                "preferences": preferences.as_dict(),
+            }
+        )
+
+    async def _remove_push(self, request: web.Request) -> web.Response:
+        self._validate_public_request(request, require_origin=True)
+        device = self._authenticate(request)
+        if device is None:
+            raise web.HTTPUnauthorized(text="Pair this device first")
+        self._record_push_change(device.device_id)
+        await self.devices.remove_push_subscription(device.device_id)
+        self._push_retry_after.pop(device.device_id, None)
+        self._push_last_result.pop(device.device_id, None)
+        return self._json_response({"subscribed": False})
+
+    def _record_push_change(self, device_id: UUID) -> None:
+        now = time.monotonic()
+        attempts = self._push_change_times[device_id]
+        while attempts and attempts[0] <= now - 60:
+            attempts.popleft()
+        if len(attempts) >= MAX_PUSH_CHANGES_PER_MINUTE:
+            raise web.HTTPTooManyRequests(text="Push subscription change rate limit reached")
+        attempts.append(now)
 
     async def _report_diagnostic(self, request: web.Request) -> web.Response:
         self._validate_public_request(request, require_origin=True)
@@ -1491,11 +1654,13 @@ class WebGatewayServer:
                     revoked = True
                 else:
                     self._active_sockets[device.device_id].add(socket)
+                    self._visible_sockets.add(socket)
                     revoked = False
             if revoked:
                 await self._close_bounded(socket, code=1008, message=b"Device session revoked")
             if socket.closed:
                 return socket
+            await self.devices.set_push_latched(device.device_id, False)
             await self._send_initial_state(
                 socket,
                 subscription,
@@ -1535,6 +1700,7 @@ class WebGatewayServer:
                     sockets.discard(socket)
                     if not sockets:
                         self._active_sockets.pop(device.device_id, None)
+                self._visible_sockets.discard(socket)
                 if reserved:
                     self._release_connection(device.device_id)
         return socket
@@ -1886,6 +2052,92 @@ class WebGatewayServer:
                 ):
                     return
 
+    async def _run_push_notifications(self, subscription: HistorySubscription) -> None:
+        while True:
+            item = await subscription.queue.get()
+            if item is None:
+                self.diagnostics.record(
+                    severity="warning",
+                    component="web",
+                    code="push_stream_overflow",
+                    message="Web Push event stream overflowed; restart the Gateway to resume push",
+                    operation="web_push",
+                )
+                return
+            event = item.event
+            descriptors = {
+                str(descriptor["world"]): descriptor
+                for descriptor in self.runtime.world_descriptors()
+            }
+            descriptor = descriptors.get(event.world, {})
+            await asyncio.gather(
+                *(
+                    self._push_for_device(device, event, descriptor.get("character"))
+                    for device in self.devices.active_devices()
+                    if device.push is not None
+                ),
+                return_exceptions=True,
+            )
+
+    async def _push_for_device(
+        self,
+        device: DeviceRecord,
+        event: Event,
+        character_name: str | None,
+    ) -> None:
+        push = device.push
+        if (
+            push is None
+            or push.latched
+            or event.world not in self._authorized_worlds(device)
+            or self._device_is_visible(device.device_id)
+            or time.monotonic() < self._push_retry_after.get(device.device_id, 0)
+            or not _push_event_matches(
+                event,
+                push.preferences,
+                character_name=character_name,
+            )
+        ):
+            return
+        result = await self.push_sender.send(push.endpoint, push.p256dh, push.auth)
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        self._push_last_result[device.device_id] = {
+            "delivered": result.delivered,
+            "status": result.status,
+            "at": now,
+            "error": result.error,
+        }
+        if result.delivered:
+            await self.devices.set_push_latched(device.device_id, True)
+            self._push_retry_after.pop(device.device_id, None)
+            return
+        if result.permanent:
+            await self.devices.remove_push_subscription(device.device_id)
+            self.diagnostics.record(
+                severity="warning",
+                component="web",
+                code="push_subscription_expired",
+                message="A Web Push service permanently rejected a device subscription",
+                operation="web_push",
+                device_id_suffix=str(device.device_id)[-8:],
+            )
+            return
+        self._push_retry_after[device.device_id] = time.monotonic() + 60
+        self.diagnostics.record(
+            severity="warning",
+            component="web",
+            code="push_delivery_failed",
+            message="A Web Push notification could not be handed to the push service",
+            operation="web_push",
+            device_id_suffix=str(device.device_id)[-8:],
+        )
+
+    def _device_is_visible(self, device_id: UUID) -> bool:
+        return any(
+            socket in self._visible_sockets
+            for socket in self._active_sockets.get(device_id, ())
+        )
+
     async def _receive_requests(
         self,
         socket: web.WebSocketResponse,
@@ -1937,6 +2189,19 @@ class WebGatewayServer:
             if set(message) != {"type", "request_id"}:
                 await self._send_error(socket, request_id, "Ping has invalid fields")
                 return
+            await self._send_ack(socket, request_id, ok=True)
+            return
+        if message_type == "visibility":
+            if set(message) != {"type", "request_id", "visible"} or not isinstance(
+                message.get("visible"), bool
+            ):
+                await self._send_error(socket, request_id, "Visibility has invalid fields")
+                return
+            if message["visible"]:
+                self._visible_sockets.add(socket)
+                await self.devices.set_push_latched(device.device_id, False)
+            else:
+                self._visible_sockets.discard(socket)
             await self._send_ack(socket, request_id, ok=True)
             return
         if message_type == "configuration_applied":

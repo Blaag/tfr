@@ -37,6 +37,14 @@ import { linkParts } from "./linkify.mjs";
 import { motionAllowsAnimation } from "./motion.mjs";
 import { preparePastePreview, validatedPasteUpdate } from "./paste.mjs";
 import {
+  disablePush,
+  enablePush,
+  loadPushStatus,
+  normalizePushPreferences,
+  pushIsSupported,
+  updatePush,
+} from "./push.mjs";
+import {
   animatePresentationElement,
   splitPresentationRuns,
   presentationValidationResult,
@@ -105,6 +113,13 @@ const elements = {
   historyList: document.querySelector("#history-list"),
   settingsDialog: document.querySelector("#settings-dialog"),
   worldList: document.querySelector("#world-list"),
+  pushStatus: document.querySelector("#push-status"),
+  pushPages: document.querySelector("#push-pages"),
+  pushMentions: document.querySelector("#push-mentions"),
+  pushAnyActivity: document.querySelector("#push-any-activity"),
+  pushWorldList: document.querySelector("#push-world-list"),
+  pushEnable: document.querySelector("#push-enable"),
+  pushDisable: document.querySelector("#push-disable"),
   gatewayVersion: document.querySelector("#gateway-version"),
   eventDialog: document.querySelector("#event-dialog"),
   eventDialogWorld: document.querySelector("#event-dialog-world"),
@@ -184,6 +199,13 @@ const state = {
   screenClearCutoffs: new Map(),
   lastScreenClearEffects: new Map(),
   paste: null,
+  push: {
+    busy: false,
+    loaded: false,
+    subscribed: false,
+    publicKey: null,
+    preferences: normalizePushPreferences(null),
+  },
 };
 const pairingSubmission = createPairingSubmission(
   (code) => submitPairing(document, code),
@@ -1820,6 +1842,7 @@ function handleMessage(message) {
       updateHistoryNotice();
     }
     startHeartbeat();
+    reportVisibility();
     return;
   }
   if (message.type === "maintenance") {
@@ -2276,7 +2299,150 @@ function openSettingsDialog(event) {
   event?.preventDefault();
   elements.commandInput.blur();
   elements.settingsDialog.showModal();
+  refreshPushStatus();
   scheduleViewportUpdate();
+}
+
+function currentPushPreferences() {
+  return normalizePushPreferences({
+    any_activity: elements.pushAnyActivity.checked,
+    mentions: elements.pushMentions.checked,
+    pages: elements.pushPages.checked,
+    worlds: [...elements.pushWorldList.querySelectorAll("input:checked")].map((input) => input.value),
+  }, state.worlds.map((world) => world.world));
+}
+
+function renderPushSettings() {
+  const push = state.push;
+  elements.pushPages.checked = push.preferences.pages;
+  elements.pushMentions.checked = push.preferences.mentions;
+  elements.pushAnyActivity.checked = push.preferences.any_activity;
+  elements.pushEnable.hidden = push.subscribed;
+  elements.pushDisable.hidden = !push.subscribed;
+  elements.pushEnable.disabled = push.busy || !push.loaded;
+  elements.pushDisable.disabled = push.busy;
+  elements.pushWorldList.replaceChildren();
+  for (const world of state.worlds) {
+    const label = document.createElement("label");
+    label.className = "setting-row";
+    const text = document.createElement("span");
+    text.textContent = world.world;
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = world.world;
+    input.checked = push.preferences.worlds.includes(world.world);
+    input.disabled = push.busy;
+    input.addEventListener("change", savePushPreferences);
+    label.append(text, input);
+    elements.pushWorldList.append(label);
+  }
+  for (const input of [elements.pushPages, elements.pushMentions, elements.pushAnyActivity]) {
+    input.disabled = push.busy;
+  }
+}
+
+async function refreshPushStatus() {
+  if (!pushIsSupported(window)) {
+    state.push.loaded = false;
+    elements.pushStatus.textContent = "Web Push requires an installed Home Screen app on iPhone or iPad.";
+    renderPushSettings();
+    return;
+  }
+  try {
+    const value = await loadPushStatus();
+    state.push.loaded = true;
+    state.push.subscribed = value.subscribed === true;
+    state.push.publicKey = value.public_key;
+    state.push.preferences = normalizePushPreferences(
+      value.preferences,
+      state.worlds.map((world) => world.world),
+    );
+    const permission = Notification.permission;
+    elements.pushStatus.textContent = state.push.subscribed
+      ? `Enabled on this device${permission === "granted" ? "" : `; browser permission is ${permission}`}.`
+      : permission === "denied"
+        ? "Notifications are blocked in system settings for this app."
+        : "Disabled. Alerts contain no message or sender details.";
+  } catch {
+    state.push.loaded = false;
+    elements.pushStatus.textContent = "Could not load notification settings from the Gateway.";
+  }
+  renderPushSettings();
+}
+
+async function enablePushNotifications() {
+  if (state.push.busy || !state.push.publicKey) return;
+  state.push.busy = true;
+  renderPushSettings();
+  try {
+    const registration = state.serviceWorkerRegistration || await navigator.serviceWorker.ready;
+    state.serviceWorkerRegistration = registration;
+    const value = await enablePush({
+      registration,
+      publicKey: state.push.publicKey,
+      preferences: currentPushPreferences(),
+    });
+    state.push.subscribed = value.subscribed === true;
+    state.push.preferences = normalizePushPreferences(value.preferences, state.worlds.map((world) => world.world));
+    elements.pushStatus.textContent = "Enabled on this device. Alerts contain no message details.";
+  } catch (error) {
+    elements.pushStatus.textContent = error instanceof Error ? error.message : "Could not enable notifications.";
+  } finally {
+    state.push.busy = false;
+    renderPushSettings();
+  }
+}
+
+async function disablePushNotifications() {
+  if (state.push.busy) return;
+  state.push.busy = true;
+  renderPushSettings();
+  try {
+    const registration = state.serviceWorkerRegistration || await navigator.serviceWorker.ready;
+    state.serviceWorkerRegistration = registration;
+    await disablePush({ registration });
+    state.push.subscribed = false;
+    elements.pushStatus.textContent = "Notifications are disabled on this device.";
+  } catch {
+    elements.pushStatus.textContent = "Could not disable notifications at the Gateway.";
+  } finally {
+    state.push.busy = false;
+    renderPushSettings();
+  }
+}
+
+async function savePushPreferences() {
+  state.push.preferences = currentPushPreferences();
+  if (!state.push.subscribed || state.push.busy) {
+    renderPushSettings();
+    return;
+  }
+  state.push.busy = true;
+  renderPushSettings();
+  try {
+    const registration = state.serviceWorkerRegistration || await navigator.serviceWorker.ready;
+    state.serviceWorkerRegistration = registration;
+    const value = await updatePush({
+      registration,
+      preferences: state.push.preferences,
+    });
+    state.push.preferences = normalizePushPreferences(value.preferences, state.worlds.map((world) => world.world));
+    elements.pushStatus.textContent = "Notification preferences saved.";
+  } catch {
+    elements.pushStatus.textContent = "Could not save notification preferences.";
+  } finally {
+    state.push.busy = false;
+    renderPushSettings();
+  }
+}
+
+function reportVisibility() {
+  if (!connection.ready || connection.socket?.readyState !== WebSocket.OPEN) return;
+  connection.socket.send(JSON.stringify({
+    type: "visibility",
+    request_id: crypto.randomUUID(),
+    visible: document.visibilityState === "visible",
+  }));
 }
 
 function watchServiceWorkerRegistration(registration) {
@@ -2305,6 +2471,12 @@ elements.settingsButton.addEventListener("pointerdown", (event) => {
   if (event.pointerType === "touch") openSettingsDialog(event);
 });
 elements.settingsButton.addEventListener("click", openSettingsDialog);
+elements.pushEnable.addEventListener("click", enablePushNotifications);
+elements.pushDisable.addEventListener("click", disablePushNotifications);
+elements.pushPages.addEventListener("change", savePushPreferences);
+elements.pushMentions.addEventListener("change", savePushPreferences);
+elements.pushAnyActivity.addEventListener("change", savePushPreferences);
+document.addEventListener("visibilitychange", reportVisibility);
 elements.pairingForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const code = pairingCodeFromLink(elements.pairingLink.value.trim(), location.origin);

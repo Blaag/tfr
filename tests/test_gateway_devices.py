@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import stat
@@ -12,7 +13,10 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 import tfr.gateway_devices as gateway_devices
-from tfr.gateway_devices import DeviceStore
+from tfr.gateway_devices import DeviceStore, PushPreferences
+
+P256DH = base64.urlsafe_b64encode(b"\x04" + b"p" * 64).rstrip(b"=").decode()
+PUSH_AUTH = base64.urlsafe_b64encode(b"a" * 16).rstrip(b"=").decode()
 
 
 def pairing_code(url: str) -> str:
@@ -108,6 +112,60 @@ async def test_device_activity_slides_expiration_with_a_daily_write_rate(
     assert DeviceStore(store.state_directory, store.origin).authenticate(token) == updated
 
 
+async def test_push_subscription_is_private_persistent_and_latched(tmp_path: Path) -> None:
+    store = DeviceStore(tmp_path / "web", "https://gateway.example.ts.net")
+    device, token = await store.redeem(
+        pairing_code(store.create_pairing_url("Phone", ("alpha", "beta"))),
+        "black@example.com",
+    )
+    preferences = PushPreferences(worlds=("beta",), mentions=True, pages=False)
+
+    subscribed = await store.set_push_subscription(
+        device.device_id,
+        endpoint="https://web.push.apple.com/QWERTY",
+        p256dh=P256DH,
+        auth=PUSH_AUTH,
+        preferences=preferences,
+    )
+    assert subscribed.push is not None and subscribed.push.preferences == preferences
+    assert store.device_descriptors()[0]["push_enabled"] is True
+    assert await store.set_push_latched(device.device_id, True)
+
+    reloaded = DeviceStore(store.state_directory, store.origin)
+    persisted = reloaded.authenticate(token)
+    assert persisted is not None and persisted.push is not None
+    assert persisted.push.latched is True
+    assert persisted.push.preferences.worlds == ("beta",)
+
+    removed = await reloaded.remove_push_subscription(device.device_id)
+    assert removed is not None and removed.push is None
+
+
+async def test_push_subscription_rejects_untrusted_endpoint_and_world(tmp_path: Path) -> None:
+    store = DeviceStore(tmp_path / "web", "https://gateway.example.ts.net")
+    device, _token = await store.redeem(
+        pairing_code(store.create_pairing_url("Phone", ("alpha",))),
+        "black@example.com",
+    )
+
+    with pytest.raises(ValueError, match="provider is unsupported"):
+        await store.set_push_subscription(
+            device.device_id,
+            endpoint="https://example.com/internal",
+            p256dh=P256DH,
+            auth=PUSH_AUTH,
+            preferences=PushPreferences(),
+        )
+    with pytest.raises(ValueError, match="not authorized"):
+        await store.set_push_subscription(
+            device.device_id,
+            endpoint="https://web.push.apple.com/QWERTY",
+            p256dh=P256DH,
+            auth=PUSH_AUTH,
+            preferences=PushPreferences(worlds=("beta",)),
+        )
+
+
 async def test_device_state_without_last_use_migrates_from_creation_time(tmp_path: Path) -> None:
     state_directory = tmp_path / "web"
     store = DeviceStore(state_directory, "https://gateway.example.ts.net")
@@ -116,7 +174,9 @@ async def test_device_state_without_last_use_migrates_from_creation_time(tmp_pat
         "black@example.com",
     )
     value = json.loads(store.path.read_text(encoding="utf-8"))
+    value["schema_version"] = 1
     del value["devices"][0]["last_used_at"]
+    del value["devices"][0]["push"]
     store.path.write_text(json.dumps(value), encoding="utf-8")
     store.path.chmod(0o600)
 
