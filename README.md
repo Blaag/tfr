@@ -750,12 +750,20 @@ Native terminal UIs can enable individual-UI desktop notifications under
 **Notifications** in `/config`. TFR notifies only after the terminal reports
 that its surface lost focus, sends at most one notification until focus returns,
 and defaults to the private text `TFR has activity`. Automatic delivery uses
-OSC 9 in Ghostty, iTerm2, Kitty, WezTerm, and Warp; tmux output is wrapped for
-passthrough, unknown terminals receive BEL, and Herdr uses `herdr notification
-show` (configure Herdr `ui.toast.delivery = "terminal"`). `/diagnostics
-notifications` reports detected terminal, multiplexer, focus state, transport,
-delivery count, and errors. The menu includes a test and one atomic **Reset
-notifications to defaults** action.
+BEL-terminated OSC 9 in Ghostty, iTerm2, Kitty, WezTerm, and Warp; tmux output
+is wrapped for passthrough, unknown terminals receive BEL, and Herdr uses
+`herdr notification show`. On macOS with Herdr 0.9.5, configure Herdr
+`ui.toast.delivery = "system"`; its `terminal` backend emits ST-terminated OSC
+9, which affected Ghostty/macOS combinations can accept without displaying.
+`/diagnostics notifications` reports detected terminal, multiplexer, focus
+state, transport, handoff count, and errors. A successful handoff means the
+terminal or Herdr accepted the request, not that the OS displayed it. The menu
+includes a test and one atomic **Reset notifications to defaults** action.
+For Herdr's macOS `system` backend, TFR supplies both a title and nonempty body
+so `terminal-notifier` does not reject the request and trigger Herdr's Script
+Editor fallback. Herdr forwards terminal focus reports to its panes; TFR uses
+those reports directly and does not ask Herdr's notification API to decide
+whether the TFR pane is focused.
 
 The recommended macOS setup is Ghostty with notifications allowed in **System
 Settings → Notifications → Ghostty**. For tmux 3.3 or newer, add this to

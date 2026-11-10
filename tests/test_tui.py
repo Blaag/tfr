@@ -5626,14 +5626,29 @@ async def test_application_starts_and_quits_from_keyboard() -> None:
         assert await asyncio.wait_for(running, timeout=1) == 0
 
 
-async def test_terminal_focus_sequences_control_notification_delivery() -> None:
+async def test_herdr_forwarded_focus_sequences_control_notification_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HERDR_ENV", "1")
     with create_pipe_input() as input:
         tui = make_tui(input=input)
+        tui.active_view.session.state = SessionState.CONNECTED
+        queue = tui.command_bus.register(tui.active_view.session.session_id)
         tui.notification_policy.reconfigure(NotificationConfig(enabled=True, any_activity=True))
         delivered = Mock(return_value=True)
         tui.notification_transport.send = delivered
         running = asyncio.create_task(tui.run())
-        await asyncio.sleep(0)
+
+        while not tui._notifications_ready:
+            await asyncio.sleep(0.005)
+        assert tui.notification_policy.focused is None
+
+        input.send_bytes(b"\x1b[I")
+        while tui.notification_policy.focused is not True:
+            await asyncio.sleep(0.005)
+        await tui.submit_text("alpha", "look")
+        assert (await asyncio.wait_for(queue.get(), timeout=1)).text == "look"
+        assert tui.notification_policy.focused is True
 
         input.send_bytes(b"\x1b[O")
         while tui.notification_policy.focused is not False:
