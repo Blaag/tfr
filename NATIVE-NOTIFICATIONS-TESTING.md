@@ -17,8 +17,11 @@ transport test and an atomic **Reset to defaults** action.
 ## Recommended macOS setup
 
 Use Ghostty and enable it under **System Settings → Notifications → Ghostty**.
-TFR's `auto` transport chooses OSC 9 for detected Ghostty/iTerm2/Kitty/WezTerm/
-Warp sessions. The terminal—not TFR—posts the macOS notification.
+TFR's `auto` transport chooses BEL-terminated OSC 9 for detected
+Ghostty/iTerm2/Kitty/WezTerm/Warp sessions. The terminal—not TFR—posts the
+macOS notification. A successful TFR handoff confirms that the request was
+written or accepted; only visual acceptance testing confirms that macOS
+displayed it.
 
 Apple Terminal and Alacritty receive BEL in automatic mode. Depending on the
 terminal profile this may sound, flash, mark a tab/Dock icon, or do nothing. It
@@ -80,18 +83,31 @@ switching local Ghostty tabs/apps and checking `/diagnostics notifications`.
 
 ## Herdr
 
-Configure Herdr terminal-owned notifications:
+On macOS with Herdr 0.9.5, configure system-owned notifications:
 
 ```toml
 [ui.toast]
-delivery = "terminal"
+delivery = "system"
 ```
 
 Run TFR in a Herdr pane and repeat the focus matrix. Diagnostics must report
 `multiplexer=herdr` and `resolved=herdr`. Herdr owns pane and outer-terminal
-focus; its JSON response tells TFR whether it actually showed or suppressed the
-notification. Keyboard input in the TFR pane starts a fresh future notification
-interval.
+focus and forwards focus-in/focus-out events to pane applications that enable
+terminal focus reporting. TFR uses those events as the notification authority;
+it must not assume every Herdr pane is unfocused or rely on `herdr notification
+show` to suppress a request from the focused pane. Herdr's JSON response tells
+TFR only whether it accepted or suppressed the notification request. Herdr
+0.9.5's `terminal` backend emits ST-terminated OSC 9, which affected
+Ghostty/macOS combinations can accept without displaying; `system` bypasses
+that path. A future Herdr release that emits BEL-terminated OSC 9 may use
+`terminal` after live acceptance testing. Raw OSC 9 or OSC 777 written inside a
+Herdr pane is consumed by Herdr and is not an end-to-end test; use TFR's menu
+test or `herdr notification show`.
+
+TFR sends Herdr a stable `TFR` title and the notification text as a nonempty
+body. This is required for Herdr's macOS `system` backend: `terminal-notifier`
+rejects an empty `-message`, which would otherwise make Herdr fall back to an
+AppleScript notification owned by Script Editor.
 
 ## Privacy
 

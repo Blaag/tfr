@@ -113,8 +113,16 @@ def test_osc9_and_tmux_transport_are_bounded_and_wrapped() -> None:
     assert transport.send("TFR has\nactivity") is True
     assert transport.resolved == "osc-9"
     assert transport.multiplexer == "tmux"
-    assert written[0].startswith("\x1bPtmux;")
-    assert "TFR has activity" in written[0]
+    assert written == [_tmux_passthrough("\x1b]9;TFR has activity\x07")]
+
+    direct: list[str] = []
+    direct_transport = TerminalNotificationTransport(
+        "osc-9",
+        environment={"TERM_PROGRAM": "ghostty"},
+        write_raw=direct.append,
+    )
+    assert direct_transport.send("TFR direct") is True
+    assert direct == ["\x1b]9;TFR direct\x07"]
 
 
 def test_herdr_transport_uses_herdr_notification_command(monkeypatch) -> None:
@@ -138,6 +146,8 @@ def test_herdr_transport_uses_herdr_notification_command(monkeypatch) -> None:
         "/usr/bin/herdr",
         "notification",
         "show",
+        "TFR",
+        "--body",
         "TFR has activity",
         "--sound",
         "none",
@@ -161,7 +171,7 @@ def test_herdr_focused_pane_suppression_is_not_reported_as_delivery(monkeypatch)
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is not installed")
 def test_tmux_live_passthrough_reaches_outer_terminal(tmp_path) -> None:
     socket_name = f"tfr-notify-{os.getpid()}"
-    sequence = _tmux_passthrough("\x1b]9;TFR tmux test\x1b\\")
+    sequence = _tmux_passthrough("\x1b]9;TFR tmux test\x07")
     script = (
         "import os,time; time.sleep(.2); "
         f"os.write(1,bytes.fromhex('{sequence.encode().hex()}')); time.sleep(.2)"
@@ -207,4 +217,4 @@ def test_tmux_live_passthrough_reaches_outer_terminal(tmp_path) -> None:
             stderr=subprocess.DEVNULL,
         )
 
-    assert b"\x1b]9;TFR tmux test\x1b\\" in output
+    assert b"\x1b]9;TFR tmux test\x07" in output

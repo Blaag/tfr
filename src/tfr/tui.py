@@ -2853,7 +2853,7 @@ class TfrTui:
             if delivered:
                 self.notification_policy.mark_delivered()
             self._record_notification_diagnostic(
-                "delivered" if delivered else "delivery_failed",
+                "handed_off" if delivered else "delivery_failed",
                 (
                     f"notification {notification.reason} through "
                     f"{self.notification_transport.resolved}"
@@ -3203,11 +3203,6 @@ class TfrTui:
         return [("", "\n".join(lines))]
 
     async def submit_text(self, alias: str, text: str) -> None:
-        if self.notification_transport.multiplexer == "herdr":
-            # Herdr owns outer focus. Keyboard input proves this pane was
-            # revisited and starts a fresh future unfocused interval.
-            self.notification_policy.focus_in()
-            self.notification_policy.focus_out()
         if alias in self._active_multiline_pastes:
             self.add_notice(alias, "A paced transfer is active; input was not sent")
             return
@@ -5070,13 +5065,13 @@ class TfrTui:
     async def _test_notification(self) -> None:
         delivered = self.notification_transport.send("TFR test notification")
         self._record_notification_diagnostic(
-            "test_delivered" if delivered else "delivery_failed",
+            "test_handed_off" if delivered else "delivery_failed",
             f"test notification through {self.notification_transport.resolved}",
         )
         await self._settings_message(
             title="Test notification",
             text=(
-                "Sent a test notification."
+                "Sent a test notification request."
                 if delivered
                 else ("The test notification could not be sent. Check /diagnostics notifications.")
             ),
@@ -7736,10 +7731,6 @@ class TfrTui:
                 )
             self._animations_started = True
             self._sync_animation_task()
-            if self.notification_transport.multiplexer == "herdr":
-                # Herdr consumes outer focus events and authoritatively suppresses
-                # notifications for the calling focused pane.
-                self.notification_policy.focus_out()
             self._notifications_ready = not self.replay_mode
             handled_signals = [signal.SIGTERM]
             if hasattr(signal, "SIGHUP"):

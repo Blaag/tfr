@@ -165,7 +165,16 @@ class TerminalNotificationTransport:
                 if executable is None:
                     raise RuntimeError("herdr executable is unavailable")
                 result = subprocess.run(  # noqa: S603
-                    [executable, "notification", "show", text, "--sound", "none"],
+                    [
+                        executable,
+                        "notification",
+                        "show",
+                        "TFR",
+                        "--body",
+                        text,
+                        "--sound",
+                        "none",
+                    ],
                     stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
@@ -186,7 +195,7 @@ class TerminalNotificationTransport:
             elif self.resolved == "bell":
                 self.write_raw("\a")
             else:
-                sequence = f"\x1b]9;{text}\x1b\\"
+                sequence = f"\x1b]9;{text}\x07"
                 self.write_raw(
                     _tmux_passthrough(sequence) if self.multiplexer == "tmux" else sequence
                 )
@@ -212,7 +221,9 @@ class TerminalNotificationTransport:
             "sent": self.sent,
             "last_error": self.last_error,
             "herdr_requirement": (
-                "Herdr ui.toast.delivery must be terminal" if self.resolved == "herdr" else None
+                "Herdr ui.toast.delivery must be terminal or system"
+                if self.resolved == "herdr"
+                else None
             ),
         }
 
