@@ -67,3 +67,27 @@ test("failed Gateway registration rolls back a newly created browser subscriptio
     globalThis.Notification = originalNotification;
   }
 });
+
+test("permission is requested before service-worker push readiness is checked", async () => {
+  let permissionRequested = false;
+  const originalNotification = globalThis.Notification;
+  globalThis.Notification = {
+    requestPermission: async () => {
+      permissionRequested = true;
+      return "granted";
+    },
+  };
+  try {
+    await assert.rejects(
+      enablePush({
+        registration: null,
+        publicKey: "AQID",
+        preferences: normalizePushPreferences(null),
+      }),
+      /unavailable/,
+    );
+    assert.equal(permissionRequested, true);
+  } finally {
+    globalThis.Notification = originalNotification;
+  }
+});

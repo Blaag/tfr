@@ -2348,6 +2348,14 @@ async function refreshPushStatus() {
     renderPushSettings();
     return;
   }
+  if (!navigator.serviceWorker.controller) {
+    state.push.loaded = false;
+    elements.pushStatus.textContent = state.serviceWorkerRegistration?.waiting
+      ? "A TFR app update must be applied before notifications can be enabled."
+      : "Close and reopen the installed TFR app before enabling notifications.";
+    renderPushSettings();
+    return;
+  }
   try {
     const value = await loadPushStatus();
     state.push.loaded = true;
@@ -2375,8 +2383,10 @@ async function enablePushNotifications() {
   state.push.busy = true;
   renderPushSettings();
   try {
-    const registration = state.serviceWorkerRegistration || await navigator.serviceWorker.ready;
-    state.serviceWorkerRegistration = registration;
+    const registration = state.serviceWorkerRegistration;
+    if (!registration?.active || !navigator.serviceWorker.controller) {
+      throw new Error("Close and reopen the installed TFR app before enabling notifications.");
+    }
     const value = await enablePush({
       registration,
       publicKey: state.push.publicKey,
@@ -2398,8 +2408,8 @@ async function disablePushNotifications() {
   state.push.busy = true;
   renderPushSettings();
   try {
-    const registration = state.serviceWorkerRegistration || await navigator.serviceWorker.ready;
-    state.serviceWorkerRegistration = registration;
+    const registration = state.serviceWorkerRegistration;
+    if (!registration) throw new Error("The service worker is unavailable");
     await disablePush({ registration });
     state.push.subscribed = false;
     elements.pushStatus.textContent = "Notifications are disabled on this device.";
@@ -2420,8 +2430,8 @@ async function savePushPreferences() {
   state.push.busy = true;
   renderPushSettings();
   try {
-    const registration = state.serviceWorkerRegistration || await navigator.serviceWorker.ready;
-    state.serviceWorkerRegistration = registration;
+    const registration = state.serviceWorkerRegistration;
+    if (!registration) throw new Error("The service worker is unavailable");
     const value = await updatePush({
       registration,
       preferences: state.push.preferences,
@@ -2448,6 +2458,7 @@ function reportVisibility() {
 function watchServiceWorkerRegistration(registration) {
   state.serviceWorkerRegistration = registration;
   showWaitingServiceWorker(registration.waiting);
+  if (elements.settingsDialog.open) refreshPushStatus();
   registration.addEventListener("updatefound", () => {
     const worker = registration.installing;
     if (!worker) return;
@@ -2808,7 +2819,11 @@ document.addEventListener("visibilitychange", () => {
 
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.addEventListener("controllerchange", () => {
-    if (state.reloadingForUpdate) location.reload();
+    if (state.reloadingForUpdate) {
+      location.reload();
+    } else if (elements.settingsDialog.open) {
+      refreshPushStatus();
+    }
   });
   window.addEventListener("load", async () => {
     try {
