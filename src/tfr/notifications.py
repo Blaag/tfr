@@ -135,15 +135,23 @@ class TerminalNotificationTransport:
             if self.environment.get("TMUX")
             else "none"
         )
-        self.terminal = (
+        self.terminal = self._detect_terminal()
+        self.resolved = self._resolve()
+        self.sent = 0
+        self.last_error: str | None = None
+
+    def _detect_terminal(self) -> str:
+        if any(
+            self.environment.get(name)
+            for name in ("GHOSTTY_SURFACE_ID", "GHOSTTY_RESOURCES_DIR", "GHOSTTY_BIN_DIR")
+        ):
+            return "ghostty"
+        return (
             self.environment.get("TERM_PROGRAM")
             or self.environment.get("LC_TERMINAL")
             or self.environment.get("TERM")
             or "unknown"
         )
-        self.resolved = self._resolve()
-        self.sent = 0
-        self.last_error: str | None = None
 
     def _resolve(self) -> str:
         if self.configured != "auto":
