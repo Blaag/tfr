@@ -58,6 +58,10 @@ def create_fixture(
         f"exit {7 if security_failure else 0}\n",
     )
     executable(
+        repository / "scripts" / "check-binary-requirements",
+        "#!/bin/sh\nprintf '%s\\n' binary-requirements >>\"$TFR_FAKE_LOG\"\n",
+    )
+    executable(
         repository / "scripts" / "publish-release",
         """#!/bin/sh
 printf 'publish %s\n' "$*" >>"$TFR_FAKE_LOG"

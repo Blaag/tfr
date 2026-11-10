@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/tfr-binary-requirements.XXXXXX")
+trap 'rm -rf "$temporary"' 0 HUP INT TERM
+
+requirements="$temporary/requirements.txt"
+uv export --locked --no-default-groups --no-emit-project --no-config --quiet \
+    --output-file "$requirements"
+
+for platform in \
+    x86_64-unknown-linux-gnu \
+    aarch64-unknown-linux-gnu \
+    aarch64-apple-darwin \
+    x86_64-pc-windows-msvc
+do
+    uv pip install --dry-run --quiet --no-config --python 3.12 --python-platform "$platform" \
+        --require-hashes --only-binary :all: --requirements "$requirements" >/dev/null
+done
+
+printf 'Binary-only runtime requirements resolved for every supported platform.\n'

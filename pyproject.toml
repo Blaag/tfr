@@ -18,7 +18,7 @@ dependencies = [
     "regex>=2026.11.7",
     "retroflow>=0.10.0,<0.11",
     "symspellpy>=6.10.2,<7",
-    "pywebpush>=2.0.3,<3",
+    "cryptography>=50,<51",
 ]
 
 [project.scripts]
