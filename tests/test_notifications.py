@@ -106,13 +106,19 @@ def test_osc9_and_tmux_transport_are_bounded_and_wrapped() -> None:
     written: list[str] = []
     transport = TerminalNotificationTransport(
         "auto",
-        environment={"TERM_PROGRAM": "ghostty", "TMUX": "/tmp/tmux"},
+        environment={
+            "TERM_PROGRAM": "tmux",
+            "TERM": "tmux-256color",
+            "TMUX": "/tmp/tmux",
+            "GHOSTTY_SURFACE_ID": "surface-1",
+        },
         write_raw=written.append,
     )
 
     assert transport.send("TFR has\nactivity") is True
     assert transport.resolved == "osc-9"
     assert transport.multiplexer == "tmux"
+    assert transport.terminal == "ghostty"
     assert written == [_tmux_passthrough("\x1b]9;TFR has activity\x07")]
 
     direct: list[str] = []
@@ -123,6 +129,17 @@ def test_osc9_and_tmux_transport_are_bounded_and_wrapped() -> None:
     )
     assert direct_transport.send("TFR direct") is True
     assert direct == ["\x1b]9;TFR direct\x07"]
+
+
+def test_tmux_without_an_outer_terminal_marker_falls_back_to_bell() -> None:
+    transport = TerminalNotificationTransport(
+        "auto",
+        environment={"TERM_PROGRAM": "tmux", "TERM": "tmux-256color", "TMUX": "/tmp/tmux"},
+        write_raw=Mock(),
+    )
+
+    assert transport.terminal == "tmux"
+    assert transport.resolved == "bell"
 
 
 def test_herdr_transport_uses_herdr_notification_command(monkeypatch) -> None:

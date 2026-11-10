@@ -776,11 +776,13 @@ set -g allow-passthrough on
 
 A new tmux server reads that file automatically; `tmux source-file ~/.tmux.conf`
 is needed only to update an already-running server. TFR wraps OSC 9 for tmux,
-so the outer Ghostty instance owns the macOS notification. With SSH or mosh,
-delivery still happens on the local terminal when every intermediate layer
-passes OSC 9 and focus reporting; use `/diagnostics notifications` to verify the
-detected path and force the per-UI transport to `osc-9` if remote environment
-detection cannot identify Ghostty.
+so the outer Ghostty instance owns the macOS notification. Some tmux setups set
+`TERM_PROGRAM=tmux`; TFR recognizes inherited `GHOSTTY_*` environment markers
+before that generic value and still selects OSC 9 automatically. With SSH or
+mosh, delivery still happens on the local terminal when every intermediate
+layer passes OSC 9 and focus reporting; use `/diagnostics notifications` to
+verify the detected path and force the per-UI transport to `osc-9` if remote
+environment detection cannot identify Ghostty.
 
 Apple Terminal and Alacritty do not receive direct macOS notifications from
 TFR. Automatic mode sends BEL, whose result depends on that terminal profile:

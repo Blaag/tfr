@@ -74,6 +74,11 @@ set -g allow-passthrough on
 A new tmux server loads `~/.tmux.conf` automatically. Run `tmux source-file
 ~/.tmux.conf` only after editing the file while a server is already running.
 Repeat the direct matrix inside tmux. Diagnostics must report `multiplexer=tmux`.
+When tmux sets `TERM_PROGRAM=tmux`, inherited `GHOSTTY_SURFACE_ID`,
+`GHOSTTY_RESOURCES_DIR`, or `GHOSTTY_BIN_DIR` markers identify the outer terminal;
+diagnostics should report `terminal=ghostty` and `resolved=osc-9`. Without an
+outer-terminal marker, automatic mode safely falls back to BEL and the transport
+must be set to **OSC 9** explicitly after live passthrough testing.
 
 For Ghostty → mosh/SSH → tmux → TFR, both OSC 9 output and focus reports must
 survive every layer. If remote environment variables do not identify Ghostty,
