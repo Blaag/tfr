@@ -98,6 +98,7 @@ run_local_checks() {
     npm --prefix tests/e2e exec -- playwright install --with-deps webkit
     npm --prefix tests/e2e test
     uv run pytest -q -k 'not test_two_worlds_exchange_traffic_without_leakage'
+    ./scripts/check-binary-requirements
     uv build --out-dir "$temporary_directory/dist" --clear
 }
 

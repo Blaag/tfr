@@ -8,19 +8,23 @@ import json
 import os
 import secrets
 import stat
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from cryptography.hazmat.primitives import serialization
+import aiohttp
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from py_vapid import Vapid
-from pywebpush import WebPushException, webpush
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 MAX_PUSH_ENDPOINT_CHARACTERS = 4096
 MAX_PUSH_KEY_CHARACTERS = 256
 PUSH_TTL_SECONDS = 15 * 60
 PUSH_TIMEOUT_SECONDS = 10
+PUSH_RECORD_SIZE = 4096
 _ALLOWED_ENDPOINT_HOSTS = frozenset(
     {
         "fcm.googleapis.com",
@@ -74,18 +78,18 @@ class VapidKeyStore:
         self.state_directory = state_directory
         self.path = state_directory / "web-push-vapid.pem"
         self.subject = subject
-        self._private_pem = self._load_or_create()
-        private_key = serialization.load_pem_private_key(self._private_pem, password=None)
+        private_pem = self._load_or_create()
+        private_key = serialization.load_pem_private_key(private_pem, password=None)
         if not isinstance(private_key, ec.EllipticCurvePrivateKey) or not isinstance(
             private_key.curve, ec.SECP256R1
         ):
             raise ValueError("web push VAPID key must be a P-256 private key")
+        self.private_key = private_key
         public = private_key.public_key().public_bytes(
             serialization.Encoding.X962,
             serialization.PublicFormat.UncompressedPoint,
         )
         self.public_key = base64.urlsafe_b64encode(public).rstrip(b"=").decode("ascii")
-        self.vapid = Vapid.from_pem(self._private_pem)
 
     def _load_or_create(self) -> bytes:
         self.state_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -166,36 +170,144 @@ class WebPushSender:
 
     async def send(self, endpoint: str, p256dh: str, auth: str) -> PushResult:
         async with self._semaphore:
-            return await asyncio.to_thread(self._send, endpoint, p256dh, auth)
+            return await self._send(endpoint, p256dh, auth)
 
-    def _send(self, endpoint: str, p256dh: str, auth: str) -> PushResult:
-        subscription = {"endpoint": endpoint, "keys": {"p256dh": p256dh, "auth": auth}}
-        payload = json.dumps(
-            {"version": 1, "type": "activity"}, separators=(",", ":"), ensure_ascii=True
-        )
+    async def _send(self, endpoint: str, p256dh: str, auth: str) -> PushResult:
         try:
-            response = webpush(
-                subscription,
-                data=payload,
-                vapid_private_key=self.keys.vapid,
-                vapid_claims={"sub": self.keys.subject},
-                ttl=PUSH_TTL_SECONDS,
-                timeout=PUSH_TIMEOUT_SECONDS,
+            payload = json.dumps(
+                {"version": 1, "type": "activity"},
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("ascii")
+            encrypted = _encrypt_web_push(payload, p256dh, auth)
+            token = _vapid_token(
+                self.keys.private_key,
+                endpoint,
+                self.keys.subject,
+                now=int(time.time()),
             )
-        except WebPushException as exc:
-            status = exc.response.status_code if exc.response is not None else None
+            headers = {
+                "Authorization": f"vapid t={token}, k={self.keys.public_key}",
+                "Content-Encoding": "aes128gcm",
+                "Content-Type": "application/octet-stream",
+                "TTL": str(PUSH_TTL_SECONDS),
+            }
+            timeout = aiohttp.ClientTimeout(total=PUSH_TIMEOUT_SECONDS)
+            async with aiohttp.ClientSession(timeout=timeout) as session, session.post(
+                endpoint,
+                data=encrypted,
+                headers=headers,
+                allow_redirects=False,
+            ) as response:
+                status = response.status
+                await response.read()
+        except (aiohttp.ClientError, TimeoutError):
             return PushResult(
                 delivered=False,
-                permanent=status in {404, 410},
-                status=status,
-                error="push service rejected the request" if status else "push service unavailable",
+                error="push service unavailable",
             )
         except (OSError, ValueError):
             return PushResult(delivered=False, error="push request could not be created")
-        status = getattr(response, "status_code", 201)
         return PushResult(
             delivered=200 <= status < 300,
             permanent=status in {404, 410},
             status=status,
             error=None if 200 <= status < 300 else "push service rejected the request",
         )
+
+
+def _decode_urlsafe(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _encode_urlsafe(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _public_bytes(key: ec.EllipticCurvePublicKey) -> bytes:
+    return key.public_bytes(
+        serialization.Encoding.X962,
+        serialization.PublicFormat.UncompressedPoint,
+    )
+
+
+def _encrypt_web_push(
+    payload: bytes,
+    receiver_public_key: str,
+    auth_secret: str,
+    *,
+    sender_private_key: ec.EllipticCurvePrivateKey | None = None,
+    salt: bytes | None = None,
+) -> bytes:
+    receiver_bytes = _decode_urlsafe(receiver_public_key)
+    auth_bytes = _decode_urlsafe(auth_secret)
+    if len(receiver_bytes) != 65 or receiver_bytes[0] != 4 or len(auth_bytes) != 16:
+        raise ValueError("push subscription key is invalid")
+    if len(payload) > PUSH_RECORD_SIZE - 17:
+        raise ValueError("push payload is too large")
+    receiver = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), receiver_bytes)
+    sender = sender_private_key or ec.generate_private_key(ec.SECP256R1())
+    if not isinstance(sender.curve, ec.SECP256R1):
+        raise ValueError("push sender key must use P-256")
+    sender_bytes = _public_bytes(sender.public_key())
+    shared_secret = sender.exchange(ec.ECDH(), receiver)
+    key_info = b"WebPush: info\x00" + receiver_bytes + sender_bytes
+    input_key_material = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=auth_bytes,
+        info=key_info,
+    ).derive(shared_secret)
+    salt = salt or os.urandom(16)
+    if len(salt) != 16:
+        raise ValueError("push salt must contain 16 bytes")
+    content_key = HKDF(
+        algorithm=hashes.SHA256(),
+        length=16,
+        salt=salt,
+        info=b"Content-Encoding: aes128gcm\x00",
+    ).derive(input_key_material)
+    nonce = HKDF(
+        algorithm=hashes.SHA256(),
+        length=12,
+        salt=salt,
+        info=b"Content-Encoding: nonce\x00",
+    ).derive(input_key_material)
+    ciphertext = AESGCM(content_key).encrypt(nonce, payload + b"\x02", None)
+    return (
+        salt
+        + PUSH_RECORD_SIZE.to_bytes(4, "big")
+        + bytes([len(sender_bytes)])
+        + sender_bytes
+        + ciphertext
+    )
+
+
+def _vapid_token(
+    private_key: ec.EllipticCurvePrivateKey,
+    endpoint: str,
+    subject: str,
+    *,
+    now: int,
+) -> str:
+    parsed = urlsplit(endpoint)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ValueError("push endpoint is invalid")
+    header = _encode_urlsafe(b'{"alg":"ES256","typ":"JWT"}')
+    claims = _encode_urlsafe(
+        json.dumps(
+            {
+                "aud": f"{parsed.scheme}://{parsed.netloc}",
+                "exp": now + 12 * 60 * 60,
+                "sub": subject,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+    )
+    signing_input = f"{header}.{claims}".encode("ascii")
+    der_signature = private_key.sign(signing_input, ec.ECDSA(hashes.SHA256()))
+    r, s = decode_dss_signature(der_signature)
+    signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+    return f"{header}.{claims}.{_encode_urlsafe(signature)}"

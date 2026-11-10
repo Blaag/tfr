@@ -46,6 +46,7 @@ jobs:
       - run: >-
           uv run pytest -q
           -k 'not test_two_worlds_exchange_traffic_without_leakage'
+      - run: ./scripts/check-binary-requirements
       - name: Embed immutable build identity
         run: printf 'BUILD_COMMIT = "%s"\n' "$GITHUB_SHA" > src/tfr/_build.py
       - name: Build candidate artifacts

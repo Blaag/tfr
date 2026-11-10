@@ -669,6 +669,12 @@ and VAPID path is compatible with Android push subscriptions. Clicking an alert
 focuses an existing TFR PWA window when possible or opens the app at `/`; it does
 not route to or reveal a particular world.
 
+The Web Push Gateway cryptography backend is distributed as binary wheels for
+Linux x86_64/ARM64, Apple Silicon macOS, and Windows x86_64. Intel macOS is not a
+supported Gateway platform for Web Push because the current security-fixed
+cryptography release does not publish an Intel macOS wheel; TFR does not fall
+back to executing dependency build scripts during managed updates.
+
 A single pasted line remains editable composer text and is never sent
 automatically. A multiline paste opens a preview tied to the selected world and
 requires explicit confirmation. The browser sends the source once; the Gateway

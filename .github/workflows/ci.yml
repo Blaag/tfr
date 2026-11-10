@@ -29,6 +29,7 @@ jobs:
       - run: >-
           uv run pytest -q
           -k 'not test_two_worlds_exchange_traffic_without_leakage'
+      - run: ./scripts/check-binary-requirements
       - run: uv build
       - name: Verify packaged web modules
         run: |

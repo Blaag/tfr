@@ -523,7 +523,8 @@ def install_release_bundle(
                         "--relocatable",
                         "--no-project",
                         str(staging),
-                    ]
+                    ],
+                    capture=True,
                 )
                 interpreter = release_python(staging)
                 _run(
@@ -541,7 +542,8 @@ def install_release_bundle(
                         "copy",
                         "--requirements",
                         str(requirements),
-                    ]
+                    ],
+                    capture=True,
                 )
                 _run(
                     [
@@ -556,7 +558,8 @@ def install_release_bundle(
                         "--link-mode",
                         "copy",
                         str(wheel),
-                    ]
+                    ],
+                    capture=True,
                 )
                 build = _installed_build(interpreter)
                 if build["version"] != manifest.version or build["commit"] != manifest.commit:

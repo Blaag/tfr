@@ -54,6 +54,20 @@ def test_run_resolves_uv_from_shared_user_install_lookup(
     assert calls == [[str(uv), "--version"]]
 
 
+def test_run_reports_captured_command_error_without_a_stack_trace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def execute(
+        arguments: list[str], **_values: object
+    ) -> subprocess.CompletedProcess[str]:
+        raise subprocess.CalledProcessError(1, arguments, stderr="binary wheel unavailable\n")
+
+    monkeypatch.setattr("tfr.install_checkout.subprocess.run", execute)
+
+    with pytest.raises(InstallationError, match="binary wheel unavailable"):
+        _run(["false"], capture=True)
+
+
 def create_repository(path: Path) -> None:
     path.mkdir()
     (path / "pyproject.toml").write_text(
