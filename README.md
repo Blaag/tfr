@@ -650,6 +650,25 @@ explicit `:`, `;`, and `@` commands and the first tokens `p`, `po`, `pos`,
 `pose`, `sa`, and `say` are left unchanged. Effects Lab command input keeps
 native spelling disabled.
 
+An installed PWA can enable standards-based Web Push under **Settings →
+Notifications**. The Gateway creates one stable private VAPID P-256 key in the
+web state directory and stores each device's push subscription alongside its
+paired-device record. Notifications are disabled until the device explicitly
+enables them. Per-device triggers support pages, character-name mentions,
+selected worlds, or any visible inbound activity. Notification content is always
+the private fixed text `TFR has activity`; message text, sender names, and world
+names are never included in the push payload. The Gateway suppresses pushes while
+that PWA reports itself visible and sends at most one alert until the PWA becomes
+visible again. Revoking a web device removes its subscription. Permanent `404`
+or `410` responses from a push service also remove the stale subscription.
+
+On iPhone and iPad, Web Push requires iOS/iPadOS 16.4 or newer, installation on
+the Home Screen, and notification permission granted from the explicit enable
+button. No Apple Developer Program membership is required. The same W3C Push API
+and VAPID path is compatible with Android push subscriptions. Clicking an alert
+focuses an existing TFR PWA window when possible or opens the app at `/`; it does
+not route to or reveal a particular world.
+
 A single pasted line remains editable composer text and is never sent
 automatically. A multiline paste opens a preview tied to the selected world and
 requires explicit confirmation. The browser sends the source once; the Gateway

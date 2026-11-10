@@ -110,9 +110,13 @@ within that identity until expiry. The temporary plaintext recovery credential
 is released from application-held references at expiry or revocation and is
 never persisted. Redemption sets an opaque `Secure`, `HttpOnly`,
 `SameSite=Strict`, host-only cookie whose persistent expiration does not exceed
-the device credential's remaining lifetime. Only token
-digests and non-secret device metadata are persisted, in an owner-only directory
-and regular file with atomic replacement. `tfr devices` lists paired devices and
+the device credential's remaining lifetime. Token digests and device metadata
+are persisted in an owner-only directory and regular file with atomic replacement.
+When Web Push is enabled, that private record also contains the subscription
+endpoint and browser-provided encryption/authentication keys. These values are
+credentials: they are never included in ordinary diagnostics or device listings.
+The Gateway's VAPID private key is a separate owner-only regular file in the same
+directory and remains stable across restarts. `tfr devices` lists paired devices and
 `tfr revoke-device` invalidates a credential and closes its active sockets.
 Credentials expire after 180 days.
 
@@ -131,6 +135,18 @@ acknowledgement means the command entered the command bus, not that the remote
 world executed it. Pairing grants the device only the non-agent worlds present at
 that time; descriptors, history, live events, and commands are all filtered to
 that fixed allowlist.
+
+An authenticated device may register, replace, or remove only its own Web Push
+subscription and trigger preferences. Subscription endpoints must use HTTPS and
+an allowlisted Apple, Google, or Mozilla push-service hostname, preventing a
+device credential from turning the Gateway into an arbitrary HTTP client. Push
+payloads are Web-Push encrypted and contain only a schema version plus the generic
+`activity` type. The service worker supplies the fixed visible text `TFR has
+activity`, so world output, sender identity, world names, and message details do
+not leave the Gateway through the push service. Every accepted push event displays
+a notification, including malformed-payload fallback, because iOS may revoke
+subscriptions that receive silent pushes. A permanent push-service rejection or
+device revocation removes the subscription.
 
 The browser receives an explicit projection rather than serialized internal
 events. Telnet, plugin-internal, and agent audit events are excluded; arbitrary

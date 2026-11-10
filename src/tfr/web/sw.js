@@ -1,4 +1,4 @@
-const CACHE_NAME = "tfr-shell-web1-v64";
+const CACHE_NAME = "tfr-shell-web1-v65";
 const NETWORK_TIMEOUT_MS = 5000;
 const SHELL = [
   "/",
@@ -16,6 +16,7 @@ const SHELL = [
   "/pairing.mjs",
   "/paste.mjs",
   "/presentation.mjs",
+  "/push.mjs",
   "/scroll-restoration.mjs",
   "/screen-clear.mjs",
   "/swipe.mjs",
@@ -70,4 +71,37 @@ self.addEventListener("fetch", (event) => {
       .catch(() => caches.match(event.request).then((response) => response || caches.match("/")))
       .finally(() => clearTimeout(timeout)),
   );
+});
+
+self.addEventListener("push", (event) => {
+  let valid = false;
+  try {
+    const value = event.data?.json();
+    valid = value?.version === 1 && value?.type === "activity";
+  } catch {
+    valid = false;
+  }
+  event.waitUntil(
+    self.registration.showNotification("TFR", {
+      body: "TFR has activity",
+      icon: "/icon-512.png",
+      badge: "/icon.svg",
+      tag: "tfr-activity",
+      renotify: false,
+      data: { url: "/", valid },
+    }),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil((async () => {
+    const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    const existing = windows.find((client) => new URL(client.url).origin === self.location.origin);
+    if (existing) {
+      await existing.focus();
+      return;
+    }
+    await self.clients.openWindow(event.notification.data?.url || "/");
+  })());
 });

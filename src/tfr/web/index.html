@@ -138,6 +138,28 @@
         </header>
         <h3 class="settings-heading">World</h3>
         <div id="world-list" class="world-list"></div>
+        <fieldset class="display-settings" aria-describedby="push-status">
+          <legend>Notifications</legend>
+          <p id="push-status" class="fine-print" role="status">Checking Web Push availability…</p>
+          <label class="setting-row" for="push-pages">
+            <span>Pages</span>
+            <input id="push-pages" type="checkbox" role="switch" checked>
+          </label>
+          <label class="setting-row" for="push-mentions">
+            <span>Character mentions</span>
+            <input id="push-mentions" type="checkbox" role="switch" checked>
+          </label>
+          <label class="setting-row" for="push-any-activity">
+            <span>Any activity</span>
+            <input id="push-any-activity" type="checkbox" role="switch">
+          </label>
+          <div>
+            <span class="fine-print">Selected worlds</span>
+            <div id="push-world-list" class="world-list"></div>
+          </div>
+          <button id="push-enable" type="button">Enable notifications</button>
+          <button id="push-disable" type="button" hidden>Disable notifications</button>
+        </fieldset>
         <fieldset class="display-settings">
           <legend>Display</legend>
           <div class="setting-row">

@@ -24,11 +24,14 @@ Reserve physical-device testing for behavior an emulator cannot establish:
 - Safari Add to Home Screen installation and standalone launch.
 - The real iOS keyboard, safe-area insets, rotation, selection, and copy behavior.
 - App suspension during lock/backgrounding and recovery after network changes.
+- Home Screen Web Push permission, delivery while closed/locked, one-alert
+  latching, focus suppression, notification click behavior, and Settings status.
 - VoiceOver, Dynamic Type, Reduce Motion integration, and touch ergonomics.
 - Visual confirmation of animation quality on the actual display.
 
 Record physical results separately without committing pairing links, cookies,
-Tailscale identities, real world names, account names, or transcripts.
+Tailscale identities, push endpoints/keys, real world names, account names, or
+transcripts.
 
 ## Committed Harness
 

@@ -14,12 +14,99 @@ from pathlib import Path
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
+from tfr.web_push import validate_push_endpoint, validate_push_key
+
 PAIRING_TTL_SECONDS = 600
 MAX_DEVICE_LABEL_CHARACTERS = 80
 DEVICE_TOKEN_BYTES = 32
 PAIRING_CODE_BYTES = 32
 DEVICE_LIFETIME_SECONDS = 180 * 24 * 60 * 60
 DEVICE_ACTIVITY_WRITE_INTERVAL_SECONDS = 24 * 60 * 60
+MAX_PUSH_WORLDS = 256
+
+
+@dataclass(frozen=True, slots=True)
+class PushPreferences:
+    any_activity: bool = False
+    worlds: tuple[str, ...] = ()
+    mentions: bool = True
+    pages: bool = True
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "any_activity": self.any_activity,
+            "worlds": list(self.worlds),
+            "mentions": self.mentions,
+            "pages": self.pages,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object, allowed_worlds: tuple[str, ...]) -> PushPreferences:
+        if not isinstance(value, dict) or set(value) != {
+            "any_activity",
+            "worlds",
+            "mentions",
+            "pages",
+        }:
+            raise ValueError("push preferences have invalid fields")
+        worlds = value["worlds"]
+        if (
+            not isinstance(worlds, list)
+            or len(worlds) > MAX_PUSH_WORLDS
+            or not all(isinstance(world, str) and world for world in worlds)
+            or len(set(worlds)) != len(worlds)
+            or not set(worlds) <= set(allowed_worlds)
+        ):
+            raise ValueError("push preference worlds are invalid")
+        for key in ("any_activity", "mentions", "pages"):
+            if not isinstance(value[key], bool):
+                raise ValueError("push preferences are invalid")
+        return cls(
+            any_activity=value["any_activity"],
+            worlds=tuple(worlds),
+            mentions=value["mentions"],
+            pages=value["pages"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PushSubscriptionRecord:
+    endpoint: str
+    p256dh: str
+    auth: str
+    preferences: PushPreferences
+    latched: bool = False
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "endpoint": self.endpoint,
+            "p256dh": self.p256dh,
+            "auth": self.auth,
+            "preferences": self.preferences.as_dict(),
+            "latched": self.latched,
+        }
+
+    @classmethod
+    def from_dict(
+        cls, value: object, allowed_worlds: tuple[str, ...]
+    ) -> PushSubscriptionRecord:
+        if not isinstance(value, dict) or set(value) != {
+            "endpoint",
+            "p256dh",
+            "auth",
+            "preferences",
+            "latched",
+        }:
+            raise ValueError("push subscription has invalid fields")
+        if not isinstance(value["latched"], bool):
+            raise ValueError("push subscription latch is invalid")
+        return cls(
+            endpoint=validate_push_endpoint(value["endpoint"]),
+            p256dh=validate_push_key(value["p256dh"], "p256dh"),
+            auth=validate_push_key(value["auth"], "authentication"),
+            preferences=PushPreferences.from_dict(value["preferences"], allowed_worlds),
+            latched=value["latched"],
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +121,7 @@ class DeviceRecord:
     allowed_worlds: tuple[str, ...]
     tailscale_login: str
     scope: str = "chat"
+    push: PushSubscriptionRecord | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -47,56 +135,23 @@ class DeviceRecord:
             "allowed_worlds": list(self.allowed_worlds),
             "tailscale_login": self.tailscale_login,
             "scope": self.scope,
+            "push": self.push.as_dict() if self.push is not None else None,
         }
 
     @classmethod
     def from_dict(cls, value: object) -> DeviceRecord:
-        if not isinstance(value, dict) or set(value) not in (
-            {
-                "device_id",
-                "label",
-                "token_digest",
-                "created_at",
-                "expires_at",
-                "allowed_worlds",
-                "tailscale_login",
-                "scope",
-            },
-            {
-                "device_id",
-                "label",
-                "token_digest",
-                "created_at",
-                "last_used_at",
-                "expires_at",
-                "allowed_worlds",
-                "tailscale_login",
-                "scope",
-            },
-            {
-                "device_id",
-                "ui_id",
-                "label",
-                "token_digest",
-                "created_at",
-                "expires_at",
-                "allowed_worlds",
-                "tailscale_login",
-                "scope",
-            },
-            {
-                "device_id",
-                "ui_id",
-                "label",
-                "token_digest",
-                "created_at",
-                "last_used_at",
-                "expires_at",
-                "allowed_worlds",
-                "tailscale_login",
-                "scope",
-            },
-        ):
+        required = {
+            "device_id",
+            "label",
+            "token_digest",
+            "created_at",
+            "expires_at",
+            "allowed_worlds",
+            "tailscale_login",
+            "scope",
+        }
+        optional = {"ui_id", "last_used_at", "push"}
+        if not isinstance(value, dict) or not required <= set(value) <= required | optional:
             raise ValueError("web device record has invalid fields")
         label = value["label"]
         digest = value["token_digest"]
@@ -157,6 +212,11 @@ class DeviceRecord:
             allowed_worlds=tuple(allowed_worlds),
             tailscale_login=tailscale_login,
             scope=scope,
+            push=(
+                PushSubscriptionRecord.from_dict(value["push"], tuple(allowed_worlds))
+                if value.get("push") is not None
+                else None
+            ),
         )
 
     @staticmethod
@@ -320,6 +380,10 @@ class DeviceStore:
             return None
         return device
 
+    def active_devices(self) -> tuple[DeviceRecord, ...]:
+        now = datetime.now(UTC)
+        return tuple(device for device in self._devices.values() if device.expires_at > now)
+
     async def mark_used(self, device_id: UUID) -> tuple[DeviceRecord | None, bool]:
         async with self._lock:
             digest = next(
@@ -365,9 +429,93 @@ class DeviceStore:
                 "allowed_worlds": list(device.allowed_worlds),
                 "tailscale_login": device.tailscale_login,
                 "scope": device.scope,
+                "push_enabled": device.push is not None,
+                "push_latched": device.push.latched if device.push is not None else False,
             }
             for device in sorted(self._devices.values(), key=lambda item: item.created_at)
         ]
+
+    async def set_push_subscription(
+        self,
+        device_id: UUID,
+        *,
+        endpoint: str,
+        p256dh: str,
+        auth: str,
+        preferences: PushPreferences,
+    ) -> DeviceRecord:
+        endpoint = validate_push_endpoint(endpoint)
+        p256dh = validate_push_key(p256dh, "p256dh")
+        auth = validate_push_key(auth, "authentication")
+        async with self._lock:
+            digest, device = self._device_entry(device_id)
+            if not set(preferences.worlds) <= set(device.allowed_worlds):
+                raise ValueError("push preference worlds are not authorized for this device")
+            if any(
+                item.device_id != device_id
+                and item.push is not None
+                and item.push.endpoint == endpoint
+                for item in self._devices.values()
+            ):
+                raise ValueError("push subscription is already registered to another device")
+            updated = replace(
+                device,
+                push=PushSubscriptionRecord(
+                    endpoint=endpoint,
+                    p256dh=p256dh,
+                    auth=auth,
+                    preferences=preferences,
+                ),
+            )
+            self._replace_and_save(digest, device, updated)
+            return updated
+
+    async def remove_push_subscription(self, device_id: UUID) -> DeviceRecord | None:
+        async with self._lock:
+            try:
+                digest, device = self._device_entry(device_id)
+            except ValueError:
+                return None
+            if device.push is None:
+                return device
+            updated = replace(device, push=None)
+            self._replace_and_save(digest, device, updated)
+            return updated
+
+    async def set_push_latched(self, device_id: UUID, latched: bool) -> DeviceRecord | None:
+        async with self._lock:
+            try:
+                digest, device = self._device_entry(device_id)
+            except ValueError:
+                return None
+            if device.push is None or device.push.latched is latched:
+                return device
+            updated = replace(device, push=replace(device.push, latched=latched))
+            self._replace_and_save(digest, device, updated)
+            return updated
+
+    def _device_entry(self, device_id: UUID) -> tuple[str, DeviceRecord]:
+        entry = next(
+            (
+                (token_digest, device)
+                for token_digest, device in self._devices.items()
+                if device.device_id == device_id
+            ),
+            None,
+        )
+        if entry is None:
+            raise ValueError("web device is unavailable")
+        return entry
+
+    def _replace_and_save(
+        self, digest: str, previous: DeviceRecord, updated: DeviceRecord
+    ) -> None:
+        self._devices[digest] = updated
+        try:
+            self._save()
+        except BaseException:
+            self._devices[digest] = previous
+            raise
 
     async def revoke(self, device_id: UUID) -> bool:
         async with self._lock:
@@ -405,13 +553,16 @@ class DeviceStore:
                 raise ValueError(f"cannot read web device state: {self.path}") from exc
         if not isinstance(value, dict) or set(value) != {"schema_version", "devices"}:
             raise ValueError("web device state has invalid fields")
-        if value["schema_version"] != 1 or not isinstance(value["devices"], list):
+        if value["schema_version"] not in {1, 2} or not isinstance(value["devices"], list):
             raise ValueError("web device state has an unsupported schema")
         devices = [DeviceRecord.from_dict(item) for item in value["devices"]]
         if len({device.device_id for device in devices}) != len(devices) or len(
             {device.token_digest for device in devices}
         ) != len(devices):
             raise ValueError("web device state contains duplicate records")
+        endpoints = [device.push.endpoint for device in devices if device.push is not None]
+        if len(endpoints) != len(set(endpoints)):
+            raise ValueError("web device state contains duplicate push subscriptions")
         self._devices = {device.token_digest: device for device in devices}
 
     def _ensure_private_directory(self) -> None:
@@ -465,7 +616,7 @@ class DeviceStore:
             descriptor = self._open_private_file()
             os.close(descriptor)
         value = {
-            "schema_version": 1,
+            "schema_version": 2,
             "devices": [
                 device.as_dict()
                 for device in sorted(self._devices.values(), key=lambda item: str(item.device_id))

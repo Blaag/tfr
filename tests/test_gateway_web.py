@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 import ssl
@@ -36,11 +37,13 @@ from tfr.events import (
     SpoofStatus,
 )
 from tfr.gateway import EventHistory
+from tfr.gateway_devices import PushPreferences
 from tfr.gateway_uis import UiStore
 from tfr.gateway_web import (
     SESSION_COOKIE,
     WebGatewayManager,
     WebGatewayServer,
+    _push_event_matches,
     _serve_root_proxy,
     _tailscale_origin,
     browser_event,
@@ -49,8 +52,11 @@ from tfr.gateway_web import (
 from tfr.plugins import PluginManager
 from tfr.presentation import color_pulse
 from tfr.updates import BuildIdentity
+from tfr.web_push import PushResult
 
 ORIGIN = "https://gateway.example.ts.net"
+P256DH = base64.urlsafe_b64encode(b"\x04" + b"p" * 64).rstrip(b"=").decode()
+PUSH_AUTH = base64.urlsafe_b64encode(b"a" * 16).rstrip(b"=").decode()
 PUBLIC_HEADERS = {
     "Host": "gateway.example.ts.net",
     "Origin": ORIGIN,
@@ -129,6 +135,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
         "pairing.mjs",
         "paste.mjs",
         "presentation.mjs",
+        "push.mjs",
         "repair.css",
         "repair.html",
         "repair.mjs",
@@ -146,7 +153,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v64";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v65";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
 
 
@@ -1262,6 +1269,114 @@ async def paired_client(
     assert 0 < int(morsel["max-age"]) <= 180 * 24 * 60 * 60
     assert parsedate_to_datetime(morsel["expires"]).timestamp() > time.time()
     return gateway, client, morsel.value
+
+
+async def test_authenticated_device_manages_private_push_subscription(tmp_path: Path) -> None:
+    runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 5}))
+    gateway, client, token = await paired_client(tmp_path, runtime)
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    subscription = {
+        "endpoint": "https://web.push.apple.com/device-token",
+        "keys": {"p256dh": P256DH, "auth": PUSH_AUTH},
+    }
+    preferences = {
+        "any_activity": False,
+        "worlds": [],
+        "mentions": True,
+        "pages": True,
+    }
+    try:
+        initial = await client.get("/api/push", headers=headers)
+        assert initial.status == 200
+        initial_value = await initial.json()
+        assert initial_value["subscribed"] is False
+        assert isinstance(initial_value["public_key"], str)
+
+        registered = await client.put(
+            "/api/push",
+            headers=headers,
+            json={"subscription": subscription, "preferences": preferences},
+        )
+        assert registered.status == 200
+        assert (await registered.json())["subscribed"] is True
+        assert gateway.devices.device_descriptors()[0]["push_enabled"] is True
+
+        removed = await client.delete("/api/push", headers=headers)
+        assert removed.status == 200
+        assert (await removed.json()) == {"subscribed": False}
+        assert gateway.devices.device_descriptors()[0]["push_enabled"] is False
+    finally:
+        await client.close()
+
+
+def test_push_policy_is_private_inbound_and_trigger_bounded() -> None:
+    page = make_event(text="Alice pages: hello", kind=EventKind.PAGE)
+    mention = replace(
+        make_event(text='Alice says, "Barnaby, hello"', kind=EventKind.SAY),
+        provenance=Provenance(sender_name="Alice", confidence=Confidence.HIGH),
+    )
+    ordinary = make_event(text='Alice says, "hello"', kind=EventKind.SAY)
+    defaults = PushPreferences()
+
+    assert _push_event_matches(page, defaults, character_name="Barnaby") is True
+    assert _push_event_matches(mention, defaults, character_name="Barnaby") is True
+    assert _push_event_matches(ordinary, defaults, character_name="Barnaby") is False
+    assert _push_event_matches(
+        replace(mention, direction=Direction.OUTBOUND), defaults, character_name="Barnaby"
+    ) is False
+    assert _push_event_matches(
+        replace(mention, redacted=True), defaults, character_name="Barnaby"
+    ) is False
+
+
+async def test_successful_push_latches_device_until_visibility_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 5}))
+    gateway, client, token = await paired_client(tmp_path, runtime)
+    device = gateway.devices.authenticate(token)
+    assert device is not None
+    device = await gateway.devices.set_push_subscription(
+        device.device_id,
+        endpoint="https://web.push.apple.com/device-token",
+        p256dh=P256DH,
+        auth=PUSH_AUTH,
+        preferences=PushPreferences(pages=True),
+    )
+    calls = 0
+
+    async def send(_endpoint: str, _p256dh: str, _auth: str) -> PushResult:
+        nonlocal calls
+        calls += 1
+        return PushResult(delivered=True, status=201)
+
+    monkeypatch.setattr(gateway.push_sender, "send", send)
+    try:
+        visible_socket = object()
+        gateway._active_sockets[device.device_id].add(visible_socket)  # type: ignore[arg-type]
+        gateway._visible_sockets.add(visible_socket)  # type: ignore[arg-type]
+        await gateway._push_for_device(
+            device,
+            make_event(text="Alice pages: visible", kind=EventKind.PAGE),
+            "Barnaby",
+        )
+        assert calls == 0
+        gateway._visible_sockets.clear()
+        await gateway._push_for_device(
+            device,
+            make_event(text="Alice pages: hello", kind=EventKind.PAGE),
+            "Barnaby",
+        )
+        latched = gateway.devices.authenticate(token)
+        assert latched is not None and latched.push is not None and latched.push.latched is True
+        await gateway._push_for_device(
+            latched,
+            make_event(text="Alice pages: again", kind=EventKind.PAGE),
+            "Barnaby",
+        )
+        assert calls == 1
+    finally:
+        await client.close()
 
 
 async def test_pwa_reports_bounded_authenticated_diagnostics(tmp_path: Path) -> None:
