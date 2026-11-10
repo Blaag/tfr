@@ -258,6 +258,17 @@ merge_pr() {
     actual_head=$(gh pr view "$pr" --repo "$EXPECTED_REPOSITORY" --json headRefOid --jq .headRefOid)
     [ "$actual_head" = "$expected_head" ] || fail "$label PR head changed after local validation"
 
+    owner=${EXPECTED_REPOSITORY%%/*}
+    repository=${EXPECTED_REPOSITORY#*/}
+    unresolved_threads=$(gh api graphql \
+        -f owner="$owner" -f repository="$repository" -F number="$pr" \
+        -f query='query($owner:String!,$repository:String!,$number:Int!){repository(owner:$owner,name:$repository){pullRequest(number:$number){reviewThreads(first:100){nodes{id,isResolved,isOutdated,comments(last:1){nodes{url}}}}}}}' \
+        --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false and .isOutdated == false) | .comments.nodes[-1].url')
+    if [ -n "$unresolved_threads" ]; then
+        printf '%s\n' "$unresolved_threads" >&2
+        fail "$label PR has unresolved review threads; fix or resolve them, then rerun"
+    fi
+
     printf '\n==> Merging %s PR #%s\n' "$label" "$pr"
     gh pr merge "$pr" --repo "$EXPECTED_REPOSITORY" --squash --delete-branch \
         --match-head-commit "$expected_head"

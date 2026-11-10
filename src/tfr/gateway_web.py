@@ -1315,8 +1315,8 @@ class WebGatewayServer:
                 auth=keys["auth"],
                 preferences=preferences,
             )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise web.HTTPBadRequest(text=str(exc)) from None
+        except (KeyError, TypeError, ValueError):
+            raise web.HTTPBadRequest(text="Invalid push subscription") from None
         self._push_retry_after.pop(device.device_id, None)
         self._push_last_result.pop(device.device_id, None)
         return self._json_response(

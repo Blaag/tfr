@@ -155,6 +155,12 @@ if args[:2] == ["pr", "view"] and "--arg" in args:
 
 if args[:2] == ["auth", "status"]:
     raise SystemExit(0)
+if args[:2] == ["api", "graphql"]:
+    if os.environ.get("TFR_FAKE_UNRESOLVED_THREAD") == "1":
+        output("https://github.invalid/Blaag/tfr/pull/1#discussion_r1")
+    else:
+        output("")
+    raise SystemExit(0)
 if args[:2] == ["repo", "view"]:
     output("Blaag/tfr")
 elif args[:2] == ["pr", "list"]:
@@ -926,3 +932,26 @@ def test_release_end_to_end_stops_on_codeql_failure(tmp_path: Path) -> None:
     assert "gh pr merge" not in log
     assert "publish" not in log
     assert "pending_deployments" not in log
+
+
+def test_release_end_to_end_reports_unresolved_review_thread_before_merge(
+    tmp_path: Path,
+) -> None:
+    repository, environment = create_fixture(tmp_path)
+    environment["TFR_FAKE_UNRESOLVED_THREAD"] = "1"
+
+    result = subprocess.run(
+        [str(repository / "scripts" / "release-end-to-end"), "0.1.1"],
+        cwd=repository,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "https://github.invalid/Blaag/tfr/pull/1#discussion_r1" in result.stderr
+    assert "unresolved review threads" in result.stderr
+    log = Path(environment["TFR_FAKE_LOG"]).read_text(encoding="utf-8")
+    assert "gh pr merge" not in log
