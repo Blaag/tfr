@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from collections.abc import Sequence
@@ -20,6 +21,19 @@ from tfr.config import (
 )
 from tfr.gateway_transport import DEFAULT_GATEWAY_PORT
 from tfr.updates import current_build
+
+
+def _configured_default_mode() -> str | None:
+    configured = os.environ.get("XDG_STATE_HOME")
+    base = Path(configured).expanduser() if configured else Path.home() / ".local" / "state"
+    path = base / "tfr" / "deployment.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if value == {"schema_version": 1, "profile": "remote-ui"}:
+        return "ui"
+    return None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -128,6 +142,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run(argv: Sequence[str] | None = None) -> int:
     original_arguments = list(argv) if argv is not None else sys.argv[1:]
+    if not original_arguments:
+        default_mode = _configured_default_mode()
+        if default_mode is not None:
+            original_arguments = [default_mode]
+            argv = original_arguments
     if original_arguments and original_arguments[0] == "config":
         from tfr.configuration_cli import run_config_cli
 

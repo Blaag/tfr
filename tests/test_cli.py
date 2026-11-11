@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 
-from tfr.cli import build_parser, run
+from tfr.cli import _configured_default_mode, build_parser, run
 
 
 def write_configuration(directory: Path, *, with_world: bool) -> Path:
@@ -25,6 +25,19 @@ def write_configuration(directory: Path, *, with_world: bool) -> Path:
     )
     agents.write_text('{"schema_version": 1}', encoding="utf-8")
     return main
+
+
+def test_remote_ui_deployment_selects_ui_for_bare_tfr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    deployment = tmp_path / "tfr" / "deployment.json"
+    deployment.parent.mkdir()
+    deployment.write_text(
+        '{"schema_version":1,"profile":"remote-ui"}\n', encoding="utf-8"
+    )
+
+    assert _configured_default_mode() == "ui"
 
 
 def test_parser_uses_xdg_default_config_path(

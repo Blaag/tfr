@@ -40,6 +40,7 @@ from tfr.gateway_client import (
     run_gateway_ui,
 )
 from tfr.gateway_configuration import GatewayConfigurationStore
+from tfr.gateway_profiles import redeem_ui_pairing
 from tfr.gateway_protocol import GatewayProtocolError, event_message, read_message, write_message
 from tfr.gateway_transport import (
     create_gateway_client_tls_context,
@@ -63,6 +64,72 @@ def make_event(sequence: int) -> Event:
         canonical_text=f"line {sequence}",
         display_text=f"line {sequence}",
     )
+
+
+async def test_remote_ui_pairing_issues_a_persistent_client_credential(tmp_path: Path) -> None:
+    ca = trustme.CA()
+    certificate = ca.issue_cert("localhost")
+    ca_path = tmp_path / "ca.pem"
+    certificate_path = tmp_path / "gateway.pem"
+    key_path = tmp_path / "gateway.key"
+    ca.cert_pem.write_to_path(ca_path)
+    certificate.cert_chain_pems[0].write_to_path(certificate_path)
+    certificate.private_key_pem.write_to_path(key_path)
+    key_path.chmod(0o600)
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    ui_store = UiStore(tmp_path / "uis")
+    code, _expires_at = ui_store.create_pairing_code()
+    socket_path = Path("/tmp") / f"tfr-ui-pairing-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(
+        runtime,  # type: ignore[arg-type]
+        socket_path,
+        tcp_host="127.0.0.1",
+        tcp_port=0,
+        tcp_auth_token="a" * 64,
+        tcp_ssl_context=create_gateway_server_tls_context(certificate_path, key_path),
+        ui_store=ui_store,
+    )
+    await server.start()
+    port = int(server.tcp_addresses[0][1])
+    ui_id = UUID("11111111-1111-4111-8111-111111111111")
+    try:
+        token = await asyncio.wait_for(
+            redeem_ui_pairing(
+                "127.0.0.1",
+                port,
+                code,
+                ui_id,
+                tls_server_name="localhost",
+                tls_ca=ca_path,
+            ),
+            timeout=2,
+        )
+        client = await asyncio.wait_for(
+            GatewayClient.connect_tcp(
+                "127.0.0.1",
+                port,
+                auth_token=token,
+                tls_context=create_gateway_client_tls_context(ca_path),
+                server_hostname="localhost",
+                client_id=ui_id,
+                ui_registration=UiRegistration(
+                    client_type="terminal",
+                    platform="fresh-install",
+                    versions={},
+                    capabilities=(),
+                ),
+            ),
+            timeout=2,
+        )
+        assert [session.world for session in client.sessions] == ["alpha"]
+        await asyncio.wait_for(client.stop(), timeout=2)
+        await client.event_bus.close()
+    finally:
+        await asyncio.wait_for(server.stop(), timeout=2)
+        await asyncio.wait_for(history.stop(), timeout=2)
 
 
 def test_retire_local_migration_sources_backs_up_and_rewrites_config(tmp_path: Path) -> None:

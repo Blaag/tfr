@@ -436,6 +436,8 @@ class ServiceRuntime(Protocol):
 
     async def list_uis(self) -> list[dict[str, object]]: ...
 
+    async def create_ui_pairing(self) -> dict[str, str]: ...
+
     async def show_ui(self, name: str) -> dict[str, object]: ...
 
     async def rename_ui(self, name: str) -> dict[str, object]: ...
@@ -6770,6 +6772,17 @@ class TfrTui:
         try:
             if action == "list" and len(parameters) == 1:
                 records = await self.service_runtime.list_uis()
+            elif action == "pair" and len(parameters) == 1:
+                invitation = await self.service_runtime.create_ui_pairing()
+                self.add_notice(
+                    alias,
+                    "Pair a new remote UI\n"
+                    "  On the new machine, run setup-tfr and select Remote UI.\n"
+                    "  Paste this single-use code when prompted:\n\n"
+                    f"{invitation['code']}\n\n"
+                    f"Expires: {invitation['expires_at']} (30 minutes after creation)",
+                )
+                return
             elif action == "show" and len(parameters) >= 2:
                 record = await self.service_runtime.show_ui(" ".join(parameters[1:]))
                 self.add_notice(alias, self._ui_record_text(record))
@@ -6805,7 +6818,7 @@ class TfrTui:
             else:
                 self.add_notice(
                     alias,
-                    'Usage: /ui list|show NAME|rename "NAME"|rename "TARGET" "NAME"|'
+                    'Usage: /ui list|pair|show NAME|rename "NAME"|rename "TARGET" "NAME"|'
                     'forget "TARGET" [confirm]',
                 )
                 return

@@ -672,6 +672,17 @@ class GatewayRuntime:
     def native_ui_focused(self) -> bool:
         return any(focused for _ui_id, focused in self._native_ui_focus.values())
 
+    async def report_focus(self, focused: bool) -> None:
+        """Track focus for the native UI embedded in all-in-one mode."""
+        self.report_native_ui_focus("all-in-one", UUID(int=0), focused)
+
+    async def create_ui_pairing(self) -> dict[str, str]:
+        ui_store = getattr(self, "ui_store", None)
+        if ui_store is None:
+            raise ValueError("UI pairing is unavailable")
+        code, expires_at = ui_store.create_pairing_code()
+        return {"code": code, "expires_at": expires_at.isoformat().replace("+00:00", "Z")}
+
     @classmethod
     async def from_configuration(
         cls,
@@ -1690,16 +1701,18 @@ class GatewayServer:
                 await self._update_task
         if self._tcp_server is not None:
             self._tcp_server.close()
-            await self._tcp_server.wait_closed()
-            self._tcp_server = None
         if self._server is not None:
             self._server.close()
-            await self._server.wait_closed()
-            self._server = None
         for task in tuple(self._clients):
             task.cancel()
         if self._clients:
             await asyncio.gather(*tuple(self._clients), return_exceptions=True)
+        if self._tcp_server is not None:
+            await self._tcp_server.wait_closed()
+            self._tcp_server = None
+        if self._server is not None:
+            await self._server.wait_closed()
+            self._server = None
         self._clients.clear()
         self._tcp_clients.clear()
         self._pending_tcp_clients.clear()
@@ -1854,19 +1867,54 @@ class GatewayServer:
         sender: asyncio.Task[None] | None = None
         receiver: asyncio.Task[None] | None = None
         participant: _GatewayUpdateParticipant | None = None
+        connection_id = ""
         try:
             hello = await asyncio.wait_for(
                 read_message(reader, maximum_bytes=MAX_HELLO_BYTES),
                 timeout=HELLO_TIMEOUT_SECONDS,
             )
+            if hello is not None and hello.get("type") == "pair_ui":
+                if auth_token is None or self.ui_store is None:
+                    raise GatewayProtocolError("remote UI pairing is unavailable")
+                if set(hello) != {"type", "protocol", "code", "client_id"}:
+                    raise GatewayProtocolError("remote UI pairing request has invalid fields")
+                try:
+                    pairing_ui_id = UUID(str(hello.get("client_id")))
+                except (TypeError, ValueError, AttributeError):
+                    raise GatewayProtocolError("remote UI pairing client ID is invalid") from None
+                try:
+                    paired_token = await self.ui_store.redeem_pairing(
+                        str(hello.get("code", "")), pairing_ui_id
+                    )
+                except ValueError as exc:
+                    raise GatewayProtocolError(str(exc)) from exc
+                await write_message(
+                    writer,
+                    {
+                        "type": "pair_ui",
+                        "client_id": str(pairing_ui_id),
+                        "auth_token": paired_token,
+                    },
+                    lock=write_lock,
+                )
+                task = asyncio.current_task()
+                if task is not None:
+                    self._pending_tcp_clients.pop(task, None)
+                return
             if hello is None or hello.get("type") != "hello":
                 raise GatewayProtocolError("first message must be hello")
+            client_id = self._client_id(hello.get("client_id"))
             if auth_token is not None:
                 supplied_token = hello.get("auth_token")
-                if not isinstance(supplied_token, str) or not hmac.compare_digest(
-                    supplied_token,
-                    auth_token,
-                ):
+                master_authenticated = isinstance(supplied_token, str) and hmac.compare_digest(
+                    supplied_token, auth_token
+                )
+                paired_authenticated = (
+                    isinstance(supplied_token, str)
+                    and self.ui_store is not None
+                    and self.ui_store.authenticate_credential(UUID(client_id), supplied_token)
+                )
+                if not master_authenticated and not paired_authenticated:
                     raise GatewayProtocolError("gateway authentication failed")
                 task = asyncio.current_task()
                 if task is None or task not in self._pending_tcp_clients:
@@ -1875,7 +1923,6 @@ class GatewayServer:
                     raise GatewayProtocolError("gateway remote client limit reached")
                 self._pending_tcp_clients.pop(task)
                 self._tcp_clients.add(task)
-            client_id = self._client_id(hello.get("client_id"))
             admin = hello.get("admin", False)
             if not isinstance(admin, bool):
                 raise GatewayProtocolError("admin must be a boolean")
@@ -3307,6 +3354,16 @@ class GatewayServer:
                 if record is None:
                     raise ValueError(f"unknown UI: {name}")
                 result = {"ui": record.as_dict()}
+            elif message_type == "create_ui_pairing":
+                if not allow_admin or self.ui_store is None:
+                    raise ValueError("UI pairing is unavailable")
+                if set(message) != {"type", "protocol", "request_id"}:
+                    raise ValueError("create_ui_pairing has invalid fields")
+                code, expires_at = self.ui_store.create_pairing_code()
+                result = {
+                    "code": code,
+                    "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+                }
             elif message_type == "rename_ui":
                 if self.ui_store is None or ui_id is None:
                     raise ValueError("current UI identity is unavailable")

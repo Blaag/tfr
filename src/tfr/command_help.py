@@ -220,7 +220,7 @@ COMMAND_HELP = {
         _command(
             "ui",
             "Inspect and administer named UIs",
-            "/ui list|show|rename|forget",
+            "/ui list|pair|show|rename|forget",
             "administration",
             "Gateway UI inventory",
             availability="gateway",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import secrets
@@ -20,6 +21,9 @@ MAX_UI_VERSIONS = 16
 MAX_UI_VERSION_NAME_CHARACTERS = 32
 MAX_UI_VERSION_VALUE_CHARACTERS = 80
 UI_CLIENT_TYPES = frozenset({"terminal", "pwa"})
+UI_PAIRING_TTL_SECONDS = 30 * 60
+MAX_ACTIVE_UI_PAIRINGS = 32
+UI_PAIRING_PREFIX = "tfr-pair-v1:"
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +170,7 @@ class UiRecord:
             applied_config_revision=revision,
         )
 
+
     @staticmethod
     def _versions(value: object) -> tuple[tuple[str, str], ...]:
         if (
@@ -200,6 +205,11 @@ class UiRecord:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class UiPairingChallenge:
+    expires_at: datetime
+
+
 class UiStore:
     """Persistent Gateway authority for stable native and PWA UI records."""
 
@@ -215,6 +225,8 @@ class UiStore:
         self._records: dict[UUID, UiRecord] = {}
         self._configuration_profiles: dict[UUID, UUID] = {}
         self._configuration_reports: dict[UUID, tuple[int, str, tuple[str, ...]]] = {}
+        self._credential_digests: dict[UUID, str] = {}
+        self._pairings: dict[str, UiPairingChallenge] = {}
         self._lock = asyncio.Lock()
         self._load()
 
@@ -223,6 +235,57 @@ class UiStore:
 
     def records(self) -> tuple[UiRecord, ...]:
         return tuple(sorted(self._records.values(), key=lambda item: item.display_name.casefold()))
+
+    def create_pairing_code(self) -> tuple[str, datetime]:
+        now = self._now()
+        self._pairings = {
+            digest: challenge
+            for digest, challenge in self._pairings.items()
+            if challenge.expires_at > now
+        }
+        if len(self._pairings) >= MAX_ACTIVE_UI_PAIRINGS:
+            raise ValueError("too many active UI pairing invitations")
+        secret = secrets.token_urlsafe(32)
+        code = f"{UI_PAIRING_PREFIX}{secret}"
+        expires_at = datetime.fromtimestamp(now.timestamp() + UI_PAIRING_TTL_SECONDS, UTC)
+        self._pairings[self._token_digest(code)] = UiPairingChallenge(expires_at=expires_at)
+        return code, expires_at
+
+    async def redeem_pairing(self, code: str, ui_id: UUID) -> str:
+        if (
+            not isinstance(code, str)
+            or not code.startswith(UI_PAIRING_PREFIX)
+            or len(code) > 128
+            or not code.isascii()
+        ):
+            raise ValueError("UI pairing code is invalid or expired")
+        async with self._lock:
+            challenge = self._pairings.pop(self._token_digest(code), None)
+            if challenge is None or challenge.expires_at <= self._now():
+                raise ValueError("UI pairing code is invalid or expired")
+            token = secrets.token_hex(32)
+            previous = self._credential_digests.get(ui_id)
+            self._credential_digests[ui_id] = self._token_digest(token)
+            try:
+                self._save()
+            except BaseException:
+                if previous is None:
+                    self._credential_digests.pop(ui_id, None)
+                else:
+                    self._credential_digests[ui_id] = previous
+                self._pairings[self._token_digest(code)] = challenge
+                raise
+            return token
+
+    def authenticate_credential(self, ui_id: UUID, token: str) -> bool:
+        if not isinstance(token, str) or not token.isascii() or len(token) > 128:
+            return False
+        expected = self._credential_digests.get(ui_id)
+        return expected is not None and secrets.compare_digest(expected, self._token_digest(token))
+
+    @staticmethod
+    def _token_digest(token: str) -> str:
+        return hashlib.sha256(token.encode("ascii")).hexdigest()
 
     def configuration_profile_id(self, ui_id: UUID) -> UUID:
         """Return the managed-configuration profile claimed by a UI."""
@@ -466,12 +529,15 @@ class UiStore:
                 raise ValueError(f"unknown UI: {target_name}")
             del self._records[target.ui_id]
             previous_profile = self._configuration_profiles.pop(target.ui_id, None)
+            previous_credential = self._credential_digests.pop(target.ui_id, None)
             try:
                 self._save()
             except BaseException:
                 self._records[target.ui_id] = target
                 if previous_profile is not None:
                     self._configuration_profiles[target.ui_id] = previous_profile
+                if previous_credential is not None:
+                    self._credential_digests[target.ui_id] = previous_credential
                 raise
             return target
 
@@ -511,9 +577,10 @@ class UiStore:
         if not isinstance(value, dict) or set(value) not in (
             {"schema_version", "uis"},
             {"schema_version", "uis", "configuration_profiles"},
+            {"schema_version", "uis", "configuration_profiles", "credentials"},
         ):
             raise ValueError("UI state has invalid fields")
-        if value["schema_version"] not in {1, 2} or not isinstance(value["uis"], list):
+        if value["schema_version"] not in {1, 2, 3} or not isinstance(value["uis"], list):
             raise ValueError("UI state has an unsupported schema")
         records = [UiRecord.from_dict(item) for item in value["uis"]]
         if len({record.ui_id for record in records}) != len(records):
@@ -533,6 +600,20 @@ class UiStore:
         if len(set(profiles.values())) != len(profiles):
             raise ValueError("UI configuration profile is claimed more than once")
         self._configuration_profiles = profiles
+        raw_credentials = value.get("credentials", {})
+        if not isinstance(raw_credentials, dict):
+            raise ValueError("UI credentials are invalid")
+        try:
+            credentials = {UUID(key): str(digest) for key, digest in raw_credentials.items()}
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("UI credentials are invalid") from exc
+        if any(
+            len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            for digest in credentials.values()
+        ):
+            raise ValueError("UI credentials are invalid")
+        self._credential_digests = credentials
 
     def _ensure_private_directory(self) -> None:
         try:
@@ -583,7 +664,7 @@ class UiStore:
             descriptor = self._open_private_file()
             os.close(descriptor)
         value = {
-            "schema_version": 2,
+            "schema_version": 3,
             "uis": [
                 record.as_dict()
                 for record in sorted(self._records.values(), key=lambda item: str(item.ui_id))
@@ -592,6 +673,12 @@ class UiStore:
                 str(ui_id): str(profile_id)
                 for ui_id, profile_id in sorted(
                     self._configuration_profiles.items(), key=lambda item: str(item[0])
+                )
+            },
+            "credentials": {
+                str(ui_id): digest
+                for ui_id, digest in sorted(
+                    self._credential_digests.items(), key=lambda item: str(item[0])
                 )
             },
         }

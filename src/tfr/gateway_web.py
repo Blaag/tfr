@@ -1151,6 +1151,7 @@ class WebGatewayServer:
                 web.post("/pair", self._pair_page),
                 web.post("/api/logout", self._logout),
                 web.post("/api/diagnostics", self._report_diagnostic),
+                web.post("/api/ui-pairing", self._create_ui_pairing),
                 web.get("/api/push", self._push_status),
                 web.put("/api/push", self._register_push),
                 web.delete("/api/push", self._remove_push),
@@ -1360,6 +1361,20 @@ class WebGatewayServer:
                 ),
                 "last_result": self._push_last_result.get(device.device_id),
                 "native_ui_focused": self._native_ui_focused(),
+            }
+        )
+
+    async def _create_ui_pairing(self, request: web.Request) -> web.Response:
+        self._validate_public_request(request, require_origin=True)
+        if self._authenticate(request) is None:
+            raise web.HTTPUnauthorized(text="Pair this device first")
+        if self.ui_store is None:
+            raise web.HTTPServiceUnavailable(text="UI pairing is unavailable")
+        code, expires_at = self.ui_store.create_pairing_code()
+        return self._json_response(
+            {
+                "code": code,
+                "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
             }
         )
 
