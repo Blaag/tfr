@@ -105,6 +105,9 @@ _PWA_DIAGNOSTIC_CODES = {
     ("startup", "application_import_failed"): "The PWA application module failed to initialize",
     ("connection", "ready_timeout"): "The PWA Gateway connection did not become ready",
     ("connection", "websocket_closed"): "The PWA WebSocket closed unexpectedly",
+    ("service-worker", "registration_failed"): "The PWA service worker could not be registered",
+    ("service-worker", "installation_redundant"): "The PWA service worker installation failed",
+    ("service-worker", "not_controlling"): "The PWA service worker does not control the page",
     ("presentation", "gateway_omitted"): "The Gateway omitted a configured presentation",
     ("presentation", "palette_front_rejected"): "The PWA rejected a palette-front presentation",
     ("presentation", "hue_wave_rejected"): "The PWA rejected a hue-wave presentation",
@@ -161,6 +164,7 @@ _ASSETS = {
     "/push.mjs": ("push.mjs", "text/javascript; charset=utf-8"),
     "/scroll-restoration.mjs": ("scroll-restoration.mjs", "text/javascript; charset=utf-8"),
     "/screen-clear.mjs": ("screen-clear.mjs", "text/javascript; charset=utf-8"),
+    "/service-worker.mjs": ("service-worker.mjs", "text/javascript; charset=utf-8"),
     "/swipe.mjs": ("swipe.mjs", "text/javascript; charset=utf-8"),
     "/text-runs.mjs": ("text-runs.mjs", "text/javascript; charset=utf-8"),
     "/transcript-events.mjs": ("transcript-events.mjs", "text/javascript; charset=utf-8"),
@@ -1084,7 +1088,7 @@ class WebGatewayServer:
                 web.get(
                     "/{asset:index.html|app.mjs|bootstrap.mjs|command.mjs|connection-lifecycle.mjs|"
                     "diagnostics.mjs|event-details.mjs|effects-lab.mjs|history-notice.mjs|linkify.mjs|motion.mjs|pairing.mjs|paste.mjs|"
-                    "presentation.mjs|push.mjs|scroll-restoration.mjs|screen-clear.mjs|combo.mjs|swipe.mjs|text-runs.mjs|"
+                    "presentation.mjs|push.mjs|scroll-restoration.mjs|screen-clear.mjs|service-worker.mjs|combo.mjs|swipe.mjs|text-runs.mjs|"
                     "transcript-events.mjs|styles.css|manifest.webmanifest|"
                     "repair.html|repair.css|repair.mjs|sw.js|icon.svg|icon-512.png|"
                     "apple-touch-icon.png}",

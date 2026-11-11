@@ -1,4 +1,4 @@
-const CACHE_NAME = "tfr-shell-web1-v66";
+const CACHE_NAME = "tfr-shell-web1-v67";
 const NETWORK_TIMEOUT_MS = 5000;
 const SHELL = [
   "/",
@@ -19,6 +19,7 @@ const SHELL = [
   "/push.mjs",
   "/scroll-restoration.mjs",
   "/screen-clear.mjs",
+  "/service-worker.mjs",
   "/swipe.mjs",
   "/text-runs.mjs",
   "/transcript-events.mjs",

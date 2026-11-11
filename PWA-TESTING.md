@@ -33,6 +33,15 @@ Record physical results separately without committing pairing links, cookies,
 Tailscale identities, push endpoints/keys, real world names, account names, or
 transcripts.
 
+For notification-enrollment failures, **Settings → Diagnostics** reports a
+structured `service_worker` object: secure/standalone context, whether
+registration was attempted, a bounded registration error name, controller and
+installing/waiting/active states, same-origin script paths, PushManager exposure,
+and notification permission. It deliberately omits subscription endpoints,
+browser encryption keys, cookies, and complete URLs. A worker that is absent,
+redundant, waiting, active-but-not-controlling, or rejected during registration
+must be distinguishable without Web Inspector.
+
 ## Committed Harness
 
 - `scripts/dev-pwa` manages the isolated mock world, branch Gateway, Tailscale
