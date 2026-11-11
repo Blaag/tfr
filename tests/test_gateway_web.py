@@ -1316,6 +1316,20 @@ async def test_authenticated_device_manages_private_push_subscription(tmp_path: 
         await client.close()
 
 
+async def test_authenticated_pwa_creates_remote_ui_pairing_code(tmp_path: Path) -> None:
+    runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 5}))
+    gateway, client, token = await paired_client(tmp_path, runtime)
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        response = await client.post("/api/ui-pairing", headers=headers)
+        assert response.status == 200
+        value = await response.json()
+        assert value["code"].startswith("tfr-pair-v1:")
+        assert value["expires_at"].endswith("Z")
+    finally:
+        await client.close()
+
+
 def test_push_policy_is_private_inbound_and_trigger_bounded() -> None:
     page = make_event(text="Alice pages: hello", kind=EventKind.PAGE)
     mention = replace(

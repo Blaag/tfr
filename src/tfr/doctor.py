@@ -155,17 +155,36 @@ async def run_doctor(
             doctor.check_private_file(token_file.expanduser(), "gateway token")
             doctor.check_private_file(tls_private_key.expanduser(), "Gateway TLS private key")
     else:
-        if gateway_host is None or token_file is None:
-            doctor.fail("remote UI profile requires --gateway-host and --token-file")
+        saved_profile = None
+        profile_store = None
+        if gateway_host is None and token_file is None:
+            from tfr.gateway_profiles import GatewayProfileStore
+
+            profile_store = GatewayProfileStore()
+            saved_profile = profile_store.active
+            if saved_profile is not None:
+                gateway_host = saved_profile.host
+                gateway_port = saved_profile.port
+                tls_ca = Path(saved_profile.tls_ca) if saved_profile.tls_ca else None
+                tls_server_name = saved_profile.tls_server_name
+        if gateway_host is None or (token_file is None and saved_profile is None):
+            doctor.fail("remote UI profile is not configured; rerun setup-tfr")
         else:
-            doctor.check_private_file(token_file.expanduser(), "gateway token")
+            if token_file is not None:
+                doctor.check_private_file(token_file.expanduser(), "gateway token")
             try:
+                auth_token = (
+                    load_gateway_token(token_file)
+                    if token_file is not None
+                    else profile_store.credentials.load(saved_profile.credential_reference)  # type: ignore[union-attr]
+                )
                 client = await GatewayClient.connect_tcp(
                     gateway_host,
                     gateway_port,
-                    auth_token=load_gateway_token(token_file),
+                    auth_token=auth_token,
                     tls_context=create_gateway_client_tls_context(tls_ca),
                     server_hostname=tls_server_name,
+                    client_id=saved_profile.ui_id if saved_profile is not None else None,
                 )
             except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
                 doctor.fail(

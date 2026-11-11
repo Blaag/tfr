@@ -1659,6 +1659,19 @@ class GatewayClient:
         except ValueError as exc:
             raise GatewayProtocolError(f"Gateway returned an invalid UI list: {exc}") from exc
 
+    async def create_ui_pairing(self) -> dict[str, str]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "create_ui_pairing", "request_id": str(request_id)}, request_id
+        )
+        if result is None:
+            raise GatewayProtocolError("Gateway returned no UI pairing invitation")
+        code = result.get("code")
+        expires_at = result.get("expires_at")
+        if not isinstance(code, str) or not isinstance(expires_at, str):
+            raise GatewayProtocolError("Gateway returned an invalid UI pairing invitation")
+        return {"code": code, "expires_at": expires_at}
+
     async def show_ui(self, name: str) -> dict[str, object]:
         request_id = uuid4()
         result = await self._request(
@@ -2448,6 +2461,9 @@ class GatewayUiRuntime:
 
     async def list_uis(self) -> list[dict[str, object]]:
         return await self.client.list_uis()
+
+    async def create_ui_pairing(self) -> dict[str, str]:
+        return await self.client.create_ui_pairing()
 
     async def show_ui(self, name: str) -> dict[str, object]:
         return await self.client.show_ui(name)

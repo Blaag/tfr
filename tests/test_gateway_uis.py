@@ -9,6 +9,31 @@ import pytest
 from tfr.gateway_uis import UiRecord, UiRegistration, UiStore
 
 
+async def test_ui_pairing_is_single_use_and_credential_persists(tmp_path) -> None:
+    now = datetime(2026, 11, 11, 12, tzinfo=UTC)
+    store = UiStore(tmp_path, clock=lambda: now)
+    ui_id = UUID("11111111-1111-4111-8111-111111111111")
+
+    code, expires_at = store.create_pairing_code()
+    token = await store.redeem_pairing(code, ui_id)
+
+    assert expires_at == now + timedelta(minutes=30)
+    assert store.authenticate_credential(ui_id, token) is True
+    with pytest.raises(ValueError, match="invalid or expired"):
+        await store.redeem_pairing(code, ui_id)
+    assert UiStore(tmp_path, clock=lambda: now).authenticate_credential(ui_id, token) is True
+
+
+async def test_ui_pairing_expires_after_thirty_minutes(tmp_path) -> None:
+    now = datetime(2026, 11, 11, 12, tzinfo=UTC)
+    store = UiStore(tmp_path, clock=lambda: now)
+    code, _expires_at = store.create_pairing_code()
+    now += timedelta(minutes=30)
+
+    with pytest.raises(ValueError, match="invalid or expired"):
+        await store.redeem_pairing(code, UUID("11111111-1111-4111-8111-111111111111"))
+
+
 async def test_register_persists_and_reuses_stable_ui_record(tmp_path) -> None:
     ui_id = UUID("11111111-1111-4111-8111-111111111111")
     times = iter(

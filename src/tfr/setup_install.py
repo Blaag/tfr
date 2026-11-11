@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import getpass
 import json
 import os
@@ -8,11 +9,13 @@ import re
 import secrets
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
 Profile = Literal["all-in-one", "local-split", "gateway", "remote-ui"]
 
@@ -213,6 +216,22 @@ def _default_config_directory() -> Path:
     return base / "tfr"
 
 
+def _deployment_path() -> Path:
+    configured = os.environ.get("XDG_STATE_HOME")
+    base = Path(configured).expanduser() if configured else Path.home() / ".local" / "state"
+    return base / "tfr" / "deployment.json"
+
+
+def _save_deployment(profile: Profile) -> None:
+    _write_file(
+        _deployment_path(),
+        json.dumps({"schema_version": 1, "profile": profile}, separators=(",", ":")) + "\n",
+        mode=0o600,
+        description="deployment selection",
+        replace_confirmed=True,
+    )
+
+
 def empty_agents_config() -> str:
     return (
         "{\n"
@@ -359,26 +378,62 @@ def _gateway_details(config_directory: Path) -> dict[str, object]:
 
 
 def _remote_ui_details(config_directory: Path) -> dict[str, object]:
-    print("\nThe UI host needs the Gateway hostname/port, the shared token, and the")
-    print("public CA certificate only when the Gateway uses a private CA.")
-    print("Never copy the Gateway TLS private key, worlds.jsonc, agents.jsonc,")
-    print("world passwords, or provider keys to this UI host.")
+    from tfr.gateway_profiles import (
+        GatewayConnectionProfile,
+        GatewayProfileStore,
+        redeem_ui_pairing,
+    )
+
+    profiles = GatewayProfileStore()
+    if profiles.active is not None:
+        raise ValueError(
+            "a Gateway profile already exists; use /gateway repair or remove it before fresh setup"
+        )
+    print("\nOpen an existing authenticated TFR UI and run /ui pair.")
+    print("That UI will display a single-use pairing code valid for 30 minutes.")
+    print("No Gateway token file or SSH access is needed on this machine.")
     host = _ask("Gateway host or private IP")
     while not host:
         host = _ask("Gateway host or private IP")
     port = _port("Gateway TCP port", DEFAULT_GATEWAY_PORT)
-    token = _path("Copied gateway token path", config_directory / "gateway.token")
-    assert token is not None
     ca_file = _path("Copied public CA certificate path (blank if not needed)", required=False)
     tls_server_name = _ask(
         "TLS certificate hostname (blank when it is the same as Gateway host)"
     )
+    pairing_code = _ask("Pairing code from the existing UI")
+    while not pairing_code:
+        pairing_code = _ask("Pairing code from the existing UI")
+    ui_id = uuid4()
+    server_name = tls_server_name or host
+    token = asyncio.run(
+        redeem_ui_pairing(
+            host,
+            port,
+            pairing_code,
+            ui_id,
+            tls_server_name=server_name,
+            tls_ca=ca_file,
+        )
+    )
+    platform = socket.gethostname().strip() or "Unknown device"
+    ui_name = f"{platform} · Terminal"[:80]
+    profile = GatewayConnectionProfile(
+        name="default",
+        host=host,
+        port=port,
+        tls_server_name=server_name,
+        tls_ca=str(ca_file) if ca_file is not None else None,
+        credential_reference="credential:pending",
+        ui_id=ui_id,
+        ui_name=ui_name,
+    )
+    profiles.add(profile, token)
+    print(f"Authenticated to Gateway {host}:{port} and saved the remote UI profile.")
     return {
         "host": host,
         "port": port,
-        "token": token,
         "ca_file": ca_file,
-        "tls_server_name": tls_server_name or None,
+        "tls_server_name": server_name,
     }
 
 
@@ -436,22 +491,10 @@ def _launcher_arguments(
             [*doctor, *shared],
         )
     assert details is not None
-    shared = [
-        "--gateway-host",
-        str(details["host"]),
-        "--gateway-port",
-        str(details["port"]),
-        "--token-file",
-        str(details["token"]),
-    ]
-    if details.get("ca_file") is not None:
-        shared.extend(["--tls-ca", str(details["ca_file"])])
-    if details.get("tls_server_name") is not None:
-        shared.extend(["--tls-server-name", str(details["tls_server_name"])])
     return (
         "tfr-remote-ui",
-        [*base, "ui", "--config", str(config), *shared],
-        [*doctor, *shared],
+        [*base, "ui"],
+        doctor,
     )
 
 
@@ -483,6 +526,7 @@ def _write_launchers(
             launcher_script(command),
             mode=0o700,
             description=f"{name} launcher",
+            replace_confirmed=name == "tfr-doctor",
         ):
             written.append(path)
     return written
@@ -543,6 +587,7 @@ def run(repository: Path) -> int:
             config_directory / "config.jsonc",
             details,
         )
+        _save_deployment(profile)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"setup-tfr: {exc}", file=sys.stderr)
         return 2

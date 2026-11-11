@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import getpass
 import json
 import os
@@ -14,14 +15,49 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from tfr.gateway_protocol import read_message, write_message
 from tfr.gateway_transport import (
     DEFAULT_GATEWAY_PORT,
+    create_gateway_client_tls_context,
     validate_gateway_token,
     validate_tcp_endpoint,
 )
 
 MAX_PROFILE_NAME_CHARACTERS = 80
 MAX_PROFILES = 32
+
+
+async def redeem_ui_pairing(
+    host: str,
+    port: int,
+    code: str,
+    ui_id: UUID,
+    *,
+    tls_server_name: str,
+    tls_ca: Path | str | None = None,
+) -> str:
+    host, port = validate_tcp_endpoint(host, port)
+    context = create_gateway_client_tls_context(tls_ca)
+    reader, writer = await asyncio.open_connection(
+        host, port, ssl=context, server_hostname=tls_server_name
+    )
+    try:
+        await write_message(
+            writer,
+            {"type": "pair_ui", "code": code.strip(), "client_id": str(ui_id)},
+        )
+        response = await asyncio.wait_for(read_message(reader), timeout=10)
+        if response is None:
+            raise ConnectionError("Gateway closed the UI pairing connection")
+        if response.get("type") == "error":
+            raise ValueError(str(response.get("message", "UI pairing failed")))
+        token = response.get("auth_token")
+        if response.get("type") != "pair_ui" or not isinstance(token, str):
+            raise ValueError("Gateway returned an invalid UI pairing response")
+        return validate_gateway_token(token)
+    finally:
+        writer.close()
+        await writer.wait_closed()
 
 
 def default_gateway_profiles_directory() -> Path:

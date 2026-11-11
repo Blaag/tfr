@@ -134,6 +134,9 @@ const elements = {
   spellingSuggestions: document.querySelector("#spelling-suggestions"),
   automaticSay: document.querySelector("#automatic-say"),
   unpairDevice: document.querySelector("#unpair-device"),
+  pairUiButton: document.querySelector("#pair-ui-button"),
+  pairUiResult: document.querySelector("#pair-ui-result"),
+  pairUiCode: document.querySelector("#pair-ui-code"),
   installOnboarding: document.querySelector("#install-onboarding"),
   continueInBrowser: document.querySelector("#continue-in-browser"),
   uninstallDevice: document.querySelector("#uninstall-device"),
@@ -2179,6 +2182,26 @@ async function unpairDevice() {
   }
 }
 
+async function createUiPairing() {
+  elements.pairUiButton.disabled = true;
+  try {
+    const response = await fetch("/api/ui-pairing", {
+      method: "POST",
+      headers: { "X-TFR-Request": "1" },
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const invitation = await response.json();
+    elements.pairUiCode.value = invitation.code;
+    elements.pairUiResult.hidden = false;
+    elements.pairUiCode.focus();
+    elements.pairUiCode.select();
+  } catch (error) {
+    window.alert(`Could not create UI pairing code: ${error.message}`);
+  } finally {
+    elements.pairUiButton.disabled = false;
+  }
+}
+
 
 async function uninstallDevice() {
   if (!window.confirm(
@@ -2606,6 +2629,7 @@ elements.pushDisable.addEventListener("click", disablePushNotifications);
 elements.pushPages.addEventListener("change", savePushPreferences);
 elements.pushMentions.addEventListener("change", savePushPreferences);
 elements.pushAnyActivity.addEventListener("change", savePushPreferences);
+elements.pairUiButton.addEventListener("click", createUiPairing);
 document.addEventListener("visibilitychange", reportVisibility);
 elements.pairingForm.addEventListener("submit", (event) => {
   event.preventDefault();
