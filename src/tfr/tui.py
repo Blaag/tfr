@@ -17,7 +17,7 @@ import webbrowser
 from collections import deque
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID, uuid4
@@ -451,6 +451,10 @@ class ServiceRuntime(Protocol):
     async def diagnostics(self, category: str | None = None) -> list[dict[str, Any]]: ...
 
     async def clear_diagnostics(self) -> None: ...
+
+    async def recall_query(self, query: dict[str, Any]) -> dict[str, Any]: ...
+
+    async def recall_status(self) -> dict[str, Any]: ...
 
     async def report_focus(self, focused: bool) -> None: ...
 
@@ -3632,7 +3636,7 @@ class TfrTui:
         elif command == "clear":
             await self._handle_clear_command(alias, parameters)
         elif command == "recall":
-            self._handle_recall_command(alias, parameters)
+            await self._handle_recall_command(alias, parameters)
         elif command == "end":
             self._jump_to_end(alias)
         elif command == "agent":
@@ -5262,9 +5266,20 @@ class TfrTui:
             result = await self._settings_input_with_reset(
                 title=setting_label(key),
                 text=(f"{self._setting_editor_summary(setting, detail)}\nType: {value_type}"),
-                default=setting_value_text(detail.get("value"), value_type),
+                default=(
+                    "forever"
+                    if key.endswith(".recall_retention_days")
+                    and detail.get("value") is None
+                    else setting_value_text(detail.get("value"), value_type)
+                ),
                 reset_label=reset_label,
-                null_label="Set explicit empty value" if nullable else None,
+                null_label=(
+                    "Keep forever"
+                    if key.endswith(".recall_retention_days")
+                    else "Set explicit empty value"
+                    if nullable
+                    else None
+                ),
             )
             if result is None:
                 return
@@ -5274,7 +5289,12 @@ class TfrTui:
             if raw is None:
                 return
             try:
-                value = parse_setting_value(raw, value_type)
+                value = (
+                    None
+                    if key.endswith(".recall_retention_days")
+                    and raw.strip().casefold() == "forever"
+                    else parse_setting_value(raw, value_type)
+                )
             except ValueError as exc:
                 await self._settings_message(title="Invalid value", text=str(exc))
                 return
@@ -7231,7 +7251,10 @@ class TfrTui:
             return
         self.add_notice(alias, "Usage: /clear [status|cycle|random|lock EFFECT]")
 
-    def _handle_recall_command(self, alias: str, parameters: list[str]) -> None:
+    async def _handle_recall_command(self, alias: str, parameters: list[str]) -> None:
+        if parameters and any(":" in parameter for parameter in parameters):
+            await self._handle_database_recall(alias, parameters)
+            return
         if len(parameters) != 1:
             self.add_notice(alias, "Usage: /recall X")
             return
@@ -7263,6 +7286,123 @@ class TfrTui:
         view.display.pager.jump_to_end()
         self._sync_animation_task(restart=True)
         self.application.invalidate()
+
+    async def _handle_database_recall(self, alias: str, parameters: list[str]) -> None:
+        if self.service_runtime is None:
+            self.add_notice(alias, "Database recall is available only through a Gateway")
+            return
+        aliases = {
+            "s": "speaker",
+            "speaker": "speaker",
+            "w": "words",
+            "words": "words",
+            "r": "regexp",
+            "regexp": "regexp",
+            "in": "world",
+            "world": "world",
+            "k": "kinds",
+            "kind": "kinds",
+            "a": "after",
+            "after": "after",
+            "b": "before",
+            "before": "before",
+            "d": "on",
+            "on": "on",
+            "si": "since",
+            "since": "since",
+            "c": "context",
+            "context": "context",
+            "ct": "context_time",
+            "context-time": "context_time",
+            "cs": "context_speakers",
+            "context-speakers": "context_speakers",
+            "l": "limit",
+            "limit": "limit",
+        }
+        query: dict[str, Any] = {}
+        provided: set[str] = set()
+        try:
+            for parameter in parameters:
+                name, separator, value = parameter.partition(":")
+                key = aliases.get(name.casefold())
+                if not separator or key is None or not value:
+                    raise ValueError(f"Unknown or incomplete recall field: {parameter}")
+                if key in provided:
+                    raise ValueError(f"Recall field {name} was specified more than once")
+                provided.add(key)
+                if key == "kinds":
+                    query[key] = [item for item in value.split(",") if item]
+                elif key == "context":
+                    counts = [int(item) for item in value.split(",")]
+                    if len(counts) == 1:
+                        query["context"] = counts[0]
+                    elif len(counts) == 2:
+                        query["context_before"], query["context_after"] = counts
+                    else:
+                        raise ValueError("Context must be COUNT or BEFORE,AFTER")
+                elif key == "context_time":
+                    durations = [self._recall_duration(item) for item in value.split(",")]
+                    if len(durations) == 1:
+                        query["context_time_before"] = durations[0]
+                        query["context_time_after"] = durations[0]
+                    elif len(durations) == 2:
+                        query["context_time_before"], query["context_time_after"] = durations
+                    else:
+                        raise ValueError("Context time must be DURATION or BEFORE,AFTER")
+                elif key == "limit":
+                    query[key] = int(value)
+                elif key in {"after", "before"}:
+                    query[key] = datetime.fromisoformat(value).astimezone().isoformat()
+                elif key == "on":
+                    day = datetime.fromisoformat(value).astimezone()
+                    start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+                    query["after"] = start.isoformat()
+                    query["before"] = (start + timedelta(days=1, microseconds=-1)).isoformat()
+                elif key == "since":
+                    try:
+                        seconds = self._recall_duration(value)
+                    except ValueError:
+                        query["after"] = datetime.fromisoformat(value).astimezone().isoformat()
+                    else:
+                        query["after"] = (
+                            datetime.now().astimezone() - timedelta(seconds=seconds)
+                        ).isoformat()
+                else:
+                    query[key] = value
+            if "words" in query and "regexp" in query:
+                raise ValueError("w:/words: and r:/regexp: are mutually exclusive")
+            if "on" in provided and provided & {"after", "before", "since"}:
+                raise ValueError("on: cannot be combined with after:, before:, or since:")
+            if "since" in provided and "after" in provided:
+                raise ValueError("since: and after: are mutually exclusive")
+            if "context" in query and "context_time_before" in query:
+                raise ValueError("c:/context: and ct:/context-time: are mutually exclusive")
+            result = await self.service_runtime.recall_query(query)
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            self.add_notice(alias, f"Recall failed: {exc}")
+            return
+        events = result.get("events", [])
+        if not isinstance(events, list) or not events:
+            self.add_notice(alias, "No matching recalled events")
+            return
+        lines = [f"Recall: {result.get('matches', 0)} match(es)"]
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            marker = "▶" if event.get("matched") else " "
+            speaker = f" {event['speaker']}:" if event.get("speaker") else ""
+            lines.append(
+                f"{marker} [{event.get('timestamp', '?')}] {event.get('world', '?')}{speaker} "
+                f"{event.get('text', '')}"
+            )
+        self.add_notice(alias, "\n".join(lines))
+
+    @staticmethod
+    def _recall_duration(value: str) -> int:
+        units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+        if len(value) < 2 or value[-1].casefold() not in units:
+            raise ValueError("Recall duration must end in s, m, h, or d")
+        return int(value[:-1]) * units[value[-1].casefold()]
 
     def _handle_low_bandwidth_command(self, alias: str, parameters: list[str]) -> None:
         operation = parameters[0].casefold() if len(parameters) == 1 else ""

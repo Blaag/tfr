@@ -103,6 +103,7 @@ from tfr.plugin_sources import PluginSourceNotice, PluginUpdateChecker, load_plu
 from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.presentation import effect_programs_as_dict
 from tfr.presentation_events import infer_presentation_speaker
+from tfr.recall_store import RecallStore, RecallWorldPolicy
 from tfr.sessions import (
     ConnectorSessionBridge,
     ConnectorWorldSession,
@@ -631,6 +632,7 @@ class GatewayRuntime:
         gateway_migration: GatewayMigrationStore | None = None,
         base_configuration_bundle: ConfigurationBundle | None = None,
         new_plugins: tuple[str, ...] = (),
+        recall_store: RecallStore | None = None,
     ) -> None:
         self.event_bus = event_bus
         self.command_bus = command_bus
@@ -655,6 +657,7 @@ class GatewayRuntime:
         self.gateway_migration = gateway_migration
         self.base_configuration_bundle = base_configuration_bundle or configuration_bundle
         self.new_plugins = new_plugins
+        self.recall_store = recall_store
         self.gateway_id = uuid4()
         self._started = False
         self._update_task: asyncio.Task[None] | None = None
@@ -682,6 +685,16 @@ class GatewayRuntime:
             raise ValueError("UI pairing is unavailable")
         code, expires_at = ui_store.create_pairing_code()
         return {"code": code, "expires_at": expires_at.isoformat().replace("+00:00", "Z")}
+
+    async def recall_query(self, query: dict[str, Any]) -> dict[str, Any]:
+        if self.recall_store is None:
+            raise ValueError("recall database is disabled")
+        return await self.recall_store.query(query)
+
+    async def recall_status(self) -> dict[str, Any]:
+        if self.recall_store is None:
+            return {"enabled": False, "worlds": []}
+        return await self.recall_store.status()
 
     @classmethod
     async def from_configuration(
@@ -780,6 +793,20 @@ class GatewayRuntime:
         sinks: list[EventSink] = []
         if bundle.main.logging.enabled:
             sinks.append(JsonlEventSink(_event_log_path(bundle.main.logging.directory)))
+        recall_store = None
+        if bundle.main.recall.enabled:
+            recall_store = RecallStore(
+                bundle.main.recall.database_path,
+                worlds={
+                    world: RecallWorldPolicy(
+                        enabled=config.recall_enabled,
+                        retention_days=config.recall_retention_days,
+                    )
+                    for world, config in bundle.worlds.worlds.items()
+                },
+                log_directory=bundle.main.logging.directory,
+            )
+            sinks.append(recall_store)
         event_bus = EventBus(sinks)
         command_bus = CommandBus()
         session_type = ConnectorWorldSession if connector_bridge is not None else WorldSession
@@ -1009,12 +1036,15 @@ class GatewayRuntime:
             configuration_bundle=bundle,
             gateway_migration=gateway_migration,
             new_plugins=new_plugins,
+            recall_store=recall_store,
         )
 
     async def start(self) -> None:
         if self._started:
             return
         self.history.start()
+        if self.recall_store is not None:
+            await self.recall_store.start()
         if self.connector_bridge is not None:
             self.connector_bridge.start()
         try:
@@ -2563,6 +2593,21 @@ class GatewayServer:
                 }:
                     raise ValueError("diagnostic category is invalid")
                 result = {"entries": self.diagnostic_list_factory(category)}
+            elif message_type == "recall_query":
+                if not allow_admin:
+                    raise ValueError("recall is unavailable")
+                if set(message) != {"type", "protocol", "request_id", "query"}:
+                    raise ValueError("recall_query has invalid fields")
+                query = message.get("query")
+                if not isinstance(query, dict):
+                    raise ValueError("recall query must be an object")
+                result = await self.runtime.recall_query(query)
+            elif message_type == "recall_status":
+                if not allow_admin:
+                    raise ValueError("recall is unavailable")
+                if set(message) != {"type", "protocol", "request_id"}:
+                    raise ValueError("recall_status has invalid fields")
+                result = await self.runtime.recall_status()
             elif message_type == "clear_diagnostics":
                 if not allow_admin or self.diagnostic_clear_factory is None:
                     raise ValueError("diagnostics are unavailable")

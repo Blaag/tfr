@@ -1229,6 +1229,36 @@ Use `/recall X` to append the last X retained display lines from the active worl
 Recall output begins with a yellow `-- Recall X` header and is not itself included
 in later recalls.
 
+The optional Gateway recall database provides indexed long-term search. It is
+globally disabled by default and every world must opt in separately:
+
+```text
+/config set recall.enabled true
+/config set worlds.example.recall_enabled true --world example
+/config set worlds.example.recall_retention_days forever --world example
+```
+
+These settings require a Gateway restart. Enabling a world automatically and
+resumably backfills existing JSONL logs; live events are deduplicated by event ID.
+Global disable pauses indexing, backfill, retention, maintenance, and queries
+without deleting the database, per-world choices, or checkpoints. `forever` is
+stored internally as an empty retention limit. A positive day count enables
+incremental hourly pruning.
+
+Search with long or abbreviated fields. `w:` uses whole words and phrases, with
+an asterisk enabling wildcards; `r:` is mutually exclusive regular-expression
+matching. Context is measured in logical events rather than wrapped screen rows:
+
+```text
+/recall s:Alice w:dragon in:example c:10
+/recall speaker:Alice words:"red * dragon" after:2026-11-01 limit:25
+/recall s:Alice r:"(?i)dragons?" ct:5m cs:matched
+```
+
+The equivalent noninteractive interface is `tfr recall query`; use
+`tfr recall status` to inspect database size, indexed ranges, and backfill state.
+The CLI always queries through the Gateway and never opens SQLite directly.
+
 Use `/sh` to temporarily open the local interactive shell and return to TFR by
 exiting it. Input beginning with `!` runs a one-shot local shell command, such as
 `! w`, and waits for Enter before restoring the full-screen UI. Begin input with

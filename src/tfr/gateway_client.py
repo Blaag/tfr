@@ -1761,6 +1761,25 @@ class GatewayClient:
             raise GatewayProtocolError("Gateway returned invalid diagnostics")
         return entries
 
+    async def recall_query(self, query: dict[str, Any]) -> dict[str, Any]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "recall_query", "request_id": str(request_id), "query": query},
+            request_id,
+        )
+        if result is None or not isinstance(result.get("events"), list):
+            raise GatewayProtocolError("Gateway returned an invalid recall result")
+        return result
+
+    async def recall_status(self) -> dict[str, Any]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "recall_status", "request_id": str(request_id)}, request_id
+        )
+        if result is None or not isinstance(result.get("enabled"), bool):
+            raise GatewayProtocolError("Gateway returned an invalid recall status")
+        return result
+
     async def clear_diagnostics(self) -> None:
         request_id = uuid4()
         await self._request(
@@ -2493,6 +2512,12 @@ class GatewayUiRuntime:
             self._record_connection("warning", "remote_diagnostics_unavailable", str(exc))
             return [*local, self.connection_diagnostics.entries()[-1].as_dict()]
         return sorted([*remote, *local], key=lambda entry: str(entry.get("timestamp", "")))[-100:]
+
+    async def recall_query(self, query: dict[str, Any]) -> dict[str, Any]:
+        return await self.client.recall_query(query)
+
+    async def recall_status(self) -> dict[str, Any]:
+        return await self.client.recall_status()
 
     async def clear_diagnostics(self) -> None:
         self.connection_diagnostics.clear()

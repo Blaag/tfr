@@ -303,6 +303,27 @@ def test_world_reconnect_policy_validates_effective_override_delays() -> None:
         )
 
 
+def test_recall_database_is_global_off_and_world_opt_in_by_default() -> None:
+    configured = WorldsConfig.model_validate(
+        {
+            "worlds": {
+                "alpha": {"host": "localhost", "port": 4201},
+                "beta": {
+                    "host": "localhost",
+                    "port": 4202,
+                    "recall_enabled": True,
+                    "recall_retention_days": 365,
+                },
+            }
+        }
+    )
+
+    assert configured.worlds["alpha"].recall_enabled is False
+    assert configured.worlds["alpha"].recall_retention_days is None
+    assert configured.worlds["beta"].recall_enabled is True
+    assert configured.worlds["beta"].recall_retention_days == 365
+
+
 def test_ui_configuration_does_not_read_world_or_agent_files(tmp_path: Path) -> None:
     main_path = write_configuration(tmp_path)
     (tmp_path / "worlds.jsonc").unlink()
@@ -326,6 +347,22 @@ def test_resolves_relative_log_directory_from_main_config(tmp_path: Path) -> Non
     bundle = load_configuration(main_path)
 
     assert bundle.main.logging.directory == (tmp_path / "logs").resolve()
+
+
+def test_resolves_relative_recall_database_from_main_config(tmp_path: Path) -> None:
+    main_path = write_configuration(tmp_path)
+    main_path.write_text(
+        MAIN.replace(
+            '"ui": {"scrollback_lines": 500,},',
+            '"ui": {"scrollback_lines": 500,}, '
+            '"recall": {"enabled": true, "database_path": "state/recall.sqlite3"},',
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_configuration(main_path)
+
+    assert bundle.main.recall.database_path == (tmp_path / "state" / "recall.sqlite3").resolve()
 
 
 def test_plugins_state_directory_defaults_and_resolves_like_logging(tmp_path: Path) -> None:

@@ -309,6 +309,24 @@
       "title": "PluginsConfig",
       "type": "object"
     },
+    "RecallConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "database_path": {
+          "default": "~/.local/state/tfr/recall.sqlite3",
+          "format": "path",
+          "title": "Database Path",
+          "type": "string"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "RecallConfig",
+      "type": "object"
+    },
     "ScreenClearConfig": {
       "additionalProperties": false,
       "allOf": [
@@ -943,6 +961,9 @@
     },
     "plugins": {
       "$ref": "#/$defs/PluginsConfig"
+    },
+    "recall": {
+      "$ref": "#/$defs/RecallConfig"
     },
     "schema_version": {
       "const": 1,
