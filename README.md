@@ -779,8 +779,10 @@ Native terminal UIs can enable individual-UI desktop notifications under
 that its surface lost focus, sends at most one notification until focus returns,
 and defaults to the private text `TFR has activity`. Automatic delivery uses
 BEL-terminated OSC 9 in Ghostty, iTerm2, Kitty, WezTerm, and Warp; tmux output
-is wrapped for passthrough, unknown terminals receive BEL, and Herdr uses
-`herdr notification show`. On macOS with Herdr 0.9.5, configure Herdr
+is wrapped for passthrough, and Herdr uses `herdr notification show`. On a local
+Linux graphical session, an unknown terminal uses the Freedesktop notification
+service through `notify-send` when both it and the user session bus are available;
+otherwise unknown terminals receive BEL. On macOS with Herdr 0.9.5, configure Herdr
 `ui.toast.delivery = "system"`; its `terminal` backend emits ST-terminated OSC
 9, which affected Ghostty/macOS combinations can accept without displaying.
 `/diagnostics notifications` reports detected terminal, multiplexer, focus
@@ -792,6 +794,16 @@ so `terminal-notifier` does not reject the request and trigger Herdr's Script
 Editor fallback. Herdr forwards terminal focus reports to its panes; TFR uses
 those reports directly and does not ask Herdr's notification API to decide
 whether the TFR pane is focused.
+
+On Linux, Ghostty remains the preferred automatic transport because OSC 9 keeps
+the notification associated with the originating terminal and works through
+tmux passthrough and compatible remote paths. The explicit **System** transport
+uses the desktop-neutral `org.freedesktop.Notifications` service via
+`notify-send`. It requires a local graphical user session; TFR does not expose
+the session-bus address in diagnostics. Omarchy 4.5 provides this interface from
+its Quickshell notification service, so no Mako or Dunst installation is needed.
+`notify-send` success confirms handoff to the notification service, not that Do
+Not Disturb or desktop policy displayed a card.
 
 The recommended macOS setup is Ghostty with notifications allowed in **System
 Settings → Notifications → Ghostty**. For tmux 3.3 or newer, add this to

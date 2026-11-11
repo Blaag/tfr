@@ -188,7 +188,7 @@ class SpeakingStreaksConfig(StrictModel):
 
 class NotificationConfig(StrictModel):
     enabled: bool = False
-    transport: Literal["auto", "osc-9", "bell", "herdr"] = "auto"
+    transport: Literal["auto", "osc-9", "bell", "herdr", "system"] = "auto"
     any_activity: bool = False
     worlds: tuple[str, ...] = Field(default=(), max_length=256)
     mentions: bool = True
