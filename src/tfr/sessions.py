@@ -26,6 +26,7 @@ from tfr.events import (
     SpoofAssessment,
     outbound_audit_event,
 )
+from tfr.reconnect import ReconnectBackoff, ReconnectPolicy
 from tfr.spoofing import assess_spoofing
 from tfr.telnet import TelnetCodec, TelnetEvent, escape_iac
 from tfr.world_connector import WorldConnectorClient
@@ -36,6 +37,7 @@ class SessionState(StrEnum):
     CONNECTING = "connecting"
     CONNECTED = "connected"
     RECONNECT_WAIT = "reconnect_wait"
+    RECONNECT_EXHAUSTED = "reconnect_exhausted"
     DISCONNECTED = "disconnected"
 
 
@@ -114,13 +116,13 @@ class WorldSession:
         event_bus: EventBus,
         command_bus: CommandBus,
         session_id: UUID | None = None,
-        reconnect_delay: float = 2.0,
+        reconnect_delay: float | None = None,
         prompt_flush_seconds: float = 0.05,
         show_nospoof_prefix: bool = False,
         adapter: ServerAdapter | None = None,
         command_queue_size: int = 1_000,
     ) -> None:
-        if reconnect_delay < 0:
+        if reconnect_delay is not None and reconnect_delay < 0:
             raise ValueError("reconnect delay cannot be negative")
         if prompt_flush_seconds <= 0:
             raise ValueError("prompt flush interval must be positive")
@@ -132,7 +134,24 @@ class WorldSession:
         self.event_bus = event_bus
         self.command_bus = command_bus
         self.session_id = session_id or uuid4()
-        self.reconnect_delay = reconnect_delay
+        policy_values = {
+            key: getattr(config, f"reconnect_{key}")
+            if getattr(config, f"reconnect_{key}") is not None
+            else getattr(defaults, f"reconnect_{key}")
+            for key in (
+                "initial_delay_seconds",
+                "max_delay_seconds",
+                "window_seconds",
+                "stable_reset_seconds",
+            )
+        }
+        if reconnect_delay is not None:
+            policy_values["initial_delay_seconds"] = reconnect_delay
+            policy_values["max_delay_seconds"] = reconnect_delay
+        self.reconnect_policy = ReconnectPolicy(**policy_values)
+        self._backoff = ReconnectBackoff(self.reconnect_policy)
+        self._connected_since: float | None = None
+        self.state_metadata: dict[str, Any] = {}
         self.prompt_flush_seconds = prompt_flush_seconds
         self.command_queue_size = command_queue_size
         self.show_nospoof_prefix = (
@@ -152,6 +171,7 @@ class WorldSession:
         self._runner: asyncio.Task[None] | None = None
         self._last_command_activity = 0.0
         self._quit_requested = False
+        self._backoff.reset()
         self._nospoof_senders: deque[str] = deque(maxlen=MAX_NOSPOOF_SENDERS)
         self._expect_nospoof_continuation = False
         if config.login is not None:
@@ -199,6 +219,7 @@ class WorldSession:
             await asyncio.wait_for(asyncio.shield(self._runner), timeout=timeout)
 
     async def _run(self) -> None:
+        exhausted = False
         try:
             while not self._stop_event.is_set():
                 await self._set_state(SessionState.CONNECTING)
@@ -214,25 +235,51 @@ class WorldSession:
                 finally:
                     self._connected_event.clear()
 
+                connected_seconds = (
+                    max(0.0, time.monotonic() - self._connected_since)
+                    if self._connected_since is not None
+                    else 0.0
+                )
+                self._connected_since = None
+                stable = self._backoff.observe_connection(connected_seconds)
+
                 await self._set_state(
                     SessionState.DISCONNECTED,
                     error_type=type(error).__name__ if error else None,
                     error=str(error) if error else None,
                     intentional=self._quit_requested,
+                    connected_seconds=connected_seconds,
+                    backoff_reset=stable,
                 )
                 if self._stop_event.is_set() or self._quit_requested or not self.reconnect:
                     break
 
+                schedule = self._backoff.next()
+                if schedule is None:
+                    exhausted = True
+                    await self._set_state(
+                        SessionState.RECONNECT_EXHAUSTED,
+                        attempts=self._backoff.attempts,
+                        retry_elapsed_seconds=self._backoff.status()["retry_elapsed_seconds"],
+                        retry_remaining_seconds=0.0,
+                    )
+                    break
                 await self._set_state(
                     SessionState.RECONNECT_WAIT,
-                    delay_seconds=self.reconnect_delay,
+                    attempt=schedule.attempt,
+                    delay_seconds=schedule.delay_seconds,
+                    retry_elapsed_seconds=schedule.elapsed_seconds,
+                    retry_remaining_seconds=schedule.remaining_seconds,
                 )
                 with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._stop_event.wait(), timeout=self.reconnect_delay)
+                    await asyncio.wait_for(
+                        self._stop_event.wait(), timeout=schedule.delay_seconds
+                    )
         finally:
             self._connected_event.clear()
             self.command_bus.unregister(self.session_id)
-            await self._set_state(SessionState.STOPPED)
+            if not exhausted or self._stop_event.is_set() or self._quit_requested:
+                await self._set_state(SessionState.STOPPED)
 
     async def _connect_and_run(self) -> None:
         tls_context = create_tls_context(self.config.tls)
@@ -246,6 +293,7 @@ class WorldSession:
             self.config.port,
             **connect_options,
         )
+        self._connected_since = time.monotonic()
         self.connection_generation += 1
         self._nospoof_senders.clear()
         self._expect_nospoof_continuation = False
@@ -488,6 +536,7 @@ class WorldSession:
 
     async def _set_state(self, state: SessionState, **metadata: Any) -> None:
         self.state = state
+        self.state_metadata = dict(metadata)
         await self._publish(
             direction=Direction.INTERNAL,
             kind=EventKind.CONNECTION,

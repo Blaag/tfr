@@ -1339,6 +1339,38 @@ def test_push_policy_is_private_inbound_and_trigger_bounded() -> None:
     ) is False
 
 
+def test_connector_diagnostics_include_current_bounded_backoff_status(tmp_path: Path) -> None:
+    runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 5}))
+    runtime.world_descriptors = lambda: [
+        {
+            "world": "alpha",
+            "state": "reconnect_wait",
+            "reconnect": {
+                "attempt": 8,
+                "delay_seconds": 120.0,
+                "retry_elapsed_seconds": 240.0,
+                "retry_remaining_seconds": 6960.0,
+            },
+        }
+    ]
+    gateway = WebGatewayServer(
+        runtime,  # type: ignore[arg-type]
+        origin=ORIGIN,
+        host="127.0.0.1",
+        port=7348,
+        state_directory=tmp_path / "web",
+        snapshot_events=5,
+    )
+
+    entries = gateway.diagnostic_entries("connector")
+
+    assert entries[-1]["code"] == "current_status"
+    assert entries[-1]["message"] == (
+        "World alpha state=reconnect_wait; attempt=8, delay_seconds=120.0, "
+        "retry_elapsed_seconds=240.0, retry_remaining_seconds=6960.0"
+    )
+
+
 def test_websocket_reconnect_resets_push_latch_only_when_initially_visible() -> None:
     assert _initial_web_visibility(None) is False
     assert _initial_web_visibility("hidden") is False

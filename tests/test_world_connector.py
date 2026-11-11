@@ -954,6 +954,62 @@ async def test_human_quit_does_not_reconnect_world(tmp_path: Path) -> None:
         await asyncio.wait_for(world_server.wait_closed(), timeout=1)
 
 
+async def test_world_reconnect_backoff_reports_attempts_and_exhaustion(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from tfr.reconnect import ReconnectBackoff
+
+    path = _socket_path(tmp_path)
+    server = WorldConnectorServer(path, build_id="a" * 64, grace_seconds=1)
+    await server.start()
+    worlds = {
+        "alpha": {
+            "host": "127.0.0.1",
+            "port": 1,
+            "encoding": "utf-8",
+            "reconnect": True,
+            "tls": {"enabled": False},
+            "startup_commands": [],
+            "login": None,
+            "idle": None,
+        }
+    }
+    client = WorldConnectorClient(path, build_id="a" * 64, worlds=worlds)
+    try:
+        await client.connect()
+        connection = server._worlds["alpha"]
+        connection._backoff = ReconnectBackoff(
+            SimpleNamespace(
+                initial_delay_seconds=0.001,
+                max_delay_seconds=0.001,
+                window_seconds=0.015,
+                stable_reset_seconds=300,
+            ),
+            jitter=lambda low, _high: low,
+        )
+        await client.start_world("alpha")
+        waits = []
+        while True:
+            message = await asyncio.wait_for(client.receive(), timeout=1)
+            if message.get("kind") != "state":
+                continue
+            if message.get("state") == "reconnect_wait":
+                waits.append(message)
+            if message.get("state") == "reconnect_exhausted":
+                exhausted = message
+                break
+        assert waits
+        assert [item["attempt"] for item in waits] == list(range(1, len(waits) + 1))
+        assert all(item["delay_seconds"] <= 0.001 for item in waits)
+        assert exhausted["attempts"] == len(waits)
+        assert exhausted["retry_remaining_seconds"] == 0.0
+        await asyncio.sleep(0.01)
+        assert connection.state == "reconnect_exhausted"
+    finally:
+        await client.close()
+        await server.stop()
+
+
 async def test_changed_world_configuration_is_rejected_without_silent_reuse(
     tmp_path: Path,
 ) -> None:

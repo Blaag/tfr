@@ -478,7 +478,17 @@ class MainConfig(StrictModel):
 class WorldDefaults(StrictModel):
     encoding: str = "utf-8"
     reconnect: bool = True
+    reconnect_initial_delay_seconds: float = Field(default=1.0, ge=0.1, le=300)
+    reconnect_max_delay_seconds: float = Field(default=120.0, ge=0.1, le=3_600)
+    reconnect_window_seconds: float = Field(default=7_200.0, ge=60, le=86_400)
+    reconnect_stable_reset_seconds: float = Field(default=300.0, ge=1, le=86_400)
     scrollback_lines: PositiveInt = 20_000
+
+    @model_validator(mode="after")
+    def valid_reconnect_delays(self) -> WorldDefaults:
+        if self.reconnect_max_delay_seconds < self.reconnect_initial_delay_seconds:
+            raise ValueError("maximum reconnect delay must be at least the initial delay")
+        return self
 
 
 class TlsConfig(StrictModel):
@@ -542,6 +552,10 @@ class WorldConfig(StrictModel):
     server: Literal["bare", "generic", "rhost", "tinymush", "tinymux"] = "generic"
     encoding: str | None = None
     reconnect: bool | None = None
+    reconnect_initial_delay_seconds: float | None = Field(default=None, ge=0.1, le=300)
+    reconnect_max_delay_seconds: float | None = Field(default=None, ge=0.1, le=3_600)
+    reconnect_window_seconds: float | None = Field(default=None, ge=60, le=86_400)
+    reconnect_stable_reset_seconds: float | None = Field(default=None, ge=1, le=86_400)
     scrollback_lines: PositiveInt | None = None
     tls: TlsConfig = Field(default_factory=TlsConfig)
     login: LoginConfig | None = None
@@ -578,6 +592,21 @@ class WorldsConfig(StrictModel):
                 owners[alias] = world
         if len(owners) > 256:
             raise ValueError("world configuration cannot define more than 256 switch aliases")
+        for world, config in self.worlds.items():
+            initial = (
+                config.reconnect_initial_delay_seconds
+                if config.reconnect_initial_delay_seconds is not None
+                else self.defaults.reconnect_initial_delay_seconds
+            )
+            maximum = (
+                config.reconnect_max_delay_seconds
+                if config.reconnect_max_delay_seconds is not None
+                else self.defaults.reconnect_max_delay_seconds
+            )
+            if maximum < initial:
+                raise ValueError(
+                    f"world {world!r} maximum reconnect delay must be at least its initial delay"
+                )
         return self
 
 

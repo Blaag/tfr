@@ -273,6 +273,36 @@ def test_world_switch_alias_limits_are_enforced() -> None:
         WorldsConfig(worlds=worlds)
 
 
+def test_world_reconnect_policy_validates_effective_override_delays() -> None:
+    configured = WorldsConfig.model_validate(
+        {
+            "defaults": {"reconnect_initial_delay_seconds": 2},
+            "worlds": {
+                "alpha": {
+                    "host": "localhost",
+                    "port": 4201,
+                    "reconnect_max_delay_seconds": 30,
+                }
+            },
+        }
+    )
+    assert configured.worlds["alpha"].reconnect_max_delay_seconds == 30
+
+    with pytest.raises(ValueError, match="maximum reconnect delay"):
+        WorldsConfig.model_validate(
+            {
+                "defaults": {"reconnect_initial_delay_seconds": 10},
+                "worlds": {
+                    "alpha": {
+                        "host": "localhost",
+                        "port": 4201,
+                        "reconnect_max_delay_seconds": 5,
+                    }
+                },
+            }
+        )
+
+
 def test_ui_configuration_does_not_read_world_or_agent_files(tmp_path: Path) -> None:
     main_path = write_configuration(tmp_path)
     (tmp_path / "worlds.jsonc").unlink()

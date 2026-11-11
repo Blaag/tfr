@@ -15,13 +15,20 @@ test("formats world connection transitions with local and UTC times", () => {
     timestamp,
     connection_state: "reconnect_wait",
     reconnect_delay_seconds: 5,
+    reconnect_attempt: 3,
+  });
+  const exhausted = connectionNotice({
+    timestamp,
+    connection_state: "reconnect_exhausted",
+    reconnect_attempts: 65,
   });
 
-  for (const notice of [connected, disconnected, reconnecting]) {
+  for (const notice of [connected, disconnected, reconnecting, exhausted]) {
     assert.match(notice, /local .+; UTC 2026-09-28 18:34:56 UTC/);
   }
   assert.match(disconnected, /^Disconnected: remote closed/);
-  assert.match(reconnecting, /^Reconnecting in 5s/);
+  assert.match(reconnecting, /^Reconnecting in 5s \(attempt 3\)/);
+  assert.match(exhausted, /^Reconnect window exhausted after 65 attempts/);
 });
 
 test("shows a server-derived NOSPOOF verdict", () => {

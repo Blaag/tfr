@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from tfr.reconnect import ReconnectBackoff, ReconnectPolicy
 from tfr.telnet import TelnetCodec, escape_iac
 
 CONNECTOR_PROTOCOL_VERSION = 1
@@ -302,6 +303,7 @@ class _WorldConnection:
             "port",
             "encoding",
             "reconnect",
+            "reconnect_policy",
             "tls",
             "startup_commands",
             "login",
@@ -333,6 +335,15 @@ class _WorldConnection:
         self.port = port
         self.encoding = encoding
         self.reconnect = reconnect
+        policy_value = config.get("reconnect_policy", {})
+        if not isinstance(policy_value, dict):
+            raise ValueError("world reconnect policy is invalid")
+        try:
+            self.reconnect_policy = ReconnectPolicy(**policy_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("world reconnect policy is invalid") from exc
+        self._backoff = ReconnectBackoff(self.reconnect_policy)
+        self._connected_since: float | None = None
         self.startup_commands = tuple(startup)
         self.login = config.get("login")
         self.idle = config.get("idle")
@@ -354,6 +365,7 @@ class _WorldConnection:
             return
         self._stop.clear()
         self._quit_requested = False
+        self._backoff.reset()
         self._runner = asyncio.create_task(self._run(), name=f"tfr-connector-{self.world}")
 
     async def stop(self) -> None:
@@ -372,6 +384,7 @@ class _WorldConnection:
         await self._commands.put(payload)
 
     async def _run(self) -> None:
+        exhausted = False
         try:
             while not self._stop.is_set():
                 await self._state("connecting")
@@ -383,18 +396,44 @@ class _WorldConnection:
                     raise
                 except Exception as exc:
                     error = exc
+                connected_seconds = (
+                    max(0.0, time.monotonic() - self._connected_since)
+                    if self._connected_since is not None
+                    else 0.0
+                )
+                self._connected_since = None
+                stable = self._backoff.observe_connection(connected_seconds)
                 await self._state(
                     "disconnected",
                     error_type=type(error).__name__ if error else None,
                     error=str(error) if error else None,
+                    connected_seconds=connected_seconds,
+                    backoff_reset=stable,
                 )
                 if self._stop.is_set() or self._quit_requested or not self.reconnect:
                     break
-                await self._state("reconnect_wait", delay_seconds=2.0)
+                schedule = self._backoff.next()
+                if schedule is None:
+                    exhausted = True
+                    await self._state(
+                        "reconnect_exhausted",
+                        attempts=self._backoff.attempts,
+                        retry_elapsed_seconds=self._backoff.status()["retry_elapsed_seconds"],
+                        retry_remaining_seconds=0.0,
+                    )
+                    break
+                await self._state(
+                    "reconnect_wait",
+                    attempt=schedule.attempt,
+                    delay_seconds=schedule.delay_seconds,
+                    retry_elapsed_seconds=schedule.elapsed_seconds,
+                    retry_remaining_seconds=schedule.remaining_seconds,
+                )
                 with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._stop.wait(), timeout=2.0)
+                    await asyncio.wait_for(self._stop.wait(), timeout=schedule.delay_seconds)
         finally:
-            await self._state("stopped")
+            if not exhausted or self._stop.is_set() or self._quit_requested:
+                await self._state("stopped")
 
     async def _connect(self) -> None:
         options: dict[str, Any] = {}
@@ -410,6 +449,7 @@ class _WorldConnection:
             options["server_hostname"] = self.tls.get("server_hostname") or self.host
         reader, writer = await asyncio.open_connection(self.host, self.port, **options)
         self._writer = writer
+        self._connected_since = time.monotonic()
         self._last_command_activity = time.monotonic()
         self.generation += 1
         await self._state(
@@ -1127,6 +1167,17 @@ def connector_worlds(bundle: Any) -> dict[str, Any]:
     for name, config in bundle.worlds.worlds.items():
         encoding = config.encoding or defaults.encoding
         reconnect = defaults.reconnect if config.reconnect is None else config.reconnect
+        reconnect_policy = {
+            key: getattr(config, f"reconnect_{key}")
+            if getattr(config, f"reconnect_{key}") is not None
+            else getattr(defaults, f"reconnect_{key}")
+            for key in (
+                "initial_delay_seconds",
+                "max_delay_seconds",
+                "window_seconds",
+                "stable_reset_seconds",
+            )
+        }
         login = None
         if config.login is not None:
             login = {
@@ -1144,6 +1195,7 @@ def connector_worlds(bundle: Any) -> dict[str, Any]:
             "port": config.port,
             "encoding": encoding,
             "reconnect": reconnect,
+            "reconnect_policy": reconnect_policy,
             "tls": {
                 "enabled": config.tls.enabled,
                 "verify": config.tls.verify,

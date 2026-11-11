@@ -46,7 +46,16 @@ export function connectionNotice(event) {
     const delay = Number.isFinite(event.reconnect_delay_seconds)
       ? ` in ${event.reconnect_delay_seconds}s`
       : "";
-    return `Reconnecting${delay} [${timestamp}]`;
+    const attempt = Number.isInteger(event.reconnect_attempt)
+      ? ` (attempt ${event.reconnect_attempt})`
+      : "";
+    return `Reconnecting${delay}${attempt} [${timestamp}]`;
+  }
+  if (event.connection_state === "reconnect_exhausted") {
+    const attempts = Number.isInteger(event.reconnect_attempts)
+      ? ` after ${event.reconnect_attempts} attempts`
+      : "";
+    return `Reconnect window exhausted${attempts}; reconnect manually [${timestamp}]`;
   }
   return event.text || "";
 }

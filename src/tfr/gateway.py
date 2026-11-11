@@ -1339,6 +1339,7 @@ class GatewayRuntime:
                 "world": session.world,
                 "session_id": str(session.session_id),
                 "state": session.state.value,
+                "reconnect": dict(getattr(session, "state_metadata", {})),
                 "connection_generation": session.connection_generation,
                 "server": session.config.server,
                 "encoding": session.encoding,
@@ -2507,6 +2508,11 @@ class GatewayServer:
                     "web",
                     "presentations",
                     "plugins",
+                    "gateway",
+                    "config",
+                    "updates",
+                    "agents",
+                    "connector",
                 }:
                     raise ValueError("diagnostic category is invalid")
                 result = {"entries": self.diagnostic_list_factory(category)}
