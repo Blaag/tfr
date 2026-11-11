@@ -54,9 +54,9 @@ export async function loadPushStatus(fetchImpl = fetch) {
 }
 
 export async function enablePush({ registration, publicKey, preferences, fetchImpl = fetch }) {
-  if (!registration?.pushManager) throw new Error("Web Push is unavailable in this installation");
   const permission = await Notification.requestPermission();
   if (permission !== "granted") throw new Error("Notification permission was not granted");
+  if (!registration?.pushManager) throw new Error("Web Push is unavailable in this installation");
   let subscription = await registration.pushManager.getSubscription();
   let created = false;
   if (!subscription) {
