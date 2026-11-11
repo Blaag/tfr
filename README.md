@@ -654,8 +654,9 @@ An installed PWA can enable standards-based Web Push under **Settings →
 Notifications**. The Gateway creates one stable private VAPID P-256 key in the
 web state directory and stores each device's push subscription alongside its
 paired-device record. Notifications are disabled until the device explicitly
-enables them. Per-device triggers support pages, character-name mentions,
-selected worlds, or any visible inbound activity. The notification title is the
+enables them. Checked worlds form the mandatory eligibility gate; within those
+worlds, per-device triggers support pages, character-name mentions, or any
+visible inbound activity. Unchecked worlds never notify. The notification title is the
 private fixed text `New activity` with no body; message text, sender names, and
 world names are never included in the push payload. The Gateway suppresses pushes while
 that PWA reports itself visible or any connected native TFR UI reports that its

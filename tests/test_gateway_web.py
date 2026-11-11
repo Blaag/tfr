@@ -154,7 +154,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v68";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v69";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
     assert 'showNotification("New activity", {' in worker
     assert 'body: "TFR has activity"' not in worker
@@ -1323,7 +1323,7 @@ def test_push_policy_is_private_inbound_and_trigger_bounded() -> None:
         provenance=Provenance(sender_name="Alice", confidence=Confidence.HIGH),
     )
     ordinary = make_event(text='Alice says, "hello"', kind=EventKind.SAY)
-    defaults = PushPreferences()
+    defaults = PushPreferences(worlds=("alpha",))
 
     assert _push_event_matches(page, defaults, character_name="Barnaby") is True
     assert _push_event_matches(mention, defaults, character_name="Barnaby") is True
@@ -1333,6 +1333,9 @@ def test_push_policy_is_private_inbound_and_trigger_bounded() -> None:
     ) is False
     assert _push_event_matches(
         replace(mention, redacted=True), defaults, character_name="Barnaby"
+    ) is False
+    assert _push_event_matches(
+        replace(page, world="beta"), defaults, character_name="Barnaby"
     ) is False
 
 
@@ -1356,7 +1359,7 @@ async def test_successful_push_latches_device_until_visibility_reset(
         endpoint="https://web.push.apple.com/device-token",
         p256dh=P256DH,
         auth=PUSH_AUTH,
-        preferences=PushPreferences(pages=True),
+        preferences=PushPreferences(worlds=("alpha",), pages=True),
     )
     calls = 0
 
@@ -1398,6 +1401,8 @@ async def test_successful_push_latches_device_until_visibility_reset(
             "Barnaby",
         )
         assert calls == 1
+        assert gateway._push_last_result[device.device_id]["reason"] == "page"
+        assert gateway._push_last_result[device.device_id]["event_kind"] == "page"
     finally:
         await client.close()
 
@@ -2217,7 +2222,7 @@ async def test_background_websocket_reconnect_does_not_reset_push_latch(
         endpoint="https://web.push.apple.com/device-token",
         p256dh=P256DH,
         auth=PUSH_AUTH,
-        preferences=PushPreferences(any_activity=True),
+        preferences=PushPreferences(worlds=("alpha",), any_activity=True),
     )
     await gateway.devices.set_push_latched(device.device_id, True)
     headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}

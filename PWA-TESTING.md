@@ -51,6 +51,13 @@ notification interval. Focus a native TFR UI while the PWA is away and verify
 matching activity does not push; focus-out the native UI without opening the PWA
 and verify the existing latch semantics remain intact.
 
+Push policy acceptance must treat checked worlds as a mandatory first gate.
+Within eligible worlds, Any activity, Pages, and Character-name mentions are OR
+triggers. Verify unrelated speech does not push with only Pages and Mentions
+enabled, while a direct page and a speech/pose body containing the configured
+character name do. Diagnostics expose only the eligible-world count, trigger
+flags, and last reason/kind—not world names or text.
+
 ## Committed Harness
 
 - `scripts/dev-pwa` manages the isolated mock world, branch Gateway, Tailscale

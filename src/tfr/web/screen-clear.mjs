@@ -198,6 +198,16 @@ function prepareCanvas(canvas, rect) {
   return context;
 }
 
+export function screenClearCanvasBox(transcript) {
+  const rect = transcript.getBoundingClientRect();
+  return {
+    left: 0,
+    top: 0,
+    width: rect.width,
+    height: rect.height,
+  };
+}
+
 function drawCell(context, cell, {
   text = cell.text,
   color = cell.color,
@@ -637,7 +647,7 @@ export function renderScreenClearFrame(context, snapshot, effect, progress) {
 }
 
 export function animateScreenClear({ canvas, transcript, cells, effect, seed, onFinish }) {
-  const rect = transcript.getBoundingClientRect();
+  const rect = screenClearCanvasBox(transcript);
   const context = prepareCanvas(canvas, rect);
   const snapshot = { cells, width: rect.width, height: rect.height, seed, effectState: null };
   snapshot.effectState = prepareEffectState(snapshot, effect);
@@ -648,6 +658,7 @@ export function animateScreenClear({ canvas, transcript, cells, effect, seed, on
   let stopped = false;
 
   canvas.hidden = false;
+  renderScreenClearFrame(context, snapshot, effect, 0);
   const finish = () => {
     if (stopped) return;
     stopped = true;

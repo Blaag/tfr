@@ -849,33 +849,48 @@ def _browser_event_class_allowed(kind: EventKind, actor_type: ActorType | None) 
     )
 
 
+def _push_event_reason(
+    event: Event,
+    preferences: PushPreferences,
+    *,
+    character_name: str | None,
+) -> str | None:
+    if (
+        event.direction is not Direction.INBOUND
+        or event.redacted
+        or event.kind not in _PUSH_EVENT_KINDS
+        or event.metadata.get("sensitive") is True
+        or event.world not in preferences.worlds
+    ):
+        return None
+    if preferences.any_activity:
+        return "any_activity"
+    if preferences.pages and event.kind is EventKind.PAGE:
+        return "page"
+    if not preferences.mentions or event.kind not in _PUSH_MENTION_KINDS or not character_name:
+        return None
+    sender = event.provenance.sender_name if event.provenance is not None else None
+    if not sender or sender.casefold() == character_name.casefold():
+        return None
+    message_text = event.metadata.get("message_text")
+    text = (
+        message_text
+        if isinstance(message_text, str)
+        else event.plain_text or event.canonical_text or ""
+    )
+    escaped = re.escape(character_name.strip())
+    return "mention" if bool(escaped) and re.search(
+        rf"(?<![\w]){escaped}(?![\w])", text, re.IGNORECASE
+    ) is not None else None
+
+
 def _push_event_matches(
     event: Event,
     preferences: PushPreferences,
     *,
     character_name: str | None,
 ) -> bool:
-    if (
-        event.direction is not Direction.INBOUND
-        or event.redacted
-        or event.kind not in _PUSH_EVENT_KINDS
-        or event.metadata.get("sensitive") is True
-    ):
-        return False
-    if preferences.any_activity or event.world in preferences.worlds:
-        return True
-    if preferences.pages and event.kind is EventKind.PAGE:
-        return True
-    if not preferences.mentions or event.kind not in _PUSH_MENTION_KINDS or not character_name:
-        return False
-    sender = event.provenance.sender_name if event.provenance is not None else None
-    if not sender or sender.casefold() == character_name.casefold():
-        return False
-    text = event.plain_text or event.canonical_text or ""
-    escaped = re.escape(character_name.strip())
-    return bool(escaped) and re.search(
-        rf"(?<![\w]){escaped}(?![\w])", text, re.IGNORECASE
-    ) is not None
+    return _push_event_reason(event, preferences, character_name=character_name) is not None
 
 
 def _initial_web_visibility(value: str | None) -> bool:
@@ -2112,12 +2127,10 @@ class WebGatewayServer:
             or self._device_is_visible(device.device_id)
             or self._native_ui_focused()
             or time.monotonic() < self._push_retry_after.get(device.device_id, 0)
-            or not _push_event_matches(
-                event,
-                push.preferences,
-                character_name=character_name,
-            )
         ):
+            return
+        reason = _push_event_reason(event, push.preferences, character_name=character_name)
+        if reason is None:
             return
         result = await self.push_sender.send(push.endpoint, push.p256dh, push.auth)
         now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -2126,6 +2139,8 @@ class WebGatewayServer:
             "status": result.status,
             "at": now,
             "error": result.error,
+            "reason": reason,
+            "event_kind": event.kind.value,
         }
         if result.delivered:
             await self.devices.set_push_latched(device.device_id, True)
