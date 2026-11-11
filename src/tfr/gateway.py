@@ -661,6 +661,16 @@ class GatewayRuntime:
         self._control_locks = {session.world: asyncio.Lock() for session in sessions}
         self._agent_locks = {name: asyncio.Lock() for name in agents.controllers}
         self._managed_settings_lock = asyncio.Lock()
+        self._native_ui_focus: dict[str, tuple[UUID, bool]] = {}
+
+    def report_native_ui_focus(self, connection_id: str, ui_id: UUID, focused: bool) -> None:
+        self._native_ui_focus[connection_id] = (ui_id, focused)
+
+    def clear_native_ui_focus(self, connection_id: str) -> None:
+        self._native_ui_focus.pop(connection_id, None)
+
+    def native_ui_focused(self) -> bool:
+        return any(focused for _ui_id, focused in self._native_ui_focus.values())
 
     @classmethod
     async def from_configuration(
@@ -2022,6 +2032,9 @@ class GatewayServer:
                     lock=write_lock,
                 )
         finally:
+            clear_focus = getattr(self.runtime, "clear_native_ui_focus", None)
+            if callable(clear_focus):
+                clear_focus(connection_id)
             if participant is not None:
                 async with self._update_participants_lock:
                     self._update_participants.pop(participant.connection_id, None)
@@ -2269,6 +2282,16 @@ class GatewayServer:
                     raise ValueError("UI capabilities must be a list")
                 record = await self.ui_store.update_capabilities(ui_id, capabilities)
                 result = {"ui": record.as_dict()}
+            elif message_type == "ui_focus":
+                if ui_id is None:
+                    raise ValueError("focus update requires a registered UI")
+                if set(message) != {"type", "protocol", "request_id", "focused"}:
+                    raise ValueError("ui_focus has invalid fields")
+                focused = message.get("focused")
+                if not isinstance(focused, bool):
+                    raise ValueError("focused must be a boolean")
+                self.runtime.report_native_ui_focus(client_id, ui_id, focused)
+                result = {"focused": focused}
             elif message_type == "command":
                 world = self._world(message)
                 text = message.get("text")

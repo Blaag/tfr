@@ -42,6 +42,15 @@ browser encryption keys, cookies, and complete URLs. A worker that is absent,
 redundant, waiting, active-but-not-controlling, or rejected during registration
 must be distinguishable without Web Inspector.
 
+The same report includes a safe `push` summary with subscription status, the
+one-alert latch, permission, and the last push-service status/time. It never
+includes an endpoint or subscription key. It also reports whether any native TFR
+UI is focused. Background WebSocket reconnects must report `visibility=hidden`
+and must not clear the latch; only an explicitly visible PWA starts a new
+notification interval. Focus a native TFR UI while the PWA is away and verify
+matching activity does not push; focus-out the native UI without opening the PWA
+and verify the existing latch semantics remain intact.
+
 ## Committed Harness
 
 - `scripts/dev-pwa` manages the isolated mock world, branch Gateway, Tailscale

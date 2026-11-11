@@ -1,4 +1,4 @@
-const CACHE_NAME = "tfr-shell-web1-v67";
+const CACHE_NAME = "tfr-shell-web1-v68";
 const NETWORK_TIMEOUT_MS = 5000;
 const SHELL = [
   "/",
@@ -83,8 +83,7 @@ self.addEventListener("push", (event) => {
     valid = false;
   }
   event.waitUntil(
-    self.registration.showNotification("TFR", {
-      body: "TFR has activity",
+    self.registration.showNotification("New activity", {
       icon: "/icon-512.png",
       badge: "/icon.svg",
       tag: "tfr-activity",

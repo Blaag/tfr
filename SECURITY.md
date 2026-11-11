@@ -141,12 +141,21 @@ subscription and trigger preferences. Subscription endpoints must use HTTPS and
 an allowlisted Apple, Google, or Mozilla push-service hostname, preventing a
 device credential from turning the Gateway into an arbitrary HTTP client. Push
 payloads are Web-Push encrypted and contain only a schema version plus the generic
-`activity` type. The service worker supplies the fixed visible text `TFR has
-activity`, so world output, sender identity, world names, and message details do
+`activity` type. The service worker supplies only the fixed title `New activity`
+and no body, so world output, sender identity, world names, and message details do
 not leave the Gateway through the push service. Every accepted push event displays
 a notification, including malformed-payload fallback, because iOS may revoke
 subscriptions that receive silent pushes. A permanent push-service rejection or
 device revocation removes the subscription.
+
+Native terminal UIs report only a boolean focus-presence signal over their
+authenticated Gateway connection. The Gateway uses the union of connected native
+focus state to suppress PWA pushes while TFR is actively in use; it clears a
+client's state on disconnect. No terminal title, foreground application, typed
+input, or operating-system activity is included. PWA WebSocket visibility is
+declared during the handshake and on later transitions. Hidden reconnects fail
+closed as away but never clear the one-alert latch; only explicit visible state
+starts a new notification interval.
 
 The browser receives an explicit projection rather than serialized internal
 events. Telnet, plugin-internal, and agent audit events are excluded; arbitrary

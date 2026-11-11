@@ -39,6 +39,23 @@ from tfr.sessions import SessionState
 from tfr.updates import current_build
 
 
+def test_native_ui_focus_presence_tracks_connections_independently() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    runtime._native_ui_focus = {}
+    first = UUID("11111111-1111-4111-8111-111111111111")
+    second = UUID("22222222-2222-4222-8222-222222222222")
+
+    runtime.report_native_ui_focus("first", first, True)
+    runtime.report_native_ui_focus("second", second, False)
+    assert runtime.native_ui_focused() is True
+
+    runtime.report_native_ui_focus("first", first, False)
+    assert runtime.native_ui_focused() is False
+    runtime.report_native_ui_focus("second", second, True)
+    runtime.clear_native_ui_focus("second")
+    assert runtime.native_ui_focused() is False
+
+
 def make_event(
     world: str,
     sequence: int,

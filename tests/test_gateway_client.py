@@ -301,6 +301,16 @@ class FakeRuntime:
             "spellcheck": False,
             "speaking_streaks": True,
         }
+        self.native_focus: dict[str, tuple[UUID, bool]] = {}
+
+    def report_native_ui_focus(self, connection_id: str, ui_id: UUID, focused: bool) -> None:
+        self.native_focus[connection_id] = (ui_id, focused)
+
+    def clear_native_ui_focus(self, connection_id: str) -> None:
+        self.native_focus.pop(connection_id, None)
+
+    def native_ui_focused(self) -> bool:
+        return any(focused for _ui_id, focused in self.native_focus.values())
 
     def world_descriptors(self) -> list[dict[str, object]]:
         return [
@@ -1676,6 +1686,44 @@ async def test_ping_and_verify_connection_confirm_a_live_gateway() -> None:
         await server.stop()
         await history.stop()
         await bus.close()
+    socket_path.parent.rmdir()
+
+
+async def test_registered_native_ui_reports_focus_and_disconnect_clears_it(
+    tmp_path: Path,
+) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    socket_path = Path("/tmp") / f"tfr-focus-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(
+        runtime, socket_path, ui_store=UiStore(tmp_path / "gateway-state")  # type: ignore[arg-type]
+    )
+    await server.start()
+    client = await GatewayClient.connect(
+        socket_path,
+        client_id=UUID("11111111-1111-4111-8111-111111111111"),
+        ui_registration=UiRegistration(
+            client_type="terminal",
+            platform="office-mac",
+            versions=(("protocol", "2"),),
+            capabilities=(),
+        ),
+    )
+    client.start()
+    try:
+        await client.report_focus(True)
+        assert runtime.native_ui_focused() is True
+        await client.report_focus(False)
+        assert runtime.native_ui_focused() is False
+        await client.report_focus(True)
+    finally:
+        await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+    assert runtime.native_ui_focused() is False
     socket_path.parent.rmdir()
 
 

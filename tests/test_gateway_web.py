@@ -43,6 +43,7 @@ from tfr.gateway_web import (
     SESSION_COOKIE,
     WebGatewayManager,
     WebGatewayServer,
+    _initial_web_visibility,
     _push_event_matches,
     _serve_root_proxy,
     _tailscale_origin,
@@ -153,8 +154,10 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v67";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v68";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
+    assert 'showNotification("New activity", {' in worker
+    assert 'body: "TFR has activity"' not in worker
 
 
 def test_every_application_module_is_routable_and_in_the_atomic_shell() -> None:
@@ -520,12 +523,16 @@ class FakeRuntime:
         self.server = "bare"
         self.encoding = "utf-8"
         self.command_details: list[dict[str, object]] = []
+        self.native_focus = False
         self.plugins = PluginManager(
             event_bus=EventBus(),
             command_bus=CommandBus(),
             targets={},
             scope="gateway",
         )
+
+    def native_ui_focused(self) -> bool:
+        return self.native_focus
 
     def world_descriptors(self) -> list[dict[str, object]]:
         return [
@@ -1329,6 +1336,14 @@ def test_push_policy_is_private_inbound_and_trigger_bounded() -> None:
     ) is False
 
 
+def test_websocket_reconnect_resets_push_latch_only_when_initially_visible() -> None:
+    assert _initial_web_visibility(None) is False
+    assert _initial_web_visibility("hidden") is False
+    assert _initial_web_visibility("visible") is True
+    with pytest.raises(ValueError, match="visibility"):
+        _initial_web_visibility("unknown")
+
+
 async def test_successful_push_latches_device_until_visibility_reset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1362,6 +1377,14 @@ async def test_successful_push_latches_device_until_visibility_reset(
         )
         assert calls == 0
         gateway._visible_sockets.clear()
+        runtime.native_focus = True
+        await gateway._push_for_device(
+            device,
+            make_event(text="Alice pages: native UI focused", kind=EventKind.PAGE),
+            "Barnaby",
+        )
+        assert calls == 0
+        runtime.native_focus = False
         await gateway._push_for_device(
             device,
             make_event(text="Alice pages: hello", kind=EventKind.PAGE),
@@ -2180,6 +2203,44 @@ async def test_websocket_reports_omitted_current_generation_retention(tmp_path: 
         await client.close()
         await history.stop()
         await bus.close()
+
+
+async def test_background_websocket_reconnect_does_not_reset_push_latch(
+    tmp_path: Path,
+) -> None:
+    runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 5}))
+    gateway, client, token = await paired_client(tmp_path, runtime)
+    device = gateway.devices.authenticate(token)
+    assert device is not None
+    await gateway.devices.set_push_subscription(
+        device.device_id,
+        endpoint="https://web.push.apple.com/device-token",
+        p256dh=P256DH,
+        auth=PUSH_AUTH,
+        preferences=PushPreferences(any_activity=True),
+    )
+    await gateway.devices.set_push_latched(device.device_id, True)
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        hidden = await client.ws_connect("/ws?visibility=hidden", headers=headers)
+        assert (await hidden.receive_json())["type"] == "hello"
+        assert (await hidden.receive_json())["type"] == "ready"
+        hidden_device = gateway.devices.authenticate(token)
+        assert hidden_device is not None and hidden_device.push is not None
+        assert hidden_device.push.latched is True
+        assert gateway._device_is_visible(device.device_id) is False
+        await hidden.close()
+
+        visible = await client.ws_connect("/ws?visibility=visible", headers=headers)
+        assert (await visible.receive_json())["type"] == "hello"
+        assert (await visible.receive_json())["type"] == "ready"
+        visible_device = gateway.devices.authenticate(token)
+        assert visible_device is not None and visible_device.push is not None
+        assert visible_device.push.latched is False
+        assert gateway._device_is_visible(device.device_id) is True
+        await visible.close()
+    finally:
+        await client.close()
 
 
 async def test_websocket_resume_reports_total_generation_and_backfill_counts(

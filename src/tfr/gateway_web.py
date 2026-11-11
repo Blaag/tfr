@@ -878,6 +878,14 @@ def _push_event_matches(
     ) is not None
 
 
+def _initial_web_visibility(value: str | None) -> bool:
+    if value in {None, "hidden"}:
+        return False
+    if value == "visible":
+        return True
+    raise ValueError("web visibility is invalid")
+
+
 class WebGatewayServer:
     def __init__(
         self,
@@ -1289,6 +1297,7 @@ class WebGatewayServer:
                     push.preferences.as_dict() if push is not None else PushPreferences().as_dict()
                 ),
                 "last_result": self._push_last_result.get(device.device_id),
+                "native_ui_focused": self._native_ui_focused(),
             }
         )
 
@@ -1592,6 +1601,10 @@ class WebGatewayServer:
         requested_gateway = request.query.get("gateway_id")
         after_cursor_value = request.query.get("after_cursor")
         try:
+            initially_visible = _initial_web_visibility(request.query.get("visibility"))
+        except ValueError:
+            raise web.HTTPBadRequest(text="Invalid visibility state") from None
+        try:
             after_cursor = int(after_cursor_value) if after_cursor_value is not None else None
         except ValueError:
             raise web.HTTPBadRequest(text="Invalid history cursor") from None
@@ -1658,13 +1671,15 @@ class WebGatewayServer:
                     revoked = True
                 else:
                     self._active_sockets[device.device_id].add(socket)
-                    self._visible_sockets.add(socket)
+                    if initially_visible:
+                        self._visible_sockets.add(socket)
                     revoked = False
             if revoked:
                 await self._close_bounded(socket, code=1008, message=b"Device session revoked")
             if socket.closed:
                 return socket
-            await self.devices.set_push_latched(device.device_id, False)
+            if initially_visible:
+                await self.devices.set_push_latched(device.device_id, False)
             await self._send_initial_state(
                 socket,
                 subscription,
@@ -2095,6 +2110,7 @@ class WebGatewayServer:
             or push.latched
             or event.world not in self._authorized_worlds(device)
             or self._device_is_visible(device.device_id)
+            or self._native_ui_focused()
             or time.monotonic() < self._push_retry_after.get(device.device_id, 0)
             or not _push_event_matches(
                 event,
@@ -2141,6 +2157,10 @@ class WebGatewayServer:
             socket in self._visible_sockets
             for socket in self._active_sockets.get(device_id, ())
         )
+
+    def _native_ui_focused(self) -> bool:
+        checker = getattr(self.runtime, "native_ui_focused", None)
+        return bool(checker()) if callable(checker) else False
 
     async def _receive_requests(
         self,
