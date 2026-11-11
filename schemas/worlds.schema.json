@@ -223,6 +223,62 @@
           "default": null,
           "title": "Reconnect"
         },
+        "reconnect_initial_delay_seconds": {
+          "anyOf": [
+            {
+              "maximum": 300,
+              "minimum": 0.1,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reconnect Initial Delay Seconds"
+        },
+        "reconnect_max_delay_seconds": {
+          "anyOf": [
+            {
+              "maximum": 3600,
+              "minimum": 0.1,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reconnect Max Delay Seconds"
+        },
+        "reconnect_stable_reset_seconds": {
+          "anyOf": [
+            {
+              "maximum": 86400,
+              "minimum": 1,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reconnect Stable Reset Seconds"
+        },
+        "reconnect_window_seconds": {
+          "anyOf": [
+            {
+              "maximum": 86400,
+              "minimum": 60,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reconnect Window Seconds"
+        },
         "scrollback_lines": {
           "anyOf": [
             {
@@ -279,6 +335,34 @@
           "default": true,
           "title": "Reconnect",
           "type": "boolean"
+        },
+        "reconnect_initial_delay_seconds": {
+          "default": 1.0,
+          "maximum": 300,
+          "minimum": 0.1,
+          "title": "Reconnect Initial Delay Seconds",
+          "type": "number"
+        },
+        "reconnect_max_delay_seconds": {
+          "default": 120.0,
+          "maximum": 3600,
+          "minimum": 0.1,
+          "title": "Reconnect Max Delay Seconds",
+          "type": "number"
+        },
+        "reconnect_stable_reset_seconds": {
+          "default": 300.0,
+          "maximum": 86400,
+          "minimum": 1,
+          "title": "Reconnect Stable Reset Seconds",
+          "type": "number"
+        },
+        "reconnect_window_seconds": {
+          "default": 7200.0,
+          "maximum": 86400,
+          "minimum": 60,
+          "title": "Reconnect Window Seconds",
+          "type": "number"
         },
         "scrollback_lines": {
           "default": 20000,

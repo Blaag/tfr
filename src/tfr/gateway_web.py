@@ -660,6 +660,15 @@ def browser_event(
         delay = event.metadata.get("delay_seconds")
         if isinstance(delay, (int, float)) and not isinstance(delay, bool):
             value["event"]["reconnect_delay_seconds"] = delay
+        for source, target in (
+            ("attempt", "reconnect_attempt"),
+            ("attempts", "reconnect_attempts"),
+            ("retry_elapsed_seconds", "reconnect_elapsed_seconds"),
+            ("retry_remaining_seconds", "reconnect_remaining_seconds"),
+        ):
+            item = event.metadata.get(source)
+            if isinstance(item, (int, float)) and not isinstance(item, bool):
+                value["event"][target] = item
     for optional_field in ("presentation", "combo", "text_runs", "provenance"):
         if len(json.dumps(value, ensure_ascii=True).encode("utf-8")) <= MAX_WEB_MESSAGE_BYTES:
             break
@@ -1045,7 +1054,44 @@ class WebGatewayServer:
         elif category == "connector":
             entries = [entry for entry in entries if entry.component == "connector"]
         ordered = sorted(entries, key=lambda item: item.timestamp)[-100:]
-        return [entry.as_dict() for entry in ordered]
+        output = [entry.as_dict() for entry in ordered]
+        if category == "connector":
+            timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            for descriptor in self.runtime.world_descriptors():
+                reconnect = descriptor.get("reconnect")
+                if not isinstance(reconnect, Mapping):
+                    reconnect = {}
+                fields = ", ".join(
+                    f"{key}={reconnect[key]}"
+                    for key in (
+                        "attempt",
+                        "attempts",
+                        "delay_seconds",
+                        "retry_elapsed_seconds",
+                        "retry_remaining_seconds",
+                    )
+                    if key in reconnect
+                    and isinstance(reconnect[key], (int, float))
+                    and not isinstance(reconnect[key], bool)
+                )
+                output.append(
+                    {
+                        "timestamp": timestamp,
+                        "severity": (
+                            "warning"
+                            if descriptor.get("state") == "reconnect_exhausted"
+                            else "info"
+                        ),
+                        "component": "connector",
+                        "code": "current_status",
+                        "message": (
+                            f"World {descriptor.get('world')} state={descriptor.get('state')}"
+                            + (f"; {fields}" if fields else "")
+                        )[:240],
+                        "operation": "world_reconnect_status",
+                    }
+                )
+        return output[-100:]
 
     def clear_diagnostics(self) -> None:
         self.runtime.plugins.diagnostics.clear()
@@ -1079,7 +1125,8 @@ class WebGatewayServer:
             self._push_subscription = await self.runtime.history.subscribe(
                 None,
                 include_history=False,
-                event_filter=lambda event: event.kind in _PUSH_EVENT_KINDS,
+                event_filter=lambda event: event.kind in _PUSH_EVENT_KINDS
+                or event.kind is EventKind.CONNECTION,
             )
         except BaseException:
             await runner.cleanup()
@@ -2005,7 +2052,25 @@ class WebGatewayServer:
         world = str(descriptor["world"])
         generation = int(descriptor.get("connection_generation", 0))
         key = (world, generation)
-        return {
+        reconnect = descriptor.get("reconnect")
+        reconnect_status = (
+            {
+                key: reconnect[key]
+                for key in (
+                    "attempt",
+                    "attempts",
+                    "delay_seconds",
+                    "retry_elapsed_seconds",
+                    "retry_remaining_seconds",
+                )
+                if key in reconnect
+                and isinstance(reconnect[key], (int, float))
+                and not isinstance(reconnect[key], bool)
+            }
+            if isinstance(reconnect, Mapping)
+            else {}
+        )
+        value = {
             "world": world,
             "state": descriptor["state"],
             "aliases": descriptor["aliases"],
@@ -2023,6 +2088,9 @@ class WebGatewayServer:
                 ),
             },
         }
+        if reconnect_status:
+            value["reconnect"] = reconnect_status
+        return value
 
     async def _send_events(
         self,
@@ -2099,6 +2167,9 @@ class WebGatewayServer:
                 )
                 return
             event = item.event
+            if event.kind is EventKind.CONNECTION:
+                self._record_connector_diagnostic(event)
+                continue
             descriptors = {
                 str(descriptor["world"]): descriptor
                 for descriptor in self.runtime.world_descriptors()
@@ -2112,6 +2183,41 @@ class WebGatewayServer:
                 ),
                 return_exceptions=True,
             )
+
+    def _record_connector_diagnostic(self, event: Event) -> None:
+        state = event.metadata.get("state")
+        if state not in {
+            "disconnected",
+            "reconnect_wait",
+            "reconnect_exhausted",
+            "connected",
+            "stopped",
+        }:
+            return
+        attempt = event.metadata.get("attempt", event.metadata.get("attempts"))
+        delay = event.metadata.get("delay_seconds")
+        message = f"World {event.world} connection state is {state}"
+        if isinstance(attempt, int):
+            message += f"; attempt={attempt}"
+        if isinstance(delay, (int, float)) and not isinstance(delay, bool):
+            message += f"; delay={delay:.1f}s"
+        code = {
+            "connected": "reconnect_connected",
+            "reconnect_wait": "reconnect_scheduled",
+            "reconnect_exhausted": "reconnect_exhausted",
+            "stopped": "reconnect_cancelled",
+        }.get(state, "reconnect_failed")
+        if state == "disconnected" and event.metadata.get("backoff_reset") is True:
+            code = "reconnect_stable"
+        elif state == "reconnect_wait" and attempt == 1:
+            code = "reconnect_started"
+        self.diagnostics.record(
+            severity="warning" if state == "reconnect_exhausted" else "info",
+            component="connector",
+            code=code,
+            message=message[:240],
+            operation="world_reconnect",
+        )
 
     async def _push_for_device(
         self,

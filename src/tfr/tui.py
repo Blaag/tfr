@@ -3091,8 +3091,23 @@ class TfrTui:
                 view.clear_selection()
                 delay = event.metadata.get("delay_seconds")
                 suffix = f" in {delay:g}s" if isinstance(delay, (int, float)) else ""
+                attempt = event.metadata.get("attempt")
+                attempt_text = f" (attempt {attempt})" if isinstance(attempt, int) else ""
                 view.display.append(
-                    self.theme.ansi_text("warning", f"Reconnecting{suffix} · [{timestamp}]")
+                    self.theme.ansi_text(
+                        "warning", f"Reconnecting{suffix}{attempt_text} · [{timestamp}]"
+                    )
+                )
+                should_count = True
+            elif state == SessionState.RECONNECT_EXHAUSTED.value:
+                view.clear_selection()
+                attempts = event.metadata.get("attempts")
+                suffix = f" after {attempts} attempts" if isinstance(attempts, int) else ""
+                view.display.append(
+                    self.theme.ansi_text(
+                        "error",
+                        f"Reconnect window exhausted{suffix}; use /reconnect · [{timestamp}]",
+                    )
                 )
                 should_count = True
         if should_count and (self.effects_lab_open or event.world != self.active_alias):

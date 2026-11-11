@@ -1084,6 +1084,19 @@ otherwise approximate the RGB colors at the terminal's available color depth.
   under mosh and TFR handling otherwise. Use `/mouse auto|terminal|tfr|status`
   to inspect or change the mode for the running UI.
 
+Unexpected world disconnects use an exponential reconnect policy: one second,
+two, four, eight, sixteen, thirty, sixty, then delays capped at two minutes,
+each with bounded jitter. Automatic retries stop after two hours and report
+`reconnect_exhausted`; `/reconnect` starts a fresh retry window. A connection
+must remain established for five minutes before it resets the outage backoff.
+Configure the shared policy with `worlds.defaults.reconnect`,
+`reconnect_initial_delay_seconds`, `reconnect_max_delay_seconds`,
+`reconnect_window_seconds`, and `reconnect_stable_reset_seconds`; nullable
+`worlds.*` overrides use the same names. Policy changes require a Gateway
+restart because the detached connector owns active world sockets. `/diagnostics
+connector` reports current attempt, delay, elapsed/remaining window, recovery,
+and exhaustion state without credentials.
+
 Input beginning with `/` is a client command. Available commands are `/world
 ALIAS`, `/next` (`/n`), `/previous` (`/p`), `/connect`, `/disconnect`, `/reconnect`,
 `/end`, `/nospoof show|hide|status`, `/animations on|off|status`,

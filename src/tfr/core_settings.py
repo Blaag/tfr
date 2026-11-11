@@ -559,6 +559,46 @@ def core_setting_descriptors() -> tuple[SettingDescriptor, ...]:
             "worlds.defaults.reconnect", SettingType.BOOLEAN, True, SettingScope.SHARED, GATEWAY
         ),
         _setting(
+            "worlds.defaults.reconnect_initial_delay_seconds",
+            SettingType.NUMBER,
+            1.0,
+            SettingScope.SHARED,
+            GATEWAY,
+            restart=RestartRequirement.GATEWAY_RESTART,
+            minimum=0.1,
+            maximum=300,
+        ),
+        _setting(
+            "worlds.defaults.reconnect_max_delay_seconds",
+            SettingType.NUMBER,
+            120.0,
+            SettingScope.SHARED,
+            GATEWAY,
+            restart=RestartRequirement.GATEWAY_RESTART,
+            minimum=0.1,
+            maximum=3_600,
+        ),
+        _setting(
+            "worlds.defaults.reconnect_window_seconds",
+            SettingType.NUMBER,
+            7_200.0,
+            SettingScope.SHARED,
+            GATEWAY,
+            restart=RestartRequirement.GATEWAY_RESTART,
+            minimum=60,
+            maximum=86_400,
+        ),
+        _setting(
+            "worlds.defaults.reconnect_stable_reset_seconds",
+            SettingType.NUMBER,
+            300.0,
+            SettingScope.SHARED,
+            GATEWAY,
+            restart=RestartRequirement.GATEWAY_RESTART,
+            minimum=1,
+            maximum=86_400,
+        ),
+        _setting(
             "worlds.defaults.scrollback_lines",
             SettingType.INTEGER,
             20_000,
@@ -614,6 +654,25 @@ def core_setting_descriptors() -> tuple[SettingDescriptor, ...]:
             SettingScope.WORLD,
             GATEWAY,
             nullable=True,
+        ),
+        *(
+            _setting(
+                f"worlds.*.reconnect_{name}",
+                SettingType.NUMBER,
+                None,
+                SettingScope.WORLD,
+                GATEWAY,
+                restart=RestartRequirement.GATEWAY_RESTART,
+                nullable=True,
+                minimum=minimum,
+                maximum=maximum,
+            )
+            for name, minimum, maximum in (
+                ("initial_delay_seconds", 0.1, 300),
+                ("max_delay_seconds", 0.1, 3_600),
+                ("window_seconds", 60, 86_400),
+                ("stable_reset_seconds", 1, 86_400),
+            )
         ),
         _setting(
             "worlds.*.scrollback_lines",
