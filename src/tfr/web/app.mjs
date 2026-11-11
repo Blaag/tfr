@@ -50,6 +50,7 @@ import {
   presentationValidationResult,
 } from "./presentation.mjs";
 import { restoreTranscriptPosition } from "./scroll-restoration.mjs";
+import { runAtWindowLoad, workerDescriptor } from "./service-worker.mjs";
 import {
   animateScreenClear,
   captureTranscriptCells,
@@ -190,6 +191,8 @@ const state = {
   heartbeatTimeout: null,
   heartbeatRequestId: null,
   serviceWorkerRegistration: null,
+  serviceWorkerRegistrationAttempted: false,
+  serviceWorkerRegistrationError: null,
   reloadingForUpdate: false,
   shownHistoryNotices: new Map(),
   comboStreaks: new Map(),
@@ -2350,9 +2353,15 @@ async function refreshPushStatus() {
   }
   if (!navigator.serviceWorker.controller) {
     state.push.loaded = false;
-    elements.pushStatus.textContent = state.serviceWorkerRegistration?.waiting
-      ? "A TFR app update must be applied before notifications can be enabled."
-      : "Close and reopen the installed TFR app before enabling notifications.";
+    elements.pushStatus.textContent = state.serviceWorkerRegistrationError
+      ? `Service worker registration failed (${state.serviceWorkerRegistrationError}). Open Diagnostics for details.`
+      : state.serviceWorkerRegistration?.waiting
+        ? "A TFR app update must be applied before notifications can be enabled."
+        : state.serviceWorkerRegistration?.installing
+          ? "The notification service worker is still installing."
+          : state.serviceWorkerRegistration?.active
+            ? "The notification service worker is active but does not control this page. Close and reopen TFR."
+            : "The notification service worker is not registered. Open Diagnostics for details.";
     renderPushSettings();
     return;
   }
@@ -2463,11 +2472,83 @@ function watchServiceWorkerRegistration(registration) {
     const worker = registration.installing;
     if (!worker) return;
     worker.addEventListener("statechange", () => {
+      if (worker.state === "redundant") {
+        reportDiagnostic(recordDiagnostic({
+          severity: "error",
+          component: "service-worker",
+          code: "installation_redundant",
+          message: "The PWA service worker installation became redundant",
+          operation: "register",
+        }));
+      }
       if (worker.state === "installed" && navigator.serviceWorker.controller) {
         showWaitingServiceWorker(worker);
       }
     });
   });
+}
+
+async function serviceWorkerDiagnosticState() {
+  let registration = state.serviceWorkerRegistration;
+  let inspectionError = null;
+  if ("serviceWorker" in navigator) {
+    try {
+      registration ||= await navigator.serviceWorker.getRegistration("/");
+    } catch (error) {
+      inspectionError = error instanceof Error ? error.name : "UnknownError";
+    }
+  }
+  return {
+    supported: "serviceWorker" in navigator,
+    secure_context: window.isSecureContext === true,
+    document_ready_state: document.readyState,
+    standalone: navigator.standalone === true
+      || window.matchMedia("(display-mode: standalone)").matches,
+    registration_attempted: state.serviceWorkerRegistrationAttempted,
+    registration_error: state.serviceWorkerRegistrationError,
+    inspection_error: inspectionError,
+    controller: workerDescriptor(navigator.serviceWorker?.controller, location.origin),
+    registration: registration ? {
+      scope_path: new URL(registration.scope).pathname,
+      active: workerDescriptor(registration.active, location.origin),
+      waiting: workerDescriptor(registration.waiting, location.origin),
+      installing: workerDescriptor(registration.installing, location.origin),
+      push_manager: Boolean(registration.pushManager),
+    } : null,
+    notification_api: "Notification" in window,
+    notification_permission: "Notification" in window ? Notification.permission : "unavailable",
+    push_manager_api: "PushManager" in window,
+  };
+}
+
+async function registerServiceWorker() {
+  state.serviceWorkerRegistrationAttempted = true;
+  try {
+    const registration = await navigator.serviceWorker.register("/sw.js");
+    state.serviceWorkerRegistrationError = null;
+    watchServiceWorkerRegistration(registration);
+    window.setTimeout(() => {
+      if (!navigator.serviceWorker.controller) {
+        reportDiagnostic(recordDiagnostic({
+          severity: "warning",
+          component: "service-worker",
+          code: "not_controlling",
+          message: "The registered PWA service worker does not control this page",
+          operation: registration.active ? "active" : registration.installing ? "installing" : "registered",
+        }));
+      }
+    }, 5000);
+  } catch (error) {
+    state.serviceWorkerRegistrationError = error instanceof Error ? error.name : "UnknownError";
+    reportDiagnostic(recordDiagnostic({
+      severity: "error",
+      component: "service-worker",
+      code: "registration_failed",
+      message: `The PWA service worker could not be registered (${state.serviceWorkerRegistrationError})`,
+      operation: "register",
+    }));
+    if (elements.settingsDialog.open) refreshPushStatus();
+  }
 }
 
 async function checkForApplicationUpdate() {
@@ -2578,13 +2659,13 @@ elements.effectsLabButton.addEventListener("click", () => {
   elements.settingsDialog.close();
   elements.effectsLab.showModal();
 });
-elements.diagnosticsButton.addEventListener("click", () => {
+elements.diagnosticsButton.addEventListener("click", async () => {
   const entries = diagnosticEntries();
   elements.diagnosticsOutput.textContent = entries.length
     ? JSON.stringify({
         gateway: elements.gatewayVersion.textContent,
         connection: elements.connectionState.textContent,
-        service_worker: navigator.serviceWorker?.controller ? "controlling" : "not controlling",
+        service_worker: await serviceWorkerDiagnosticState(),
         entries,
       }, null, 2)
     : "No local diagnostics.";
@@ -2825,13 +2906,7 @@ if ("serviceWorker" in navigator) {
       refreshPushStatus();
     }
   });
-  window.addEventListener("load", async () => {
-    try {
-      watchServiceWorkerRegistration(await navigator.serviceWorker.register("/sw.js"));
-    } catch {
-      // The live app remains usable when service-worker registration is unavailable.
-    }
-  });
+  runAtWindowLoad(document, window, registerServiceWorker);
 }
 
 export const startup = start();
