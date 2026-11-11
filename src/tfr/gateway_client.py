@@ -1084,6 +1084,13 @@ class GatewayClient:
         request_id = uuid4()
         await self._request({"type": "ping", "request_id": str(request_id)}, request_id)
 
+    async def report_focus(self, focused: bool) -> None:
+        request_id = uuid4()
+        await self._request(
+            {"type": "ui_focus", "request_id": str(request_id), "focused": focused},
+            request_id,
+        )
+
     async def update(self, *, force: bool = False) -> dict[str, Any]:
         request_id = uuid4()
         message: dict[str, Any] = {"type": "update", "request_id": str(request_id)}
@@ -2475,6 +2482,9 @@ class GatewayUiRuntime:
         self.connection_diagnostics.clear()
         with contextlib.suppress(ConnectionError, OSError, RuntimeError, ValueError):
             await self.client.clear_diagnostics()
+
+    async def report_focus(self, focused: bool) -> None:
+        await self.client.report_focus(focused)
 
     def record_notification_diagnostic(
         self, code: str, message: str, status: Mapping[str, object]

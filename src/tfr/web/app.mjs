@@ -1894,6 +1894,7 @@ function socketUrl() {
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   if (state.gatewayId) url.searchParams.set("gateway_id", state.gatewayId);
   if (state.gatewayId && state.cursor) url.searchParams.set("after_cursor", state.cursor);
+  url.searchParams.set("visibility", document.visibilityState === "visible" ? "visible" : "hidden");
   return url;
 }
 
@@ -2521,6 +2522,25 @@ async function serviceWorkerDiagnosticState() {
   };
 }
 
+async function pushDiagnosticState() {
+  try {
+    const value = await loadPushStatus();
+    return {
+      supported: value.supported === true,
+      subscribed: value.subscribed === true,
+      latched: value.latched === true,
+      native_ui_focused: value.native_ui_focused === true,
+      notification_permission: "Notification" in window ? Notification.permission : "unavailable",
+      last_result: value.last_result || null,
+    };
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error.name : "UnknownError",
+      notification_permission: "Notification" in window ? Notification.permission : "unavailable",
+    };
+  }
+}
+
 async function registerServiceWorker() {
   state.serviceWorkerRegistrationAttempted = true;
   try {
@@ -2659,18 +2679,28 @@ elements.effectsLabButton.addEventListener("click", () => {
   elements.settingsDialog.close();
   elements.effectsLab.showModal();
 });
-elements.diagnosticsButton.addEventListener("click", async () => {
+elements.diagnosticsButton.addEventListener("click", () => {
   const entries = diagnosticEntries();
-  elements.diagnosticsOutput.textContent = entries.length
-    ? JSON.stringify({
-        gateway: elements.gatewayVersion.textContent,
-        connection: elements.connectionState.textContent,
-        service_worker: await serviceWorkerDiagnosticState(),
-        entries,
-      }, null, 2)
-    : "No local diagnostics.";
+  const base = {
+    gateway: elements.gatewayVersion.textContent,
+    connection: elements.connectionState.textContent,
+    service_worker: "inspecting",
+    push: "inspecting",
+    entries,
+  };
+  elements.diagnosticsOutput.textContent = JSON.stringify(base, null, 2);
   elements.settingsDialog.close();
   elements.diagnosticsDialog.showModal();
+  Promise.all([serviceWorkerDiagnosticState(), pushDiagnosticState()]).then(
+    ([serviceWorker, push]) => {
+      if (!elements.diagnosticsDialog.open) return;
+      elements.diagnosticsOutput.textContent = JSON.stringify({
+        ...base,
+        service_worker: serviceWorker,
+        push,
+      }, null, 2);
+    },
+  );
 });
 elements.diagnosticsClose.addEventListener("click", () => elements.diagnosticsDialog.close());
 elements.diagnosticsCopy.addEventListener("click", async () => {

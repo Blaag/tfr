@@ -450,6 +450,8 @@ class ServiceRuntime(Protocol):
 
     async def clear_diagnostics(self) -> None: ...
 
+    async def report_focus(self, focused: bool) -> None: ...
+
     def record_notification_diagnostic(
         self, code: str, message: str, status: Mapping[str, object]
     ) -> None: ...
@@ -1607,11 +1609,15 @@ class TfrTui:
         @bindings.add(_FOCUS_IN_KEY, is_global=True)
         def terminal_focus_in(_event: Any) -> None:
             self.notification_policy.focus_in()
+            if self.service_runtime is not None:
+                self._spawn(self.service_runtime.report_focus(True))
             self._record_notification_diagnostic("focus_in", "TFR terminal surface is focused")
 
         @bindings.add(_FOCUS_OUT_KEY, is_global=True)
         def terminal_focus_out(_event: Any) -> None:
             self.notification_policy.focus_out()
+            if self.service_runtime is not None:
+                self._spawn(self.service_runtime.report_focus(False))
             self._record_notification_diagnostic("focus_out", "TFR terminal surface is unfocused")
 
         @bindings.add("escape", filter=settings_dialog_active, is_global=True)

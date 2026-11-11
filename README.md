@@ -655,12 +655,14 @@ Notifications**. The Gateway creates one stable private VAPID P-256 key in the
 web state directory and stores each device's push subscription alongside its
 paired-device record. Notifications are disabled until the device explicitly
 enables them. Per-device triggers support pages, character-name mentions,
-selected worlds, or any visible inbound activity. Notification content is always
-the private fixed text `TFR has activity`; message text, sender names, and world
-names are never included in the push payload. The Gateway suppresses pushes while
-that PWA reports itself visible and sends at most one alert until the PWA becomes
-visible again. Revoking a web device removes its subscription. Permanent `404`
-or `410` responses from a push service also remove the stale subscription.
+selected worlds, or any visible inbound activity. The notification title is the
+private fixed text `New activity` with no body; message text, sender names, and
+world names are never included in the push payload. The Gateway suppresses pushes while
+that PWA reports itself visible or any connected native TFR UI reports that its
+terminal surface is focused. It sends at most one alert until the PWA becomes
+explicitly visible again; iOS background WebSocket reconnects do not reset that
+latch. Revoking a web device removes its subscription. Permanent `404` or `410`
+responses from a push service also remove the stale subscription.
 
 On iPhone and iPad, Web Push requires iOS/iPadOS 16.4 or newer, installation on
 the Home Screen, and notification permission granted from the explicit enable
