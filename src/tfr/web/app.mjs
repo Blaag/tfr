@@ -204,6 +204,8 @@ const state = {
   paste: null,
   push: {
     busy: false,
+    saveRequested: false,
+    saveTask: null,
     loaded: false,
     subscribed: false,
     publicKey: null,
@@ -703,6 +705,7 @@ function updateViewportHeight() {
 }
 
 function scheduleViewportUpdate() {
+  cancelScreenClearAnimation();
   updateViewportHeight();
   window.requestAnimationFrame(updateViewportHeight);
   window.clearTimeout(viewportTimer);
@@ -2433,27 +2436,36 @@ async function disablePushNotifications() {
 
 async function savePushPreferences() {
   state.push.preferences = currentPushPreferences();
-  if (!state.push.subscribed || state.push.busy) {
+  if (!state.push.subscribed) {
     renderPushSettings();
     return;
   }
-  state.push.busy = true;
-  renderPushSettings();
-  try {
-    const registration = state.serviceWorkerRegistration;
-    if (!registration) throw new Error("The service worker is unavailable");
-    const value = await updatePush({
-      registration,
-      preferences: state.push.preferences,
-    });
-    state.push.preferences = normalizePushPreferences(value.preferences, state.worlds.map((world) => world.world));
-    elements.pushStatus.textContent = "Notification preferences saved.";
-  } catch {
-    elements.pushStatus.textContent = "Could not save notification preferences.";
-  } finally {
-    state.push.busy = false;
+  state.push.saveRequested = true;
+  if (state.push.saveTask) return;
+  state.push.saveTask = (async () => {
+    while (state.push.saveRequested) {
+      state.push.saveRequested = false;
+      const preferences = state.push.preferences;
+      try {
+        const registration = state.serviceWorkerRegistration;
+        if (!registration) throw new Error("The service worker is unavailable");
+        const value = await updatePush({ registration, preferences });
+        if (!state.push.saveRequested) {
+          state.push.preferences = normalizePushPreferences(
+            value.preferences,
+            state.worlds.map((world) => world.world),
+          );
+          elements.pushStatus.textContent = "Notification preferences saved.";
+        }
+      } catch {
+        elements.pushStatus.textContent = "Could not save notification preferences.";
+      }
+    }
+  })().finally(() => {
+    state.push.saveTask = null;
     renderPushSettings();
-  }
+  });
+  renderPushSettings();
 }
 
 function reportVisibility() {
@@ -2530,6 +2542,12 @@ async function pushDiagnosticState() {
       subscribed: value.subscribed === true,
       latched: value.latched === true,
       native_ui_focused: value.native_ui_focused === true,
+      triggers: {
+        eligible_world_count: Array.isArray(value.preferences?.worlds) ? value.preferences.worlds.length : 0,
+        any_activity: value.preferences?.any_activity === true,
+        pages: value.preferences?.pages === true,
+        mentions: value.preferences?.mentions === true,
+      },
       notification_permission: "Notification" in window ? Notification.permission : "unavailable",
       last_result: value.last_result || null,
     };

@@ -94,6 +94,9 @@
 
       <section id="history-notice" class="history-notice" hidden></section>
       <section id="transcript" class="transcript" aria-live="polite" aria-label="World transcript">
+        <div class="screen-clear-layer" aria-hidden="true">
+          <canvas id="screen-clear-overlay" class="screen-clear-overlay" hidden></canvas>
+        </div>
         <div class="transcript-overlay" aria-hidden="true">
           <div id="combo-notice" class="combo-notice" hidden></div>
         </div>
@@ -103,7 +106,6 @@
           <p>Waiting for a signal.</p>
         </div>
       </section>
-      <canvas id="screen-clear-overlay" class="screen-clear-overlay" aria-hidden="true" hidden></canvas>
       <div id="combo-fireworks" class="combo-fireworks" aria-hidden="true"></div>
 
       <button id="return-live" class="return-live" type="button" hidden>
@@ -141,22 +143,23 @@
         <fieldset class="display-settings" aria-describedby="push-status">
           <legend>Notifications</legend>
           <p id="push-status" class="fine-print" role="status">Checking Web Push availability…</p>
+          <div>
+            <span class="fine-print">Eligible worlds</span>
+            <div id="push-world-list" class="world-list"></div>
+          </div>
+          <p class="fine-print">Only checked worlds can notify. Choose one or more triggers below.</p>
           <label class="setting-row" for="push-pages">
-            <span>Pages</span>
+            <span>Pages in eligible worlds</span>
             <input id="push-pages" type="checkbox" role="switch" checked>
           </label>
           <label class="setting-row" for="push-mentions">
-            <span>Character mentions</span>
+            <span>Character-name mentions in eligible worlds</span>
             <input id="push-mentions" type="checkbox" role="switch" checked>
           </label>
           <label class="setting-row" for="push-any-activity">
-            <span>Any activity</span>
+            <span>Any activity in eligible worlds</span>
             <input id="push-any-activity" type="checkbox" role="switch">
           </label>
-          <div>
-            <span class="fine-print">Selected worlds</span>
-            <div id="push-world-list" class="world-list"></div>
-          </div>
           <button id="push-enable" type="button">Enable notifications</button>
           <button id="push-disable" type="button" hidden>Disable notifications</button>
         </fieldset>

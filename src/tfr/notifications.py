@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
@@ -124,10 +125,12 @@ class TerminalNotificationTransport:
         *,
         environment: Mapping[str, str] | None = None,
         write_raw: Callable[[str], None],
+        platform_name: str | None = None,
     ) -> None:
         self.environment = dict(environment or os.environ)
         self.configured = configured
         self.write_raw = write_raw
+        self.platform = platform_name or sys.platform
         self.multiplexer = (
             "herdr"
             if self.environment.get("HERDR_ENV") or self.environment.get("HERDR_PANE_ID")
@@ -154,6 +157,8 @@ class TerminalNotificationTransport:
         )
 
     def _resolve(self) -> str:
+        if self.configured == "system":
+            return "freedesktop"
         if self.configured != "auto":
             return self.configured
         if self.multiplexer == "herdr":
@@ -161,7 +166,16 @@ class TerminalNotificationTransport:
         terminal = self.terminal.casefold()
         if any(name in terminal for name in ("ghostty", "iterm", "kitty", "wezterm", "warp")):
             return "osc-9"
+        if self._freedesktop_available():
+            return "freedesktop"
         return "bell"
+
+    def _freedesktop_available(self) -> bool:
+        return (
+            self.platform.startswith("linux")
+            and bool(self.environment.get("DBUS_SESSION_BUS_ADDRESS"))
+            and shutil.which("notify-send") is not None
+        )
 
     def send(self, message: str) -> bool:
         text = _safe_text(message)
@@ -202,6 +216,31 @@ class TerminalNotificationTransport:
                     return False
             elif self.resolved == "bell":
                 self.write_raw("\a")
+            elif self.resolved == "freedesktop":
+                if not self.platform.startswith("linux"):
+                    raise RuntimeError("system notifications are supported only on Linux")
+                if not self.environment.get("DBUS_SESSION_BUS_ADDRESS"):
+                    raise RuntimeError("the Linux desktop session bus is unavailable")
+                executable = shutil.which("notify-send")
+                if executable is None:
+                    raise RuntimeError("notify-send is unavailable")
+                result = subprocess.run(  # noqa: S603
+                    [
+                        executable,
+                        "--app-name=TFR",
+                        "--urgency=normal",
+                        "--expire-time=8000",
+                        text,
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    check=False,
+                    env=self.environment,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError("the Linux notification service rejected the request")
             else:
                 sequence = f"\x1b]9;{text}\x07"
                 self.write_raw(
@@ -210,7 +249,7 @@ class TerminalNotificationTransport:
             self.sent += 1
             self.last_error = None
             return True
-        except (OSError, RuntimeError) as exc:
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
             self.last_error = str(exc)[:200]
             return False
 
@@ -218,6 +257,7 @@ class TerminalNotificationTransport:
         return {
             "configured": self.configured,
             "resolved": self.resolved,
+            "platform": self.platform,
             "terminal": self.terminal,
             "multiplexer": self.multiplexer,
             "focus": "focused"
@@ -228,6 +268,8 @@ class TerminalNotificationTransport:
             "latched": latched,
             "sent": self.sent,
             "last_error": self.last_error,
+            "session_bus": bool(self.environment.get("DBUS_SESSION_BUS_ADDRESS")),
+            "notify_send": shutil.which("notify-send") is not None,
             "herdr_requirement": (
                 "Herdr ui.toast.delivery must be terminal or system"
                 if self.resolved == "herdr"

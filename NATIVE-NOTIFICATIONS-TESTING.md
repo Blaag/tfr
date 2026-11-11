@@ -86,6 +86,32 @@ set this UI's transport to **OSC 9** explicitly. Mosh support varies by version,
 so verify with **Send test notification**, then verify real focus gating by
 switching local Ghostty tabs/apps and checking `/diagnostics notifications`.
 
+## Linux and Omarchy
+
+Linux automatic delivery prefers a detected OSC-capable terminal. For Ghostty,
+repeat the direct and tmux matrices above; diagnostics should report
+`platform=linux`, `terminal=ghostty`, and `resolved=osc-9`.
+
+Verify the desktop-neutral fallback separately in the same graphical user
+session:
+
+```sh
+busctl --user status org.freedesktop.Notifications
+notify-send 'TFR test' 'Freedesktop notification path'
+```
+
+Omarchy 4.5's Quickshell service owns `org.freedesktop.Notifications`; Mako and
+Dunst are not required. Set the TFR transport to **System** and use **Send test
+notification**. Diagnostics must report `resolved=freedesktop`,
+`session_bus=true`, and `notify_send=true`, but must never include the D-Bus
+address. Then test ordinary unfocused delivery and one-notification latching.
+Do Not Disturb may suppress presentation after a successful handoff.
+
+An unknown terminal in a local Linux session automatically uses Freedesktop only
+when `DBUS_SESSION_BUS_ADDRESS` and `notify-send` are both available. Remote SSH
+hosts normally lack the local graphical session bus; use a verified OSC path or
+BEL rather than sending a notification to the wrong desktop session.
+
 ## Herdr
 
 On macOS with Herdr 0.9.5, configure system-owned notifications:

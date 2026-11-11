@@ -168,7 +168,8 @@
             "auto",
             "osc-9",
             "bell",
-            "herdr"
+            "herdr",
+            "system"
           ],
           "title": "Transport",
           "type": "string"

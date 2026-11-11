@@ -142,6 +142,93 @@ def test_tmux_without_an_outer_terminal_marker_falls_back_to_bell() -> None:
     assert transport.resolved == "bell"
 
 
+def test_linux_auto_prefers_ghostty_osc_over_freedesktop(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "tfr.notifications.shutil.which",
+        lambda name: "/usr/bin/notify-send" if name == "notify-send" else None,
+    )
+    transport = TerminalNotificationTransport(
+        "auto",
+        environment={
+            "TERM_PROGRAM": "ghostty",
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+        },
+        write_raw=Mock(),
+        platform_name="linux",
+    )
+
+    assert transport.resolved == "osc-9"
+
+
+def test_linux_auto_uses_freedesktop_for_unknown_local_terminal(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "tfr.notifications.shutil.which",
+        lambda name: "/usr/bin/notify-send" if name == "notify-send" else None,
+    )
+    run = Mock(return_value=Mock(returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr("tfr.notifications.subprocess.run", run)
+    environment = {
+        "TERM_PROGRAM": "unknown-terminal",
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+        "PATH": "/usr/bin",
+    }
+    transport = TerminalNotificationTransport(
+        "auto",
+        environment=environment,
+        write_raw=Mock(),
+        platform_name="linux",
+    )
+
+    assert transport.resolved == "freedesktop"
+    assert transport.send("TFR has\nactivity") is True
+    assert run.call_args.args[0] == [
+        "/usr/bin/notify-send",
+        "--app-name=TFR",
+        "--urgency=normal",
+        "--expire-time=8000",
+        "TFR has activity",
+    ]
+    assert run.call_args.kwargs["env"] == environment
+    status = transport.status(focused=False, latched=True)
+    assert status["session_bus"] is True
+    assert status["notify_send"] is True
+    assert "unix:path" not in str(status)
+
+
+def test_linux_system_transport_fails_closed_without_a_session_bus(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "tfr.notifications.shutil.which",
+        lambda name: "/usr/bin/notify-send" if name == "notify-send" else None,
+    )
+    transport = TerminalNotificationTransport(
+        "system",
+        environment={"TERM": "xterm-256color"},
+        write_raw=Mock(),
+        platform_name="linux",
+    )
+
+    assert transport.resolved == "freedesktop"
+    assert transport.send("TFR has activity") is False
+    assert transport.last_error == "the Linux desktop session bus is unavailable"
+
+
+def test_linux_auto_without_desktop_notification_service_falls_back_to_bell(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("tfr.notifications.shutil.which", lambda _name: None)
+    written: list[str] = []
+    transport = TerminalNotificationTransport(
+        "auto",
+        environment={"TERM": "xterm-256color"},
+        write_raw=written.append,
+        platform_name="linux",
+    )
+
+    assert transport.resolved == "bell"
+    assert transport.send("TFR has activity") is True
+    assert written == ["\a"]
+
+
 def test_herdr_transport_uses_herdr_notification_command(monkeypatch) -> None:
     monkeypatch.setattr("tfr.notifications.shutil.which", lambda _name: "/usr/bin/herdr")
     run = Mock(

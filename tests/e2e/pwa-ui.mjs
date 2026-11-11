@@ -658,6 +658,19 @@ try {
   await page.locator("#command-input").focus();
   await page.waitForTimeout(350);
   assertGeometry(await geometry(), "keyboard-sized portrait");
+  await page.evaluate(() => document.querySelector("#screen-clear-handle").click());
+  await page.waitForFunction(() => document.querySelectorAll("#event-list .event").length === 0);
+  const keyboardTranscript = await page.locator("#transcript").boundingBox();
+  const keyboardCanvas = await page.locator("#screen-clear-overlay").boundingBox();
+  const keyboardHeader = await page.locator(".topbar").boundingBox();
+  assert.ok(keyboardTranscript && keyboardCanvas && keyboardHeader);
+  assert.ok(Math.abs(keyboardCanvas.x - keyboardTranscript.x) <= 1);
+  assert.ok(Math.abs(keyboardCanvas.y - keyboardTranscript.y) <= 1);
+  assert.ok(Math.abs(keyboardCanvas.width - keyboardTranscript.width) <= 1);
+  assert.ok(Math.abs(keyboardCanvas.height - keyboardTranscript.height) <= 1);
+  assert.ok(keyboardCanvas.y >= keyboardHeader.y + keyboardHeader.height - 1);
+  await page.evaluate(() => document.querySelector("#screen-clear-handle").click());
+  await page.waitForFunction(() => document.querySelectorAll("#event-list .event").length > 0);
 
   await page.setViewportSize({ width: 844, height: 240 });
   await page.locator("#command-input").focus();

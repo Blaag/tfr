@@ -206,6 +206,18 @@ are explicit operator actions and are not sandboxed. Their commands and output
 are not written to TFR's event log, but invoked programs can independently log,
 modify files, access credentials, or communicate over the network.
 
+## Native Desktop Notifications
+
+Native notification previews never include message content or sender names.
+Terminal-owned delivery emits bounded, control-stripped OSC 9 or BEL output;
+tmux receives an escaped passthrough envelope, and Herdr receives discrete
+arguments without a shell. On Linux, the explicit system transport invokes the
+absolute `notify-send` executable with a bounded argument list and no shell. It
+is available only when running on Linux with a user D-Bus session address;
+diagnostics expose only boolean availability, never the address. Automatic mode
+prefers a recognized OSC-capable terminal so remote and multiplexed sessions do
+not accidentally target a desktop notification service on another host.
+
 ## Clipboard
 
 Dragging across world output copies the selected plain text to the clipboard.

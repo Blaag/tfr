@@ -206,7 +206,7 @@ def core_setting_descriptors() -> tuple[SettingDescriptor, ...]:
             "auto",
             SettingScope.UI,
             NATIVE,
-            choices=("auto", "osc-9", "bell", "herdr"),
+            choices=("auto", "osc-9", "bell", "herdr", "system"),
         ),
         _setting(
             "ui.notifications.any_activity", SettingType.BOOLEAN, False, SettingScope.UI, NATIVE

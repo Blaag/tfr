@@ -5,9 +5,21 @@ import {
   eventsAfterClearCutoff,
   isRestoreSwipe,
   renderScreenClearFrame,
+  screenClearCanvasBox,
   selectScreenClearEffect,
   validatedScreenClearConfig,
 } from "../src/tfr/web/screen-clear.mjs";
+
+test("screen clear canvas uses transcript-local viewport coordinates", () => {
+  assert.deepEqual(
+    screenClearCanvasBox({
+      scrollLeft: 7,
+      scrollTop: 213,
+      getBoundingClientRect: () => ({ left: 40, top: 180, width: 320, height: 280 }),
+    }),
+    { left: 0, top: 0, width: 320, height: 280 },
+  );
+});
 
 test("screen clear configuration accepts only supported portable effects", () => {
   assert.deepEqual(
