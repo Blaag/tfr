@@ -2256,11 +2256,26 @@ class GatewayUiRuntime:
                 )
             ):
                 return "Gateway connection is already healthy"
+            old_gateway = self.client.gateway_id
+            self._restart_phase = "reconnecting"
+            self._reconnect_attempt = 1
             await self._set_gateway_connected(False, intentional=True)
-            restored = await self.client.reconnect()
+            try:
+                restored = await self.client.reconnect(allow_generation_reset=True)
+                self.plugins.retarget(
+                    {session.world: session.session_id for session in self.client.sessions}
+                )
+            except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+                self._restart_phase = "waiting"
+                self._last_connection_error = str(exc)
+                raise
+            self._restart_phase = "reconnected"
+            self._reconnect_attempt = 0
+            self._last_connection_transition = datetime.now(UTC)
+            self._last_connection_error = None
             await self._set_gateway_connected(True)
             await self._reconcile_world_states()
-            return self._format_reconnect_message(restored)
+            return self._format_reconnect_message(restored, previous_gateway=old_gateway)
 
     async def request_update(self, *, force: bool = False) -> dict[str, Any]:
         self._update_transaction_active = True
@@ -2817,6 +2832,7 @@ class GatewayUiRuntime:
             task.add_done_callback(self._connection_task_done)
             return
         self._update_transaction_active = False
+        self._restart_phase = "disconnected"
         task = asyncio.create_task(
             self._set_gateway_connected(False, intentional=self._stopping),
             name="tfr-gateway-disconnected-event",
@@ -2892,11 +2908,15 @@ class GatewayUiRuntime:
     async def _recover_after_update(self) -> None:
         await self._set_gateway_connected(False)
         last_error: Exception | None = None
+        old_gateway = self.client.gateway_id
         for _attempt in range(120):
             if self._stopping:
                 return
             try:
-                restored = await self.client.reconnect()
+                restored = await self.client.reconnect(allow_generation_reset=True)
+                self.plugins.retarget(
+                    {session.world: session.session_id for session in self.client.sessions}
+                )
             except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
                 last_error = exc
                 await asyncio.sleep(1)
@@ -2905,7 +2925,7 @@ class GatewayUiRuntime:
             self._update_transaction_active = False
             await self._set_gateway_connected(True)
             await self._reconcile_world_states()
-            self.notify(self._format_reconnect_message(restored))
+            self.notify(self._format_reconnect_message(restored, previous_gateway=old_gateway))
             return
         self._update_restart_expected = False
         self._update_transaction_active = False
@@ -2937,14 +2957,20 @@ class GatewayUiRuntime:
         for session in self.client.sessions:
             await self.plugins.publish_session_state(session.world, session.state.value)
 
-    def _format_reconnect_message(self, restored: int) -> str:
+    def _format_reconnect_message(
+        self, restored: int, *, previous_gateway: UUID | None = None
+    ) -> str:
+        replacement = previous_gateway is not None and previous_gateway != self.client.gateway_id
+        prefix = (
+            "Reconnected to replacement Gateway after restart or reboot"
+            if replacement
+            else "Reconnected to Gateway"
+        )
         if self.client.history_truncated:
-            return (
-                f"Reconnected to Gateway; restored {restored} retained events after a history gap"
-            )
+            return f"{prefix}; restored {restored} retained events after a history gap"
         if restored:
-            return f"Reconnected to Gateway; restored {restored} missed events"
-        return "Reconnected to Gateway"
+            return f"{prefix}; restored {restored} missed events"
+        return prefix
 
     async def _supervise(self) -> None:
         """Periodically verify the Gateway connection and recover from silence.
@@ -2979,6 +3005,7 @@ class GatewayUiRuntime:
                 timeout=config.ping_timeout_seconds
             ):
                 return
+            old_gateway = self.client.gateway_id
             await self._set_gateway_connected(False)
             for attempt in range(1, config.max_attempts + 1):
                 if self._stopping:
@@ -2987,21 +3014,37 @@ class GatewayUiRuntime:
                     f"Gateway connection lost; reconnecting (attempt "
                     f"{attempt}/{config.max_attempts})..."
                 )
+                self._restart_phase = "reconnecting"
+                self._reconnect_attempt = attempt
                 try:
-                    restored = await self.client.reconnect()
+                    restored = await self.client.reconnect(allow_generation_reset=True)
+                    self.plugins.retarget(
+                        {session.world: session.session_id for session in self.client.sessions}
+                    )
                 except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+                    self._last_connection_error = str(exc)
                     if attempt == config.max_attempts:
+                        self._restart_phase = "waiting"
                         failure = (
                             f"Gateway reconnect failed after {config.max_attempts} attempts: "
-                            f"{exc}. Use /gateway reconnect to retry manually."
+                            f"{exc}. Automatic recovery will continue; use /gateway reconnect "
+                            "to retry now or /reload if Gateway configuration changed."
                         )
                         self.notify(failure)
                         return
                     await asyncio.sleep(config.retry_interval_seconds)
                 else:
+                    self._restart_phase = "reconnected"
+                    self._reconnect_attempt = 0
+                    self._last_connection_transition = datetime.now(UTC)
+                    self._last_connection_error = None
                     await self._set_gateway_connected(True)
                     await self._reconcile_world_states()
-                    self.notify(self._format_reconnect_message(restored))
+                    self.notify(
+                        self._format_reconnect_message(
+                            restored, previous_gateway=old_gateway
+                        )
+                    )
                     return
 
 
