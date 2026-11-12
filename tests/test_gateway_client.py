@@ -878,7 +878,11 @@ async def test_gateway_configuration_mutation_preview_history_and_undo(tmp_path:
     registry = core_configuration_registry()
     runtime.configuration_values = ConfigurationValues(registry)
     runtime.gateway_configuration = GatewayConfigurationStore(tmp_path / "gateway-state", registry)
-    runtime.plugins = SimpleNamespace(diagnostics=DiagnosticBuffer())
+    runtime.plugins = SimpleNamespace(
+        diagnostics=DiagnosticBuffer(),
+        validate_speaker_effects=AsyncMock(),
+        reconfigure_speaker_effects=AsyncMock(),
+    )
     ui_store = UiStore(tmp_path / "ui-state")
     ui_id = UUID("11111111-1111-4111-8111-111111111111")
     socket_path = Path("/tmp") / f"tfr-config-mutation-{uuid4().hex[:8]}" / "gateway.sock"
@@ -920,6 +924,19 @@ async def test_gateway_configuration_mutation_preview_history_and_undo(tmp_path:
         )
         assert committed["revision"] == 1
         assert (await client.config_show("ui.spellcheck.enabled"))["value"] is True
+        runtime.plugins.validate_speaker_effects.side_effect = ValueError("invalid fixture rules")
+        with pytest.raises(ValueError, match="invalid fixture rules"):
+            await client.config_mutate(
+                "set",
+                "plugins.config.speaker_effects.rules",
+                value=[{"speaker": "Alice", "effect": "shimmer", "color": "#5f87ff"}],
+                scope="plugin",
+                target="speaker_effects",
+                expected_revision=1,
+                confirm=True,
+            )
+        assert runtime.gateway_configuration.revision == 1
+        runtime.plugins.validate_speaker_effects.side_effect = None
         with pytest.raises(ValueError, match="revision is 1, not 0"):
             await client.config_mutate(
                 "set",

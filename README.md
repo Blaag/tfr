@@ -862,7 +862,13 @@ Structured plugin settings use trusted declarative forms. For example, open
 `Plugin: Speaker Effects` to add, edit, reorder, delete, and preview speaker
 rules with color, effect-specific, world, and message-kind controls. Saving
 validates and commits the complete collection atomically, preserving unchanged
-rules.
+rules. Speaker effects currently support Say and Pose message kinds. TFR
+automatically removes the legacy Page kind from older managed rules before
+loading or editing them; Page-only legacy restrictions become unrestricted over
+the currently supported kinds so one obsolete rule cannot disable the plugin.
+Gateway saves preflight plugin registration before advancing the configuration
+revision, preserving the active effects and stored revision when validation
+fails.
 
 For scripts, provisioning, and assistive tools, use the non-interactive owner
 interface. Mutations preview by default and require `--apply`; multiple
