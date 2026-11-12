@@ -1780,6 +1780,15 @@ class GatewayClient:
             raise GatewayProtocolError("Gateway returned an invalid recall status")
         return result
 
+    async def release_status(self) -> dict[str, Any]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "release_status", "request_id": str(request_id)}, request_id
+        )
+        if result is None or not isinstance(result.get("managed"), bool):
+            raise GatewayProtocolError("Gateway returned an invalid release status")
+        return result
+
     async def clear_diagnostics(self) -> None:
         request_id = uuid4()
         await self._request(
@@ -2564,6 +2573,9 @@ class GatewayUiRuntime:
 
     async def recall_status(self) -> dict[str, Any]:
         return await self.client.recall_status()
+
+    async def release_status(self) -> dict[str, Any]:
+        return await self.client.release_status()
 
     async def clear_diagnostics(self) -> None:
         self.connection_diagnostics.clear()

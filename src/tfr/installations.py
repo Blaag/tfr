@@ -20,6 +20,7 @@ from tfr.release_leases import (
     ReleaseLeaseError,
     exclusive_release_lease,
     pruning_is_enabled,
+    pruning_state,
 )
 
 try:
@@ -165,6 +166,7 @@ class ReleasePruneResult:
     deleted: tuple[str, ...] = ()
     retained_live: tuple[str, ...] = ()
     failures: tuple[tuple[str, str], ...] = ()
+    reclaimed_bytes: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,6 +338,42 @@ class InstallationLayout:
         with self.lock():
             return self._prune_releases_locked(retain=retain)
 
+    def release_status(self, *, retain: int = _RELEASE_RETENTION) -> dict[str, Any]:
+        """Describe retention without deleting or advancing the safety epoch."""
+        with self.lock():
+            releases = self._list_releases_locked()
+            reasons, live = self._retention_reasons_locked(releases, retain=retain)
+            entries = []
+            total_bytes = 0
+            for release in releases:
+                release_id = release.metadata.release_id
+                size = _directory_size(release.path)
+                total_bytes += size
+                entries.append(
+                    {
+                        "release_id": release_id,
+                        "version": release.metadata.version,
+                        "source": release.metadata.source,
+                        "installed_at": release.metadata.installed_at,
+                        "bytes": size,
+                        "reasons": sorted(reasons.get(release_id, ())),
+                        "eligible": release_id not in reasons,
+                    }
+                )
+            state = pruning_state(self.root)
+            return {
+                "managed": True,
+                "root": str(self.root),
+                "retention_target": retain,
+                "pruning_enabled": bool(state and state.get("enabled") is True),
+                "boot_id": state.get("boot_id") if state else None,
+                "installed_count": len(entries),
+                "installed_bytes": total_bytes,
+                "live_releases": sorted(live),
+                "releases": entries,
+                "last_cleanup": _read_cleanup_result(self.root),
+            }
+
     def _activate_locked(
         self, release_id: str, *, write_launcher: bool = True
     ) -> InstalledRelease:
@@ -383,18 +421,12 @@ class InstallationLayout:
         fresh_install: bool = False,
     ) -> ReleasePruneResult:
         if not pruning_is_enabled(self.root, fresh_install=fresh_install):
-            return ReleasePruneResult(enabled=False)
+            result = ReleasePruneResult(enabled=False)
+            self._write_cleanup_result(result, before=len(self._list_releases_locked()), after=None)
+            return result
         releases = self._list_releases_locked()
-        current = self._pointer_release_id(self.current)
-        previous = self._pointer_release_id(self.previous)
-        protected = {release_id for release_id in (current, previous) if release_id is not None}
-        live: set[str] = set()
-        for release in releases:
-            release_id = release.metadata.release_id
-            with exclusive_release_lease(self.root, release_id) as available:
-                if not available:
-                    live.add(release_id)
-        protected.update(live)
+        reasons, live = self._retention_reasons_locked(releases, retain=retain)
+        protected = set(reasons)
         newest = sorted(
             releases,
             key=lambda release: (
@@ -403,6 +435,70 @@ class InstallationLayout:
             ),
             reverse=True,
         )
+        deleted: list[str] = []
+        failures: list[tuple[str, str]] = []
+        reclaimed_bytes = 0
+        for release in reversed(newest):
+            release_id = release.metadata.release_id
+            if release_id in protected:
+                continue
+            with exclusive_release_lease(self.root, release_id) as available:
+                if not available:
+                    live.add(release_id)
+                    continue
+                try:
+                    # Validate again after taking the exclusive lease so the
+                    # path cannot be replaced between eligibility and removal.
+                    self.validate_release(release_id)
+                    size = _directory_size(release.path)
+                    shutil.rmtree(release.path)
+                except (InstallationError, OSError) as exc:
+                    failures.append((release_id, str(exc)))
+                else:
+                    deleted.append(release_id)
+                    reclaimed_bytes += size
+        result = ReleasePruneResult(
+            enabled=True,
+            deleted=tuple(deleted),
+            retained_live=tuple(sorted(live)),
+            failures=tuple(failures),
+            reclaimed_bytes=reclaimed_bytes,
+        )
+        self._write_cleanup_result(
+            result,
+            before=len(releases),
+            after=len(releases) - len(deleted),
+        )
+        return result
+
+    def _retention_reasons_locked(
+        self, releases: Sequence[InstalledRelease], *, retain: int
+    ) -> tuple[dict[str, set[str]], set[str]]:
+        reasons: dict[str, set[str]] = {}
+
+        def protect(release_id: str | None, reason: str) -> None:
+            if release_id is not None:
+                reasons.setdefault(release_id, set()).add(reason)
+
+        protect(self._pointer_release_id(self.current), "current")
+        protect(self._pointer_release_id(self.previous), "previous")
+        live: set[str] = set()
+        for release in releases:
+            release_id = release.metadata.release_id
+            with exclusive_release_lease(self.root, release_id) as available:
+                if not available:
+                    live.add(release_id)
+                    protect(release_id, "live-lease")
+        newest = sorted(
+            releases,
+            key=lambda release: (
+                datetime.fromisoformat(release.metadata.installed_at),
+                release.metadata.release_id,
+            ),
+            reverse=True,
+        )
+        for release in newest[:retain]:
+            protect(release.metadata.release_id, "recent")
         stable_releases = [
             release
             for release in releases
@@ -416,38 +512,27 @@ class InstallationLayout:
                     int(part) for part in release.metadata.version.split(".")
                 ),
             )
-            # Downgrade protection derives its high-water mark from installed
-            # stable metadata, so pruning must retain the highest seen stable.
-            protected.add(highest_stable.metadata.release_id)
-        # Keep the normal recent-release window in addition to safety
-        # exceptions. A connector can therefore make the count temporarily
-        # exceed the target, but its old release becomes removable as soon as
-        # the connector exits instead of occupying a recent-history slot.
-        protected.update(release.metadata.release_id for release in newest[:retain])
-        deleted: list[str] = []
-        failures: list[tuple[str, str]] = []
-        for release in reversed(newest):
-            release_id = release.metadata.release_id
-            if release_id in protected:
-                continue
-            with exclusive_release_lease(self.root, release_id) as available:
-                if not available:
-                    live.add(release_id)
-                    continue
-                try:
-                    # Validate again after taking the exclusive lease so the
-                    # path cannot be replaced between eligibility and removal.
-                    self.validate_release(release_id)
-                    shutil.rmtree(release.path)
-                except (InstallationError, OSError) as exc:
-                    failures.append((release_id, str(exc)))
-                else:
-                    deleted.append(release_id)
-        return ReleasePruneResult(
-            enabled=True,
-            deleted=tuple(deleted),
-            retained_live=tuple(sorted(live)),
-            failures=tuple(failures),
+            protect(highest_stable.metadata.release_id, "downgrade-high-water")
+        return reasons, live
+
+    def _write_cleanup_result(
+        self, result: ReleasePruneResult, *, before: int, after: int | None
+    ) -> None:
+        lease_directory = self.root / "release-leases"
+        lease_directory.mkdir(exist_ok=True, mode=0o700)
+        _write_json(
+            lease_directory / "cleanup.json",
+            {
+                "schema_version": 1,
+                "timestamp": datetime.now().astimezone().isoformat(),
+                "enabled": result.enabled,
+                "installed_before": before,
+                "installed_after": after,
+                "deleted": list(result.deleted),
+                "retained_live": list(result.retained_live),
+                "failures": [list(item) for item in result.failures],
+                "reclaimed_bytes": result.reclaimed_bytes,
+            },
         )
 
     def write_launcher(self) -> Path:
@@ -522,6 +607,14 @@ def managed_restart_command(arguments: Sequence[str]) -> list[str] | None:
     _layout, installed = managed
     python = release_python(installed.path)
     return [str(python), "-I", "-m", "tfr", *arguments]
+
+
+def managed_release_status() -> dict[str, Any]:
+    managed = managed_installation()
+    if managed is None:
+        return {"managed": False}
+    layout, _installed = managed
+    return layout.release_status()
 
 
 def prune_managed_releases() -> ReleasePruneResult | None:
@@ -611,6 +704,42 @@ def _read_metadata(path: Path) -> ReleaseMetadata:
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise InstallationError(f"cannot read release metadata: {path}") from exc
     return ReleaseMetadata.from_mapping(value)
+
+
+def _read_cleanup_result(root: Path) -> dict[str, Any] | None:
+    path = root / "release-leases" / "cleanup.json"
+    try:
+        path_stat = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if (
+        not stat.S_ISREG(path_stat.st_mode)
+        or path_stat.st_uid != os.geteuid()
+        or stat.S_IMODE(path_stat.st_mode) & 0o077
+        or path_stat.st_size > 64 * 1024
+    ):
+        raise InstallationError("release cleanup state must be an owner-only bounded file")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise InstallationError("cannot read release cleanup state") from exc
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise InstallationError("release cleanup state is invalid")
+    return value
+
+
+def _directory_size(path: Path) -> int:
+    total = 0
+    for directory, _subdirectories, files in os.walk(path, followlinks=False):
+        for name in files:
+            candidate = Path(directory) / name
+            try:
+                candidate_stat = candidate.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISREG(candidate_stat.st_mode):
+                total += candidate_stat.st_size
+    return total
 
 
 def _write_json(path: Path, value: Mapping[str, Any]) -> None:

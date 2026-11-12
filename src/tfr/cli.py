@@ -55,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
             "doctor",
             "admin",
             "recall",
+            "releases",
             "pair",
             "devices",
             "revoke-device",
@@ -64,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "admin_action",
         nargs="?",
-        choices=("restart-gateway", "query", "status"),
+        choices=("restart-gateway", "query", "status", "list"),
         help="admin mode operation",
     )
     parser.add_argument(
@@ -191,9 +192,22 @@ async def _run_recall_cli(args: argparse.Namespace) -> int:
                 f"Recall database: {status.get('database_path')} "
                 f"({status.get('database_bytes', 0)} bytes)"
             )
+            backfill = status.get("backfill")
+            if isinstance(backfill, dict):
+                print(
+                    f"Backfill: {backfill.get('state', 'unknown')}; "
+                    f"files {backfill.get('files_completed', 0)}/"
+                    f"{backfill.get('files_total', 0)}; "
+                    f"bytes {backfill.get('bytes_checkpointed', 0)}/"
+                    f"{backfill.get('bytes_total', 0)}; "
+                    f"scanned {backfill.get('records_scanned', 0)}; "
+                    f"inserted {backfill.get('records_inserted', 0)}"
+                )
             for world in status.get("worlds", []):
                 print(
-                    f"{world.get('world')}: {world.get('count')} events; "
+                    f"{world.get('world')}: "
+                    f"{'enabled' if world.get('enabled') else 'disabled'}; "
+                    f"{world.get('count')} events; "
                     f"{world.get('oldest')} through {world.get('newest')}"
                 )
             return 0
@@ -262,6 +276,35 @@ async def _run_recall_cli(args: argparse.Namespace) -> int:
         await client.event_bus.close()
 
 
+def _run_releases_cli(action: str) -> int:
+    from tfr.installations import managed_release_status
+
+    status = managed_release_status()
+    if status.get("managed") is not True:
+        print("TFR is not running from a managed release installation.")
+        return 0
+    print(
+        f"Managed releases: {status.get('installed_count', 0)} "
+        f"({status.get('installed_bytes', 0)} bytes); pruning "
+        f"{'enabled' if status.get('pruning_enabled') else 'deferred'}; "
+        f"retain {status.get('retention_target', 5)} recent"
+    )
+    releases = status.get("releases", [])
+    if action == "list":
+        for release in releases:
+            reasons = ", ".join(str(item) for item in release.get("reasons", []))
+            print(f"{release.get('release_id')} [{reasons or 'eligible for cleanup'}]")
+    cleanup = status.get("last_cleanup")
+    if isinstance(cleanup, dict):
+        print(
+            f"Last cleanup: {cleanup.get('timestamp')}; "
+            f"deleted {len(cleanup.get('deleted', []))}; "
+            f"reclaimed {cleanup.get('reclaimed_bytes', 0)} bytes; "
+            f"failures {len(cleanup.get('failures', []))}"
+        )
+    return 0
+
+
 def run(argv: Sequence[str] | None = None) -> int:
     original_arguments = list(argv) if argv is not None else sys.argv[1:]
     if not original_arguments:
@@ -315,6 +358,12 @@ def run(argv: Sequence[str] | None = None) -> int:
         except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
             print(f"tfr: recall error: {exc}", file=sys.stderr)
             return 2
+
+    if args.mode == "releases":
+        if args.admin_action not in {"status", "list"}:
+            print("tfr: releases mode requires status or list", file=sys.stderr)
+            return 2
+        return _run_releases_cli(args.admin_action)
 
     if args.mode == "admin":
         if args.admin_action != "restart-gateway":

@@ -2140,6 +2140,109 @@ async def test_diagnostics_copy_uses_complete_bounded_report() -> None:
     assert "Diagnostic message 29" not in text
 
 
+async def test_recall_status_shows_disabled_worlds_and_backfill_progress() -> None:
+    tui = make_tui()
+    tui.service_runtime = SimpleNamespace(
+        recall_status=AsyncMock(
+            return_value={
+                "enabled": True,
+                "database_path": "/state/recall.sqlite3",
+                "database_bytes": 1024,
+                "backfill": {
+                    "state": "running",
+                    "files_completed": 1,
+                    "files_total": 3,
+                    "bytes_checkpointed": 500,
+                    "bytes_total": 1500,
+                    "records_scanned": 50,
+                    "records_inserted": 40,
+                },
+                "worlds": [
+                    {
+                        "world": "alpha",
+                        "enabled": False,
+                        "retention_days": None,
+                        "count": 0,
+                        "oldest": None,
+                        "newest": None,
+                    }
+                ],
+            }
+        )
+    )
+
+    await tui._handle_client_command("alpha", "/recall status")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Backfill: running; files 1/3" in text
+    assert "alpha: disabled" in text
+    assert "no worlds permit recall" in text
+
+
+async def test_database_recall_defaults_to_active_world_and_all_is_explicit() -> None:
+    tui = make_tui()
+    runtime = SimpleNamespace(recall_query=AsyncMock(return_value={"matches": 0, "events": []}))
+    tui.service_runtime = runtime
+
+    await tui._handle_client_command("alpha", "/recall w:dragon")
+    await tui._handle_client_command("alpha", "/recall all w:dragon")
+
+    assert runtime.recall_query.await_args_list[0].args[0] == {
+        "words": "dragon",
+        "world": "alpha",
+    }
+    assert runtime.recall_query.await_args_list[1].args[0] == {"words": "dragon"}
+
+
+async def test_database_recall_rejects_all_with_named_world() -> None:
+    tui = make_tui()
+    runtime = SimpleNamespace(recall_query=AsyncMock())
+    tui.service_runtime = runtime
+
+    await tui._handle_client_command("alpha", "/recall all in:beta w:dragon")
+
+    runtime.recall_query.assert_not_awaited()
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "all cannot be combined" in text
+
+
+async def test_releases_list_explains_retention_reasons() -> None:
+    tui = make_tui()
+    tui.service_runtime = SimpleNamespace(
+        release_status=AsyncMock(
+            return_value={
+                "managed": True,
+                "root": "/state/tfr",
+                "pruning_enabled": True,
+                "retention_target": 5,
+                "installed_count": 2,
+                "installed_bytes": 2048,
+                "live_releases": ["1.2.3+stable.abc"],
+                "releases": [
+                    {
+                        "release_id": "1.2.3+stable.abc",
+                        "reasons": ["current", "live-lease", "recent"],
+                        "bytes": 1024,
+                        "eligible": False,
+                    },
+                    {
+                        "release_id": "1.2.2+stable.def",
+                        "reasons": [],
+                        "bytes": 1024,
+                        "eligible": True,
+                    },
+                ],
+            }
+        )
+    )
+
+    await tui._handle_client_command("alpha", "/releases list")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "current, live-lease, recent" in text
+    assert "eligible for cleanup" in text
+
+
 async def test_config_migration_commands_submit_choose_apply_and_report_status() -> None:
     tui = make_tui()
     preview = {

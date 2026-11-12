@@ -15,6 +15,7 @@ import regex as safe_regex
 from tfr.events import Event
 
 SCHEMA_VERSION = 1
+PROJECTION_VERSION = "inbound-only-v1"
 BACKFILL_BATCH_LINES = 500
 QUERY_CANDIDATE_LIMIT = 20_000
 MAX_MATCHES = 500
@@ -48,6 +49,15 @@ class RecallStore:
         self._write_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=10_000)
         self._writer_error: BaseException | None = None
         self._closed = False
+        self._backfill_state = "pending"
+        self._backfill_error: str | None = None
+        self._backfill_files_total = 0
+        self._backfill_files_completed = 0
+        self._backfill_bytes_total = 0
+        self._backfill_bytes_checkpointed = 0
+        self._backfill_records_scanned = 0
+        self._backfill_records_inserted = 0
+        self._projection_rebuilt = False
 
     async def start(self) -> None:
         await asyncio.to_thread(self._open)
@@ -118,6 +128,21 @@ class RecallStore:
             "INSERT OR REPLACE INTO recall_metadata(key, value) VALUES('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
+        projection = connection.execute(
+            "SELECT value FROM recall_metadata WHERE key='projection_version'"
+        ).fetchone()
+        if projection is None or projection[0] != PROJECTION_VERSION:
+            connection.execute("DELETE FROM recall_events")
+            connection.execute("DELETE FROM recall_metadata WHERE key LIKE 'backfill:%'")
+            connection.execute(
+                "INSERT OR REPLACE INTO recall_metadata(key, value) "
+                "VALUES('projection_version', ?)",
+                (PROJECTION_VERSION,),
+            )
+            self._projection_rebuilt = True
+        else:
+            # Defend against rows written by an older candidate after rollback.
+            connection.execute("DELETE FROM recall_events WHERE direction!='inbound'")
         connection.commit()
         if os.name == "posix":
             os.chmod(self.path, 0o600)
@@ -127,7 +152,12 @@ class RecallStore:
         if self._writer_error is not None:
             raise RuntimeError("recall database writer failed") from self._writer_error
         policy = self.worlds.get(event.world)
-        if policy is None or not policy.enabled or event.redacted:
+        if (
+            policy is None
+            or not policy.enabled
+            or event.redacted
+            or event.direction.value != "inbound"
+        ):
             return
         value = {
             "event_id": str(event.event_id),
@@ -199,6 +229,8 @@ class RecallStore:
         policy = self.worlds.get(str(world))
         if policy is None or not policy.enabled or value.get("redacted") is True:
             return None
+        if value.get("direction") != "inbound":
+            return None
         text = value.get("plain_text") or value.get("canonical_text") or value.get("display_text")
         if not isinstance(text, str) or not text:
             return None
@@ -241,31 +273,58 @@ class RecallStore:
         )
 
     async def _backfill(self) -> None:
+        self._backfill_state = "running"
         try:
+            paths = tuple(sorted(self.log_directory.glob("*.jsonl")))
+            enabled_worlds = tuple(
+                world for world, policy in self.worlds.items() if policy.enabled
+            )
+            self._backfill_files_total = len(paths) * len(enabled_worlds)
+            self._backfill_bytes_total = sum(
+                self._file_size(path) for path in paths for _world in enabled_worlds
+            )
             for world, policy in self.worlds.items():
                 if not policy.enabled:
                     continue
-                for path in sorted(self.log_directory.glob("*.jsonl")):
+                for path in paths:
                     if self._closed:
                         return
                     await self._backfill_file(path, world)
+                    self._backfill_files_completed += 1
+            self._backfill_state = "completed"
         except asyncio.CancelledError:
             raise
+        except BaseException as exc:
+            self._backfill_state = "failed"
+            self._backfill_error = f"{type(exc).__name__}: {exc}"[:240]
 
     async def _backfill_file(self, path: Path, world: str) -> None:
         offset = await asyncio.to_thread(self._checkpoint, path, world)
+        self._backfill_bytes_checkpointed += offset
         while not self._closed:
-            values, next_offset = await asyncio.to_thread(self._read_log_batch, path, offset)
+            values, next_offset, scanned = await asyncio.to_thread(
+                self._read_log_batch, path, offset
+            )
             if not values and next_offset == offset:
                 return
+            self._backfill_records_scanned += scanned
             if values:
-                await asyncio.to_thread(
+                inserted = await asyncio.to_thread(
                     self._insert_values,
                     [value for value in values if value.get("world") == world],
                 )
+                self._backfill_records_inserted += inserted
             await asyncio.to_thread(self._set_checkpoint, path, world, next_offset)
+            self._backfill_bytes_checkpointed += max(0, next_offset - offset)
             offset = next_offset
             await asyncio.sleep(0)
+
+    @staticmethod
+    def _file_size(path: Path) -> int:
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
 
     def _checkpoint_key(self, path: Path, world: str) -> str:
         return f"backfill:{world}:{path.resolve()}"
@@ -291,8 +350,9 @@ class RecallStore:
             )
 
     @staticmethod
-    def _read_log_batch(path: Path, offset: int) -> tuple[list[dict[str, Any]], int]:
+    def _read_log_batch(path: Path, offset: int) -> tuple[list[dict[str, Any]], int, int]:
         values: list[dict[str, Any]] = []
+        scanned = 0
         try:
             with path.open("rb") as source:
                 source.seek(offset)
@@ -302,15 +362,16 @@ class RecallStore:
                     if not line or not line.endswith(b"\n"):
                         break
                     last_complete = source.tell()
+                    scanned += 1
                     try:
                         value = json.loads(line)
                     except (UnicodeDecodeError, json.JSONDecodeError):
                         continue
                     if isinstance(value, dict):
                         values.append(value)
-                return values, last_complete
+                return values, last_complete, scanned
         except OSError:
-            return [], offset
+            return [], offset, 0
 
     async def query(self, query: dict[str, Any]) -> dict[str, Any]:
         await self._write_queue.join()
@@ -377,6 +438,7 @@ class RecallStore:
                 "SELECT recall_events.* FROM recall_events "
                 "JOIN recall_events_fts ON recall_events_fts.rowid=recall_events.id "
                 "WHERE (? IS NULL OR world=?) "
+                "AND direction='inbound' "
                 "AND (? IS NULL OR speaker_folded=?) "
                 "AND (?='[]' OR kind IN (SELECT value FROM json_each(?))) "
                 "AND (? IS NULL OR timestamp_us>=?) AND (? IS NULL OR timestamp_us<=?) "
@@ -387,6 +449,7 @@ class RecallStore:
         else:
             rows = connection.execute(
                 "SELECT * FROM recall_events WHERE (? IS NULL OR world=?) "
+                "AND direction='inbound' "
                 "AND (? IS NULL OR speaker_folded=?) "
                 "AND (?='[]' OR kind IN (SELECT value FROM json_each(?))) "
                 "AND (? IS NULL OR timestamp_us>=?) AND (? IS NULL OR timestamp_us<=?) "
@@ -412,6 +475,7 @@ class RecallStore:
                     reversed(
                         connection.execute(
                             "SELECT * FROM recall_events WHERE world=? AND "
+                            "direction='inbound' AND "
                             "(? IS NULL OR timestamp_us>=?) AND "
                             "(timestamp_us < ? OR (timestamp_us = ? AND id < ?)) AND "
                             "(? IS NULL OR speaker_folded=?) "
@@ -436,6 +500,7 @@ class RecallStore:
                 context_rows.extend(
                     connection.execute(
                         "SELECT * FROM recall_events WHERE world=? AND "
+                        "direction='inbound' AND "
                         "(? IS NULL OR timestamp_us<=?) AND "
                         "(timestamp_us > ? OR (timestamp_us = ? AND id > ?)) AND "
                         "(? IS NULL OR speaker_folded=?) "
@@ -534,6 +599,7 @@ class RecallStore:
             "SELECT world, COUNT(*) AS count, MIN(timestamp) AS oldest, MAX(timestamp) AS newest "
             "FROM recall_events GROUP BY world ORDER BY world"
         ).fetchall()
+        indexed = {str(row["world"]): dict(row) for row in rows}
         return {
             "enabled": True,
             "database_path": str(self.path),
@@ -546,8 +612,30 @@ class RecallStore:
                 )
                 if candidate.exists()
             ),
-            "worlds": [dict(row) for row in rows],
+            "worlds": [
+                {
+                    "world": world,
+                    "enabled": policy.enabled,
+                    "retention_days": policy.retention_days,
+                    "count": int(indexed.get(world, {}).get("count", 0)),
+                    "oldest": indexed.get(world, {}).get("oldest"),
+                    "newest": indexed.get(world, {}).get("newest"),
+                }
+                for world, policy in self.worlds.items()
+            ],
             "backfill_active": self._backfill_task is not None and not self._backfill_task.done(),
+            "projection": PROJECTION_VERSION,
+            "projection_rebuilt": self._projection_rebuilt,
+            "backfill": {
+                "state": self._backfill_state,
+                "error": self._backfill_error,
+                "files_total": self._backfill_files_total,
+                "files_completed": self._backfill_files_completed,
+                "bytes_total": self._backfill_bytes_total,
+                "bytes_checkpointed": self._backfill_bytes_checkpointed,
+                "records_scanned": self._backfill_records_scanned,
+                "records_inserted": self._backfill_records_inserted,
+            },
         }
 
     async def _maintenance_loop(self) -> None:

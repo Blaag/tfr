@@ -299,6 +299,11 @@ def test_pruning_retains_live_release_until_process_exits(tmp_path: Path) -> Non
         installed = {release.metadata.release_id for release in layout.list_releases()}
         assert first in installed
         assert len(installed) == 6
+        status = layout.release_status()
+        described = {item["release_id"]: item for item in status["releases"]}
+        assert "live-lease" in described[first]["reasons"]
+        assert status["installed_count"] == 6
+        assert status["installed_bytes"] > 0
     finally:
         process.communicate("\n", timeout=10)
 
@@ -308,6 +313,10 @@ def test_pruning_retains_live_release_until_process_exits(tmp_path: Path) -> Non
     assert first in result.deleted
     assert first not in installed
     assert len(installed) == 5
+    cleanup = layout.release_status()["last_cleanup"]
+    assert first in cleanup["deleted"]
+    assert cleanup["installed_before"] == 6
+    assert cleanup["installed_after"] == 5
 
 
 def test_existing_install_waits_for_boot_boundary_before_pruning(
