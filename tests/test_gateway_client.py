@@ -2301,6 +2301,45 @@ async def test_authenticated_native_ui_can_administer_gateway_configuration(
         await client.stop()
         await server.stop()
         await history.stop()
+
+
+async def test_gateway_client_queries_recall_database(tmp_path: Path) -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    runtime.recall_query = AsyncMock(
+        return_value={
+            "matches": 1,
+            "events": [
+                {
+                    "world": "alpha",
+                    "timestamp": "2026-11-11T12:00:00Z",
+                    "text": "dragon",
+                    "matched": True,
+                }
+            ],
+            "truncated": False,
+        }
+    )
+    runtime.recall_status = AsyncMock(return_value={"enabled": True, "worlds": []})
+    socket_path = Path("/tmp") / f"tfr-recall-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    client.start()
+    try:
+        result = await client.recall_query({"speaker": "Alice", "words": "dragon"})
+        assert result["matches"] == 1
+        assert (await client.recall_status())["enabled"] is True
+        runtime.recall_query.assert_awaited_once_with(
+            {"speaker": "Alice", "words": "dragon"}
+        )
+    finally:
+        await client.stop()
+        await client.event_bus.close()
+        await server.stop()
+        await history.stop()
         await bus.close()
         socket_path.parent.rmdir()
 

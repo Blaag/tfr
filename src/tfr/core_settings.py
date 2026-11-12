@@ -325,6 +325,22 @@ def core_setting_descriptors() -> tuple[SettingDescriptor, ...]:
             restart=RestartRequirement.GATEWAY_RESTART,
         ),
         _setting(
+            "recall.enabled",
+            SettingType.BOOLEAN,
+            False,
+            SettingScope.GATEWAY,
+            GATEWAY,
+            restart=RestartRequirement.GATEWAY_RESTART,
+        ),
+        _setting(
+            "recall.database_path",
+            SettingType.STRING,
+            "~/.local/state/tfr/recall.sqlite3",
+            SettingScope.GATEWAY,
+            GATEWAY,
+            restart=RestartRequirement.GATEWAY_RESTART,
+        ),
+        _setting(
             "updates.enabled", SettingType.BOOLEAN, True, SettingScope.GATEWAY, GATEWAY_AND_UI
         ),
         _setting(
@@ -680,6 +696,24 @@ def core_setting_descriptors() -> tuple[SettingDescriptor, ...]:
             None,
             SettingScope.WORLD,
             GATEWAY,
+            nullable=True,
+            minimum=1,
+        ),
+        _setting(
+            "worlds.*.recall_enabled",
+            SettingType.BOOLEAN,
+            False,
+            SettingScope.WORLD,
+            GATEWAY,
+            restart=RestartRequirement.GATEWAY_RESTART,
+        ),
+        _setting(
+            "worlds.*.recall_retention_days",
+            SettingType.INTEGER,
+            None,
+            SettingScope.WORLD,
+            GATEWAY,
+            restart=RestartRequirement.GATEWAY_RESTART,
             nullable=True,
             minimum=1,
         ),

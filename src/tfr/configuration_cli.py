@@ -229,7 +229,12 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             changes = []
             for key, raw in _assignments(args.assignments):
                 setting = _known_setting(settings, key)
-                value = parse_setting_value(raw, str(setting.get("type", "json")))
+                value = (
+                    None
+                    if key.endswith(".recall_retention_days")
+                    and raw.strip().casefold() == "forever"
+                    else parse_setting_value(raw, str(setting.get("type", "json")))
+                )
                 scope, target = _destination(setting, args)
                 changes.append(
                     {
@@ -311,9 +316,15 @@ def _human_output(result: dict[str, Any]) -> str:
         )
     if action == "get":
         item = result["setting"]
+        display_value = (
+            "forever"
+            if str(item.get("key", "")).endswith(".recall_retention_days")
+            and item.get("value") is None
+            else json.dumps(item.get("value"), ensure_ascii=False)
+        )
         return "\n".join(
             (
-                f"{item.get('key')} = {json.dumps(item.get('value'), ensure_ascii=False)}",
+                f"{item.get('key')} = {display_value}",
                 f"Source: {item.get('source')}",
                 f"Required action: {item.get('restart')}",
             )
@@ -323,7 +334,12 @@ def _human_output(result: dict[str, Any]) -> str:
         lines = [state, f"Required action: {result.get('restart', 'live')}"]
         for change in result.get("changes", []):
             value = (
-                json.dumps(change.get("value"), ensure_ascii=False)
+                (
+                    "forever"
+                    if str(change.get("key", "")).endswith(".recall_retention_days")
+                    and change.get("value") is None
+                    else json.dumps(change.get("value"), ensure_ascii=False)
+                )
                 if change.get("operation") == "set"
                 else "inherited/default"
             )

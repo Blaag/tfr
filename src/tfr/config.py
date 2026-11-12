@@ -229,6 +229,11 @@ class LoggingConfig(StrictModel):
     directory: Path = Path("~/.local/state/tfr/logs")
 
 
+class RecallConfig(StrictModel):
+    enabled: bool = False
+    database_path: Path = Path("~/.local/state/tfr/recall.sqlite3")
+
+
 _STABLE_UPDATE_MANIFEST_URL = (
     "https://github.com/Blaag/tfr/releases/latest/download/update-manifest.json"
 )
@@ -469,6 +474,7 @@ class MainConfig(StrictModel):
     agents_file: Path = Path("agents.jsonc")
     ui: UiConfig = Field(default_factory=UiConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    recall: RecallConfig = Field(default_factory=RecallConfig)
     updates: UpdateConfig = Field(default_factory=UpdateConfig)
     web_gateway: WebGatewayConfig = Field(default_factory=WebGatewayConfig)
     managed_settings: ManagedSettingsConfig = Field(default_factory=ManagedSettingsConfig)
@@ -557,6 +563,8 @@ class WorldConfig(StrictModel):
     reconnect_window_seconds: float | None = Field(default=None, ge=60, le=86_400)
     reconnect_stable_reset_seconds: float | None = Field(default=None, ge=1, le=86_400)
     scrollback_lines: PositiveInt | None = None
+    recall_enabled: bool = False
+    recall_retention_days: PositiveInt | None = None
     tls: TlsConfig = Field(default_factory=TlsConfig)
     login: LoginConfig | None = None
     autoconnect: bool = False
@@ -800,6 +808,9 @@ def gateway_bootstrap_bundle(
             "logging": main.logging.model_copy(
                 update={"directory": _resolve_path(main.logging.directory)}
             ),
+            "recall": main.recall.model_copy(
+                update={"database_path": _resolve_path(main.recall.database_path)}
+            ),
             "updates": main.updates.model_copy(
                 update={"state_directory": _resolve_path(main.updates.state_directory)}
             ),
@@ -896,6 +907,14 @@ def load_ui_configuration(main_path: Path | str | None = None) -> UiConfiguratio
                 update={
                     "directory": _resolve_path(
                         main.logging.directory,
+                        relative_to=resolved_main.parent,
+                    )
+                }
+            ),
+            "recall": main.recall.model_copy(
+                update={
+                    "database_path": _resolve_path(
+                        main.recall.database_path,
                         relative_to=resolved_main.parent,
                     )
                 }

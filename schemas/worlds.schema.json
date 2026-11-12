@@ -211,6 +211,24 @@
         "provenance": {
           "$ref": "#/$defs/ProvenanceConfig"
         },
+        "recall_enabled": {
+          "default": false,
+          "title": "Recall Enabled",
+          "type": "boolean"
+        },
+        "recall_retention_days": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recall Retention Days"
+        },
         "reconnect": {
           "anyOf": [
             {

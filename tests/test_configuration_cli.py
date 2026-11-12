@@ -102,6 +102,33 @@ def test_config_cli_apply_uses_one_confirmed_batch(
     }
 
 
+def test_config_cli_accepts_forever_recall_retention(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    client = FakeClient()
+    client.config_list.return_value = [
+        {
+            "key": "worlds.alpha.recall_retention_days",
+            "type": "integer",
+            "scope": "world",
+        }
+    ]
+
+    async def connect(_args):
+        return client
+
+    monkeypatch.setattr("tfr.configuration_cli._connect", connect)
+
+    assert (
+        run_config_cli(
+            ["set", "worlds.alpha.recall_retention_days", "forever", "--world", "alpha"]
+        )
+        == 0
+    )
+    assert "forever" in capsys.readouterr().out
+    assert client.config_batch.await_args.args[0][0]["value"] is None
+
+
 def test_config_cli_rejects_ambiguous_per_ui_target(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

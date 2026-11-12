@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from collections.abc import Sequence
+from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -48,13 +49,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "mode",
         nargs="?",
-        choices=("ui", "gateway", "doctor", "admin", "pair", "devices", "revoke-device"),
+        choices=(
+            "ui",
+            "gateway",
+            "doctor",
+            "admin",
+            "recall",
+            "pair",
+            "devices",
+            "revoke-device",
+        ),
         help="run a client, the Gateway, setup diagnostics, or web-device administration",
     )
     parser.add_argument(
         "admin_action",
         nargs="?",
-        choices=("restart-gateway",),
+        choices=("restart-gateway", "query", "status"),
         help="admin mode operation",
     )
     parser.add_argument(
@@ -137,7 +147,119 @@ def build_parser() -> argparse.ArgumentParser:
         help="doctor mode: deployment profile to validate",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {build_version}")
+    parser.add_argument("--speaker", help="recall query: exact attributed speaker")
+    parser.add_argument("--words", help="recall query: whole words, phrase, or * wildcard")
+    parser.add_argument("--regexp", help="recall query: regular expression")
+    parser.add_argument("--world", help="recall query: world name")
+    parser.add_argument("--kind", action="append", default=[], help="recall query: event kind")
+    parser.add_argument("--after", help="recall query: inclusive ISO date/time lower bound")
+    parser.add_argument("--before", help="recall query: inclusive ISO date/time upper bound")
+    parser.add_argument("--on", help="recall query: local calendar date")
+    parser.add_argument("--since", help="recall query: duration such as 2h or ISO date/time")
+    parser.add_argument("--context", type=int, default=0, help="recall query: events before/after")
+    parser.add_argument("--context-time", help="recall query: time before/after, such as 5m")
+    parser.add_argument("--limit", type=int, default=50, help="recall query: maximum matches")
     return parser
+
+
+async def _run_recall_cli(args: argparse.Namespace) -> int:
+    from tfr.gateway import default_gateway_socket
+    from tfr.gateway_client import GatewayClient
+    from tfr.gateway_profiles import GatewayProfileStore
+    from tfr.gateway_transport import create_gateway_client_tls_context
+
+    profiles = GatewayProfileStore()
+    active = profiles.active
+    if args.socket is not None or active is None:
+        client = await GatewayClient.connect(args.socket or default_gateway_socket())
+    else:
+        client = await GatewayClient.connect_tcp(
+            active.host,
+            active.port,
+            auth_token=profiles.credentials.load(active.credential_reference),
+            tls_context=create_gateway_client_tls_context(active.tls_ca),
+            server_hostname=active.tls_server_name,
+            client_id=active.ui_id,
+        )
+    try:
+        if args.admin_action == "status":
+            status = await client.recall_status()
+            if not status["enabled"]:
+                print("Recall database is disabled.")
+                return 0
+            print(
+                f"Recall database: {status.get('database_path')} "
+                f"({status.get('database_bytes', 0)} bytes)"
+            )
+            for world in status.get("worlds", []):
+                print(
+                    f"{world.get('world')}: {world.get('count')} events; "
+                    f"{world.get('oldest')} through {world.get('newest')}"
+                )
+            return 0
+        after = args.after
+        before = args.before
+        if args.on:
+            if after or before or args.since:
+                raise ValueError("--on cannot be combined with --after, --before, or --since")
+            day = datetime.fromisoformat(args.on).astimezone()
+            start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+            after = start.isoformat()
+            before = (start + timedelta(days=1, microseconds=-1)).isoformat()
+        elif args.since:
+            if after:
+                raise ValueError("--since and --after are mutually exclusive")
+            try:
+                amount = int(args.since[:-1])
+                multiplier = {"s": 1, "m": 60, "h": 3600, "d": 86400}[args.since[-1]]
+            except (KeyError, ValueError):
+                after = datetime.fromisoformat(args.since).astimezone().isoformat()
+            else:
+                after = (
+                    datetime.now().astimezone() - timedelta(seconds=amount * multiplier)
+                ).isoformat()
+        context_time = 0
+        if args.context_time:
+            if args.context:
+                raise ValueError("--context and --context-time are mutually exclusive")
+            try:
+                amount = int(args.context_time[:-1])
+                multiplier = {"s": 1, "m": 60, "h": 3600, "d": 86400}[
+                    args.context_time[-1]
+                ]
+            except (KeyError, ValueError):
+                raise ValueError("--context-time must end in s, m, h, or d") from None
+            context_time = amount * multiplier
+        query = {
+            key: value
+            for key, value in {
+                "speaker": args.speaker,
+                "words": args.words,
+                "regexp": args.regexp,
+                "world": args.world,
+                "kinds": args.kind,
+                "after": after,
+                "before": before,
+                "context": args.context,
+                "context_time_before": context_time,
+                "context_time_after": context_time,
+                "limit": args.limit,
+            }.items()
+            if value is not None and value != ()
+        }
+        result = await client.recall_query(query)
+        for event in result["events"]:
+            marker = ">" if event.get("matched") else " "
+            speaker = f" {event['speaker']}:" if event.get("speaker") else ""
+            print(
+                f"{marker} [{event.get('timestamp')}] {event.get('world')}{speaker} "
+                f"{event.get('text', '')}"
+            )
+        print(f"{result.get('matches', 0)} match(es)", file=sys.stderr)
+        return 0
+    finally:
+        await client.stop()
+        await client.event_bus.close()
 
 
 def run(argv: Sequence[str] | None = None) -> int:
@@ -173,6 +295,26 @@ def run(argv: Sequence[str] | None = None) -> int:
     if args.profile is not None and args.mode != "doctor":
         print("tfr: --profile requires doctor mode", file=sys.stderr)
         return 2
+
+    if args.mode == "recall":
+        if args.admin_action not in {"query", "status"}:
+            print("tfr: recall mode requires query or status", file=sys.stderr)
+            return 2
+        if args.words is not None and args.regexp is not None:
+            print("tfr: --words and --regexp are mutually exclusive", file=sys.stderr)
+            return 2
+        if network_arguments:
+            print(
+                "tfr: recall uses the active Gateway profile or --socket; direct network "
+                "options are not accepted",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            return asyncio.run(_run_recall_cli(args))
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            print(f"tfr: recall error: {exc}", file=sys.stderr)
+            return 2
 
     if args.mode == "admin":
         if args.admin_action != "restart-gateway":
