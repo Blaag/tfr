@@ -707,6 +707,11 @@ class GatewayRuntime:
             }
         return await self.recall_store.status()
 
+    async def statistics(self, query: dict[str, Any]) -> dict[str, Any]:
+        if self.recall_store is None:
+            raise ValueError("statistics require the recall database")
+        return await self.recall_store.statistics(query)
+
     async def release_status(self) -> dict[str, Any]:
         from tfr.installations import managed_release_status
 
@@ -2273,10 +2278,13 @@ class GatewayServer:
                     ui_id=ui_id,
                     configuration_admin=configuration_admin,
                 )
-                if message.get("type") != "update":
+                if message.get("type") not in {"update", "stats_query", "release_status"}:
                     await request
                     continue
-                task = asyncio.create_task(request, name="tfr-gateway-update-request")
+                task = asyncio.create_task(
+                    request,
+                    name=f"tfr-gateway-{message.get('type', 'request')}",
+                )
                 update_requests.add(task)
                 task.add_done_callback(self._update_request_done)
                 task.add_done_callback(update_requests.discard)
@@ -2624,6 +2632,15 @@ class GatewayServer:
                 if set(message) != {"type", "protocol", "request_id"}:
                     raise ValueError("recall_status has invalid fields")
                 result = await self.runtime.recall_status()
+            elif message_type == "stats_query":
+                if not allow_admin:
+                    raise ValueError("statistics are unavailable")
+                if set(message) != {"type", "protocol", "request_id", "query"}:
+                    raise ValueError("stats_query has invalid fields")
+                query = message.get("query")
+                if not isinstance(query, dict):
+                    raise ValueError("statistics query must be an object")
+                result = await self.runtime.statistics(query)
             elif message_type == "release_status":
                 if not allow_admin:
                     raise ValueError("release status is unavailable")

@@ -104,6 +104,20 @@ COMMAND_HELP = {
             "Gateway host",
             related=("diagnostics", "update", "version"),
         ),
+        _command(
+            "stats",
+            "Explore line, speaker, word, world, and time activity from recall",
+            "/stats [all] [summary|speakers|worlds|words|activity|hours|weekdays|heatmap] "
+            "[since:7d] [speaker:NAME] [top:10]",
+            "worlds",
+            "active world or all recall-enabled worlds",
+            examples=(
+                "/stats speakers since:30d",
+                "/stats all words by:world top:10",
+                "/stats speaker:Wedge heatmap since:90d",
+            ),
+            related=("recall", "diagnostics"),
+        ),
         _command("end", "Return to live output", "/end", "worlds", "this UI", related=("recall",)),
         _command(
             "gateway",

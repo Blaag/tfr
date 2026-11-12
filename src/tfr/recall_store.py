@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import threading
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -20,6 +21,19 @@ BACKFILL_BATCH_LINES = 500
 QUERY_CANDIDATE_LIMIT = 20_000
 MAX_MATCHES = 500
 MAX_CONTEXT = 100
+MAX_STATS_ROWS = 100
+MAX_STATS_GROUPS = 20
+_CONVERSATION_KINDS = ("say", "pose", "speech")
+_WORD = safe_regex.compile(r"[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*")
+_STOP_WORDS = frozenset(
+    {
+        "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "for", "from",
+        "had", "has", "have", "he", "her", "him", "his", "i", "if", "in", "is", "it",
+        "its", "me", "my", "of", "on", "or", "our", "she", "that", "the", "their",
+        "them", "they", "this", "to", "was", "we", "were", "what", "when", "where",
+        "who", "will", "with", "would", "you", "your", "say", "says",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,9 +290,7 @@ class RecallStore:
         self._backfill_state = "running"
         try:
             paths = tuple(sorted(self.log_directory.glob("*.jsonl")))
-            enabled_worlds = tuple(
-                world for world, policy in self.worlds.items() if policy.enabled
-            )
+            enabled_worlds = tuple(world for world, policy in self.worlds.items() if policy.enabled)
             self._backfill_files_total = len(paths) * len(enabled_worlds)
             self._backfill_bytes_total = sum(
                 self._file_size(path) for path in paths for _world in enabled_worlds
@@ -378,6 +390,237 @@ class RecallStore:
         if self._writer_error is not None:
             raise RuntimeError("recall database writer failed") from self._writer_error
         return await asyncio.to_thread(self._query, query)
+
+    async def statistics(self, query: dict[str, Any]) -> dict[str, Any]:
+        await self._write_queue.join()
+        if self._writer_error is not None:
+            raise RuntimeError("recall database writer failed") from self._writer_error
+        return await asyncio.to_thread(self._statistics, query)
+
+    def _statistics(self, query: dict[str, Any]) -> dict[str, Any]:
+        view = query.get("view", "summary")
+        if view not in {
+            "summary",
+            "speakers",
+            "speaker",
+            "worlds",
+            "words",
+            "activity",
+            "hours",
+            "weekdays",
+            "heatmap",
+        }:
+            raise ValueError("stats view is invalid")
+        world = self._optional_text(query.get("world"), "world")
+        speaker = self._optional_text(query.get("speaker"), "speaker")
+        after_us = self._time_bound(query.get("after"), "after")
+        before_us = self._time_bound(query.get("before"), "before")
+        top = query.get("top", 10)
+        groups = query.get("groups", 10)
+        minimum = query.get("minimum_word_length", 2)
+        offset = query.get("timezone_offset_minutes", 0)
+        if not isinstance(top, int) or isinstance(top, bool) or not 1 <= top <= MAX_STATS_ROWS:
+            raise ValueError(f"stats top must be between 1 and {MAX_STATS_ROWS}")
+        if (
+            not isinstance(groups, int)
+            or isinstance(groups, bool)
+            or not 1 <= groups <= MAX_STATS_GROUPS
+        ):
+            raise ValueError(f"stats groups must be between 1 and {MAX_STATS_GROUPS}")
+        if not isinstance(minimum, int) or isinstance(minimum, bool) or not 1 <= minimum <= 20:
+            raise ValueError("stats minimum word length must be between 1 and 20")
+        if not isinstance(offset, int) or isinstance(offset, bool) or not -840 <= offset <= 840:
+            raise ValueError("stats timezone offset is invalid")
+        arguments = (
+            world,
+            world,
+            speaker.casefold() if speaker else None,
+            speaker.casefold() if speaker else None,
+            after_us,
+            after_us,
+            before_us,
+            before_us,
+        )
+        rows = (
+            self._require_connection()
+            .execute(
+                "SELECT world, timestamp, timestamp_us, kind, speaker, speaker_folded, text "
+                "FROM recall_events WHERE direction='inbound' "
+                "AND kind IN ('say','pose','speech') "
+                "AND (? IS NULL OR world=?) AND (? IS NULL OR speaker_folded=?) "
+                "AND (? IS NULL OR timestamp_us>=?) AND (? IS NULL OR timestamp_us<=?) "
+                "ORDER BY timestamp_us, id",
+                arguments,
+            )
+            .fetchall()
+        )
+        values = [dict(row) for row in rows]
+        summary = self._stats_summary(values)
+        result: dict[str, Any] = {
+            "view": view,
+            "world": world,
+            "speaker": speaker,
+            "summary": summary,
+            "scanned_lines": len(values),
+            "timezone_offset_minutes": offset,
+        }
+        if view == "summary":
+            return result
+        if view in {"speakers", "speaker"}:
+            result["rows"] = self._stats_groups(values, "speaker", top)
+        elif view == "worlds":
+            result["rows"] = self._stats_groups(values, "world", top)
+        elif view == "words":
+            result.update(self._stats_words(values, query, top, groups, minimum))
+        elif view in {"hours", "weekdays", "heatmap", "activity"}:
+            result.update(self._stats_time(values, view, query.get("bucket", "day"), offset))
+        return result
+
+    @staticmethod
+    def _stats_summary(values: list[dict[str, Any]]) -> dict[str, Any]:
+        kinds = Counter(str(value["kind"]) for value in values)
+        speakers = {str(value["speaker_folded"]) for value in values if value["speaker_folded"]}
+        attributed = sum(value["speaker_folded"] is not None for value in values)
+        classified = kinds["say"] + kinds["pose"]
+        return {
+            "lines": len(values),
+            "attributed_lines": attributed,
+            "unattributed_lines": len(values) - attributed,
+            "speakers": len(speakers),
+            "says": kinds["say"],
+            "poses": kinds["pose"],
+            "speech": kinds["speech"],
+            "say_percent": round(kinds["say"] * 100 / classified, 1) if classified else 0.0,
+            "pose_percent": round(kinds["pose"] * 100 / classified, 1) if classified else 0.0,
+            "classification_coverage": round(classified * 100 / len(values), 1) if values else 0.0,
+            "first": values[0]["timestamp"] if values else None,
+            "last": values[-1]["timestamp"] if values else None,
+        }
+
+    @classmethod
+    def _stats_groups(
+        cls, values: list[dict[str, Any]], field: str, limit: int
+    ) -> list[dict[str, Any]]:
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        labels: dict[str, str] = {}
+        key_field = "speaker_folded" if field == "speaker" else "world"
+        for value in values:
+            raw = value.get(key_field)
+            if raw is None:
+                continue
+            key = str(raw)
+            labels.setdefault(key, str(value.get(field) or raw))
+            grouped[key].append(value)
+        output = []
+        for key, items in grouped.items():
+            summary = cls._stats_summary(items)
+            output.append({"name": labels[key], **summary})
+        output.sort(key=lambda item: (-int(item["lines"]), str(item["name"]).casefold()))
+        total = sum(int(item["lines"]) for item in output)
+        for item in output:
+            item["share_percent"] = round(int(item["lines"]) * 100 / total, 1) if total else 0.0
+        return output[:limit]
+
+    @staticmethod
+    def _tokens(text: str, speaker: str | None, *, minimum: int, stop: bool) -> list[str]:
+        excluded = set(_STOP_WORDS if stop else ())
+        if speaker:
+            excluded.update(token.casefold() for token in _WORD.findall(speaker))
+        return [
+            token.casefold()
+            for token in _WORD.findall(text)
+            if len(token) >= minimum and token.casefold() not in excluded
+        ]
+
+    @classmethod
+    def _stats_words(
+        cls,
+        values: list[dict[str, Any]],
+        query: dict[str, Any],
+        top: int,
+        groups: int,
+        minimum: int,
+    ) -> dict[str, Any]:
+        by = query.get("by")
+        if by not in {None, "speaker", "world"}:
+            raise ValueError("stats words by must be speaker or world")
+        stop = query.get("stop_words", True)
+        if not isinstance(stop, bool):
+            raise ValueError("stats stop_words must be boolean")
+        if by is None:
+            counter: Counter[str] = Counter()
+            for value in values:
+                counter.update(
+                    cls._tokens(
+                        str(value["text"]), value.get("speaker"), minimum=minimum, stop=stop
+                    )
+                )
+            return {
+                "words": [
+                    {"word": word, "count": count} for word, count in counter.most_common(top)
+                ]
+            }
+        active = cls._stats_groups(values, by, groups)
+        selected = {str(item["name"]).casefold() for item in active}
+        counters: dict[str, Counter[str]] = defaultdict(Counter)
+        labels: dict[str, str] = {}
+        for value in values:
+            label = value.get(by)
+            if not label or str(label).casefold() not in selected:
+                continue
+            key = str(label).casefold()
+            labels.setdefault(key, str(label))
+            counters[key].update(
+                cls._tokens(str(value["text"]), value.get("speaker"), minimum=minimum, stop=stop)
+            )
+        return {
+            "word_groups": [
+                {
+                    "name": labels[key],
+                    "words": [
+                        {"word": word, "count": count} for word, count in counter.most_common(top)
+                    ],
+                }
+                for key, counter in sorted(
+                    counters.items(), key=lambda item: -sum(item[1].values())
+                )
+            ]
+        }
+
+    @staticmethod
+    def _stats_time(
+        values: list[dict[str, Any]], view: str, bucket: object, offset_minutes: int
+    ) -> dict[str, Any]:
+        shifted = [
+            datetime.fromisoformat(str(value["timestamp"]).replace("Z", "+00:00"))
+            + timedelta(minutes=offset_minutes)
+            for value in values
+        ]
+        if view == "hours":
+            counts = Counter(value.hour for value in shifted)
+            return {
+                "series": [{"label": f"{hour:02d}", "count": counts[hour]} for hour in range(24)]
+            }
+        if view == "weekdays":
+            counts = Counter(value.weekday() for value in shifted)
+            names = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+            return {"series": [{"label": names[day], "count": counts[day]} for day in range(7)]}
+        if view == "heatmap":
+            counts = Counter((value.weekday(), value.hour) for value in shifted)
+            return {"matrix": [[counts[(day, hour)] for hour in range(24)] for day in range(7)]}
+        if bucket not in {"hour", "day", "month"}:
+            raise ValueError("stats activity bucket must be hour, day, or month")
+        labels = []
+        for value in shifted:
+            labels.append(
+                value.strftime("%Y-%m-%d %H:00")
+                if bucket == "hour"
+                else value.strftime("%Y-%m")
+                if bucket == "month"
+                else value.strftime("%Y-%m-%d")
+            )
+        counts = Counter(labels)
+        return {"series": [{"label": label, "count": counts[label]} for label in sorted(counts)]}
 
     def _query(self, query: dict[str, Any]) -> dict[str, Any]:
         speaker = self._optional_text(query.get("speaker"), "speaker")
@@ -533,6 +776,7 @@ class RecallStore:
                 expression = safe_regex.compile(regexp)
             except safe_regex.error as exc:
                 raise ValueError(f"invalid recall regular expression: {exc}") from exc
+
             def regex_match(text: str) -> bool:
                 try:
                     return expression.search(text, timeout=0.1) is not None

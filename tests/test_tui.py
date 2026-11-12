@@ -2237,6 +2237,87 @@ async def test_database_recall_rejects_all_with_named_world() -> None:
     assert "all cannot be combined" in text
 
 
+async def test_stats_defaults_to_active_world_and_renders_speaker_bars() -> None:
+    tui = make_tui()
+    runtime = SimpleNamespace(
+        statistics=AsyncMock(
+            return_value={
+                "view": "speakers",
+                "world": "alpha",
+                "speaker": None,
+                "summary": {
+                    "lines": 15,
+                    "speakers": 2,
+                    "unattributed_lines": 0,
+                    "say_percent": 60.0,
+                    "pose_percent": 40.0,
+                    "classification_coverage": 100.0,
+                    "first": "2026-11-01T00:00:00Z",
+                    "last": "2026-11-02T00:00:00Z",
+                },
+                "rows": [
+                    {
+                        "name": "Alice",
+                        "lines": 10,
+                        "say_percent": 70.0,
+                        "pose_percent": 30.0,
+                        "share_percent": 66.7,
+                    },
+                    {
+                        "name": "Bob",
+                        "lines": 5,
+                        "say_percent": 40.0,
+                        "pose_percent": 60.0,
+                        "share_percent": 33.3,
+                    },
+                ],
+                "scanned_lines": 15,
+            }
+        )
+    )
+    tui.service_runtime = runtime
+
+    await tui._handle_client_command("alpha", "/stats speakers since:7d")
+
+    query = runtime.statistics.await_args.args[0]
+    assert query["world"] == "alpha"
+    assert query["view"] == "speakers"
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Alice" in text
+    assert "████" in text
+
+
+async def test_stats_all_omits_world_and_heatmap_renders() -> None:
+    tui = make_tui()
+    runtime = SimpleNamespace(
+        statistics=AsyncMock(
+            return_value={
+                "view": "heatmap",
+                "world": None,
+                "speaker": None,
+                "summary": {
+                    "lines": 1,
+                    "speakers": 1,
+                    "unattributed_lines": 0,
+                    "say_percent": 100.0,
+                    "pose_percent": 0.0,
+                    "classification_coverage": 100.0,
+                },
+                "matrix": [[1] + [0] * 23] + [[0] * 24 for _ in range(6)],
+                "scanned_lines": 1,
+            }
+        )
+    )
+    tui.service_runtime = runtime
+
+    await tui._handle_client_command("alpha", "/stats all heatmap since:30d")
+
+    assert "world" not in runtime.statistics.await_args.args[0]
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Mon" in text
+    assert "█" in text
+
+
 async def test_releases_list_explains_retention_reasons() -> None:
     tui = make_tui()
     tui.service_runtime = SimpleNamespace(

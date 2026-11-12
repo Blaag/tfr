@@ -171,6 +171,7 @@ _CORE_CLIENT_COMMANDS = frozenset(
         "config",
         "disconnect",
         "demoeffects",
+        "diagnostics",
         "end",
         "effects",
         "exit",
@@ -192,9 +193,11 @@ _CORE_CLIENT_COMMANDS = frozenset(
         "reconnect",
         "reload",
         "restart",
+        "releases",
         "settings",
         "sh",
         "spellcheck",
+        "stats",
         "streaks",
         "testspeaker",
         "teststreak",
@@ -455,6 +458,8 @@ class ServiceRuntime(Protocol):
     async def recall_query(self, query: dict[str, Any]) -> dict[str, Any]: ...
 
     async def recall_status(self) -> dict[str, Any]: ...
+
+    async def statistics(self, query: dict[str, Any]) -> dict[str, Any]: ...
 
     async def release_status(self) -> dict[str, Any]: ...
 
@@ -3641,6 +3646,11 @@ class TfrTui:
             await self._handle_clear_command(alias, parameters)
         elif command == "recall":
             await self._handle_recall_command(alias, parameters)
+        elif command == "stats":
+            if parameters == ["help"]:
+                self.add_help(alias, "stats", self.help_text("stats"))
+            else:
+                await self._handle_stats_command(alias, parameters)
         elif command == "end":
             self._jump_to_end(alias)
         elif command == "agent":
@@ -5041,8 +5051,7 @@ class TfrTui:
             + (
                 "Gateway restart requested automatically; reconnecting."
                 if result.get("restarting") is True
-                else "Required action: "
-                f"{self._settings_action_text(result.get('restart', 'live'))}"
+                else f"Required action: {self._settings_action_text(result.get('restart', 'live'))}"
             )
             + (f"\nWarning: {result['warning']}" if result.get("warning") else ""),
         )
@@ -5277,8 +5286,7 @@ class TfrTui:
                 text=(f"{self._setting_editor_summary(setting, detail)}\nType: {value_type}"),
                 default=(
                     "forever"
-                    if key.endswith(".recall_retention_days")
-                    and detail.get("value") is None
+                    if key.endswith(".recall_retention_days") and detail.get("value") is None
                     else setting_value_text(detail.get("value"), value_type)
                 ),
                 reset_label=reset_label,
@@ -7471,6 +7479,224 @@ class TfrTui:
             )
         self.add_notice(alias, "\n".join(lines))
 
+    async def _handle_stats_command(self, alias: str, parameters: list[str]) -> None:
+        if self.service_runtime is None or not hasattr(self.service_runtime, "statistics"):
+            self.add_notice(alias, "Statistics are available only through a Gateway")
+            return
+        views = {
+            "summary",
+            "speakers",
+            "worlds",
+            "words",
+            "activity",
+            "hours",
+            "weekdays",
+            "heatmap",
+        }
+        view = "summary"
+        all_worlds = False
+        query: dict[str, Any] = {}
+        graph = "auto"
+        now = datetime.now().astimezone()
+        try:
+            for parameter in parameters:
+                folded = parameter.casefold()
+                if folded in views:
+                    if view != "summary":
+                        raise ValueError("Specify only one statistics view")
+                    view = folded
+                    continue
+                if folded == "all":
+                    all_worlds = True
+                    continue
+                name, separator, value = parameter.partition(":")
+                if not separator or not value:
+                    raise ValueError(f"Unknown statistics option: {parameter}")
+                key = name.casefold()
+                if key in {"in", "world"}:
+                    query["world"] = value
+                elif key in {"s", "speaker"}:
+                    query["speaker"] = value
+                elif key in {"a", "after"}:
+                    query["after"] = datetime.fromisoformat(value).astimezone().isoformat()
+                elif key in {"b", "before"}:
+                    query["before"] = datetime.fromisoformat(value).astimezone().isoformat()
+                elif key in {"si", "since"}:
+                    try:
+                        seconds = self._recall_duration(value)
+                    except ValueError:
+                        query["after"] = datetime.fromisoformat(value).astimezone().isoformat()
+                    else:
+                        query["after"] = (now - timedelta(seconds=seconds)).isoformat()
+                elif key in {"on", "d"}:
+                    day = datetime.fromisoformat(value).astimezone()
+                    start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+                    query["after"] = start.isoformat()
+                    query["before"] = (start + timedelta(days=1, microseconds=-1)).isoformat()
+                elif key in {"top", "groups", "min"}:
+                    query[{"min": "minimum_word_length"}.get(key, key)] = int(value)
+                elif key == "by":
+                    query["by"] = value.casefold()
+                elif key == "bucket":
+                    query["bucket"] = value.casefold()
+                elif key == "stop":
+                    if value.casefold() not in {"on", "off"}:
+                        raise ValueError("stop must be on or off")
+                    query["stop_words"] = value.casefold() == "on"
+                elif key == "graph":
+                    if value.casefold() not in {"auto", "bar", "line", "heatmap", "none"}:
+                        raise ValueError("graph must be auto, bar, line, heatmap, or none")
+                    graph = value.casefold()
+                else:
+                    raise ValueError(f"Unknown statistics option: {parameter}")
+            if all_worlds and "world" in query:
+                raise ValueError("all cannot be combined with in:/world:")
+            if not all_worlds and "world" not in query:
+                query["world"] = alias
+            if "after" not in query and "before" not in query:
+                query["after"] = (now - timedelta(days=7)).isoformat()
+            if "speaker" in query and view == "summary":
+                view = "speaker"
+            query["view"] = view
+            query["timezone_offset_minutes"] = int(
+                (now.utcoffset() or timedelta()).total_seconds() // 60
+            )
+            result = await self.service_runtime.statistics(query)
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            self.add_notice(alias, f"Statistics failed: {exc}")
+            return
+        self.add_notice(alias, self._format_statistics(result, graph=graph))
+
+    @classmethod
+    def _format_statistics(cls, result: dict[str, Any], *, graph: str) -> str:
+        view = str(result.get("view", "summary"))
+        scope = result.get("world") or "all worlds"
+        speaker = result.get("speaker")
+        title = f"Statistics — {speaker + ' — ' if speaker else ''}{scope}"
+        summary = result.get("summary", {})
+        offset = int(result.get("timezone_offset_minutes", 0))
+        sign = "+" if offset >= 0 else "-"
+        absolute_offset = abs(offset)
+        lines = [
+            title,
+            f"Local activity buckets: UTC{sign}{absolute_offset // 60:02d}:"
+            f"{absolute_offset % 60:02d}",
+            cls._stats_summary_text(summary),
+        ]
+        if view in {"speakers", "speaker", "worlds"}:
+            rows = [item for item in result.get("rows", []) if isinstance(item, dict)]
+            lines.extend(("", "Name                 Lines   Say%  Pose%  Share"))
+            lines.extend(
+                f"{str(row.get('name', '?'))[:20]:20} {int(row.get('lines', 0)):6} "
+                f"{float(row.get('say_percent', 0)):5.1f} "
+                f"{float(row.get('pose_percent', 0)):6.1f} "
+                f"{float(row.get('share_percent', 0)):6.1f}%"
+                for row in rows
+            )
+            if graph != "none":
+                lines.extend(
+                    ("", *cls._stats_bars([(str(row["name"]), int(row["lines"])) for row in rows]))
+                )
+        elif view == "words":
+            if result.get("word_groups"):
+                for group in result["word_groups"]:
+                    lines.extend(
+                        (
+                            "",
+                            f"Top words — {group.get('name')}",
+                            *cls._stats_word_lines(group.get("words", []), graph),
+                        )
+                    )
+            else:
+                lines.extend(
+                    ("", "Top words", *cls._stats_word_lines(result.get("words", []), graph))
+                )
+        elif view in {"hours", "weekdays"}:
+            series = [(str(item["label"]), int(item["count"])) for item in result.get("series", [])]
+            lines.extend(("", *cls._stats_bars(series)))
+        elif view == "activity":
+            series = [(str(item["label"]), int(item["count"])) for item in result.get("series", [])]
+            lines.extend(("", *cls._stats_line(series)))
+        elif view == "heatmap":
+            lines.extend(("", *cls._stats_heatmap(result.get("matrix", []))))
+        lines.append(f"Scanned {result.get('scanned_lines', 0)} recalled conversational lines")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _stats_summary_text(summary: dict[str, Any]) -> str:
+        return (
+            f"  {summary.get('lines', 0)} lines; {summary.get('speakers', 0)} speakers; "
+            f"{summary.get('unattributed_lines', 0)} unattributed\n"
+            f"  Says {summary.get('say_percent', 0)}%; poses {summary.get('pose_percent', 0)}%; "
+            f"classification coverage {summary.get('classification_coverage', 0)}%\n"
+            f"  {summary.get('first') or 'no first event'} through "
+            f"{summary.get('last') or 'no last event'}"
+        )
+
+    @staticmethod
+    def _stats_bars(values: list[tuple[str, int]], width: int = 32) -> tuple[str, ...]:
+        maximum = max((value for _label, value in values), default=0)
+        label_width = min(18, max((len(label) for label, _value in values), default=1))
+        return tuple(
+            f"{label[:label_width]:<{label_width}} "
+            f"{'█' * (round(value * width / maximum) if maximum else 0):<{width}} {value}"
+            for label, value in values
+        )
+
+    @classmethod
+    def _stats_word_lines(cls, words: object, graph: str) -> tuple[str, ...]:
+        values = (
+            [
+                (str(item.get("word", "?")), int(item.get("count", 0)))
+                for item in words
+                if isinstance(item, dict)
+            ]
+            if isinstance(words, list)
+            else []
+        )
+        if graph != "none":
+            return cls._stats_bars(values)
+        return tuple(f"{word:20} {count}" for word, count in values)
+
+    @staticmethod
+    def _stats_line(values: list[tuple[str, int]]) -> tuple[str, ...]:
+        if not values:
+            return ("No activity",)
+        if len(values) > 60:
+            chunk_size = (len(values) + 59) // 60
+            values = [
+                (chunk[0][0], sum(value for _label, value in chunk))
+                for start in range(0, len(values), chunk_size)
+                if (chunk := values[start : start + chunk_size])
+            ]
+        blocks = "▁▂▃▄▅▆▇█"
+        maximum = max(value for _label, value in values)
+        plot = "".join(
+            blocks[round(value * 7 / maximum)] if maximum else blocks[0] for _label, value in values
+        )
+        return (
+            f"{maximum:>6} ┤{plot}",
+            "       "
+            + values[0][0]
+            + " " * max(1, len(plot) - len(values[0][0]) - len(values[-1][0]))
+            + values[-1][0],
+        )
+
+    @staticmethod
+    def _stats_heatmap(matrix: object) -> tuple[str, ...]:
+        rows = matrix if isinstance(matrix, list) else []
+        maximum = max((int(value) for row in rows for value in row), default=0)
+        shades = "·░▒▓█"
+        names = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+        output = ["    " + " ".join(f"{hour:02d}" for hour in range(24))]
+        for name, row in zip(names, rows, strict=False):
+            cells = "  ".join(
+                shades[round(int(value) * 4 / maximum)] if maximum else shades[0] for value in row
+            )
+            output.append(f"{name} {cells}")
+        output.append("    · none  ░ low  ▒ medium  ▓ high  █ peak")
+        return tuple(output)
+
     @staticmethod
     def _format_recall_status(status: dict[str, Any]) -> str:
         lines = [
@@ -7552,8 +7778,7 @@ class TfrTui:
         ]
         if status.get("installation_busy") is True:
             lines.append(
-                "  Installation/update in progress; detailed inventory is temporarily "
-                "unavailable."
+                "  Installation/update in progress; detailed inventory is temporarily unavailable."
             )
         if status.get("deferred_reason") == "host-reboot-required":
             lines.append("  Cleanup deferred until the Gateway host reboots.")
