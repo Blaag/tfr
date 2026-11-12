@@ -1,3 +1,3 @@
-from tfr.cli import main
+from tfr import main
 
 main()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import re
 import shlex
@@ -15,6 +16,12 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from tfr.release_leases import (
+    ReleaseLeaseError,
+    exclusive_release_lease,
+    pruning_is_enabled,
+)
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - managed installs target POSIX hosts
@@ -27,6 +34,8 @@ _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _LAUNCHER_MARKER = "# Managed by TFR's versioned installer."
 _MANAGED_ROOT_ENV = "TFR_MANAGED_ROOT"
+_RELEASE_RETENTION = 5
+_LOGGER = logging.getLogger(__name__)
 
 
 class InstallationError(ValueError):
@@ -148,6 +157,14 @@ class InstalledRelease:
     metadata: ReleaseMetadata
     current: bool = False
     previous: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ReleasePruneResult:
+    enabled: bool
+    deleted: tuple[str, ...] = ()
+    retained_live: tuple[str, ...] = ()
+    failures: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,6 +330,12 @@ class InstallationLayout:
                 raise InstallationError("no previous TFR release is available")
             return self._activate_locked(previous)
 
+    def prune_releases(self, *, retain: int = _RELEASE_RETENTION) -> ReleasePruneResult:
+        if retain < 2:
+            raise InstallationError("release retention must preserve at least two releases")
+        with self.lock():
+            return self._prune_releases_locked(retain=retain)
+
     def _activate_locked(
         self, release_id: str, *, write_launcher: bool = True
     ) -> InstalledRelease:
@@ -342,7 +365,90 @@ class InstallationLayout:
                 if isinstance(exc, InstallationError):
                     raise
                 raise InstallationError(f"cannot activate release: {release_id}") from exc
+        try:
+            self._prune_releases_locked(
+                retain=_RELEASE_RETENTION,
+                fresh_install=current is None,
+            )
+        except (InstallationError, OSError, ReleaseLeaseError) as exc:
+            # Activation is authoritative once the pointer has moved. Cleanup
+            # must never turn a successful activation into a reported failure.
+            _LOGGER.warning("TFR release cleanup was skipped: %s", exc)
         return self.validate_release(release_id)
+
+    def _prune_releases_locked(
+        self,
+        *,
+        retain: int,
+        fresh_install: bool = False,
+    ) -> ReleasePruneResult:
+        if not pruning_is_enabled(self.root, fresh_install=fresh_install):
+            return ReleasePruneResult(enabled=False)
+        releases = self._list_releases_locked()
+        current = self._pointer_release_id(self.current)
+        previous = self._pointer_release_id(self.previous)
+        protected = {release_id for release_id in (current, previous) if release_id is not None}
+        live: set[str] = set()
+        for release in releases:
+            release_id = release.metadata.release_id
+            with exclusive_release_lease(self.root, release_id) as available:
+                if not available:
+                    live.add(release_id)
+        protected.update(live)
+        newest = sorted(
+            releases,
+            key=lambda release: (
+                datetime.fromisoformat(release.metadata.installed_at),
+                release.metadata.release_id,
+            ),
+            reverse=True,
+        )
+        stable_releases = [
+            release
+            for release in releases
+            if release.metadata.source == "stable-release"
+            and _STABLE_VERSION.fullmatch(release.metadata.version) is not None
+        ]
+        if stable_releases:
+            highest_stable = max(
+                stable_releases,
+                key=lambda release: tuple(
+                    int(part) for part in release.metadata.version.split(".")
+                ),
+            )
+            # Downgrade protection derives its high-water mark from installed
+            # stable metadata, so pruning must retain the highest seen stable.
+            protected.add(highest_stable.metadata.release_id)
+        # Keep the normal recent-release window in addition to safety
+        # exceptions. A connector can therefore make the count temporarily
+        # exceed the target, but its old release becomes removable as soon as
+        # the connector exits instead of occupying a recent-history slot.
+        protected.update(release.metadata.release_id for release in newest[:retain])
+        deleted: list[str] = []
+        failures: list[tuple[str, str]] = []
+        for release in reversed(newest):
+            release_id = release.metadata.release_id
+            if release_id in protected:
+                continue
+            with exclusive_release_lease(self.root, release_id) as available:
+                if not available:
+                    live.add(release_id)
+                    continue
+                try:
+                    # Validate again after taking the exclusive lease so the
+                    # path cannot be replaced between eligibility and removal.
+                    self.validate_release(release_id)
+                    shutil.rmtree(release.path)
+                except (InstallationError, OSError) as exc:
+                    failures.append((release_id, str(exc)))
+                else:
+                    deleted.append(release_id)
+        return ReleasePruneResult(
+            enabled=True,
+            deleted=tuple(deleted),
+            retained_live=tuple(sorted(live)),
+            failures=tuple(failures),
+        )
 
     def write_launcher(self) -> Path:
         _validate_ancestors(self.bin_directory)
@@ -416,6 +522,15 @@ def managed_restart_command(arguments: Sequence[str]) -> list[str] | None:
     _layout, installed = managed
     python = release_python(installed.path)
     return [str(python), "-I", "-m", "tfr", *arguments]
+
+
+def prune_managed_releases() -> ReleasePruneResult | None:
+    """Apply automatic retention to the active managed installation."""
+    managed = managed_installation()
+    if managed is None:
+        return None
+    layout, _installed = managed
+    return layout.prune_releases()
 
 
 def managed_installation() -> tuple[InstallationLayout, InstalledRelease] | None:
