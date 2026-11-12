@@ -5034,8 +5034,12 @@ class TfrTui:
             alias,
             "/config",
             f"Saved {len(changes)} related change at revision {result.get('revision')}.\n"
-            f"Required action: "
-            f"{self._settings_action_text(result.get('restart', 'live'))}",
+            + (
+                "Gateway restart requested automatically; reconnecting."
+                if result.get("restarting") is True
+                else "Required action: "
+                f"{self._settings_action_text(result.get('restart', 'live'))}"
+            ),
         )
         return True
 
@@ -6688,7 +6692,11 @@ class TfrTui:
                     self.add_notice(
                         alias,
                         f"Saved {key} at revision {result.get('revision')}; "
-                        f"required action: {result.get('restart')}",
+                        + (
+                            "Gateway restart requested automatically; reconnecting."
+                            if result.get("restarting") is True
+                            else f"required action: {result.get('restart')}"
+                        ),
                     )
                 return
             if valid_status:
@@ -6894,17 +6902,12 @@ class TfrTui:
     async def _handle_diagnostics_command(self, alias: str, parameters: list[str]) -> None:
         usage = (
             "Usage: /diagnostics [gateway|config|plugins|presentations|notifications|web|"
-            "updates|agents|connector|report|clear|export PATH]"
+            "updates|agents|connector|report|clear|copy [CATEGORY]|export PATH]"
         )
         if self.service_runtime is None:
             self.add_notice(alias, "Diagnostics are available only in an attached UI")
             return
-        if len(parameters) > 2 or (len(parameters) == 2 and parameters[0].casefold() != "export"):
-            self.add_notice(alias, usage)
-            return
-        category = parameters[0].casefold() if parameters else None
-        if category not in {
-            None,
+        diagnostic_categories = {
             "gateway",
             "config",
             "plugins",
@@ -6914,18 +6917,36 @@ class TfrTui:
             "updates",
             "agents",
             "connector",
-            "report",
-            "clear",
-            "export",
-        } or (category == "export" and len(parameters) != 2):
+        }
+        action = parameters[0].casefold() if parameters else None
+        mode = "display"
+        query_category: str | None = action
+        if action == "copy":
+            mode = "copy"
+            query_category = parameters[1].casefold() if len(parameters) == 2 else None
+            valid = len(parameters) <= 2 and query_category in diagnostic_categories | {None}
+        elif action == "export":
+            mode = "export"
+            query_category = None
+            valid = len(parameters) == 2
+        elif action == "report":
+            mode = "report"
+            query_category = None
+            valid = len(parameters) == 1
+        elif action == "clear":
+            mode = "clear"
+            query_category = None
+            valid = len(parameters) == 1
+        else:
+            valid = len(parameters) <= 1 and action in diagnostic_categories | {None}
+        if not valid:
             self.add_notice(alias, usage)
             return
         try:
-            if category == "clear":
+            if mode == "clear":
                 await self.service_runtime.clear_diagnostics()
                 self.add_notice(alias, "Cleared bounded runtime diagnostics")
                 return
-            query_category = None if category in {"report", "export"} else category
             entries = await self.service_runtime.diagnostics(query_category)
             if query_category in {None, "plugins", "presentations"}:
                 entries = [
@@ -6957,12 +6978,16 @@ class TfrTui:
         if not entries and not local_status and web_status is None:
             self.add_notice(alias, "No matching runtime diagnostics")
             return
-        report = category in {"report", "export"}
+        report = mode in {"report", "export", "copy"}
         incident_id = str(uuid4()) if report else None
         heading = (
             f"Runtime diagnostics — incident {incident_id}"
             if incident_id
-            else (f"Runtime diagnostics — {category}" if category else "Runtime diagnostics")
+            else (
+                f"Runtime diagnostics — {query_category}"
+                if query_category
+                else "Runtime diagnostics"
+            )
         )
         lines = [heading]
         if local_status:
@@ -7000,7 +7025,8 @@ class TfrTui:
             lines.append(f"  PWA diagnostics: unavailable — {web_error}")
         if not entries:
             lines.append("  No recent diagnostic entries")
-        for entry in entries[-25:]:
+        selected_entries = entries if report else entries[-25:]
+        for entry in selected_entries:
             client = str(entry.get("client", "gateway"))
             if entry.get("ui_name"):
                 client = f"{client}:{entry['ui_name']}"
@@ -7026,7 +7052,7 @@ class TfrTui:
                 )
             )
         output = "\n".join(lines)
-        if category == "export":
+        if mode == "export":
             destination = Path(parameters[1]).expanduser()
             try:
                 descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -7041,6 +7067,15 @@ class TfrTui:
             self.add_notice(
                 alias,
                 f"Wrote local diagnostics report to {destination}. Nothing was uploaded.",
+            )
+            return
+        if mode == "copy":
+            self._copy_selection(output + "\n")
+            qualifier = f" {query_category}" if query_category else ""
+            self.add_notice(
+                alias,
+                f"Copied complete{qualifier} diagnostics report to the clipboard "
+                f"({len(selected_entries)} entries). Nothing was uploaded.",
             )
             return
         self.add_notice(alias, output)

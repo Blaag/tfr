@@ -44,7 +44,14 @@ def acquire_process_release_lease(package_file: str | Path) -> str | None:
         # Installer bootstraps can intentionally import checkout code while a
         # managed root is present. Only code loaded from a release gets a lease.
         return None
-    if not relative.parts or _RELEASE_ID.fullmatch(relative.parts[0]) is None:
+    if not relative.parts:
+        raise ReleaseLeaseError("managed package path has no release ID")
+    if relative.parts[0].startswith(".staging-"):
+        # The installer imports a newly built environment to verify its build
+        # identity before atomically committing the staging directory under
+        # its final release ID. It is not runnable release state yet.
+        return None
+    if _RELEASE_ID.fullmatch(relative.parts[0]) is None:
         raise ReleaseLeaseError("managed package path has an invalid release ID")
     release_id = relative.parts[0]
     descriptor = _open_lease(root, release_id)

@@ -2305,15 +2305,25 @@ class GatewayUiRuntime:
         expected_revision: int,
         confirm: bool,
     ) -> dict[str, object]:
-        return await self.client.config_mutate(
-            operation,
-            key,
-            value=value,
-            scope=scope,
-            target=target,
-            expected_revision=expected_revision,
-            confirm=confirm,
-        )
+        if confirm:
+            self._arm_restart("configuration_mutation")
+        try:
+            result = await self.client.config_mutate(
+                operation,
+                key,
+                value=value,
+                scope=scope,
+                target=target,
+                expected_revision=expected_revision,
+                confirm=confirm,
+            )
+        except BaseException:
+            if confirm:
+                self._cancel_configuration_restart()
+            raise
+        if confirm:
+            self._complete_configuration_restart(result, "Configuration mutation")
+        return result
 
     async def config_changes(self, limit: int = 50) -> dict[str, object]:
         return await self.client.config_changes(limit)
@@ -2325,17 +2335,53 @@ class GatewayUiRuntime:
         expected_revision: int,
         confirm: bool,
     ) -> dict[str, object]:
-        return await self.client.config_batch(
-            changes,
-            expected_revision=expected_revision,
-            confirm=confirm,
-        )
+        if confirm:
+            self._arm_restart("configuration_batch")
+        try:
+            result = await self.client.config_batch(
+                changes,
+                expected_revision=expected_revision,
+                confirm=confirm,
+            )
+        except BaseException:
+            if confirm:
+                self._cancel_configuration_restart()
+            raise
+        if confirm:
+            self._complete_configuration_restart(result, "Configuration batch")
+        return result
 
     async def config_undo(self, *, expected_revision: int, confirm: bool) -> dict[str, object]:
-        return await self.client.config_undo(
-            expected_revision=expected_revision,
-            confirm=confirm,
+        if confirm:
+            self._arm_restart("configuration_undo")
+        try:
+            result = await self.client.config_undo(
+                expected_revision=expected_revision,
+                confirm=confirm,
+            )
+        except BaseException:
+            if confirm:
+                self._cancel_configuration_restart()
+            raise
+        if confirm:
+            self._complete_configuration_restart(result, "Configuration undo")
+        return result
+
+    def _cancel_configuration_restart(self) -> None:
+        self._restart_expected = False
+        self._restart_phase = "idle"
+
+    def _complete_configuration_restart(
+        self, result: dict[str, object], operation: str
+    ) -> None:
+        if result.get("restarting") is not True:
+            self._cancel_configuration_restart()
+            return
+        self._restart_phase = "acknowledged"
+        self._record_connection(
+            "info", "restart_acknowledged", f"{operation} requested Gateway restart"
         )
+        self._start_restart_watchdog()
 
     async def config_export(
         self, *, include_secrets: bool = False, confirm: bool = False

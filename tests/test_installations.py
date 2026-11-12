@@ -48,6 +48,21 @@ def stage_release(
     return release_metadata
 
 
+def test_staged_release_build_verification_does_not_require_a_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = InstallationLayout.defaults(root=tmp_path / "tfr", bin_directory=tmp_path / "bin")
+    release_id = f"1.2.3+git.{'a' * 40}"
+    staging = layout.create_staging_directory(release_id)
+    package_file = staging / "lib/python3.12/site-packages/tfr/__init__.py"
+    package_file.parent.mkdir(parents=True)
+    package_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("TFR_MANAGED_ROOT", str(layout.root))
+
+    assert release_leases.acquire_process_release_lease(package_file) is None
+
+
 def test_checkout_release_id_includes_exact_commit() -> None:
     commit = "a" * 40
 

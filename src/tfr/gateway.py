@@ -2831,6 +2831,9 @@ class GatewayServer:
                         ),
                         "requires_confirmation": False,
                     }
+                    if result.get("restart") == "gateway-restart":
+                        result["restarting"] = True
+                        restart_gateway = True
             elif message_type == "config_batch":
                 store = self.runtime.gateway_configuration
                 if store is None:
@@ -2903,6 +2906,9 @@ class GatewayServer:
                         "revision": store.revision,
                         "requires_confirmation": False,
                     }
+                    if result.get("restart") == "gateway-restart":
+                        result["restarting"] = True
+                        restart_gateway = True
             elif message_type == "config_changes":
                 store = self.runtime.gateway_configuration
                 if store is None:
@@ -2966,6 +2972,9 @@ class GatewayServer:
                         **mutation.as_dict(redact=descriptor.sensitivity if descriptor else True),
                         "requires_confirmation": False,
                     }
+                    if result.get("restart") == "gateway-restart":
+                        result["restarting"] = True
+                        restart_gateway = True
             elif message_type == "config_export":
                 transfer = self.configuration_transfer
                 if transfer is None:

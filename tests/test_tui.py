@@ -2107,6 +2107,39 @@ async def test_gateway_restart_command_is_immediate_for_owner_ui() -> None:
     assert "Gateway restart requested" in text
 
 
+async def test_diagnostics_copy_uses_complete_bounded_report() -> None:
+    tui = make_tui()
+    entries = [
+        {
+            "timestamp": f"2026-11-12T01:00:{index:02d}Z",
+            "severity": "info",
+            "client": "gateway",
+            "component": "connector",
+            "code": f"event_{index}",
+            "message": f"Diagnostic message {index}",
+        }
+        for index in range(30)
+    ]
+    runtime = SimpleNamespace(
+        diagnostics=AsyncMock(return_value=entries),
+        diagnostic_status=Mock(return_value={"connected": True, "worlds": {}}),
+        web_status=AsyncMock(return_value={"enabled": False, "device_count": 0}),
+    )
+    tui.service_runtime = runtime
+    tui._copy_selection = Mock()
+
+    await tui._handle_client_command("alpha", "/diagnostics copy connector")
+
+    runtime.diagnostics.assert_awaited_once_with("connector")
+    copied = tui._copy_selection.call_args.args[0]
+    assert "Diagnostic message 0" in copied
+    assert "Diagnostic message 29" in copied
+    assert "Privacy: this report is local" in copied
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Copied complete connector diagnostics report" in text
+    assert "Diagnostic message 29" not in text
+
+
 async def test_config_migration_commands_submit_choose_apply_and_report_status() -> None:
     tui = make_tui()
     preview = {
