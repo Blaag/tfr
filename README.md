@@ -1304,6 +1304,34 @@ status` provides the same status through the active Gateway profile. The CLI
 always queries through the Gateway and never opens SQLite directly. Recall
 status is also included in `/diagnostics recall` and `/diagnostics copy`.
 
+Use `/stats` for bounded exploratory analytics over the existing inbound recall
+projection. Statistics count conversational `say`, `pose`, and `speech` lines;
+they do not alter the database or claim exact typed-character measurements.
+Interactive statistics default to the active world and last seven days. Use
+`all` for every recall-enabled world and reuse `since:`, `on:`, `after:`,
+`before:`, and `in:` time/scope filters:
+
+```text
+/stats
+/stats speakers since:30d top:20
+/stats speaker:Wedge since:90d
+/stats all worlds since:30d
+/stats words since:7d top:20
+/stats all words by:speaker groups:10 top:8
+/stats activity since:30d bucket:day
+/stats hours since:30d
+/stats weekdays since:90d
+/stats heatmap since:90d
+```
+
+Tables use approximate attributed speaker and line counts. Word frequencies use
+Unicode case-folding, remove the attributed speaker name and common English/MUSH
+framing words by default, and support `stop:off` and `min:N`. `graph:auto`
+renders horizontal bars, compact activity lines, or weekday/hour block heatmaps;
+use `graph:none` for tables only. Hour and weekday buckets use the native UI's
+current local UTC offset, which is displayed by the query response and may be
+off by one hour across a historical daylight-saving transition.
+
 Use `/sh` to temporarily open the local interactive shell and return to TFR by
 exiting it. Input beginning with `!` runs a one-shot local shell command, such as
 `! w`, and waits for Enter before restoring the full-screen UI. Begin input with

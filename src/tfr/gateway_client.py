@@ -1780,6 +1780,16 @@ class GatewayClient:
             raise GatewayProtocolError("Gateway returned an invalid recall status")
         return result
 
+    async def statistics(self, query: dict[str, Any]) -> dict[str, Any]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "stats_query", "request_id": str(request_id), "query": query},
+            request_id,
+        )
+        if result is None or not isinstance(result.get("summary"), dict):
+            raise GatewayProtocolError("Gateway returned invalid statistics")
+        return result
+
     async def release_status(self) -> dict[str, Any]:
         request_id = uuid4()
         result = await self._request(
@@ -2588,6 +2598,9 @@ class GatewayUiRuntime:
 
     async def recall_status(self) -> dict[str, Any]:
         return await self.client.recall_status()
+
+    async def statistics(self, query: dict[str, Any]) -> dict[str, Any]:
+        return await self.client.statistics(query)
 
     async def release_status(self) -> dict[str, Any]:
         return await self.client.release_status()

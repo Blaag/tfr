@@ -248,3 +248,42 @@ async def test_backfill_is_automatic_deduplicated_and_resumable(tmp_path) -> Non
         assert (await second.query({"words": "history", "world": "beta"}))["matches"] == 1
     finally:
         await second.close()
+
+
+async def test_recall_statistics_aggregate_speakers_words_and_time(tmp_path) -> None:
+    store = RecallStore(
+        tmp_path / "recall.sqlite3",
+        worlds={"alpha": RecallWorldPolicy(enabled=True, retention_days=None)},
+        log_directory=tmp_path / "logs",
+    )
+    await store.start()
+    try:
+        await store.write(
+            recall_event('Alice says, "red dragon coffee"', speaker="Alice", seconds=1)
+        )
+        await store.write(recall_event("Alice waves at the dragon", speaker="Alice", seconds=2))
+        await store.write(recall_event('Bob says, "coffee time"', speaker="Bob", seconds=3602))
+        await store._write_queue.join()
+
+        speakers = await store.statistics({"view": "speakers", "world": "alpha"})
+        assert speakers["summary"]["lines"] == 3
+        assert [row["name"] for row in speakers["rows"]] == ["Alice", "Bob"]
+        assert speakers["rows"][0]["lines"] == 2
+
+        words = await store.statistics(
+            {"view": "words", "world": "alpha", "top": 3, "stop_words": True}
+        )
+        assert words["words"][0] == {"word": "dragon", "count": 2}
+        assert all(item["word"] not in {"alice", "says", "the"} for item in words["words"])
+
+        hours = await store.statistics(
+            {"view": "hours", "world": "alpha", "timezone_offset_minutes": 0}
+        )
+        assert hours["series"][12]["count"] == 2
+        assert hours["series"][13]["count"] == 1
+        heatmap = await store.statistics(
+            {"view": "heatmap", "world": "alpha", "timezone_offset_minutes": 0}
+        )
+        assert sum(sum(row) for row in heatmap["matrix"]) == 3
+    finally:
+        await store.close()
