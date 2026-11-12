@@ -977,6 +977,19 @@ async def test_gateway_configuration_mutation_preview_history_and_undo(tmp_path:
         assert batch_undo["key"] == "batch"
         assert (await client.config_show("ui.spellcheck.enabled"))["value"] is False
         assert (await client.config_show("ui.show_nospoof_prefix"))["value"] is False
+
+        recall = await client.config_mutate(
+            "set",
+            "recall.enabled",
+            value=True,
+            scope="gateway",
+            target=None,
+            expected_revision=4,
+            confirm=True,
+        )
+        assert recall["restart"] == "gateway-restart"
+        assert recall["restarting"] is True
+        await asyncio.wait_for(server.wait_application_restart(), timeout=1)
     finally:
         await client.stop()
         await server.stop()
@@ -2118,6 +2131,40 @@ async def test_expected_gateway_restart_recovers_immediately_and_retargets_plugi
     assert any("restored 2 events" in notice for notice in notices)
     assert runtime.connection_diagnostics.entries()[-1].code == "restart_completed"
     await event_bus.close()
+
+
+async def test_confirmed_configuration_mutation_arms_restart_recovery() -> None:
+    client = SimpleNamespace(
+        gateway_id=uuid4(),
+        sessions=[],
+        event_bus=EventBus(),
+        config_mutate=AsyncMock(
+            return_value={
+                "revision": 1,
+                "restart": "gateway-restart",
+                "restarting": True,
+            }
+        ),
+    )
+    runtime = GatewayUiRuntime(client, SimpleNamespace(process_event=AsyncMock()))
+    runtime._start_restart_watchdog = Mock()
+
+    result = await runtime.config_mutate(
+        "set",
+        "recall.enabled",
+        value=True,
+        scope="gateway",
+        target=None,
+        expected_revision=0,
+        confirm=True,
+    )
+
+    assert result["restarting"] is True
+    assert runtime._restart_expected is True
+    assert runtime._restart_phase == "acknowledged"
+    runtime._start_restart_watchdog.assert_called_once_with()
+    assert runtime.connection_diagnostics.entries()[-1].code == "restart_acknowledged"
+    await client.event_bus.close()
 
 
 async def test_expected_gateway_restart_reports_stalled_acknowledgement(

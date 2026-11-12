@@ -318,9 +318,12 @@ are not used.
 TFR does not track users and does not contain telemetry or automatic diagnostic,
 crash-report, or usage-data submission. Runtime diagnostics are bounded, redacted,
 stored locally with private file permissions, and leave the machine only when a
-person deliberately copies or exports a report. `/diagnostics report` creates a
-copyable local report; `/diagnostics export PATH` explicitly writes one to a new
-private file. Neither command uploads anything.
+person deliberately copies or exports a report. `/diagnostics copy` copies the
+complete bounded report to the local UI clipboard; an optional category such as
+`/diagnostics copy connector` filters it. `/diagnostics report` renders the
+complete report, while `/diagnostics export PATH` explicitly writes it to a new
+private file. Ordinary category views remain limited to the newest 25 entries
+for readability. None of these commands uploads anything.
 
 TFR's only automatic TFR-maintained network traffic is update discovery, including
 configured stable plugin manifests. Set `updates.enabled` to `false` to disable
