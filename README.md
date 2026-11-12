@@ -201,6 +201,7 @@ Managed files use this layout:
 ~/.local/share/tfr/
 ├── releases/VERSION+git.COMMIT/
 ├── releases/VERSION+stable.COMMIT/
+├── release-leases/RELEASE_ID.lock
 ├── current -> releases/RELEASE_ID
 ├── previous -> releases/PREVIOUS_RELEASE_ID
 └── install.lock
@@ -238,10 +239,23 @@ is rejected. Use `--no-activate` to stage the verified release without changing
 `current`.
 
 `--rollback` swaps `current` and `previous`, so it can be reversed by running it
-again. Installed release directories are retained until removed manually. Use
-`--root` and `--bin-dir` to place a test or nonstandard installation elsewhere,
-and `--python` to select the Python 3.12-or-newer interpreter that `uv` should
-use. Ensure `~/.local/bin` is in `PATH` before using `tfr` directly.
+again. Successful activation and managed startup automatically retain the five
+most recently installed releases, `current`, `previous`, the highest installed
+stable version used for downgrade protection, and every release leased by a
+live TFR process. Each managed process holds a kernel-backed shared lease on the
+release from which it imported TFR; cleanup requires an exclusive lease before
+removing that release. A long-lived world connector can therefore remain on an
+older release through any number of Gateway application updates, and its release
+becomes eligible after that connector exits.
+
+The first lease-aware release installed over an existing managed installation
+records a safety epoch and defers cleanup of older, lease-unaware processes until
+the machine crosses a boot boundary. Fresh installations prune immediately.
+Cleanup failures never undo a successful activation; the affected release is
+retained and TFR logs a warning. Use `--root` and `--bin-dir` to place a test or
+nonstandard installation elsewhere, and `--python` to select the Python
+3.12-or-newer interpreter that `uv` should use. Ensure `~/.local/bin` is in
+`PATH` before using `tfr` directly.
 
 The installer does not copy configuration. Managed commands automatically use
 the standard configuration path described above. For a nonstandard location,

@@ -7,6 +7,7 @@ import contextlib
 import errno
 import hashlib
 import json
+import logging
 import os
 import re
 import signal
@@ -29,6 +30,7 @@ DEFAULT_PER_WORLD_BUFFER_BYTES = 1024 * 1024
 DEFAULT_GLOBAL_BUFFER_BYTES = 16 * 1024 * 1024
 MAXIMUM_MESSAGE_BYTES = 1024 * 1024
 GATEWAY_APPLICATION_RESTART_EXIT = 75
+_LOGGER = logging.getLogger(__name__)
 
 
 class ProtocolError(ValueError):
@@ -1451,6 +1453,14 @@ def launch_gateway_supervisor(
 
 def main() -> None:
     import argparse
+
+    from tfr.installations import InstallationError, prune_managed_releases
+    from tfr.release_leases import ReleaseLeaseError
+
+    try:
+        prune_managed_releases()
+    except (InstallationError, OSError, ReleaseLeaseError) as exc:
+        _LOGGER.warning("TFR release cleanup was skipped: %s", exc)
 
     parser = argparse.ArgumentParser(description="Internal TFR world connector process.")
     parser.add_argument("--socket", type=Path, required=True)

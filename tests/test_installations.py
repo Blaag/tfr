@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from tfr import release_leases
 from tfr.installations import (
     InstallationError,
     InstallationLayout,
@@ -241,3 +244,79 @@ def test_update_activation_does_not_rewrite_a_nonstandard_launcher(tmp_path: Pat
 
     assert activated.metadata.release_id == second
     assert layout.launcher.read_text(encoding="utf-8") == launcher
+
+
+@pytest.mark.skipif(os.name != "posix", reason="release leases require flock")
+def test_pruning_retains_live_release_until_process_exits(tmp_path: Path) -> None:
+    layout = InstallationLayout.defaults(root=tmp_path / "tfr", bin_directory=tmp_path / "bin")
+    release_ids = [f"1.2.3+git.{character * 40}" for character in "1234567"]
+    first = release_ids[0]
+    stage_release(layout, first, "1" * 40)
+    layout.activate(first)
+    package_file = layout.releases / first / "lib/python3.12/site-packages/tfr/__init__.py"
+    package_file.parent.mkdir(parents=True)
+    package_file.write_text("", encoding="utf-8")
+    environment = dict(os.environ)
+    environment["TFR_MANAGED_ROOT"] = str(layout.root)
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from tfr.release_leases import acquire_process_release_lease; "
+                f"acquire_process_release_lease({str(package_file)!r}); "
+                "print('ready', flush=True); input()"
+            ),
+        ],
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == "ready"
+        for index, release_id in enumerate(release_ids[1:], start=2):
+            stage_release(layout, release_id, str(index) * 40)
+            layout.activate(release_id)
+
+        installed = {release.metadata.release_id for release in layout.list_releases()}
+        assert first in installed
+        assert len(installed) == 6
+    finally:
+        process.communicate("\n", timeout=10)
+
+    result = layout.prune_releases()
+    installed = {release.metadata.release_id for release in layout.list_releases()}
+    assert result.enabled is True
+    assert first in result.deleted
+    assert first not in installed
+    assert len(installed) == 5
+
+
+def test_existing_install_waits_for_boot_boundary_before_pruning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = InstallationLayout.defaults(root=tmp_path / "tfr", bin_directory=tmp_path / "bin")
+    release_ids = [f"1.2.3+git.{character * 40}" for character in "1234567"]
+    for index, release_id in enumerate(release_ids, start=1):
+        stage_release(layout, release_id, str(index) * 40)
+    layout._replace_pointer(layout.current, release_ids[0])
+    monkeypatch.setattr(release_leases, "_boot_identity", lambda: "test:boot-a")
+
+    layout.activate(release_ids[-1])
+
+    assert len(layout.list_releases()) == 7
+    state = (layout.root / "release-leases/state.json").read_text(encoding="utf-8")
+    assert '"enabled":false' in state
+
+    monkeypatch.setattr(release_leases, "_boot_identity", lambda: "test:boot-b")
+    result = layout.prune_releases()
+
+    assert result.enabled is True
+    assert result.deleted
+    assert '"enabled":true' in (layout.root / "release-leases/state.json").read_text(
+        encoding="utf-8"
+    )
