@@ -1264,6 +1264,9 @@ globally disabled by default and every world must opt in separately:
 
 These settings require a Gateway restart. Enabling a world automatically and
 resumably backfills existing JSONL logs; live events are deduplicated by event ID.
+The recall database is an inbound-only projection of what worlds sent back. Human,
+agent, and idle commands such as `@@` remain in the complete JSONL audit logs but
+are not indexed for recall.
 Global disable pauses indexing, backfill, retention, maintenance, and queries
 without deleting the database, per-world choices, or checkpoints. `forever` is
 stored internally as an empty retention limit. A positive day count enables
@@ -1277,7 +1280,13 @@ matching. Context is measured in logical events rather than wrapped screen rows:
 /recall s:Alice w:dragon in:example c:10
 /recall speaker:Alice words:"red * dragon" after:2026-11-01 limit:25
 /recall s:Alice r:"(?i)dragons?" ct:5m cs:matched
+/recall all w:"red dragon"
 ```
+
+Interactive searches default to the active world. Use `in:WORLD` to select a
+different world or the explicit `all` token to search every recall-enabled world.
+`all` and `in:WORLD` cannot be combined. The noninteractive CLI has no active
+world and retains its all-world default unless `--world` is provided.
 
 Use `/recall status` to inspect global and per-world enablement, retention,
 indexed ranges, and resumable backfill file, byte, scan, and insertion progress.

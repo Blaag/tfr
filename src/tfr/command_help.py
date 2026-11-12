@@ -86,10 +86,14 @@ COMMAND_HELP = {
         _command(
             "recall",
             "Show retained lines or search the Gateway recall database",
-            "/recall COUNT | status | s:SPEAKER w:WORDS [in:WORLD] [c:COUNT]",
+            "/recall COUNT | status | [all] s:SPEAKER w:WORDS [in:WORLD] [c:COUNT]",
             "worlds",
             "active world",
-            examples=("/recall 50", '/recall s:Alice w:"red * dragon" c:10'),
+            examples=(
+                "/recall 50",
+                '/recall s:Alice w:"red * dragon" c:10',
+                '/recall all w:"red dragon"',
+            ),
             related=("end",),
         ),
         _command(

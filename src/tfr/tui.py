@@ -7397,8 +7397,14 @@ class TfrTui:
         }
         query: dict[str, Any] = {}
         provided: set[str] = set()
+        all_worlds = False
         try:
             for parameter in parameters:
+                if parameter.casefold() == "all":
+                    if all_worlds:
+                        raise ValueError("Recall field all was specified more than once")
+                    all_worlds = True
+                    continue
                 name, separator, value = parameter.partition(":")
                 key = aliases.get(name.casefold())
                 if not separator or key is None or not value:
@@ -7453,6 +7459,10 @@ class TfrTui:
                 raise ValueError("since: and after: are mutually exclusive")
             if "context" in query and "context_time_before" in query:
                 raise ValueError("c:/context: and ct:/context-time: are mutually exclusive")
+            if all_worlds and "world" in query:
+                raise ValueError("all cannot be combined with in:/world:")
+            if not all_worlds and "world" not in query:
+                query["world"] = alias
             result = await self.service_runtime.recall_query(query)
         except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
             self.add_notice(alias, f"Recall failed: {exc}")
@@ -7477,6 +7487,8 @@ class TfrTui:
     def _format_recall_status(status: dict[str, Any]) -> str:
         lines = [
             f"Recall database: {'enabled' if status.get('enabled') else 'disabled'}",
+            f"  Projection: {status.get('projection', 'unavailable')}"
+            + (" (rebuilt at startup)" if status.get("projection_rebuilt") else ""),
         ]
         if status.get("database_path"):
             lines.append(

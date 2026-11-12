@@ -15,6 +15,7 @@ import regex as safe_regex
 from tfr.events import Event
 
 SCHEMA_VERSION = 1
+PROJECTION_VERSION = "inbound-only-v1"
 BACKFILL_BATCH_LINES = 500
 QUERY_CANDIDATE_LIMIT = 20_000
 MAX_MATCHES = 500
@@ -56,6 +57,7 @@ class RecallStore:
         self._backfill_bytes_checkpointed = 0
         self._backfill_records_scanned = 0
         self._backfill_records_inserted = 0
+        self._projection_rebuilt = False
 
     async def start(self) -> None:
         await asyncio.to_thread(self._open)
@@ -126,6 +128,21 @@ class RecallStore:
             "INSERT OR REPLACE INTO recall_metadata(key, value) VALUES('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
+        projection = connection.execute(
+            "SELECT value FROM recall_metadata WHERE key='projection_version'"
+        ).fetchone()
+        if projection is None or projection[0] != PROJECTION_VERSION:
+            connection.execute("DELETE FROM recall_events")
+            connection.execute("DELETE FROM recall_metadata WHERE key LIKE 'backfill:%'")
+            connection.execute(
+                "INSERT OR REPLACE INTO recall_metadata(key, value) "
+                "VALUES('projection_version', ?)",
+                (PROJECTION_VERSION,),
+            )
+            self._projection_rebuilt = True
+        else:
+            # Defend against rows written by an older candidate after rollback.
+            connection.execute("DELETE FROM recall_events WHERE direction!='inbound'")
         connection.commit()
         if os.name == "posix":
             os.chmod(self.path, 0o600)
@@ -135,7 +152,12 @@ class RecallStore:
         if self._writer_error is not None:
             raise RuntimeError("recall database writer failed") from self._writer_error
         policy = self.worlds.get(event.world)
-        if policy is None or not policy.enabled or event.redacted:
+        if (
+            policy is None
+            or not policy.enabled
+            or event.redacted
+            or event.direction.value != "inbound"
+        ):
             return
         value = {
             "event_id": str(event.event_id),
@@ -206,6 +228,8 @@ class RecallStore:
         world = value.get("world")
         policy = self.worlds.get(str(world))
         if policy is None or not policy.enabled or value.get("redacted") is True:
+            return None
+        if value.get("direction") != "inbound":
             return None
         text = value.get("plain_text") or value.get("canonical_text") or value.get("display_text")
         if not isinstance(text, str) or not text:
@@ -414,6 +438,7 @@ class RecallStore:
                 "SELECT recall_events.* FROM recall_events "
                 "JOIN recall_events_fts ON recall_events_fts.rowid=recall_events.id "
                 "WHERE (? IS NULL OR world=?) "
+                "AND direction='inbound' "
                 "AND (? IS NULL OR speaker_folded=?) "
                 "AND (?='[]' OR kind IN (SELECT value FROM json_each(?))) "
                 "AND (? IS NULL OR timestamp_us>=?) AND (? IS NULL OR timestamp_us<=?) "
@@ -424,6 +449,7 @@ class RecallStore:
         else:
             rows = connection.execute(
                 "SELECT * FROM recall_events WHERE (? IS NULL OR world=?) "
+                "AND direction='inbound' "
                 "AND (? IS NULL OR speaker_folded=?) "
                 "AND (?='[]' OR kind IN (SELECT value FROM json_each(?))) "
                 "AND (? IS NULL OR timestamp_us>=?) AND (? IS NULL OR timestamp_us<=?) "
@@ -449,6 +475,7 @@ class RecallStore:
                     reversed(
                         connection.execute(
                             "SELECT * FROM recall_events WHERE world=? AND "
+                            "direction='inbound' AND "
                             "(? IS NULL OR timestamp_us>=?) AND "
                             "(timestamp_us < ? OR (timestamp_us = ? AND id < ?)) AND "
                             "(? IS NULL OR speaker_folded=?) "
@@ -473,6 +500,7 @@ class RecallStore:
                 context_rows.extend(
                     connection.execute(
                         "SELECT * FROM recall_events WHERE world=? AND "
+                        "direction='inbound' AND "
                         "(? IS NULL OR timestamp_us<=?) AND "
                         "(timestamp_us > ? OR (timestamp_us = ? AND id > ?)) AND "
                         "(? IS NULL OR speaker_folded=?) "
@@ -596,6 +624,8 @@ class RecallStore:
                 for world, policy in self.worlds.items()
             ],
             "backfill_active": self._backfill_task is not None and not self._backfill_task.done(),
+            "projection": PROJECTION_VERSION,
+            "projection_rebuilt": self._projection_rebuilt,
             "backfill": {
                 "state": self._backfill_state,
                 "error": self._backfill_error,

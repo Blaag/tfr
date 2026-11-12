@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -8,7 +9,13 @@ from tfr.events import Confidence, Direction, Event, EventKind, Provenance
 from tfr.recall_store import RecallStore, RecallWorldPolicy
 
 
-def recall_event(text: str, *, speaker: str, seconds: int = 0) -> Event:
+def recall_event(
+    text: str,
+    *,
+    speaker: str,
+    seconds: int = 0,
+    direction: Direction = Direction.INBOUND,
+) -> Event:
     return Event(
         event_id=uuid4(),
         session_id=UUID("11111111-1111-4111-8111-111111111111"),
@@ -16,7 +23,7 @@ def recall_event(text: str, *, speaker: str, seconds: int = 0) -> Event:
         connection_generation=1,
         sequence=seconds,
         timestamp=datetime(2026, 11, 11, 12, tzinfo=UTC) + timedelta(seconds=seconds),
-        direction=Direction.INBOUND,
+        direction=direction,
         kind=EventKind.SAY,
         canonical_text=text,
         plain_text=text,
@@ -34,6 +41,14 @@ async def test_recall_store_matches_whole_words_wildcards_regex_and_context(tmp_
     await store.start()
     try:
         await store.write(recall_event("Alice arrives", speaker="Alice", seconds=1))
+        await store.write(
+            recall_event(
+                "say A red dragon appears",
+                speaker="Alice",
+                seconds=2,
+                direction=Direction.OUTBOUND,
+            )
+        )
         await store.write(recall_event("A red dragon appears", speaker="Bob", seconds=2))
         await store.write(recall_event("dragonfly", speaker="Bob", seconds=3))
         await store.write(recall_event("Alice leaves", speaker="Alice", seconds=4))
@@ -51,6 +66,49 @@ async def test_recall_store_matches_whole_words_wildcards_regex_and_context(tmp_
         assert regexp["matches"] == 2
     finally:
         await store.close()
+
+
+async def test_recall_projection_rebuilds_existing_database_as_inbound_only(tmp_path) -> None:
+    database = tmp_path / "recall.sqlite3"
+    store = RecallStore(
+        database,
+        worlds={"alpha": RecallWorldPolicy(enabled=True, retention_days=None)},
+        log_directory=tmp_path / "logs",
+    )
+    await store.start()
+    await store.close()
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("DELETE FROM recall_metadata WHERE key='projection_version'")
+        connection.execute(
+            "INSERT INTO recall_metadata(key, value) VALUES(?, '100')",
+            (f"backfill:alpha:{database.resolve()}",),
+        )
+        connection.execute(
+            "INSERT INTO recall_events(event_id, world, timestamp, timestamp_us, kind, "
+            "direction, speaker, speaker_folded, text, display_text) "
+            "VALUES(?, 'alpha', '2026-11-11T12:00:00Z', 1, 'command', 'outbound', "
+            "NULL, NULL, '@@', '@@')",
+            (str(uuid4()),),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    rebuilt = RecallStore(
+        database,
+        worlds={"alpha": RecallWorldPolicy(enabled=True, retention_days=None)},
+        log_directory=tmp_path / "logs",
+    )
+    await rebuilt.start()
+    try:
+        status = await rebuilt.status()
+        assert status["projection"] == "inbound-only-v1"
+        assert status["projection_rebuilt"] is True
+        assert (await rebuilt.query({"words": "@@"}))["matches"] == 0
+        assert rebuilt._checkpoint(database, "alpha") == 0
+    finally:
+        await rebuilt.close()
 
 
 async def test_recall_store_respects_world_opt_in_and_retention(tmp_path) -> None:

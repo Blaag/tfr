@@ -2179,6 +2179,33 @@ async def test_recall_status_shows_disabled_worlds_and_backfill_progress() -> No
     assert "no worlds permit recall" in text
 
 
+async def test_database_recall_defaults_to_active_world_and_all_is_explicit() -> None:
+    tui = make_tui()
+    runtime = SimpleNamespace(recall_query=AsyncMock(return_value={"matches": 0, "events": []}))
+    tui.service_runtime = runtime
+
+    await tui._handle_client_command("alpha", "/recall w:dragon")
+    await tui._handle_client_command("alpha", "/recall all w:dragon")
+
+    assert runtime.recall_query.await_args_list[0].args[0] == {
+        "words": "dragon",
+        "world": "alpha",
+    }
+    assert runtime.recall_query.await_args_list[1].args[0] == {"words": "dragon"}
+
+
+async def test_database_recall_rejects_all_with_named_world() -> None:
+    tui = make_tui()
+    runtime = SimpleNamespace(recall_query=AsyncMock())
+    tui.service_runtime = runtime
+
+    await tui._handle_client_command("alpha", "/recall all in:beta w:dragon")
+
+    runtime.recall_query.assert_not_awaited()
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "all cannot be combined" in text
+
+
 async def test_releases_list_explains_retention_reasons() -> None:
     tui = make_tui()
     tui.service_runtime = SimpleNamespace(
