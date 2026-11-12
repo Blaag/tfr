@@ -1206,9 +1206,14 @@ settings:
 `heartbeat_seconds` controls how often TFR actively confirms the connection is
 alive; `ping_timeout_seconds` bounds how long it waits for that confirmation
 before treating the connection as lost. Set `enabled` to `false` to disable
-automatic retry entirely and rely on `/gateway reconnect` manually. If the
-Gateway itself restarted or changed its worlds, use `/reload` instead so the
-UI can be rebuilt from the new Gateway state.
+automatic retry entirely and rely on `/gateway reconnect` manually. Reconnect
+accepts an authenticated replacement Gateway generation after an application
+restart or host reboot, updates world session identities, retargets plugins, and
+loads retained history when the configured world and agent topology remains
+compatible. A changed world set, aliases, or agent topology still requires
+`/reload` so the UI can be rebuilt. After one bounded retry burst is exhausted,
+background heartbeat recovery continues and `/gateway reconnect` can request an
+immediate attempt.
 
 `/boss` opens a plugin-provided full-screen cover. The built-in
 `build-dashboard` disguises real per-world received counts and last-activity

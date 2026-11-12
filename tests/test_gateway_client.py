@@ -1682,6 +1682,33 @@ async def test_client_reconnect_requires_reload_after_gateway_restart() -> None:
     socket_path.parent.rmdir()
 
 
+async def test_client_reconnect_accepts_compatible_gateway_generation_reset() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    socket_path = Path("/tmp") / f"tfr-test-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    client = await GatewayClient.connect(socket_path)
+    client.start()
+    replacement_gateway = uuid4()
+    try:
+        await client.stop()
+        runtime.gateway_id = replacement_gateway
+
+        restored = await client.reconnect(allow_generation_reset=True)
+
+        assert restored >= 0
+        assert client.gateway_id == replacement_gateway
+    finally:
+        await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+    socket_path.parent.rmdir()
+
+
 async def test_client_reconnect_requires_reload_when_world_aliases_change() -> None:
     bus = EventBus()
     history = EventHistory(bus, {"alpha": 10})
@@ -1974,6 +2001,50 @@ async def test_gateway_ui_runtime_orders_reconnect_before_world_reconciliation()
     socket_path.parent.rmdir()
 
 
+async def test_manual_reconnect_accepts_replacement_gateway_and_retargets_plugins() -> None:
+    old_gateway = uuid4()
+    new_gateway = uuid4()
+    old_session = uuid4()
+    new_session = uuid4()
+    session = SimpleNamespace(
+        world="alpha", session_id=old_session, state=SimpleNamespace(value="connected")
+    )
+    event_bus = EventBus()
+    client = SimpleNamespace(
+        gateway_id=old_gateway,
+        sessions=[session],
+        event_bus=event_bus,
+        history_truncated=False,
+        reconnect=AsyncMock(),
+    )
+
+    async def reconnect(*, allow_generation_reset: bool = False) -> int:
+        assert allow_generation_reset is True
+        client.gateway_id = new_gateway
+        session.session_id = new_session
+        return 2
+
+    client.reconnect.side_effect = reconnect
+    plugins = SimpleNamespace(
+        lifecycle=AsyncMock(),
+        publish_session_state=AsyncMock(),
+        retarget=Mock(),
+        process_event=AsyncMock(),
+    )
+    runtime = GatewayUiRuntime(client, plugins)
+    runtime._gateway_connected = False
+
+    message = await runtime.reconnect()
+
+    assert message == (
+        "Reconnected to replacement Gateway after restart or reboot; "
+        "restored 2 missed events"
+    )
+    plugins.retarget.assert_called_once_with({"alpha": new_session})
+    assert runtime.diagnostic_status()["restart_phase"] == "reconnected"
+    await event_bus.close()
+
+
 async def test_gateway_ui_runtime_supervisor_leaves_a_healthy_connection_alone() -> None:
     bus = EventBus()
     history = EventHistory(bus, {"alpha": 10})
@@ -2084,7 +2155,53 @@ async def test_gateway_ui_runtime_recover_connection_gives_up_after_max_attempts
     assert len(attempts) == 3
     assert attempts[-1].endswith("(attempt 3/3)...")
     assert any("failed after 3 attempts" in text for text in notices)
-    assert "Use /gateway reconnect to retry manually." in notices[-1]
+    assert "Automatic recovery will continue" in notices[-1]
+    assert ui_runtime.diagnostic_status()["restart_phase"] == "waiting"
+
+
+async def test_automatic_recovery_accepts_replacement_gateway() -> None:
+    old_gateway = uuid4()
+    new_gateway = uuid4()
+    session = SimpleNamespace(
+        world="alpha", session_id=uuid4(), state=SimpleNamespace(value="connected")
+    )
+    event_bus = EventBus()
+    client = SimpleNamespace(
+        gateway_id=old_gateway,
+        sessions=[session],
+        event_bus=event_bus,
+        history_truncated=False,
+        reconnect=AsyncMock(),
+    )
+
+    async def reconnect(*, allow_generation_reset: bool = False) -> int:
+        assert allow_generation_reset is True
+        client.gateway_id = new_gateway
+        session.session_id = uuid4()
+        return 1
+
+    client.reconnect.side_effect = reconnect
+    plugins = SimpleNamespace(
+        lifecycle=AsyncMock(),
+        publish_session_state=AsyncMock(),
+        retarget=Mock(),
+        process_event=AsyncMock(),
+    )
+    notices: list[str] = []
+    runtime = GatewayUiRuntime(
+        client,
+        plugins,
+        reconnect_config=GatewayReconnectConfig(max_attempts=1, retry_interval_seconds=0.01),
+        notify=notices.append,
+    )
+    runtime._gateway_connected = False
+
+    await runtime._recover_connection()
+
+    assert any("replacement Gateway after restart or reboot" in text for text in notices)
+    plugins.retarget.assert_called_once()
+    assert runtime.diagnostic_status()["restart_phase"] == "reconnected"
+    await event_bus.close()
 
 
 async def test_expected_gateway_restart_recovers_immediately_and_retargets_plugins() -> None:
