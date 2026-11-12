@@ -340,39 +340,105 @@ class InstallationLayout:
 
     def release_status(self, *, retain: int = _RELEASE_RETENTION) -> dict[str, Any]:
         """Describe retention without deleting or advancing the safety epoch."""
-        with self.lock():
+        state = pruning_state(self.root)
+        cleanup = _read_cleanup_result(self.root)
+        pruning_enabled = bool(state and state.get("enabled") is True)
+        base: dict[str, Any] = {
+            "managed": True,
+            "root": str(self.root),
+            "retention_target": retain,
+            "pruning_enabled": pruning_enabled,
+            "deferred_reason": (
+                None
+                if pruning_enabled
+                else "host-reboot-required"
+                if state is not None
+                else "lease-epoch-uninitialized"
+            ),
+            "boot_id": state.get("boot_id") if state else None,
+            "last_cleanup": cleanup,
+        }
+        if self._installation_writer_busy():
+            installed = None
+            if cleanup is not None:
+                installed = cleanup.get("installed_after")
+                if installed is None:
+                    installed = cleanup.get("installed_before")
+            return {
+                **base,
+                "installation_busy": True,
+                "inventory_available": False,
+                "installed_count": installed,
+                "installed_bytes": None,
+                "live_releases": [],
+                "releases": [],
+            }
+        try:
             releases = self._list_releases_locked()
             reasons, live = self._retention_reasons_locked(releases, retain=retain)
-            entries = []
-            total_bytes = 0
-            for release in releases:
-                release_id = release.metadata.release_id
-                size = _directory_size(release.path)
-                total_bytes += size
-                entries.append(
-                    {
-                        "release_id": release_id,
-                        "version": release.metadata.version,
-                        "source": release.metadata.source,
-                        "installed_at": release.metadata.installed_at,
-                        "bytes": size,
-                        "reasons": sorted(reasons.get(release_id, ())),
-                        "eligible": release_id not in reasons,
-                    }
-                )
-            state = pruning_state(self.root)
+        except (InstallationError, OSError):
             return {
-                "managed": True,
-                "root": str(self.root),
-                "retention_target": retain,
-                "pruning_enabled": bool(state and state.get("enabled") is True),
-                "boot_id": state.get("boot_id") if state else None,
-                "installed_count": len(entries),
-                "installed_bytes": total_bytes,
-                "live_releases": sorted(live),
-                "releases": entries,
-                "last_cleanup": _read_cleanup_result(self.root),
+                **base,
+                "installation_busy": True,
+                "inventory_available": False,
+                "installed_count": None,
+                "installed_bytes": None,
+                "live_releases": [],
+                "releases": [],
             }
+        entries = []
+        total_bytes = 0
+        for release in releases:
+            release_id = release.metadata.release_id
+            size = _directory_size(release.path)
+            total_bytes += size
+            release_reasons = set(reasons.get(release_id, ()))
+            if not pruning_enabled and not release_reasons:
+                release_reasons.add("safety-epoch-deferred")
+            entries.append(
+                {
+                    "release_id": release_id,
+                    "version": release.metadata.version,
+                    "source": release.metadata.source,
+                    "installed_at": release.metadata.installed_at,
+                    "bytes": size,
+                    "reasons": sorted(release_reasons),
+                    "eligible": pruning_enabled and release_id not in reasons,
+                }
+            )
+        return {
+            **base,
+            "installation_busy": False,
+            "inventory_available": True,
+            "installed_count": len(entries),
+            "installed_bytes": total_bytes,
+            "live_releases": sorted(live),
+            "releases": entries,
+        }
+
+    def _installation_writer_busy(self) -> bool:
+        """Probe the writer lock without holding any lock during status reads."""
+        if fcntl is None:
+            raise InstallationError("managed installation locking requires a POSIX host")
+        flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(self.lock_path, flags)
+        except FileNotFoundError:
+            return False
+        try:
+            file_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(file_stat.st_mode) or (
+                file_stat.st_uid != os.geteuid() or stat.S_IMODE(file_stat.st_mode) & 0o077
+            ):
+                raise InstallationError("installation lock must be an owner-only regular file")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(descriptor)
 
     def _activate_locked(
         self, release_id: str, *, write_launcher: bool = True

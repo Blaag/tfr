@@ -6956,28 +6956,16 @@ class TfrTui:
                 self.add_notice(alias, "Cleared bounded runtime diagnostics")
                 return
             if query_category == "recall":
-                entries = self._recall_diagnostic_entries(
-                    await self.service_runtime.recall_status()
-                )
+                entries = await self._safe_recall_diagnostic_entries()
             elif query_category == "releases":
-                entries = self._release_diagnostic_entries(
-                    await self.service_runtime.release_status()
-                )
+                entries = await self._safe_release_diagnostic_entries()
             else:
                 entries = await self.service_runtime.diagnostics(query_category)
                 if query_category is None:
                     if hasattr(self.service_runtime, "recall_status"):
-                        entries.extend(
-                            self._recall_diagnostic_entries(
-                                await self.service_runtime.recall_status()
-                            )
-                        )
+                        entries.extend(await self._safe_recall_diagnostic_entries())
                     if hasattr(self.service_runtime, "release_status"):
-                        entries.extend(
-                            self._release_diagnostic_entries(
-                                await self.service_runtime.release_status()
-                            )
-                        )
+                        entries.extend(await self._safe_release_diagnostic_entries())
             if query_category in {None, "plugins", "presentations"}:
                 entries = [
                     *entries,
@@ -7003,7 +6991,7 @@ class TfrTui:
                 except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
                     web_error = str(exc)
         except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
-            self.add_notice(alias, f"Diagnostics failed: {exc}")
+            self.add_notice(alias, self._gateway_operation_error("Diagnostics", exc))
             return
         if not entries and not local_status and web_status is None:
             self.add_notice(alias, "No matching runtime diagnostics")
@@ -7543,7 +7531,7 @@ class TfrTui:
         try:
             status = await self.service_runtime.release_status()
         except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
-            self.add_notice(alias, f"Release status failed: {exc}")
+            self.add_notice(alias, self._gateway_operation_error("Release status", exc))
             return
         self.add_notice(alias, self._format_release_status(status, verbose=parameters == ["list"]))
 
@@ -7551,14 +7539,24 @@ class TfrTui:
     def _format_release_status(status: dict[str, Any], *, verbose: bool) -> str:
         if status.get("managed") is not True:
             return "Gateway is not running from a managed release installation."
+        installed_count = status.get("installed_count")
+        installed_bytes = status.get("installed_bytes")
         lines = [
             "Managed Gateway releases",
             f"  Root: {status.get('root')}",
             f"  Pruning: {'enabled' if status.get('pruning_enabled') else 'deferred'}; "
             f"retain {status.get('retention_target', 5)} recent releases",
-            f"  Installed: {status.get('installed_count', 0)} releases; "
-            f"{status.get('installed_bytes', 0)} bytes",
+            f"  Installed: {installed_count if installed_count is not None else 'unknown'} "
+            "releases; "
+            f"{installed_bytes if installed_bytes is not None else 'unknown'} bytes",
         ]
+        if status.get("installation_busy") is True:
+            lines.append(
+                "  Installation/update in progress; detailed inventory is temporarily "
+                "unavailable."
+            )
+        if status.get("deferred_reason") == "host-reboot-required":
+            lines.append("  Cleanup deferred until the Gateway host reboots.")
         releases = status.get("releases", [])
         if verbose:
             for release in releases:
@@ -7614,10 +7612,57 @@ class TfrTui:
                 "severity": "error" if failures else "info",
                 "client": "gateway",
                 "component": "releases",
-                "code": "cleanup_failed" if failures else "cleanup_status",
+                "code": (
+                    "cleanup_failed"
+                    if failures
+                    else "status_busy"
+                    if status.get("installation_busy") is True
+                    else "cleanup_status"
+                ),
                 "message": cls._format_release_status(status, verbose=True),
             }
         ]
+
+    async def _safe_recall_diagnostic_entries(self) -> list[dict[str, Any]]:
+        runtime = self.service_runtime
+        if runtime is None:
+            return [self._dynamic_status_error("recall", RuntimeError("Gateway unavailable"))]
+        try:
+            return self._recall_diagnostic_entries(await runtime.recall_status())
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            return [self._dynamic_status_error("recall", exc)]
+
+    async def _safe_release_diagnostic_entries(self) -> list[dict[str, Any]]:
+        runtime = self.service_runtime
+        if runtime is None:
+            return [self._dynamic_status_error("releases", RuntimeError("Gateway unavailable"))]
+        try:
+            return self._release_diagnostic_entries(await runtime.release_status())
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            return [self._dynamic_status_error("releases", exc)]
+
+    @staticmethod
+    def _dynamic_status_error(component: str, exc: BaseException) -> dict[str, Any]:
+        return {
+            "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "severity": "warning",
+            "client": "ui",
+            "component": component,
+            "code": "status_unavailable",
+            "message": f"Dynamic {component} status is temporarily unavailable: {exc}"[:240],
+        }
+
+    def _gateway_operation_error(self, operation: str, exc: BaseException) -> str:
+        runtime = self.service_runtime
+        if runtime is not None and hasattr(runtime, "diagnostic_status"):
+            status = runtime.diagnostic_status()
+            if status.get("connected") is not True:
+                phase = status.get("restart_phase", "reconnecting")
+                return (
+                    f"{operation} is temporarily unavailable while the Gateway is "
+                    f"updating or reconnecting ({phase})."
+                )
+        return f"{operation} failed: {exc}"
 
     @staticmethod
     def _recall_duration(value: str) -> int:
