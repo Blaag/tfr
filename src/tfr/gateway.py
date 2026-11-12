@@ -693,8 +693,24 @@ class GatewayRuntime:
 
     async def recall_status(self) -> dict[str, Any]:
         if self.recall_store is None:
-            return {"enabled": False, "worlds": []}
+            return {
+                "enabled": False,
+                "worlds": [
+                    {
+                        "world": world,
+                        "enabled": config.recall_enabled,
+                        "retention_days": config.recall_retention_days,
+                        "count": 0,
+                    }
+                    for world, config in self.configuration_bundle.worlds.worlds.items()
+                ],
+            }
         return await self.recall_store.status()
+
+    async def release_status(self) -> dict[str, Any]:
+        from tfr.installations import managed_release_status
+
+        return await asyncio.to_thread(managed_release_status)
 
     @classmethod
     async def from_configuration(
@@ -2608,6 +2624,12 @@ class GatewayServer:
                 if set(message) != {"type", "protocol", "request_id"}:
                     raise ValueError("recall_status has invalid fields")
                 result = await self.runtime.recall_status()
+            elif message_type == "release_status":
+                if not allow_admin:
+                    raise ValueError("release status is unavailable")
+                if set(message) != {"type", "protocol", "request_id"}:
+                    raise ValueError("release_status has invalid fields")
+                result = await self.runtime.release_status()
             elif message_type == "clear_diagnostics":
                 if not allow_admin or self.diagnostic_clear_factory is None:
                     raise ValueError("diagnostics are unavailable")
@@ -2834,6 +2856,15 @@ class GatewayServer:
                     if result.get("restart") == "gateway-restart":
                         result["restarting"] = True
                         restart_gateway = True
+                    if (
+                        key == "recall.enabled"
+                        and value is True
+                        and not self._recall_worlds_enabled()
+                    ):
+                        result["warning"] = (
+                            "Recall is globally enabled, but no worlds permit recall. "
+                            "Enable worlds.<WORLD>.recall_enabled to index logs."
+                        )
             elif message_type == "config_batch":
                 store = self.runtime.gateway_configuration
                 if store is None:
@@ -2909,6 +2940,22 @@ class GatewayServer:
                     if result.get("restart") == "gateway-restart":
                         result["restarting"] = True
                         restart_gateway = True
+                    if any(
+                        mutation.key == "recall.enabled" and mutation.value is True
+                        for mutation in mutations
+                    ) and not (
+                        self._recall_worlds_enabled()
+                        or any(
+                            mutation.key.startswith("worlds.")
+                            and mutation.key.endswith(".recall_enabled")
+                            and mutation.value is True
+                            for mutation in mutations
+                        )
+                    ):
+                        result["warning"] = (
+                            "Recall is globally enabled, but no worlds permit recall. "
+                            "Enable worlds.<WORLD>.recall_enabled to index logs."
+                        )
             elif message_type == "config_changes":
                 store = self.runtime.gateway_configuration
                 if store is None:
@@ -3664,6 +3711,11 @@ class GatewayServer:
         if record is None:
             raise ValueError(f"unknown UI: {target}")
         return str(self.ui_store.configuration_profile_id(record.ui_id))
+
+    def _recall_worlds_enabled(self) -> bool:
+        bundle = getattr(self.runtime, "configuration_bundle", None)
+        worlds = getattr(getattr(bundle, "worlds", None), "worlds", {})
+        return any(getattr(config, "recall_enabled", False) for config in worlds.values())
 
     def _sync_gateway_configuration_value(self, mutation: ConfigurationMutation) -> None:
         values = self.runtime.configuration_values

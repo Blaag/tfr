@@ -989,6 +989,7 @@ async def test_gateway_configuration_mutation_preview_history_and_undo(tmp_path:
         )
         assert recall["restart"] == "gateway-restart"
         assert recall["restarting"] is True
+        assert "no worlds permit recall" in str(recall["warning"])
         await asyncio.wait_for(server.wait_application_restart(), timeout=1)
     finally:
         await client.stop()
@@ -2370,6 +2371,9 @@ async def test_gateway_client_queries_recall_database(tmp_path: Path) -> None:
         }
     )
     runtime.recall_status = AsyncMock(return_value={"enabled": True, "worlds": []})
+    runtime.release_status = AsyncMock(
+        return_value={"managed": True, "installed_count": 5, "releases": []}
+    )
     socket_path = Path("/tmp") / f"tfr-recall-{uuid4().hex[:8]}" / "gateway.sock"
     server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
     await server.start()
@@ -2379,6 +2383,7 @@ async def test_gateway_client_queries_recall_database(tmp_path: Path) -> None:
         result = await client.recall_query({"speaker": "Alice", "words": "dragon"})
         assert result["matches"] == 1
         assert (await client.recall_status())["enabled"] is True
+        assert (await client.release_status())["installed_count"] == 5
         runtime.recall_query.assert_awaited_once_with(
             {"speaker": "Alice", "words": "dragon"}
         )

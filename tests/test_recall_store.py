@@ -81,7 +81,25 @@ async def test_recall_store_respects_world_opt_in_and_retention(tmp_path) -> Non
             ]
         )
         assert inserted == 0
-        assert (await store.status())["worlds"] == []
+        worlds = (await store.status())["worlds"]
+        assert worlds == [
+            {
+                "world": "alpha",
+                "enabled": False,
+                "retention_days": None,
+                "count": 0,
+                "oldest": None,
+                "newest": None,
+            },
+            {
+                "world": "beta",
+                "enabled": True,
+                "retention_days": 30,
+                "count": 0,
+                "oldest": None,
+                "newest": None,
+            },
+        ]
     finally:
         await store.close()
 

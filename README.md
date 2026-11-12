@@ -223,6 +223,13 @@ The checkout script also manages installed releases:
 ./scripts/install-from-checkout --rollback
 ```
 
+Managed executions expose read-only retention status with `tfr releases status`
+and `tfr releases list`. An attached UI can inspect the Gateway host with
+`/releases status` or `/releases list`; each release is labeled with reasons such
+as `current`, `previous`, `recent`, `live-lease`, and
+`downgrade-high-water`. `/diagnostics releases` and the complete diagnostics copy
+include the persisted outcome of the latest automatic cleanup.
+
 `--latest-stable` performs an explicit, fail-closed stable installation. It
 fetches the live official release manifest without using the notification
 cache, fetches only its fully qualified annotated Git tag from the official
@@ -1272,9 +1279,12 @@ matching. Context is measured in logical events rather than wrapped screen rows:
 /recall s:Alice r:"(?i)dragons?" ct:5m cs:matched
 ```
 
-The equivalent noninteractive interface is `tfr recall query`; use
-`tfr recall status` to inspect database size, indexed ranges, and backfill state.
-The CLI always queries through the Gateway and never opens SQLite directly.
+Use `/recall status` to inspect global and per-world enablement, retention,
+indexed ranges, and resumable backfill file, byte, scan, and insertion progress.
+The equivalent noninteractive interface is `tfr recall query`; `tfr recall
+status` provides the same status through the active Gateway profile. The CLI
+always queries through the Gateway and never opens SQLite directly. Recall
+status is also included in `/diagnostics recall` and `/diagnostics copy`.
 
 Use `/sh` to temporarily open the local interactive shell and return to TFR by
 exiting it. Input beginning with `!` runs a one-shot local shell command, such as

@@ -107,6 +107,11 @@ def pruning_is_enabled(root: Path, *, fresh_install: bool = False) -> bool:
     return False
 
 
+def pruning_state(root: Path) -> dict[str, object] | None:
+    """Return the validated lease epoch state without advancing it."""
+    return _read_state(root / "release-leases" / "state.json")
+
+
 def _open_lease(root: Path, release_id: str) -> int:
     if _RELEASE_ID.fullmatch(release_id) is None:
         raise ReleaseLeaseError("release lease has an invalid release ID")

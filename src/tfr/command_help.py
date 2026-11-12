@@ -86,11 +86,19 @@ COMMAND_HELP = {
         _command(
             "recall",
             "Show retained lines or search the Gateway recall database",
-            "/recall COUNT | s:SPEAKER w:WORDS [in:WORLD] [c:COUNT]",
+            "/recall COUNT | status | s:SPEAKER w:WORDS [in:WORLD] [c:COUNT]",
             "worlds",
             "active world",
             examples=("/recall 50", '/recall s:Alice w:"red * dragon" c:10'),
             related=("end",),
+        ),
+        _command(
+            "releases",
+            "Inspect retained managed releases on the Gateway",
+            "/releases [status|list]",
+            "gateway",
+            "Gateway host",
+            related=("diagnostics", "update", "version"),
         ),
         _command("end", "Return to live output", "/end", "worlds", "this UI", related=("recall",)),
         _command(

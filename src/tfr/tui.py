@@ -456,6 +456,8 @@ class ServiceRuntime(Protocol):
 
     async def recall_status(self) -> dict[str, Any]: ...
 
+    async def release_status(self) -> dict[str, Any]: ...
+
     async def report_focus(self, focused: bool) -> None: ...
 
     def record_notification_diagnostic(
@@ -3600,6 +3602,8 @@ class TfrTui:
             await self._handle_ui_command(alias, parameters)
         elif command == "diagnostics":
             await self._handle_diagnostics_command(alias, parameters)
+        elif command == "releases":
+            await self._handle_releases_command(alias, parameters)
         elif command == "plugins":
             if parameters == ["help"]:
                 self.add_help(alias, "plugins", self.help_text("plugins"))
@@ -5039,7 +5043,8 @@ class TfrTui:
                 if result.get("restarting") is True
                 else "Required action: "
                 f"{self._settings_action_text(result.get('restart', 'live'))}"
-            ),
+            )
+            + (f"\nWarning: {result['warning']}" if result.get("warning") else ""),
         )
         return True
 
@@ -6696,7 +6701,8 @@ class TfrTui:
                             "Gateway restart requested automatically; reconnecting."
                             if result.get("restarting") is True
                             else f"required action: {result.get('restart')}"
-                        ),
+                        )
+                        + (f"\nWarning: {result['warning']}" if result.get("warning") else ""),
                     )
                 return
             if valid_status:
@@ -6902,7 +6908,7 @@ class TfrTui:
     async def _handle_diagnostics_command(self, alias: str, parameters: list[str]) -> None:
         usage = (
             "Usage: /diagnostics [gateway|config|plugins|presentations|notifications|web|"
-            "updates|agents|connector|report|clear|copy [CATEGORY]|export PATH]"
+            "updates|agents|connector|recall|releases|report|clear|copy [CATEGORY]|export PATH]"
         )
         if self.service_runtime is None:
             self.add_notice(alias, "Diagnostics are available only in an attached UI")
@@ -6917,6 +6923,8 @@ class TfrTui:
             "updates",
             "agents",
             "connector",
+            "recall",
+            "releases",
         }
         action = parameters[0].casefold() if parameters else None
         mode = "display"
@@ -6947,7 +6955,29 @@ class TfrTui:
                 await self.service_runtime.clear_diagnostics()
                 self.add_notice(alias, "Cleared bounded runtime diagnostics")
                 return
-            entries = await self.service_runtime.diagnostics(query_category)
+            if query_category == "recall":
+                entries = self._recall_diagnostic_entries(
+                    await self.service_runtime.recall_status()
+                )
+            elif query_category == "releases":
+                entries = self._release_diagnostic_entries(
+                    await self.service_runtime.release_status()
+                )
+            else:
+                entries = await self.service_runtime.diagnostics(query_category)
+                if query_category is None:
+                    if hasattr(self.service_runtime, "recall_status"):
+                        entries.extend(
+                            self._recall_diagnostic_entries(
+                                await self.service_runtime.recall_status()
+                            )
+                        )
+                    if hasattr(self.service_runtime, "release_status"):
+                        entries.extend(
+                            self._release_diagnostic_entries(
+                                await self.service_runtime.release_status()
+                            )
+                        )
             if query_category in {None, "plugins", "presentations"}:
                 entries = [
                     *entries,
@@ -7287,6 +7317,17 @@ class TfrTui:
         self.add_notice(alias, "Usage: /clear [status|cycle|random|lock EFFECT]")
 
     async def _handle_recall_command(self, alias: str, parameters: list[str]) -> None:
+        if parameters == ["status"]:
+            if self.service_runtime is None:
+                self.add_notice(alias, "Recall status is available only through a Gateway")
+                return
+            try:
+                status = await self.service_runtime.recall_status()
+            except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+                self.add_notice(alias, f"Recall status failed: {exc}")
+                return
+            self.add_notice(alias, self._format_recall_status(status))
+            return
         if parameters and any(":" in parameter for parameter in parameters):
             await self._handle_database_recall(alias, parameters)
             return
@@ -7431,6 +7472,140 @@ class TfrTui:
                 f"{event.get('text', '')}"
             )
         self.add_notice(alias, "\n".join(lines))
+
+    @staticmethod
+    def _format_recall_status(status: dict[str, Any]) -> str:
+        lines = [
+            f"Recall database: {'enabled' if status.get('enabled') else 'disabled'}",
+        ]
+        if status.get("database_path"):
+            lines.append(
+                f"  {status.get('database_path')} ({status.get('database_bytes', 0)} bytes)"
+            )
+        backfill = status.get("backfill")
+        if isinstance(backfill, dict):
+            lines.append(
+                "  Backfill: "
+                f"{backfill.get('state', 'unknown')}; "
+                f"files {backfill.get('files_completed', 0)}/{backfill.get('files_total', 0)}; "
+                f"bytes {backfill.get('bytes_checkpointed', 0)}/{backfill.get('bytes_total', 0)}; "
+                f"scanned {backfill.get('records_scanned', 0)}; "
+                f"inserted {backfill.get('records_inserted', 0)}"
+            )
+            if backfill.get("error"):
+                lines.append(f"  Backfill error: {backfill['error']}")
+        worlds = status.get("worlds", [])
+        enabled_count = sum(
+            item.get("enabled") is True for item in worlds if isinstance(item, dict)
+        )
+        lines.append(f"  Worlds enabled: {enabled_count}/{len(worlds)}")
+        for world in worlds:
+            if not isinstance(world, dict):
+                continue
+            retention = world.get("retention_days")
+            retention_text = "unlimited" if retention is None else f"{retention} days"
+            lines.append(
+                f"  {world.get('world')}: "
+                f"{'enabled' if world.get('enabled') else 'disabled'}; "
+                f"{world.get('count', 0)} events; retention {retention_text}; "
+                f"{world.get('oldest') or 'no oldest'} through "
+                f"{world.get('newest') or 'no newest'}"
+            )
+        if status.get("enabled") and enabled_count == 0:
+            lines.extend(
+                (
+                    "  Warning: no worlds permit recall, so no logs will be indexed.",
+                    "  Enable a world with: /config set "
+                    "worlds.<WORLD>.recall_enabled true --confirm",
+                )
+            )
+        return "\n".join(lines)
+
+    async def _handle_releases_command(self, alias: str, parameters: list[str]) -> None:
+        if parameters not in ([], ["status"], ["list"]):
+            self.add_notice(alias, "Usage: /releases [status|list]")
+            return
+        if self.service_runtime is None or not hasattr(self.service_runtime, "release_status"):
+            self.add_notice(alias, "Gateway release status is unavailable")
+            return
+        try:
+            status = await self.service_runtime.release_status()
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            self.add_notice(alias, f"Release status failed: {exc}")
+            return
+        self.add_notice(alias, self._format_release_status(status, verbose=parameters == ["list"]))
+
+    @staticmethod
+    def _format_release_status(status: dict[str, Any], *, verbose: bool) -> str:
+        if status.get("managed") is not True:
+            return "Gateway is not running from a managed release installation."
+        lines = [
+            "Managed Gateway releases",
+            f"  Root: {status.get('root')}",
+            f"  Pruning: {'enabled' if status.get('pruning_enabled') else 'deferred'}; "
+            f"retain {status.get('retention_target', 5)} recent releases",
+            f"  Installed: {status.get('installed_count', 0)} releases; "
+            f"{status.get('installed_bytes', 0)} bytes",
+        ]
+        releases = status.get("releases", [])
+        if verbose:
+            for release in releases:
+                if not isinstance(release, dict):
+                    continue
+                reasons = ", ".join(str(item) for item in release.get("reasons", []))
+                lines.append(
+                    f"  {release.get('release_id')} — "
+                    f"{reasons or 'eligible for cleanup'}; {release.get('bytes', 0)} bytes"
+                )
+        else:
+            eligible = sum(
+                item.get("eligible") is True for item in releases if isinstance(item, dict)
+            )
+            lines.append(
+                f"  Live leases: {len(status.get('live_releases', []))}; eligible: {eligible}"
+            )
+        cleanup = status.get("last_cleanup")
+        if isinstance(cleanup, dict):
+            lines.append(
+                f"  Last cleanup: {cleanup.get('timestamp')}; "
+                f"deleted {len(cleanup.get('deleted', []))}; "
+                f"reclaimed {cleanup.get('reclaimed_bytes', 0)} bytes; "
+                f"failures {len(cleanup.get('failures', []))}"
+            )
+        return "\n".join(lines)
+
+    @classmethod
+    def _recall_diagnostic_entries(cls, status: dict[str, Any]) -> list[dict[str, Any]]:
+        backfill = status.get("backfill") if isinstance(status.get("backfill"), dict) else {}
+        return [
+            {
+                "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                "severity": "error" if backfill.get("state") == "failed" else "info",
+                "client": "gateway",
+                "component": "recall",
+                "code": f"backfill_{backfill.get('state', 'unavailable')}",
+                "message": cls._format_recall_status(status),
+            }
+        ]
+
+    @classmethod
+    def _release_diagnostic_entries(cls, status: dict[str, Any]) -> list[dict[str, Any]]:
+        cleanup = status.get("last_cleanup")
+        failures = cleanup.get("failures", []) if isinstance(cleanup, dict) else []
+        return [
+            {
+                "timestamp": (
+                    cleanup.get("timestamp")
+                    if isinstance(cleanup, dict)
+                    else datetime.now(UTC).isoformat().replace("+00:00", "Z")
+                ),
+                "severity": "error" if failures else "info",
+                "client": "gateway",
+                "component": "releases",
+                "code": "cleanup_failed" if failures else "cleanup_status",
+                "message": cls._format_release_status(status, verbose=True),
+            }
+        ]
 
     @staticmethod
     def _recall_duration(value: str) -> int:
