@@ -242,6 +242,30 @@ async def test_speaker_effects_catalog_includes_first_party_configuration_metada
     assert item["settings"][0]["key"] == "plugins.config.speaker_effects.rules"
 
 
+async def test_speaker_effects_load_normalizes_legacy_page_kinds() -> None:
+    manager = await PluginManager.load(
+        enabled=("speaker_effects",),
+        config={
+            "speaker_effects": {
+                "rules": [
+                    {"speaker": "Alice", "effect": "shimmer", "kinds": ["say", "page"]},
+                    {"speaker": "Bob", "effect": "shimmer", "kinds": ["page"]},
+                ]
+            }
+        },
+        event_bus=EventBus(),
+        command_bus=CommandBus(),
+        targets={},
+        discovered=(FakeEntryPoint("speaker_effects", SpotlightPlugin()),),
+        scope="ui",
+    )
+
+    rules = manager.config["speaker_effects"]["rules"]
+    assert rules[0]["kinds"] == ["say"]
+    assert "kinds" not in rules[1]
+    assert manager.catalog()[0]["loaded"] is True
+
+
 def inbound_event(session_id: Any, *, text: str = "hello") -> Event:
     return Event(
         session_id=session_id,

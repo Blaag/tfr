@@ -211,16 +211,33 @@ def validate_speaker_rule(rule: Mapping[str, object]) -> dict[str, object]:
         ):
             raise ValueError(f"{field} must be a list of names")
     kinds = value.get("kinds")
-    if isinstance(kinds, list) and not set(kinds) <= {"say", "pose", "page"}:
-        raise ValueError("message kinds support only Say, Pose, and Page")
+    if isinstance(kinds, list) and not set(kinds) <= {"say", "pose"}:
+        raise ValueError("speaker effect kinds support only Say and Pose")
     return value
 
 
-def speaker_rules(value: object) -> list[dict[str, object]]:
+def normalize_speaker_rules(value: object) -> list[dict[str, object]]:
+    """Adapt legacy Page targeting to the current speaker-effects contract."""
     if value is None:
         return []
     if not isinstance(value, list) or any(not isinstance(item, Mapping) for item in value):
         raise ValueError("speaker effects rules are not a list of objects")
+    output: list[dict[str, object]] = []
+    for item in value:
+        rule = copy.deepcopy(dict(item))
+        kinds = rule.get("kinds")
+        if isinstance(kinds, list):
+            without_legacy_page = [kind for kind in kinds if kind != "page"]
+            if without_legacy_page:
+                rule["kinds"] = without_legacy_page
+            else:
+                rule.pop("kinds", None)
+        output.append(rule)
+    return output
+
+
+def speaker_rules(value: object) -> list[dict[str, object]]:
+    value = normalize_speaker_rules(value)
     rules = []
     for index, item in enumerate(value):
         try:

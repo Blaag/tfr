@@ -1091,6 +1091,29 @@ async def test_speaker_effect_form_removes_fields_invalid_for_new_effect() -> No
     assert tui._settings_choice.await_args.kwargs["default"] == "comet"
 
 
+async def test_speaker_effect_form_removes_legacy_page_kind() -> None:
+    tui = make_tui()
+    tui._settings_input = AsyncMock(return_value="Alice")
+    tui._settings_choice = AsyncMock(return_value="shimmer")
+    tui._settings_color = AsyncMock(side_effect=["#5f87ff", "#ffffff"])
+    tui._settings_multiselect = AsyncMock(side_effect=[[], ["say"]])
+
+    rule = await tui._speaker_rule_form(
+        {
+            "speaker": "Alice",
+            "effect": "shimmer",
+            "color": "#5f87ff",
+            "accent_color": "#ffffff",
+            "kinds": ["say", "page"],
+        }
+    )
+
+    assert rule is not None
+    assert rule["kinds"] == ["say"]
+    kinds_prompt = tui._settings_multiselect.await_args_list[1].kwargs
+    assert [value for value, _label in kinds_prompt["values"]] == ["say", "pose"]
+
+
 async def test_color_picker_shows_swatches_and_resolved_default() -> None:
     tui = make_tui()
     tui._settings_choice = AsyncMock(return_value="")

@@ -926,10 +926,18 @@ class PluginManager:
         points = tuple(points) + tuple(extra_discovered)
         manager._available_plugins = tuple(sorted({point.name for point in points}))
         manager.requested_plugins = tuple(dict.fromkeys(enabled))
+        normalized_config = dict(config)
+        speaker_config = normalized_config.get("speaker_effects")
+        if isinstance(speaker_config, Mapping):
+            from tfr.settings_ui import normalize_speaker_rules
+
+            speaker_value = dict(speaker_config)
+            speaker_value["rules"] = normalize_speaker_rules(speaker_value.get("rules", []))
+            normalized_config["speaker_effects"] = speaker_value
         manager.config = MappingProxyType(
             {
                 name: MappingProxyType(dict(value)) if isinstance(value, Mapping) else value
-                for name, value in config.items()
+                for name, value in normalized_config.items()
             }
         )
         available: dict[str, DiscoveredPlugin] = {}
@@ -979,7 +987,7 @@ class PluginManager:
                 register = getattr(plugin, "register", plugin)
                 result = register(
                     manager._registrar(name),
-                    MappingProxyType(dict(config.get(name, {}))),
+                    MappingProxyType(dict(normalized_config.get(name, {}))),
                 )
                 if inspect.isawaitable(result):
                     await result
@@ -996,24 +1004,8 @@ class PluginManager:
     async def reconfigure_speaker_effects(self, rules: object) -> None:
         """Validate and atomically replace the Gateway speaker presentation decorator."""
 
+        normalized, replacements = await self._prepare_speaker_effects(rules)
         name = "speaker_effects"
-        point = self._discovered_plugins.get(name)
-        if point is None or name not in self.requested_plugins:
-            raise ValueError("speaker_effects is not available and enabled on the Gateway")
-        temporary = PluginRegistry()
-        plugin = point.load()
-        register = getattr(plugin, "register", plugin)
-        result = register(
-            PluginRegistrar(name, temporary, self.scope),
-            MappingProxyType({"rules": rules}),
-        )
-        if inspect.isawaitable(result):
-            await result
-        replacements = {
-            key: value
-            for key, value in temporary.presentation_decorators.items()
-            if value[0] == name
-        }
         retained = {
             key: value
             for key, value in self.registry.presentation_decorators.items()
@@ -1021,10 +1013,41 @@ class PluginManager:
         }
         retained.update(replacements)
         config = dict(self.config)
-        config[name] = MappingProxyType({"rules": rules})
+        config[name] = MappingProxyType({"rules": normalized})
         self.registry.presentation_decorators = retained
         self.config = MappingProxyType(config)
         self.load_failures.pop(name, None)
+        if name not in self._loaded_plugins:
+            self._loaded_plugins.append(name)
+
+    async def validate_speaker_effects(self, rules: object) -> None:
+        await self._prepare_speaker_effects(rules)
+
+    async def _prepare_speaker_effects(
+        self, rules: object
+    ) -> tuple[list[dict[str, object]], dict[str, object]]:
+        from tfr.settings_ui import normalize_speaker_rules
+
+        name = "speaker_effects"
+        point = self._discovered_plugins.get(name)
+        if point is None or name not in self.requested_plugins:
+            raise ValueError("speaker_effects is not available and enabled on the Gateway")
+        temporary = PluginRegistry()
+        plugin = point.load()
+        register = getattr(plugin, "register", plugin)
+        normalized = normalize_speaker_rules(rules)
+        result = register(
+            PluginRegistrar(name, temporary, self.scope),
+            MappingProxyType({"rules": normalized}),
+        )
+        if inspect.isawaitable(result):
+            await result
+        replacements: dict[str, object] = {
+            key: value
+            for key, value in temporary.presentation_decorators.items()
+            if value[0] == name
+        }
+        return normalized, replacements
 
     def catalog(self) -> list[dict[str, object]]:
         output = []

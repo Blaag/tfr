@@ -261,7 +261,7 @@ def test_speaker_rule_merge_keeps_managed_speakers_and_adds_missing_legacy_rules
 
     assert [rule["speaker"] for rule in merged] == ["Bob", "Blood"]
     assert merged[0]["effect"] == "combo_godlike"
-    assert merged[0]["kinds"] == ["say", "pose", "page"]
+    assert merged[0]["kinds"] == ["say", "pose"]
 
 
 def test_bootstrap_metadata_is_silent_and_existing_secret_reference_is_preserved(

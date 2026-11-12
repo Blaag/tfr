@@ -133,6 +133,7 @@ from tfr.sessions import SessionManager, SessionState, WorldSession
 from tfr.settings_ui import (
     SPEAKER_EFFECT_NAMES,
     editable_settings,
+    normalize_speaker_rules,
     parse_setting_value,
     setting_category,
     setting_destination,
@@ -5357,7 +5358,7 @@ class TfrTui:
         self,
         existing: dict[str, object] | None = None,
     ) -> dict[str, object] | None:
-        rule = dict(existing or {})
+        rule = normalize_speaker_rules([existing])[0] if existing else {}
         speaker = await self._settings_input(
             title="Speaker effect",
             text="Speaker name",
@@ -5477,7 +5478,6 @@ class TfrTui:
             values=[
                 ("say", "When they say something"),
                 ("pose", "When they pose"),
-                ("page", "When they page"),
             ],
             defaults=[str(item) for item in rule.get("kinds", [])],
         )

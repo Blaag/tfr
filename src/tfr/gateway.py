@@ -2833,6 +2833,10 @@ class GatewayServer:
                     )
                 resolved_target = self._configuration_target(scope, target, ui_id=ui_id)
                 value = message.get("value")
+                if key == "plugins.config.speaker_effects.rules" and message_type == "config_set":
+                    from tfr.settings_ui import normalize_speaker_rules
+
+                    value = normalize_speaker_rules(value)
                 preview = store.preview(
                     key,
                     value,
@@ -2840,6 +2844,10 @@ class GatewayServer:
                     target=resolved_target,
                     reset=message_type == "config_reset",
                 )
+                if key == "plugins.config.speaker_effects.rules":
+                    await self.runtime.plugins.validate_speaker_effects(
+                        [] if message_type == "config_reset" else value
+                    )
                 if not confirm:
                     result = preview
                 else:
@@ -2925,8 +2933,20 @@ class GatewayServer:
                             "change only their own UI-scoped settings"
                         )
                     change["target"] = self._configuration_target(scope, target, ui_id=ui_id)
+                    if (
+                        change.get("key") == "plugins.config.speaker_effects.rules"
+                        and change.get("operation") == "set"
+                    ):
+                        from tfr.settings_ui import normalize_speaker_rules
+
+                        change["value"] = normalize_speaker_rules(change.get("value"))
                     resolved_changes.append(change)
                 preview = store.preview_batch(resolved_changes)
+                for change in resolved_changes:
+                    if change.get("key") == "plugins.config.speaker_effects.rules":
+                        await self.runtime.plugins.validate_speaker_effects(
+                            change.get("value", []) if change.get("operation") == "set" else []
+                        )
                 if not confirm:
                     result = preview
                 else:

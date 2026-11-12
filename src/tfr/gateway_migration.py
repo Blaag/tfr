@@ -205,7 +205,7 @@ def _normalized_speaker_rules(value: object) -> list[dict[str, object]]:
         rule = copy.deepcopy(raw)
         kinds = rule.get("kinds")
         if isinstance(kinds, list):
-            supported = [kind for kind in kinds if kind in {"say", "pose", "page"}]
+            supported = [kind for kind in kinds if kind in {"say", "pose"}]
             if supported:
                 rule["kinds"] = supported
             else:
