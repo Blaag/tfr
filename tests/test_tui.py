@@ -2140,6 +2140,37 @@ async def test_diagnostics_copy_uses_complete_bounded_report() -> None:
     assert "Diagnostic message 29" not in text
 
 
+async def test_diagnostics_isolates_dynamic_status_failures() -> None:
+    tui = make_tui()
+    runtime = SimpleNamespace(
+        diagnostics=AsyncMock(
+            return_value=[
+                {
+                    "timestamp": "2026-11-12T01:00:00Z",
+                    "severity": "info",
+                    "client": "gateway",
+                    "component": "gateway",
+                    "code": "healthy",
+                    "message": "Gateway diagnostics remain available",
+                }
+            ]
+        ),
+        recall_status=AsyncMock(side_effect=RuntimeError("recall busy")),
+        release_status=AsyncMock(side_effect=RuntimeError("install busy")),
+        diagnostic_status=Mock(return_value={"connected": True, "worlds": {}}),
+        web_status=AsyncMock(return_value={"enabled": False, "device_count": 0}),
+    )
+    tui.service_runtime = runtime
+
+    await tui._handle_client_command("alpha", "/diagnostics")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Gateway diagnostics remain available" in text
+    assert "Dynamic recall status is temporarily unavailable" in text
+    assert "Dynamic releases status is temporarily unavailable" in text
+    assert "Diagnostics failed" not in text
+
+
 async def test_recall_status_shows_disabled_worlds_and_backfill_progress() -> None:
     tui = make_tui()
     tui.service_runtime = SimpleNamespace(
@@ -2241,6 +2272,50 @@ async def test_releases_list_explains_retention_reasons() -> None:
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
     assert "current, live-lease, recent" in text
     assert "eligible for cleanup" in text
+
+
+async def test_releases_status_reports_installation_busy_without_failure() -> None:
+    tui = make_tui()
+    tui.service_runtime = SimpleNamespace(
+        release_status=AsyncMock(
+            return_value={
+                "managed": True,
+                "root": "/state/tfr",
+                "pruning_enabled": False,
+                "deferred_reason": "host-reboot-required",
+                "retention_target": 5,
+                "installation_busy": True,
+                "inventory_available": False,
+                "installed_count": 106,
+                "installed_bytes": None,
+                "live_releases": [],
+                "releases": [],
+            }
+        )
+    )
+
+    await tui._handle_client_command("alpha", "/releases")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "Installation/update in progress" in text
+    assert "Cleanup deferred until the Gateway host reboots" in text
+    assert "Release status failed" not in text
+
+
+async def test_releases_error_is_reconnect_aware() -> None:
+    tui = make_tui()
+    tui.service_runtime = SimpleNamespace(
+        release_status=AsyncMock(side_effect=ConnectionError("gateway client is not running")),
+        diagnostic_status=Mock(
+            return_value={"connected": False, "restart_phase": "reconnecting"}
+        ),
+    )
+
+    await tui._handle_client_command("alpha", "/releases")
+
+    text = fragment_list_to_text(tui.active_view.display.formatted_text())
+    assert "temporarily unavailable while the Gateway is updating or recon\nnecting" in text
+    assert "gateway client is not running" not in text
 
 
 async def test_config_migration_commands_submit_choose_apply_and_report_status() -> None:

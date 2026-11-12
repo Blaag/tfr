@@ -223,6 +223,21 @@ def test_installation_lock_rejects_concurrent_writer(tmp_path: Path) -> None:
         pass
 
 
+def test_release_status_returns_busy_snapshot_during_installation(tmp_path: Path) -> None:
+    layout = InstallationLayout.defaults(root=tmp_path / "tfr", bin_directory=tmp_path / "bin")
+    release_id = f"1.2.3+git.{'a' * 40}"
+    stage_release(layout, release_id, "a" * 40)
+    layout.activate(release_id)
+
+    with layout.lock():
+        status = layout.release_status()
+
+    assert status["managed"] is True
+    assert status["installation_busy"] is True
+    assert status["inventory_available"] is False
+    assert status["releases"] == []
+
+
 def test_managed_restart_uses_current_release(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -333,6 +348,13 @@ def test_existing_install_waits_for_boot_boundary_before_pruning(
     layout.activate(release_ids[-1])
 
     assert len(layout.list_releases()) == 7
+    deferred = layout.release_status()
+    assert deferred["pruning_enabled"] is False
+    assert deferred["deferred_reason"] == "host-reboot-required"
+    assert not any(item["eligible"] for item in deferred["releases"])
+    assert any(
+        "safety-epoch-deferred" in item["reasons"] for item in deferred["releases"]
+    )
     state = (layout.root / "release-leases/state.json").read_text(encoding="utf-8")
     assert '"enabled":false' in state
 

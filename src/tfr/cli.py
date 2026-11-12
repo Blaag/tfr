@@ -283,12 +283,18 @@ def _run_releases_cli(action: str) -> int:
     if status.get("managed") is not True:
         print("TFR is not running from a managed release installation.")
         return 0
+    installed_count = status.get("installed_count")
+    installed_bytes = status.get("installed_bytes")
     print(
-        f"Managed releases: {status.get('installed_count', 0)} "
-        f"({status.get('installed_bytes', 0)} bytes); pruning "
+        f"Managed releases: {installed_count if installed_count is not None else 'unknown'} "
+        f"({installed_bytes if installed_bytes is not None else 'unknown'} bytes); pruning "
         f"{'enabled' if status.get('pruning_enabled') else 'deferred'}; "
         f"retain {status.get('retention_target', 5)} recent"
     )
+    if status.get("installation_busy") is True:
+        print("Installation/update in progress; detailed inventory is temporarily unavailable.")
+    if status.get("deferred_reason") == "host-reboot-required":
+        print("Cleanup is deferred until this host reboots.")
     releases = status.get("releases", [])
     if action == "list":
         for release in releases:

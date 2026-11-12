@@ -228,7 +228,11 @@ and `tfr releases list`. An attached UI can inspect the Gateway host with
 `/releases status` or `/releases list`; each release is labeled with reasons such
 as `current`, `previous`, `recent`, `live-lease`, and
 `downgrade-high-water`. `/diagnostics releases` and the complete diagnostics copy
-include the persisted outcome of the latest automatic cleanup.
+include the persisted outcome of the latest automatic cleanup. Status never
+takes the installation writer lock: while staging, activation, or pruning owns
+that lock, it returns a temporary `installation_busy` summary instead of delaying
+the operation. Existing installations with lease-unaware processes report that
+cleanup is deferred until the host crosses its one-time reboot safety boundary.
 
 `--latest-stable` performs an explicit, fail-closed stable installation. It
 fetches the live official release manifest without using the notification
