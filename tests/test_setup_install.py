@@ -50,6 +50,7 @@ def test_generated_launcher_quotes_paths_and_forwards_arguments(tmp_path: Path) 
 
     assert f"'{executable}'" in script
     assert f"'{token}'" in script
+    assert "\n+  " not in script
     assert script.endswith('"$@"\n')
 
 

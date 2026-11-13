@@ -262,7 +262,7 @@ def empty_agents_config() -> str:
 
 
 def launcher_script(arguments: list[str]) -> str:
-    command = " \\\n+  ".join(shlex.quote(argument) for argument in arguments)
+    command = " \\\n  ".join(shlex.quote(argument) for argument in arguments)
     return f'#!/bin/sh\nset -eu\n\nexec {command} "$@"\n'
 
 
