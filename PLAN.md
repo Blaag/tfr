@@ -812,7 +812,7 @@ Acceptance criteria:
   notifier in automatic mode, and do not promise custom icons or click-to-world
   routing where the transport cannot support them.
   - [x] macOS-first native phase: individual-UI policy and reset, strict
-    focus-out gating, one notification per unfocused interval, private/contextual
+    focus-out gating, one notification per unfocused interval, Private/Details
     previews, OSC 9, BEL fallback, tmux wrapping, Herdr delivery, diagnostics,
     and automated policy/transport/focus tests.
   - [x] Add Linux notification delivery through OSC 9 or the standard
@@ -820,11 +820,13 @@ Acceptance criteria:
     an implementation dependency.
   - [x] Cover singular pages and known Alien/MUSH multipage formats; retain a
     permissive bounded fallback for other MU* page formats and add fixtures as found.
-- [ ] Add post-migration guidance for providers, agents, and other settings
-  whose plaintext secrets are intentionally omitted. List each missing secret
-  reference, explain `env:`, private `file:`, and macOS Keychain options, keep
-  dependent agents inactive until validation succeeds, and confirm readiness
-  before retiring the migration workflow.
+- [x] Complete safe post-migration handling for providers, agents, worlds, and
+  other secret-bearing settings. Migration omits plaintext secrets, preserves
+  existing managed references, stores available world passwords in private
+  mode-0600 files, reports genuinely missing secrets, and supports documented
+  `env:`, private `file:`, and macOS `keychain:` references. Dependent settings
+  remain subject to normal configuration validation; no additional migration
+  assistant is required.
 - [x] Convert `/boss` into a plugin with dynamic display content and an API for
   other components or plugins to emit events into the active boss view.
 - [x] Publish gateway- and UI-detected operational activity as plugin-visible
@@ -1010,11 +1012,11 @@ Acceptance criteria:
   switching, unread markers, touch-friendly command history, dynamic type,
   safe-area and keyboard handling, compact provenance, virtualized per-world
   scrollback, explicit return-to-live behavior, and responsive layouts for
-  narrow screens. Compare PWA background/reconnect and notification limits
-  against a native Swift client before choosing the long-term platform. The PWA
-  implementation, structured ANSI-derived text runs, and initial iPhone
-  validation are complete; deeper accessibility testing and the longer platform
-  pilot remain follow-up work.
+  narrow screens. The PWA implementation, structured ANSI-derived text runs,
+  background reconnect/backfill, Web Push, mobile input/layout behavior, and
+  real-device validation are complete. The PWA is the selected mobile client;
+  further browser or device compatibility work is regression-driven from user
+  reports and bounded `/diagnostics` rather than an open-ended acceptance gate.
 - [x] Add native-UI Gateway/PWA administration for status, pairing, device
   listing, and revocation, including a scannable pairing QR code. Keep the
   owner-only CLI as a fallback, but discover both standard Unix socket paths
