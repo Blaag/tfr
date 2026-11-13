@@ -31,6 +31,7 @@ class PushPreferences:
     worlds: tuple[str, ...] = ()
     mentions: bool = True
     pages: bool = True
+    preview: str = "private"
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -38,16 +39,29 @@ class PushPreferences:
             "worlds": list(self.worlds),
             "mentions": self.mentions,
             "pages": self.pages,
+            "preview": self.preview,
         }
 
     @classmethod
     def from_dict(cls, value: object, allowed_worlds: tuple[str, ...]) -> PushPreferences:
-        if not isinstance(value, dict) or set(value) != {
-            "any_activity",
-            "worlds",
-            "mentions",
-            "pages",
-        }:
+        if (
+            not isinstance(value, dict)
+            or not set(value)
+            <= {
+                "any_activity",
+                "worlds",
+                "mentions",
+                "pages",
+                "preview",
+            }
+            or not {
+                "any_activity",
+                "worlds",
+                "mentions",
+                "pages",
+            }
+            <= set(value)
+        ):
             raise ValueError("push preferences have invalid fields")
         worlds = value["worlds"]
         if (
@@ -61,11 +75,17 @@ class PushPreferences:
         for key in ("any_activity", "mentions", "pages"):
             if not isinstance(value[key], bool):
                 raise ValueError("push preferences are invalid")
+        preview = value.get("preview", "private")
+        if preview == "full":
+            preview = "details"
+        if preview not in {"private", "details"}:
+            raise ValueError("push preview preference is invalid")
         return cls(
             any_activity=value["any_activity"],
             worlds=tuple(worlds),
             mentions=value["mentions"],
             pages=value["pages"],
+            preview=preview,
         )
 
 
@@ -87,9 +107,7 @@ class PushSubscriptionRecord:
         }
 
     @classmethod
-    def from_dict(
-        cls, value: object, allowed_worlds: tuple[str, ...]
-    ) -> PushSubscriptionRecord:
+    def from_dict(cls, value: object, allowed_worlds: tuple[str, ...]) -> PushSubscriptionRecord:
         if not isinstance(value, dict) or set(value) != {
             "endpoint",
             "p256dh",
@@ -507,9 +525,7 @@ class DeviceStore:
             raise ValueError("web device is unavailable")
         return entry
 
-    def _replace_and_save(
-        self, digest: str, previous: DeviceRecord, updated: DeviceRecord
-    ) -> None:
+    def _replace_and_save(self, digest: str, previous: DeviceRecord, updated: DeviceRecord) -> None:
         self._devices[digest] = updated
         try:
             self._save()

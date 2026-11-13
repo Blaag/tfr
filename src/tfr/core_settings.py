@@ -227,7 +227,7 @@ def core_setting_descriptors() -> tuple[SettingDescriptor, ...]:
             "private",
             SettingScope.UI,
             NATIVE,
-            choices=("private", "full"),
+            choices=("private", "details"),
         ),
         _setting("ui.pager.enabled", SettingType.BOOLEAN, True, SettingScope.UI_TYPE, NATIVE),
         _setting(

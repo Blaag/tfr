@@ -140,13 +140,15 @@ An authenticated device may register, replace, or remove only its own Web Push
 subscription and trigger preferences. Subscription endpoints must use HTTPS and
 an allowlisted Apple, Google, or Mozilla push-service hostname, preventing a
 device credential from turning the Gateway into an arbitrary HTTP client. Push
-payloads are Web-Push encrypted and contain only a schema version plus the generic
-`activity` type. The service worker supplies only the fixed title `New activity`
-and no body, so world output, sender identity, world names, and message details do
-not leave the Gateway through the push service. Every accepted push event displays
-a notification, including malformed-payload fallback, because iOS may revoke
-subscriptions that receive silent pushes. A permanent push-service rejection or
-device revocation removes the subscription.
+payloads are Web-Push encrypted. Private previews contain only a schema version
+and generic `activity` type; the service worker supplies the fixed title `New
+activity` and no body. Opt-in Details previews add only the bounded world alias
+and trigger reason so the device can show a world-and-reason alert. Sender
+identity and message text are never included or supported. Push services receive
+only encrypted payload bytes. Every accepted push event displays a notification,
+including malformed-payload fallback, because iOS may revoke subscriptions that
+receive silent pushes. A permanent push-service rejection or device revocation
+removes the subscription.
 
 Native terminal UIs report only a boolean focus-presence signal over their
 authenticated Gateway connection. The Gateway uses the union of connected native

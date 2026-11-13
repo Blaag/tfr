@@ -11,16 +11,17 @@ import {
 test("normalizes push preferences to authorized worlds", () => {
   assert.deepEqual(
     normalizePushPreferences(
-      { any_activity: true, worlds: ["alpha", "other", "alpha"], mentions: false, pages: true },
+      { any_activity: true, worlds: ["alpha", "other", "alpha"], mentions: false, pages: true, preview: "details" },
       ["alpha", "beta"],
     ),
-    { any_activity: true, worlds: ["alpha"], mentions: false, pages: true },
+    { any_activity: true, worlds: ["alpha"], mentions: false, pages: true, preview: "details" },
   );
   assert.deepEqual(normalizePushPreferences(null), {
     any_activity: false,
     worlds: [],
     mentions: true,
     pages: true,
+    preview: "private",
   });
 });
 

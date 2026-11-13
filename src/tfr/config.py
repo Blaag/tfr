@@ -193,7 +193,12 @@ class NotificationConfig(StrictModel):
     worlds: tuple[str, ...] = Field(default=(), max_length=256)
     mentions: bool = True
     pages: bool = True
-    preview: Literal["private", "full"] = "private"
+    preview: Literal["private", "details"] = "private"
+
+    @field_validator("preview", mode="before")
+    @classmethod
+    def migrate_notification_preview(cls, value: object) -> object:
+        return "details" if value == "full" else value
 
     @model_validator(mode="after")
     def valid_worlds(self) -> NotificationConfig:

@@ -164,6 +164,35 @@ async def test_sender_uses_only_private_generic_payload(
     assert "message" not in str(FakeSession.request)
 
 
+async def test_sender_details_payload_contains_only_world_and_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, bytes] = {}
+
+    def encrypt(payload: bytes, _p256dh: str, _auth: str) -> bytes:
+        captured["payload"] = payload
+        return b"encrypted"
+
+    monkeypatch.setattr(web_push, "_encrypt_web_push", encrypt)
+    monkeypatch.setattr(web_push, "_vapid_token", lambda *_args, **_kwargs: "token")
+    monkeypatch.setattr(web_push.aiohttp, "ClientSession", FakeSession)
+    sender = WebPushSender(VapidKeyStore(tmp_path / "web", "https://gateway.example.test"))
+
+    result = await sender._send(
+        "https://web.push.apple.com/token",
+        "key",
+        "auth",
+        world="alien",
+        reason="mention",
+    )
+
+    assert result.delivered is True
+    assert captured["payload"] == (
+        b'{"version":1,"type":"activity","world":"alien","reason":"mention"}'
+    )
+    assert b"message" not in captured["payload"]
+
+
 async def test_sender_marks_expired_subscription_permanent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

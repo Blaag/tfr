@@ -683,10 +683,13 @@ Notifications**. The Gateway creates one stable private VAPID P-256 key in the
 web state directory and stores each device's push subscription alongside its
 paired-device record. Notifications are disabled until the device explicitly
 enables them. Checked worlds form the mandatory eligibility gate; within those
-worlds, per-device triggers support pages, character-name mentions, or any
-visible inbound activity. Unchecked worlds never notify. The notification title is the
-private fixed text `New activity` with no body; message text, sender names, and
-world names are never included in the push payload. The Gateway suppresses pushes while
+worlds, per-device triggers support pages, character-name mentions in says or
+speech, or any visible inbound activity. Pose text does not trigger mentions.
+Unchecked worlds never notify, and selecting no worlds effectively disables
+notifications. **Private** previews use the fixed title `New activity` with no
+body. Opt-in **Details** previews include only the world and reason, such as
+`Page received` or `Your character name was mentioned`; message text and sender
+names are never included or supported. The Gateway suppresses pushes while
 that PWA reports itself visible or any connected native TFR UI reports that its
 terminal surface is focused. It sends at most one alert until the PWA becomes
 explicitly visible again; iOS background WebSocket reconnects do not reset that
@@ -805,7 +808,10 @@ terminal-safe reverse-video keyboard cursor.
 Native terminal UIs can enable individual-UI desktop notifications under
 **Notifications** in `/config`. TFR notifies only after the terminal reports
 that its surface lost focus, sends at most one notification until focus returns,
-and defaults to the private text `TFR has activity`. Automatic delivery uses
+and defaults to the private text `TFR has activity`. The same eligible-world,
+page, speech-mention, any-activity, and Private/Details policy used by the PWA
+applies; no selected worlds means no notifications. Details include only the
+world and reason, never message or sender text. Automatic delivery uses
 BEL-terminated OSC 9 in Ghostty, iTerm2, Kitty, WezTerm, and Warp; tmux output
 is wrapped for passthrough, and Herdr uses `herdr notification show`. On a local
 Linux graphical session, an unknown terminal uses the Freedesktop notification

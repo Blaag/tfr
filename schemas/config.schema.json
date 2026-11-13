@@ -157,7 +157,7 @@
           "default": "private",
           "enum": [
             "private",
-            "full"
+            "details"
           ],
           "title": "Preview",
           "type": "string"

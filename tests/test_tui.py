@@ -5966,7 +5966,9 @@ async def test_herdr_forwarded_focus_sequences_control_notification_delivery(
         tui = make_tui(input=input)
         tui.active_view.session.state = SessionState.CONNECTED
         queue = tui.command_bus.register(tui.active_view.session.session_id)
-        tui.notification_policy.reconfigure(NotificationConfig(enabled=True, any_activity=True))
+        tui.notification_policy.reconfigure(
+            NotificationConfig(enabled=True, any_activity=True, worlds=("alpha",))
+        )
         delivered = Mock(return_value=True)
         tui.notification_transport.send = delivered
         running = asyncio.create_task(tui.run())
