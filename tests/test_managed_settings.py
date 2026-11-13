@@ -12,6 +12,7 @@ from tfr.config import (
     ConfigurationBundle,
     GagConfig,
     LoggingConfig,
+    LoginConfig,
     MainConfig,
     ManagedSettingsConfig,
     UiConfig,
@@ -259,6 +260,43 @@ async def test_gateway_gag_mutation_persists_then_hot_swaps_policy(tmp_path: Pat
             worlds(),  # type: ignore[union-attr]
         )
         assert reset_store.list_gag_patterns("alpha").patterns == ("from base",)
+    finally:
+        await runtime.stop()
+
+
+async def test_recall_enabled_gateway_uses_login_character(tmp_path: Path) -> None:
+    bundle = configuration_bundle(tmp_path)
+    alpha = bundle.worlds.worlds["alpha"]
+    bundle = bundle.model_copy(
+        update={
+            "main": bundle.main.model_copy(
+                update={
+                    "recall": bundle.main.recall.model_copy(
+                        update={"enabled": True, "database_path": tmp_path / "recall.sqlite3"}
+                    )
+                }
+            ),
+            "worlds": bundle.worlds.model_copy(
+                update={
+                    "worlds": {
+                        **bundle.worlds.worlds,
+                        "alpha": alpha.model_copy(
+                            update={
+                                "recall_enabled": True,
+                                "login": LoginConfig(character="Black", password="secret"),
+                            }
+                        ),
+                    }
+                }
+            ),
+        }
+    )
+
+    runtime = await GatewayRuntime.from_configuration(bundle)
+    try:
+        assert runtime.recall_store is not None
+        assert runtime.recall_store.worlds["alpha"].character_name == "Black"
+        assert runtime.recall_store.worlds["beta"].character_name is None
     finally:
         await runtime.stop()
 

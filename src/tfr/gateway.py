@@ -822,7 +822,9 @@ class GatewayRuntime:
                     world: RecallWorldPolicy(
                         enabled=config.recall_enabled,
                         retention_days=config.recall_retention_days,
-                        character_name=config.character,
+                        character_name=(
+                            config.login.character if config.login is not None else None
+                        ),
                     )
                     for world, config in bundle.worlds.worlds.items()
                 },
