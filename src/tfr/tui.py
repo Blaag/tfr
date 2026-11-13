@@ -7629,6 +7629,9 @@ class TfrTui:
             f"{summary.get('unattributed_lines', 0)} unattributed\n"
             f"  Says {summary.get('say_percent', 0)}%; poses {summary.get('pose_percent', 0)}%; "
             f"classification coverage {summary.get('classification_coverage', 0)}%\n"
+            f"  Attribution: stored {summary.get('stored_attribution_lines', 0)}; "
+            f"local character {summary.get('configured_character_lines', 0)}; "
+            f"visible text {summary.get('inferred_attribution_lines', 0)}\n"
             f"  {summary.get('first') or 'no first event'} through "
             f"{summary.get('last') or 'no last event'}"
         )

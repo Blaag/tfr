@@ -1338,6 +1338,13 @@ use `graph:none` for tables only. Hour and weekday buckets use the native UI's
 current local UTC offset, which is displayed by the query response and may be
 off by one hour across a historical daylight-saving transition.
 
+For worlds without NOSPOOF, stats infer speakers from visible `Name says,` lines
+and use those names to recognize poses. Local `You say,` echoes and poses are
+mapped to the configured character for that world. This inference happens only
+during stats queries; recall rows and event logs are unchanged. Word analysis
+strips inferred line prefixes before tokenization so speaker names do not
+dominate top-word results.
+
 Use `/sh` to temporarily open the local interactive shell and return to TFR by
 exiting it. Input beginning with `!` runs a one-shot local shell command, such as
 `! w`, and waits for Enter before restoring the full-screen UI. Begin input with

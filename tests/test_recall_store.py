@@ -287,3 +287,80 @@ async def test_recall_statistics_aggregate_speakers_words_and_time(tmp_path) -> 
         assert sum(sum(row) for row in heatmap["matrix"]) == 3
     finally:
         await store.close()
+
+
+async def test_stats_infer_local_and_visible_speakers_without_provenance(tmp_path) -> None:
+    store = RecallStore(
+        tmp_path / "recall.sqlite3",
+        worlds={
+            "global": RecallWorldPolicy(enabled=True, retention_days=None, character_name="black"),
+            "alien": RecallWorldPolicy(enabled=True, retention_days=None),
+        },
+        log_directory=tmp_path / "logs",
+    )
+    await store.start()
+    try:
+        base = {
+            "timestamp": "2026-11-11T12:00:00Z",
+            "direction": "inbound",
+            "display_text": "unused",
+            "redacted": False,
+        }
+        values = [
+            {
+                **base,
+                "event_id": str(uuid4()),
+                "world": "global",
+                "kind": "say",
+                "plain_text": 'You say, "hello"',
+            },
+            {
+                **base,
+                "event_id": str(uuid4()),
+                "world": "global",
+                "kind": "raw_output",
+                "plain_text": "black waves.",
+            },
+            {
+                **base,
+                "event_id": str(uuid4()),
+                "world": "alien",
+                "kind": "say",
+                "plain_text": 'Blood says, "hello"',
+            },
+            {
+                **base,
+                "event_id": str(uuid4()),
+                "world": "alien",
+                "kind": "raw_output",
+                "plain_text": "Blood waves.",
+            },
+            {
+                **base,
+                "event_id": str(uuid4()),
+                "world": "alien",
+                "kind": "raw_output",
+                "plain_text": "Unknown system output",
+            },
+        ]
+        store._insert_values(values)
+
+        local = await store.statistics({"view": "speaker", "world": "global", "speaker": "black"})
+        assert local["summary"]["lines"] == 2
+        assert local["summary"]["configured_character_lines"] == 2
+        assert local["summary"]["poses"] == 1
+
+        alien = await store.statistics({"view": "speakers", "world": "alien"})
+        assert alien["summary"]["lines"] == 2
+        assert alien["summary"]["inferred_attribution_lines"] == 2
+        assert alien["summary"]["poses"] == 1
+        assert alien["rows"][0]["name"] == "Blood"
+
+        words = await store.statistics({"view": "words", "top": 15})
+        tokens = {item["word"] for item in words["words"]}
+        assert "blood" not in tokens
+        assert "black" not in tokens
+        assert "says" not in tokens
+        assert "hello" in tokens
+    finally:
+        await store.close()
