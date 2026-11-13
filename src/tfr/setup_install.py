@@ -409,6 +409,30 @@ def _remote_ui_details(config_directory: Path) -> dict[str, object]:
         raise ValueError(
             "a Gateway profile already exists; use /gateway repair or remove it before fresh setup"
         )
+    recovery = _path("UI recovery bundle path (blank to pair from an existing UI)", required=False)
+    if recovery is not None:
+        same_ui = _yes_no(
+            "Is this restoring the same UI identity rather than adding a new UI?",
+            default=True,
+        )
+        platform = socket.gethostname().strip() or "Unknown device"
+        ui_name = None
+        if not same_ui:
+            proposed = f"{platform} · Terminal"[:80]
+            ui_name = _ask("New UI display name", proposed)
+        profile = profiles.restore_recovery(
+            recovery,
+            recover_identity=same_ui,
+            ui_name=ui_name,
+        )
+        print(f"Restored Gateway profile {profile.name} from {recovery}.")
+        print("The recovery bundle contains a live Gateway credential; keep or delete it securely.")
+        return {
+            "host": profile.host,
+            "port": profile.port,
+            "ca_file": Path(profile.tls_ca) if profile.tls_ca else None,
+            "tls_server_name": profile.tls_server_name,
+        }
     print("\nOpen an existing authenticated TFR UI and run /ui pair.")
     print("That UI will display a single-use pairing code valid for 30 minutes.")
     print("No Gateway token file or SSH access is needed on this machine.")

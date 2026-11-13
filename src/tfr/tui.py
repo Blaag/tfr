@@ -4181,6 +4181,18 @@ class TfrTui:
             if parameters == ["profiles", "export"]:
                 self.add_notice(alias, json.dumps(store.export(), indent=2, sort_keys=True))
                 return
+            if (
+                len(parameters) == 4
+                and parameters[:2] == ["profiles", "export"]
+                and parameters[3] == "--include-token"
+            ):
+                destination = store.export_recovery(parameters[2])
+                self.add_notice(
+                    alias,
+                    f"Wrote private UI recovery bundle to {destination}. It contains a live "
+                    "Gateway credential; store it securely and delete it when no longer needed.",
+                )
+                return
             if parameters == ["setup"]:
                 await run_in_terminal(lambda: interactive_gateway_setup(store))
                 self.restart_requested = True

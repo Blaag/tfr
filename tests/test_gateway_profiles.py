@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from uuid import uuid4
 
@@ -84,3 +85,52 @@ def test_interactive_setup_collects_connection_and_proposes_defaults(tmp_path: P
     assert created.tls_server_name == "gateway.example"
     assert created.ui_id == store.active.ui_id  # type: ignore[union-attr]
     assert created.ui_name == "My Terminal"
+
+
+def test_private_recovery_bundle_restores_same_ui_identity(tmp_path: Path) -> None:
+    source = GatewayProfileStore(tmp_path / "source")
+    original = profile("home")
+    source.add(original, TOKEN)
+    bundle = source.export_recovery(tmp_path / "backup" / "ui-recovery.json")
+
+    assert os.stat(bundle).st_mode & 0o777 == 0o600
+    value = json.loads(bundle.read_text(encoding="utf-8"))
+    assert value["format"] == "tfr-ui-recovery"
+    assert value["auth_token"] == TOKEN
+    assert "credential_reference" not in value["profile"]
+
+    restored_store = GatewayProfileStore(tmp_path / "restored")
+    restored = restored_store.restore_recovery(bundle, recover_identity=True)
+
+    assert restored.ui_id == original.ui_id
+    assert restored.ui_name == original.ui_name
+    assert restored_store.credentials.load(restored.credential_reference) == TOKEN
+
+
+def test_recovery_bundle_can_create_a_distinct_new_ui(tmp_path: Path) -> None:
+    source = GatewayProfileStore(tmp_path / "source")
+    original = profile()
+    source.add(original, TOKEN)
+    bundle = source.export_recovery(tmp_path / "ui-recovery.json")
+    restored_store = GatewayProfileStore(tmp_path / "new-ui")
+
+    restored = restored_store.restore_recovery(bundle, recover_identity=False, ui_name="New Laptop")
+
+    assert restored.ui_id != original.ui_id
+    assert restored.ui_name == "New Laptop"
+
+
+def test_recovery_export_refuses_to_overwrite_existing_file(tmp_path: Path) -> None:
+    store = GatewayProfileStore(tmp_path / "source")
+    store.add(profile(), TOKEN)
+    destination = tmp_path / "ui-recovery.json"
+    destination.write_text("keep", encoding="utf-8")
+
+    try:
+        store.export_recovery(destination)
+    except FileExistsError:
+        pass
+    else:
+        raise AssertionError("recovery export unexpectedly overwrote an existing file")
+
+    assert destination.read_text(encoding="utf-8") == "keep"

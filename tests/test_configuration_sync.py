@@ -14,7 +14,7 @@ from tfr.configuration_sync import (
     required_action,
     validate_configuration_ack,
 )
-from tfr.configuration_values import ConfigurationValues
+from tfr.configuration_values import ConfigurationValues, SettingProvenance
 from tfr.core import EventBus
 from tfr.core_settings import core_configuration_registry
 from tfr.gateway_client import GatewayClient, _apply_gateway_ui_configuration
@@ -36,6 +36,19 @@ def test_effective_configuration_uses_shared_type_and_individual_precedence(
         ("ui.spellcheck.enabled", True, "shared", None),
         ("ui.theme.preset", "dracula", "ui-type", "terminal"),
         ("ui.theme.preset", "nord", "ui", str(first_ui)),
+        (
+            "plugins.sources",
+            [
+                {
+                    "repo": "Blaag/tfr-plugins-public",
+                    "path": ".",
+                    "policy": "stable-auto",
+                    "manifest_url": "https://example.test/plugin-manifest.json",
+                }
+            ],
+            "gateway",
+            None,
+        ),
     )
     for key, value, scope, target in changes:
         store.set(
@@ -47,19 +60,24 @@ def test_effective_configuration_uses_shared_type_and_individual_precedence(
             actor_ui_id="test",
             actor_ui_name="Test",
         )
+        if key == "plugins.sources":
+            values.record(
+                key,
+                value,
+                SettingProvenance.MANAGED,
+                source_detail="managed Gateway configuration",
+            )
 
-    first = effective_client_configuration(
-        values, store, client_type="terminal", ui_id=first_ui
-    )
-    second = effective_client_configuration(
-        values, store, client_type="terminal", ui_id=second_ui
-    )
+    first = effective_client_configuration(values, store, client_type="terminal", ui_id=first_ui)
+    second = effective_client_configuration(values, store, client_type="terminal", ui_id=second_ui)
     pwa = effective_client_configuration(values, store, client_type="pwa", ui_id=uuid4())
 
-    assert first.revision == 3
+    assert first.revision == 4
     assert first.settings["ui.spellcheck.enabled"] is True
     assert first.settings["ui.theme.preset"] == "nord"
     assert second.settings["ui.theme.preset"] == "dracula"
+    assert first.settings["plugins.sources"][0]["repo"] == "Blaag/tfr-plugins-public"
+    assert "plugins.sources" not in pwa.settings
     assert "ui.theme.preset" not in pwa.settings
     assert all("password" not in key and "api_key" not in key for key in first.settings)
 
@@ -177,9 +195,7 @@ def test_initial_configuration_reports_unknown_plugin_setting_as_unsupported() -
 
 
 async def test_pushed_configuration_is_acknowledged_without_blocking_the_read_pump() -> None:
-    acknowledgement: asyncio.Future[dict[str, object]] = (
-        asyncio.get_running_loop().create_future()
-    )
+    acknowledgement: asyncio.Future[dict[str, object]] = asyncio.get_running_loop().create_future()
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await write_message(

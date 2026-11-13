@@ -6,6 +6,7 @@ import plistlib
 import shlex
 import shutil
 import stat
+
 # Fixed service-manager argument arrays are passed directly and never through a shell.
 import subprocess  # nosec B404
 import sys

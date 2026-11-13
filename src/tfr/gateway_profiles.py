@@ -7,6 +7,7 @@ import os
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,8 @@ from tfr.gateway_transport import (
 
 MAX_PROFILE_NAME_CHARACTERS = 80
 MAX_PROFILES = 32
+MAX_RECOVERY_CA_BYTES = 1_048_576
+RECOVERY_FORMAT = "tfr-ui-recovery"
 
 
 async def redeem_ui_pairing(
@@ -333,6 +336,100 @@ class GatewayProfileStore:
             "active": self._active,
             "profiles": [profile.as_dict(export=True) for profile in self.profiles()],
         }
+
+    def export_recovery(self, destination: Path | str) -> Path:
+        profile = self.active
+        if profile is None:
+            raise ValueError("no active Gateway profile is available to recover")
+        value: dict[str, object] = {
+            "format": RECOVERY_FORMAT,
+            "schema_version": 1,
+            "profile": profile.as_dict(export=True),
+            "auth_token": self.credentials.load(profile.credential_reference),
+            "tls_ca_pem": None,
+        }
+        if profile.tls_ca is not None:
+            ca_path = Path(profile.tls_ca).expanduser()
+            details = ca_path.stat(follow_symlinks=False)
+            if not stat.S_ISREG(details.st_mode) or details.st_size > MAX_RECOVERY_CA_BYTES:
+                raise ValueError("Gateway profile CA must be a bounded regular file")
+            value["tls_ca_pem"] = ca_path.read_text(encoding="ascii")
+        path = Path(destination).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump(value, stream, sort_keys=True, separators=(",", ":"))
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        os.chmod(path, 0o600)
+        return path
+
+    def restore_recovery(
+        self,
+        source: Path | str,
+        *,
+        recover_identity: bool,
+        ui_name: str | None = None,
+    ) -> GatewayConnectionProfile:
+        if self.profiles():
+            raise ValueError("Gateway profiles already exist; recovery requires an empty store")
+        path = Path(source).expanduser()
+        details = path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(details.st_mode) or details.st_size > MAX_RECOVERY_CA_BYTES + 16_384:
+            raise ValueError("UI recovery bundle must be a bounded regular file")
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict) or set(value) != {
+            "format",
+            "schema_version",
+            "profile",
+            "auth_token",
+            "tls_ca_pem",
+        }:
+            raise ValueError("UI recovery bundle is invalid")
+        if value["format"] != RECOVERY_FORMAT or value["schema_version"] != 1:
+            raise ValueError("UI recovery bundle is unsupported")
+        exported = value["profile"]
+        if not isinstance(exported, dict) or set(exported) != {
+            "name",
+            "host",
+            "port",
+            "tls_server_name",
+            "tls_ca",
+            "ui_id",
+            "ui_name",
+        }:
+            raise ValueError("UI recovery profile is invalid")
+        token = validate_gateway_token(value["auth_token"])
+        ca_pem = value["tls_ca_pem"]
+        tls_ca: str | None = None
+        if ca_pem is not None:
+            if not isinstance(ca_pem, str) or not ca_pem.startswith("-----BEGIN CERTIFICATE-----"):
+                raise ValueError("UI recovery CA is invalid")
+            self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            ca_path = self.directory / "recovery-ca.pem"
+            descriptor = os.open(
+                ca_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600
+            )
+            with os.fdopen(descriptor, "w", encoding="ascii") as stream:
+                stream.write(ca_pem)
+            os.chmod(ca_path, 0o600)
+            tls_ca = str(ca_path)
+        restored = GatewayConnectionProfile.from_dict(
+            {
+                **exported,
+                "tls_ca": tls_ca,
+                "credential_reference": "credential:pending",
+                "ui_id": exported["ui_id"] if recover_identity else str(uuid4()),
+                "ui_name": ui_name or exported["ui_name"],
+            }
+        )
+        self.add(restored, token)
+        return self.get(restored.name)
 
     def _load(self) -> None:
         if not self.path.exists():

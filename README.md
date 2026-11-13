@@ -793,8 +793,17 @@ or an export.
 Once connected, manage profiles from TFR with `/gateway setup`, `/gateway
 profiles`, `/gateway switch NAME`, `/gateway rename NAME NEW-NAME`, `/gateway
 repair NAME`, and `/gateway forget NAME --confirm`. Use `/gateway profiles
-export` for a credential-free backup. TLS and authentication errors identify
-the failed handshake; repair the selected profile and reconnect.
+export` for a credential-free display. To prepare a replacement or additional
+UI, use `/gateway profiles export PATH --include-token`. This writes a private
+mode-0600 recovery bundle containing the active endpoint, TLS identity, stable
+UI identity, custom CA material when configured, and live Gateway token. It
+never includes world configuration or message data. Treat the bundle like a
+password: transfer it privately and delete it when no longer needed. During
+`setup-tfr`, choose **Remote UI** and provide the recovery bundle; choose whether
+to preserve the same UI identity for recovery or generate a distinct identity
+for an additional UI. The token is moved into the normal Keychain/private
+credential backend. TLS and authentication errors identify the failed handshake;
+repair the selected profile and reconnect.
 
 If TFR detects values in a legacy local UI configuration, it offers the
 Gateway-managed migration flow. Run `/config migrate` on each named UI, inspect
