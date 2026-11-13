@@ -25,13 +25,62 @@ MAX_STATS_ROWS = 100
 MAX_STATS_GROUPS = 20
 _CONVERSATION_KINDS = ("say", "pose", "speech")
 _WORD = safe_regex.compile(r"[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*")
+_VISIBLE_SAY = safe_regex.compile(r"^(?P<speaker>.+?)\s+says?,\s+[\"“]", safe_regex.IGNORECASE)
 _STOP_WORDS = frozenset(
     {
-        "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "for", "from",
-        "had", "has", "have", "he", "her", "him", "his", "i", "if", "in", "is", "it",
-        "its", "me", "my", "of", "on", "or", "our", "she", "that", "the", "their",
-        "them", "they", "this", "to", "was", "we", "were", "what", "when", "where",
-        "who", "will", "with", "would", "you", "your", "say", "says",
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "been",
+        "but",
+        "by",
+        "for",
+        "from",
+        "had",
+        "has",
+        "have",
+        "he",
+        "her",
+        "him",
+        "his",
+        "i",
+        "if",
+        "in",
+        "is",
+        "it",
+        "its",
+        "me",
+        "my",
+        "of",
+        "on",
+        "or",
+        "our",
+        "she",
+        "that",
+        "the",
+        "their",
+        "them",
+        "they",
+        "this",
+        "to",
+        "was",
+        "we",
+        "were",
+        "what",
+        "when",
+        "where",
+        "who",
+        "will",
+        "with",
+        "would",
+        "you",
+        "your",
+        "say",
+        "says",
     }
 )
 
@@ -40,6 +89,7 @@ _STOP_WORDS = frozenset(
 class RecallWorldPolicy:
     enabled: bool
     retention_days: int | None
+    character_name: str | None = None
 
 
 class RecallStore:
@@ -434,8 +484,6 @@ class RecallStore:
         arguments = (
             world,
             world,
-            speaker.casefold() if speaker else None,
-            speaker.casefold() if speaker else None,
             after_us,
             after_us,
             before_us,
@@ -446,15 +494,21 @@ class RecallStore:
             .execute(
                 "SELECT world, timestamp, timestamp_us, kind, speaker, speaker_folded, text "
                 "FROM recall_events WHERE direction='inbound' "
-                "AND kind IN ('say','pose','speech') "
-                "AND (? IS NULL OR world=?) AND (? IS NULL OR speaker_folded=?) "
+                "AND kind IN ('say','pose','speech','raw_output') "
+                "AND (? IS NULL OR world=?) "
                 "AND (? IS NULL OR timestamp_us>=?) AND (? IS NULL OR timestamp_us<=?) "
                 "ORDER BY timestamp_us, id",
                 arguments,
             )
             .fetchall()
         )
-        values = [dict(row) for row in rows]
+        values = self._infer_stats_values([dict(row) for row in rows])
+        if speaker:
+            values = [
+                value
+                for value in values
+                if str(value.get("speaker_folded", "")) == speaker.casefold()
+            ]
         summary = self._stats_summary(values)
         result: dict[str, Any] = {
             "view": view,
@@ -476,16 +530,83 @@ class RecallStore:
             result.update(self._stats_time(values, view, query.get("bucket", "day"), offset))
         return result
 
+    def _infer_stats_values(self, values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        known: dict[str, dict[str, str]] = defaultdict(dict)
+        for world, policy in self.worlds.items():
+            if policy.character_name:
+                known[world][policy.character_name.casefold()] = policy.character_name
+        for value in values:
+            speaker = value.get("speaker")
+            if speaker:
+                value["attribution"] = "stored"
+                known[str(value["world"])][str(speaker).casefold()] = str(speaker)
+                continue
+            if value["kind"] != "say":
+                continue
+            text = str(value["text"]).lstrip()
+            policy = self.worlds.get(str(value["world"]))
+            if policy and policy.character_name and text.casefold().startswith("you say,"):
+                self._set_inferred_speaker(value, policy.character_name, "configured-character")
+            elif match := _VISIBLE_SAY.match(text):
+                speaker = match.group("speaker").strip()
+                if speaker.casefold() != "you":
+                    self._set_inferred_speaker(value, speaker, "visible-text")
+            if value.get("speaker"):
+                speaker = str(value["speaker"])
+                known[str(value["world"])][speaker.casefold()] = speaker
+        output: list[dict[str, Any]] = []
+        for value in values:
+            if value["kind"] != "raw_output":
+                output.append(value)
+                continue
+            text = str(value["text"]).lstrip()
+            speakers = known.get(str(value["world"]), {})
+            matches = [
+                display
+                for folded, display in speakers.items()
+                if self._stats_speaker_prefix(text, folded)
+            ]
+            if not matches:
+                continue
+            speaker = max(matches, key=len)
+            value["kind"] = "pose"
+            character = getattr(self.worlds.get(str(value["world"])), "character_name", None)
+            source = (
+                "configured-character"
+                if character and speaker.casefold() == character.casefold()
+                else "visible-text"
+            )
+            self._set_inferred_speaker(value, speaker, source)
+            output.append(value)
+        return output
+
+    @staticmethod
+    def _set_inferred_speaker(value: dict[str, Any], speaker: str, source: str) -> None:
+        value["speaker"] = speaker
+        value["speaker_folded"] = speaker.casefold()
+        value["attribution"] = source
+
+    @staticmethod
+    def _stats_speaker_prefix(text: str, speaker_folded: str) -> bool:
+        if not text.casefold().startswith(speaker_folded):
+            return False
+        suffix = text[len(speaker_folded) :]
+        return not suffix or suffix[0].isspace() or suffix[:2].casefold() in {"'s", "’s"}
+
     @staticmethod
     def _stats_summary(values: list[dict[str, Any]]) -> dict[str, Any]:
         kinds = Counter(str(value["kind"]) for value in values)
         speakers = {str(value["speaker_folded"]) for value in values if value["speaker_folded"]}
         attributed = sum(value["speaker_folded"] is not None for value in values)
+        attribution = Counter(str(value.get("attribution", "unattributed")) for value in values)
         classified = kinds["say"] + kinds["pose"]
         return {
             "lines": len(values),
             "attributed_lines": attributed,
             "unattributed_lines": len(values) - attributed,
+            "stored_attribution_lines": attribution["stored"],
+            "configured_character_lines": attribution["configured-character"],
+            "inferred_attribution_lines": attribution["visible-text"],
             "speakers": len(speakers),
             "says": kinds["say"],
             "poses": kinds["pose"],
@@ -526,6 +647,12 @@ class RecallStore:
         excluded = set(_STOP_WORDS if stop else ())
         if speaker:
             excluded.update(token.casefold() for token in _WORD.findall(speaker))
+            folded_text = text.casefold().lstrip()
+            folded_speaker = speaker.casefold()
+            if folded_text.startswith(folded_speaker):
+                text = text.lstrip()[len(speaker) :].lstrip()
+            elif folded_text.startswith("you say,"):
+                text = text.lstrip()[len("you say,") :].lstrip()
         return [
             token.casefold()
             for token in _WORD.findall(text)
