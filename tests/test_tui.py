@@ -343,7 +343,7 @@ async def test_mouse_command_rejects_invalid_mode() -> None:
     await tui._handle_client_command("alpha", "/mouse invalid")
 
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
-    assert "Usage: /mouse auto|terminal|tfr|status" in text
+    assert "Usage: /mouse [auto|terminal|tfr|status]" in text
 
 
 async def add_speaker_effects(
@@ -793,7 +793,7 @@ async def test_help_uses_topics_and_structured_command_and_plugin_details() -> N
     assert "Help request: /help\n\nTFR help topics" in help_text
     assert "Help request: /help config\n\n/config" in help_text
     assert "Help request: /help fixture\n\n/fixture" in help_text
-    assert " --" not in help_text
+    assert "set KEY VALUE|reset KEY support --scope" in help_text
 
 
 async def test_topic_help_explains_command_drill_down_and_separates_responses() -> None:
@@ -2053,7 +2053,7 @@ async def test_recall_rejects_invalid_arguments(command: str) -> None:
     await tui._handle_client_command("alpha", command)
 
     text = fragment_list_to_text(tui.active_view.display.formatted_text())
-    assert "Usage: /recall X" in text
+    assert "Usage: /recall COUNT | status" in text
 
 
 async def test_recall_rejects_non_positive_counts() -> None:
@@ -2410,9 +2410,7 @@ async def test_releases_error_is_reconnect_aware() -> None:
     tui = make_tui()
     tui.service_runtime = SimpleNamespace(
         release_status=AsyncMock(side_effect=ConnectionError("gateway client is not running")),
-        diagnostic_status=Mock(
-            return_value={"connected": False, "restart_phase": "reconnecting"}
-        ),
+        diagnostic_status=Mock(return_value={"connected": False, "restart_phase": "reconnecting"}),
     )
 
     await tui._handle_client_command("alpha", "/releases")
@@ -3815,12 +3813,31 @@ def test_general_help_hides_effects_lab_only_commands() -> None:
 
     help_text = tui.help_text("appearance")
 
-    assert "/effects — Open the Effects Lab" in help_text
+    assert "/effects — Open and control the Effects Lab" in help_text
     assert "/teststreak" not in help_text
     assert "/testspeaker" not in help_text
     assert "/effects effect" not in help_text
     assert "/effects force" not in help_text
     assert "/effects close" not in help_text
+
+    detail = tui.help_text("effects")
+    assert "/effects [open|close|list|combos|speakers|all|effect NAME" in detail
+    assert "/teststreak [all|3..7]" in detail
+
+
+def test_recall_and_stats_help_document_filters_and_limits() -> None:
+    tui = make_tui()
+
+    recall = tui.help_text("recall")
+    stats = tui.help_text("stats")
+
+    assert "l:/limit: limits matches" in recall
+    assert "c:/context: adds events" in recall
+    assert "ct:/context-time:" in recall
+    assert "after:, before:, on:, and since:" in recall
+    assert "Defaults to the active world and last 7 days" in stats
+    assert "groups:, min:" in stats
+    assert "graph:auto|bar|line|heatmap|none" in stats
 
 
 async def test_effects_lab_rejects_non_lab_commands_with_command_list() -> None:
@@ -4079,7 +4096,7 @@ async def test_speaking_streak_status_and_usage() -> None:
 
     rendered = fragment_list_to_text(tui.active_view.output_text())
     assert "Speaking streak effects are off" in rendered
-    assert "Usage: /streaks on|off|status" in rendered
+    assert "Usage: /streaks [on|off|status]" in rendered
 
 
 async def test_spellcheck_and_streak_commands_persist_on_gateway() -> None:

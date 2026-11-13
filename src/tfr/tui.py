@@ -59,7 +59,7 @@ from tfr.ansi import ansi_visible_text, safe_ansi_formatted_text, terminal_plain
 from tfr.borders import BorderEdge, border_cell
 from tfr.clear_effects import ScreenClearContext
 from tfr.combo import Combo, ComboTracker
-from tfr.command_help import COMMAND_HELP, TOPIC_SUMMARIES, CommandHelp, suggest_help
+from tfr.command_help import COMMAND_HELP, TOPIC_SUMMARIES, CommandHelp, command_usage, suggest_help
 from tfr.config import (
     ConfigurationBundle,
     NotificationConfig,
@@ -4165,11 +4165,7 @@ class TfrTui:
         if not isinstance(store, GatewayProfileStore):
             self.add_notice(alias, "Gateway profiles are unavailable")
             return
-        usage = (
-            "Usage: /gateway restart|reconnect|setup|profiles [export]|switch NAME|"
-            "rename NAME NEW-NAME|"
-            "repair NAME|forget NAME --confirm"
-        )
+        usage = command_usage("gateway")
         try:
             action = parameters[0] if parameters else ""
             if parameters == ["profiles"]:
@@ -4216,10 +4212,7 @@ class TfrTui:
             self.add_notice(alias, f"Gateway profile error: {exc}")
 
     async def _handle_plugins_command(self, alias: str, parameters: list[str]) -> None:
-        usage = (
-            "Usage: /plugins available|installed|enabled|failed|show NAME|"
-            "enable NAME [confirm]|disable NAME [confirm]"
-        )
+        usage = command_usage("plugins")
         if self.service_runtime is None or not hasattr(self.service_runtime, "plugins_catalog"):
             self.add_notice(alias, usage)
             return
@@ -4317,10 +4310,7 @@ class TfrTui:
         self.add_notice(alias, usage)
 
     async def _handle_web_command(self, alias: str, parameters: list[str]) -> None:
-        usage = (
-            "Usage: /web status|repair|devices|"
-            'pair "Device name" [--gateway HOST:PORT]|revoke DEVICE_ID'
-        )
+        usage = command_usage("web")
         if self.service_runtime is None:
             self.add_notice(alias, "Web administration is available only in an attached UI")
             return
@@ -6326,12 +6316,7 @@ class TfrTui:
             or valid_claim_profile
             or valid_remove_profile
         ):
-            self.add_notice(
-                alias,
-                "Usage: /config [summary|status|list|show|set|reset|changes|undo|migrate|"
-                "migration-status|rollback-migration|export|import|import-status|"
-                "rollback-import|ui-profiles|claim-ui-profile|remove-ui-profile]",
-            )
+            self.add_notice(alias, command_usage("config"))
             return
         if self.service_runtime is None:
             self.add_notice(alias, "Configuration inventory is available only in an attached UI")
@@ -6858,11 +6843,7 @@ class TfrTui:
                 self.add_notice(alias, f"Forgot UI {record['display_name']}")
                 return
             else:
-                self.add_notice(
-                    alias,
-                    'Usage: /ui list|pair|show NAME|rename "NAME"|rename "TARGET" "NAME"|'
-                    'forget "TARGET" [confirm]',
-                )
+                self.add_notice(alias, command_usage("ui"))
                 return
         except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
             self.add_notice(alias, f"UI inventory failed: {exc}")
@@ -6914,10 +6895,7 @@ class TfrTui:
         )
 
     async def _handle_diagnostics_command(self, alias: str, parameters: list[str]) -> None:
-        usage = (
-            "Usage: /diagnostics [gateway|config|plugins|presentations|notifications|web|"
-            "updates|agents|connector|recall|releases|report|clear|copy [CATEGORY]|export PATH]"
-        )
+        usage = command_usage("diagnostics")
         if self.service_runtime is None:
             self.add_notice(alias, "Diagnostics are available only in an attached UI")
             return
@@ -7108,7 +7086,7 @@ class TfrTui:
 
     async def _handle_update_command(self, alias: str, parameters: list[str]) -> None:
         if parameters not in ([], ["status"], ["check"], ["force"]):
-            self.add_notice(alias, "Usage: /update [status|check|force]")
+            self.add_notice(alias, command_usage("update"))
             return
         core_enabled = self.update_checker is not None and self.update_checker.config.enabled
         plugins_enabled = (
@@ -7246,7 +7224,7 @@ class TfrTui:
         elif operation == "hide":
             session.show_nospoof_prefix = False
         elif operation not in {"", "status"} or len(parameters) > 1:
-            self.add_notice(alias, "Usage: /nospoof show|hide|status")
+            self.add_notice(alias, command_usage("nospoof"))
             return
         visibility = "shown" if session.show_nospoof_prefix else "hidden"
         self.add_notice(alias, f"NOSPOOF prefixes are {visibility}")
@@ -7310,7 +7288,7 @@ class TfrTui:
             self.screen_clear_effect = effect
             self.add_notice(alias, f"Screen-clear effect locked to {effect}")
             return
-        self.add_notice(alias, "Usage: /clear [status|cycle|random|lock EFFECT]")
+        self.add_notice(alias, command_usage("clear"))
 
     async def _handle_recall_command(self, alias: str, parameters: list[str]) -> None:
         if parameters == ["status"]:
@@ -7328,12 +7306,12 @@ class TfrTui:
             await self._handle_database_recall(alias, parameters)
             return
         if len(parameters) != 1:
-            self.add_notice(alias, "Usage: /recall X")
+            self.add_notice(alias, command_usage("recall"))
             return
         try:
             count = int(parameters[0])
         except ValueError:
-            self.add_notice(alias, "Usage: /recall X")
+            self.add_notice(alias, command_usage("recall"))
             return
         if count <= 0:
             self.add_notice(alias, "Recall count must be a positive integer")
@@ -7752,7 +7730,7 @@ class TfrTui:
 
     async def _handle_releases_command(self, alias: str, parameters: list[str]) -> None:
         if parameters not in ([], ["status"], ["list"]):
-            self.add_notice(alias, "Usage: /releases [status|list]")
+            self.add_notice(alias, command_usage("releases"))
             return
         if self.service_runtime is None or not hasattr(self.service_runtime, "release_status"):
             self.add_notice(alias, "Gateway release status is unavailable")
@@ -7908,7 +7886,7 @@ class TfrTui:
         elif operation == "off":
             self._set_low_bandwidth(False)
         elif operation != "status" or len(parameters) > 1:
-            self.add_notice(alias, "Usage: /lowbw [on|off|status]")
+            self.add_notice(alias, command_usage("lowbw"))
             return
         self._sync_animation_task(restart=True)
         state = "on" if self.low_bandwidth else "off"
@@ -7928,7 +7906,7 @@ class TfrTui:
                 self._mosh_detected = _running_under_mosh()
             self.application.invalidate()
         elif operation not in {"", "status"} or len(parameters) > 1:
-            self.add_notice(alias, "Usage: /mouse auto|terminal|tfr|status")
+            self.add_notice(alias, command_usage("mouse"))
             return
         reason = (
             "; mosh-server detected" if self.mouse_mode == "auto" and self._mosh_detected else ""
@@ -7968,7 +7946,7 @@ class TfrTui:
         elif operation == "off":
             self.animations_enabled = False
         elif operation != "status" or len(parameters) > 1:
-            self.add_notice(alias, "Usage: /animations [on|off|status]")
+            self.add_notice(alias, command_usage("animations"))
             return
         if not self.animations_enabled:
             self._clear_combo_visuals()
@@ -7985,7 +7963,7 @@ class TfrTui:
     async def _handle_speaking_streaks_command(self, alias: str, parameters: list[str]) -> None:
         operation = parameters[0].casefold() if len(parameters) == 1 else ""
         if operation not in {"on", "off", "status", ""} or len(parameters) > 1:
-            self.add_notice(alias, "Usage: /streaks on|off|status")
+            self.add_notice(alias, command_usage("streaks"))
             return
         try:
             current = await self._shared_ui_setting("speaking_streaks", operation)
@@ -8018,7 +7996,7 @@ class TfrTui:
             self.add_notice(alias, "Restored the original pre-correction draft")
             return
         if operation not in {"on", "off", "status", ""} or len(parameters) > 1:
-            self.add_notice(alias, "Usage: /spellcheck on|off|status|undo")
+            self.add_notice(alias, command_usage("spellcheck"))
             return
         try:
             current = await self._shared_ui_setting("spellcheck", operation)
@@ -8104,7 +8082,7 @@ class TfrTui:
             runtime.record_notification_diagnostic(code, message, self.notification_status())
 
     async def _handle_gag_command(self, alias: str, parameters: list[str]) -> None:
-        usage = "Usage: /gag list|add PATTERN|remove PATTERN|reset"
+        usage = command_usage("gag")
         if self.service_runtime is None:
             self.add_notice(alias, "Managed gag settings are unavailable")
             return
