@@ -22,6 +22,7 @@ from tfr.gateway_transport import (
     load_gateway_token,
     validate_tcp_endpoint,
 )
+from tfr.service_management import service_definition, service_status
 from tfr.updates import current_build
 
 DoctorProfile = Literal["all-in-one", "local-split", "gateway", "remote-ui"]
@@ -37,6 +38,9 @@ class Doctor:
     def fail(self, message: str) -> None:
         self.failures += 1
         print(f"[fail] {message}")
+
+    def warning(self, message: str) -> None:
+        print(f"[warning] {message}")
 
     def check_private_file(self, path: Path, label: str) -> None:
         try:
@@ -69,9 +73,7 @@ async def run_doctor(
 ) -> int:
     doctor = Doctor()
     build = current_build()
-    doctor.ok(
-        f"TFR {build.version}" + (f" ({build.commit[:12]})" if build.commit else "")
-    )
+    doctor.ok(f"TFR {build.version}" + (f" ({build.commit[:12]})" if build.commit else ""))
     if shutil.which("git") is None:
         doctor.fail("git is unavailable; stable installs and updates require it")
     else:
@@ -81,6 +83,50 @@ async def run_doctor(
         doctor.fail("uv is unavailable; install it from https://docs.astral.sh/uv/")
     else:
         doctor.ok(f"uv is available: {uv}")
+
+    configured_state = os.environ.get("XDG_STATE_HOME")
+    state_directory = (
+        Path(configured_state).expanduser() / "tfr"
+        if configured_state
+        else Path.home() / ".local" / "state" / "tfr"
+    )
+    if socket_path is None:
+        from tfr.gateway import default_gateway_socket
+
+        socket_path = default_gateway_socket()
+    target_socket = socket_path.expanduser()
+    if profile in {"gateway", "local-split"}:
+        definition = service_definition(
+            Path.home() / ".local" / "bin" / "tfr-gateway", state_directory
+        )
+        status = service_status(definition)
+        if definition is None:
+            doctor.ok("Gateway user-service management is unsupported; launcher mode is available")
+        elif not status.installed:
+            doctor.ok("Gateway user service is not installed; launcher-only mode is available")
+        elif not status.managed:
+            doctor.fail(f"Gateway service definition is not TFR-managed: {definition.path}")
+        elif not status.available:
+            doctor.fail(f"Gateway service manager is unavailable for {definition.path}")
+        else:
+            if status.enabled:
+                doctor.ok(f"Gateway user service is enabled: {definition.path}")
+            else:
+                doctor.warning(
+                    "Gateway user service definition is installed but not enabled; "
+                    "launcher-only operation remains available"
+                )
+            if status.active:
+                doctor.ok("Gateway user service is active")
+            elif status.enabled:
+                doctor.fail(f"Gateway user service is not active: {status.detail}")
+            if status.linger is False:
+                doctor.warning(
+                    "systemd user lingering is disabled; the Gateway may stop after logout. "
+                    f"Run: loginctl enable-linger {os.environ.get('USER', os.getuid())}"
+                )
+            if status.log_hint:
+                print(f"[info] Gateway service logs: {status.log_hint}")
 
     try:
         if profile == "remote-ui":
@@ -103,9 +149,7 @@ async def run_doctor(
                 core_configuration_registry(),
                 defer_plugin_validation=True,
             )
-            doctor.ok(
-                f"Gateway-managed configuration is valid at revision {store.revision}"
-            )
+            doctor.ok(f"Gateway-managed configuration is valid at revision {store.revision}")
             for warning in bootstrap.warnings:
                 print(f"[warning] {warning}")
         else:
@@ -123,18 +167,16 @@ async def run_doctor(
     if profile == "all-in-one":
         doctor.ok("all-in-one mode does not require a Gateway")
     elif profile == "local-split":
-        from tfr.gateway import default_gateway_socket
-
-        target = (socket_path or default_gateway_socket()).expanduser()
         try:
-            client = await GatewayClient.connect(target)
+            client = await GatewayClient.connect(target_socket)
         except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
-            doctor.fail(f"local Gateway is not reachable at {target}: {exc}")
+            doctor.fail(f"local Gateway is not reachable at {target_socket}: {exc}")
             print("Start it with the generated tfr-gateway launcher, then rerun this check.")
         else:
+            await _check_web_status(doctor, client)
             await client.stop()
             await client.event_bus.close()
-            doctor.ok(f"local Gateway handshake succeeded at {target}")
+            doctor.ok(f"local Gateway handshake succeeded at {target_socket}")
     elif profile == "gateway":
         if listen_host is None:
             doctor.fail("Gateway profile requires --listen-host")
@@ -149,11 +191,19 @@ async def run_doctor(
                 doctor.fail(f"Gateway network configuration is invalid: {exc}")
             else:
                 doctor.ok(
-                    "Gateway TLS listener configuration is valid for "
-                    f"{listen_host}:{listen_port}"
+                    f"Gateway TLS listener configuration is valid for {listen_host}:{listen_port}"
                 )
             doctor.check_private_file(token_file.expanduser(), "gateway token")
             doctor.check_private_file(tls_private_key.expanduser(), "Gateway TLS private key")
+        try:
+            client = await GatewayClient.connect(target_socket)
+        except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+            doctor.fail(f"Gateway application is not reachable at {target_socket}: {exc}")
+        else:
+            await _check_web_status(doctor, client)
+            await client.stop()
+            await client.event_bus.close()
+            doctor.ok(f"Gateway application handshake succeeded at {target_socket}")
     else:
         saved_profile = None
         profile_store = None
@@ -202,3 +252,21 @@ async def run_doctor(
         return 2
     print("Doctor found no problems.")
     return 0
+
+
+async def _check_web_status(doctor: Doctor, client: GatewayClient) -> None:
+    try:
+        status = await client.web_status()
+    except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+        doctor.warning(f"Gateway web backend status is unavailable: {exc}")
+        return
+    if not status.get("enabled"):
+        doctor.ok("Gateway web backend is disabled")
+        return
+    transport = str(status.get("transport", "unknown"))
+    if status.get("active"):
+        doctor.ok(f"Gateway web backend is active ({transport})")
+    else:
+        doctor.fail(f"Gateway web backend is configured but inactive ({transport})")
+    if transport == "tailscale":
+        doctor.ok(f"Tailscale Serve origin is configured: {status.get('origin', 'unknown')}")

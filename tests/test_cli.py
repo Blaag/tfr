@@ -27,14 +27,20 @@ def write_configuration(directory: Path, *, with_world: bool) -> Path:
     return main
 
 
+@pytest.mark.parametrize("schema_version", [1, 2])
 def test_remote_ui_deployment_selects_ui_for_bare_tfr(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_version: int
 ) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     deployment = tmp_path / "tfr" / "deployment.json"
     deployment.parent.mkdir()
     deployment.write_text(
-        '{"schema_version":1,"profile":"remote-ui"}\n', encoding="utf-8"
+        '{"schema_version":'
+        + str(schema_version)
+        + ',"profile":"remote-ui","gateway_socket":"/state/gateway.sock"}\n'
+        if schema_version == 2
+        else '{"schema_version":1,"profile":"remote-ui"}\n',
+        encoding="utf-8",
     )
 
     assert _configured_default_mode() == "ui"

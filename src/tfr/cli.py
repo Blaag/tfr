@@ -32,7 +32,11 @@ def _configured_default_mode() -> str | None:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
-    if value == {"schema_version": 1, "profile": "remote-ui"}:
+    if (
+        isinstance(value, dict)
+        and value.get("schema_version") in {1, 2}
+        and value.get("profile") == "remote-ui"
+    ):
         return "ui"
     return None
 
@@ -72,10 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=default_config_path(),
-        help=(
-            "Gateway bootstrap or standalone legacy configuration file "
-            "(default: %(default)s)"
-        ),
+        help=("Gateway bootstrap or standalone legacy configuration file (default: %(default)s)"),
     )
     parser.add_argument(
         "--check-config",
@@ -238,9 +239,7 @@ async def _run_recall_cli(args: argparse.Namespace) -> int:
                 raise ValueError("--context and --context-time are mutually exclusive")
             try:
                 amount = int(args.context_time[:-1])
-                multiplier = {"s": 1, "m": 60, "h": 3600, "d": 86400}[
-                    args.context_time[-1]
-                ]
+                multiplier = {"s": 1, "m": 60, "h": 3600, "d": 86400}[args.context_time[-1]]
             except (KeyError, ValueError):
                 raise ValueError("--context-time must end in s, m, h, or d") from None
             context_time = amount * multiplier
@@ -533,9 +532,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             )
 
             if args.mode == "pair":
-                pairing_url = asyncio.run(
-                    create_device_pairing_url(args.socket, args.device_name)
-                )
+                pairing_url = asyncio.run(create_device_pairing_url(args.socket, args.device_name))
                 if gateway_target is not None:
                     expected_origin = f"https://{gateway_target}"
                     actual_origin = pairing_url.split("/#", 1)[0].rstrip("/")

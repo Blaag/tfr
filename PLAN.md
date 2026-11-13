@@ -1022,7 +1022,7 @@ Acceptance criteria:
   owner-only CLI as a fallback, but discover both standard Unix socket paths
   and report actionable attempted-path failures rather than requiring users to
   coordinate runtime paths manually.
-- [ ] Add optional Gateway service management as an explicit setup choice.
+- [x] Add optional Gateway service management as an explicit setup choice.
   Detect systemd/launchd support, generate one stable explicit socket path,
   install/start/restart only with operator approval, report process/socket/web
   backend/Tailscale Serve health separately in `tfr doctor`, and document
@@ -1042,9 +1042,10 @@ Acceptance criteria:
   fallbacks, and begin with a bounded foreground-color timeline plus static bold
   and underline. Migrate existing named text effects incrementally rather than
   replacing the plugin API in one release. Browser-only scale, rotation,
-  translation, opacity, and overlay primitives remain follow-up work and must not
-  constrain the PWA to terminal capabilities. Keep client commands and actions
-  outside the presentation language.
+  translation, opacity, and overlay primitives are intentionally deferred until
+  a separately scoped PWA interface redesign; they are not open release work and
+  must not constrain the PWA to terminal capabilities. Keep client commands and
+  actions outside the presentation language.
 - [x] Finish migrating portable transcript plugins from named terminal-only
   effects to the bounded presentation mini-DSL. Every current public speaker
   effect and terminal reveal now uses typed programs with explicit fallbacks;

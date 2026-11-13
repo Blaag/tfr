@@ -37,7 +37,8 @@ remote UI host. It installs the latest verified stable release, creates private
 configuration, can prompt for world connection details, enables the public
 plugin catalog, generates profile launchers, and provides `tfr-doctor` checks.
 Rerun it later to change profiles; it backs up files before approved replacement
-and does not start TFR or install a background service.
+and never starts TFR without confirmation. For local-split and Gateway-host
+profiles, it can optionally install and start a current-user Gateway service.
 
 If `uv` is missing, the assistant offers to run Astral's official installer or
 waits while you install it yourself and re-checks, or exit cleanly. Remote setup
@@ -56,10 +57,41 @@ Remote attached UI:    ~/.local/bin/tfr-remote-ui
 Check selected setup:  ~/.local/bin/tfr-doctor
 ```
 
-Nothing is started automatically. The recommended all-in-one profile does not
-require a Gateway. The local split profile runs `tfr-gateway` in one terminal
-and `tfr-ui` in another. Remote launchers include the selected TLS and token-file
+The recommended all-in-one profile does not require a Gateway. Without the
+optional service, the local split profile runs `tfr-gateway` in one terminal and
+`tfr-ui` in another. Remote launchers include the selected TLS and token-file
 options. Rerun `setup-tfr` later to change profiles.
+
+Gateway service setup is explicit and current-user only: `systemd --user` on
+Linux and a LaunchAgent on macOS. TFR shows the generated definition and exact
+service commands, asks separately before installing/replacing the definition and
+before enabling or starting it, never invokes `sudo`, and refuses to overwrite a
+foreign service file. Launcher-only operation remains supported. Managed Gateway
+and local-UI launchers share the stable socket
+`~/.local/state/tfr/run/gateway.sock` (or the corresponding `XDG_STATE_HOME`
+path), avoiding differences between login and service environments.
+
+Linux service commands are:
+
+```console
+systemctl --user status tfr-gateway.service
+systemctl --user restart tfr-gateway.service
+journalctl --user-unit=tfr-gateway.service
+```
+
+For a headless Gateway that must continue after logout, inspect `tfr-doctor` and
+enable user lingering when it reports that lingering is disabled:
+
+```console
+loginctl enable-linger "$USER"
+```
+
+TFR reports this command but does not run it. On macOS, the LaunchAgent label is
+`org.tfr.gateway`; stdout and stderr are written under
+`~/.local/state/tfr/logs/`. Rerunning setup can safely refresh a TFR-managed
+definition or offer to remove it when switching to a profile without a Gateway.
+`tfr-doctor` reports the service manager, process, socket handshake, web backend,
+Tailscale Serve transport, lingering state, and relevant log location separately.
 
 The bootstrap checkout is not installed as `main`. The underlying installer
 fetches the official stable manifest, verifies its immutable tag and commit,

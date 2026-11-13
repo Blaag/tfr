@@ -6,10 +6,13 @@ from pathlib import Path
 import pytest
 
 from tfr.config import WorldsConfig
+from tfr.service_management import service_definition
 from tfr.setup_install import (
     SCHEMA_ROOT,
+    _configure_gateway_service,
     _configure_worlds,
     _world_entry,
+    _write_launchers,
     generate_worlds_config,
     launcher_script,
 )
@@ -48,6 +51,85 @@ def test_generated_launcher_quotes_paths_and_forwards_arguments(tmp_path: Path) 
     assert f"'{executable}'" in script
     assert f"'{token}'" in script
     assert script.endswith('"$@"\n')
+
+
+def test_local_split_launchers_share_explicit_stable_socket(tmp_path: Path) -> None:
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    socket = tmp_path / "state" / "run" / "gateway.sock"
+
+    written = _write_launchers(
+        "local-split",
+        binary,
+        tmp_path / "tfr",
+        tmp_path / "config.jsonc",
+        None,
+        socket,
+    )
+
+    assert {path.name for path in written} == {"tfr-gateway", "tfr-ui", "tfr-doctor"}
+    for path in written:
+        content = path.read_text(encoding="utf-8")
+        assert "--socket" in content
+        assert str(socket) in content
+
+
+def test_gateway_service_requires_separate_start_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher = tmp_path / "bin/tfr-gateway"
+    launcher.parent.mkdir()
+    launcher.write_text(f"#!/bin/sh\n# {tmp_path / 'state/run/gateway.sock'}\n", encoding="utf-8")
+    launcher.chmod(0o700)
+    definition = service_definition(
+        launcher,
+        tmp_path / "state",
+        platform_name="linux",
+        home=tmp_path,
+        uid=501,
+    )
+    assert definition is not None
+    answers = iter((True, False))
+    started = False
+
+    def start(_definition: object) -> None:
+        nonlocal started
+        started = True
+
+    monkeypatch.setattr("tfr.setup_install.service_definition", lambda *_args: definition)
+    monkeypatch.setattr("tfr.setup_install.shutil.which", lambda _name: "/bin/systemctl")
+    monkeypatch.setattr("tfr.setup_install._yes_no", lambda *_args, **_kwargs: next(answers))
+    monkeypatch.setattr("tfr.setup_install.install_service", start)
+
+    _configure_gateway_service("gateway", launcher=launcher, state_directory=tmp_path / "state")
+
+    assert definition.path.read_text(encoding="utf-8") == definition.content
+    assert started is False
+
+
+def test_gateway_service_refuses_foreign_definition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    definition = service_definition(
+        tmp_path / "bin/tfr-gateway",
+        tmp_path / "state",
+        platform_name="linux",
+        home=tmp_path,
+        uid=501,
+    )
+    assert definition is not None
+    definition.path.parent.mkdir(parents=True)
+    definition.path.write_text("foreign service\n", encoding="utf-8")
+    monkeypatch.setattr("tfr.setup_install.service_definition", lambda *_args: definition)
+    monkeypatch.setattr("tfr.setup_install.shutil.which", lambda _name: "/bin/systemctl")
+    monkeypatch.setattr("tfr.setup_install._yes_no", lambda *_args, **_kwargs: True)
+
+    with pytest.raises(RuntimeError, match="refusing to replace non-TFR"):
+        _configure_gateway_service(
+            "gateway",
+            launcher=tmp_path / "bin/tfr-gateway",
+            state_directory=tmp_path / "state",
+        )
 
 
 def test_rebuilding_worlds_confirms_each_replacement_once(
