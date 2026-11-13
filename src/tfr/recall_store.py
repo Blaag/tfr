@@ -26,6 +26,7 @@ MAX_STATS_GROUPS = 20
 _CONVERSATION_KINDS = ("say", "pose", "speech")
 _WORD = safe_regex.compile(r"[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*")
 _VISIBLE_SAY = safe_regex.compile(r"^(?P<speaker>.+?)\s+says?,\s+[\"“]", safe_regex.IGNORECASE)
+_INFERRED_SPEAKER = safe_regex.compile(r"^[\p{L}\p{N}_'-]{1,64}$")
 _STOP_WORDS = frozenset(
     {
         "a",
@@ -531,6 +532,11 @@ class RecallStore:
         return result
 
     def _infer_stats_values(self, values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        values = [
+            value
+            for value in values
+            if not str(value.get("text", "")).lstrip().startswith("▶ [")
+        ]
         known: dict[str, dict[str, str]] = defaultdict(dict)
         for world, policy in self.worlds.items():
             if policy.character_name:
@@ -549,7 +555,7 @@ class RecallStore:
                 self._set_inferred_speaker(value, policy.character_name, "configured-character")
             elif match := _VISIBLE_SAY.match(text):
                 speaker = match.group("speaker").strip()
-                if speaker.casefold() != "you":
+                if speaker.casefold() != "you" and _INFERRED_SPEAKER.fullmatch(speaker):
                     self._set_inferred_speaker(value, speaker, "visible-text")
             if value.get("speaker"):
                 speaker = str(value["speaker"])
