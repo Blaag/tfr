@@ -11,6 +11,7 @@ from tfr.setup_install import (
     SCHEMA_ROOT,
     _configure_gateway_service,
     _configure_worlds,
+    _save_deployment,
     _world_entry,
     _write_launchers,
     generate_worlds_config,
@@ -73,6 +74,17 @@ def test_local_split_launchers_share_explicit_stable_socket(tmp_path: Path) -> N
         content = path.read_text(encoding="utf-8")
         assert "--socket" in content
         assert str(socket) in content
+
+
+def test_remote_ui_deployment_marker_remains_compatible_with_older_releases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+    _save_deployment("remote-ui", tmp_path / "ignored.sock")
+
+    value = json.loads((tmp_path / "tfr/deployment.json").read_text(encoding="utf-8"))
+    assert value == {"schema_version": 1, "profile": "remote-ui"}
 
 
 def test_gateway_service_requires_separate_start_confirmation(

@@ -169,6 +169,10 @@ def _local_configuration_is_retired(path: Path) -> bool:
     return isinstance(plugins, dict) and set(plugins) <= {"sources", "state_directory"}
 
 
+def _local_configuration_needs_migration(path: Path, marker: Path) -> bool:
+    return path.is_file() and not marker.is_file() and not _local_configuration_is_retired(path)
+
+
 def _recover_local_plugin_bootstrap(main: Path, marker: Path) -> bool:
     candidates: list[tuple[Path, str | None]] = []
     try:
@@ -3148,7 +3152,9 @@ async def run_gateway_ui(
     migration_marker = local_configuration.main_path.with_name(
         f"{local_configuration.main_path.name}.tfr-migrated"
     )
-    local_migration_completed = migration_marker.is_file()
+    local_migration_completed = not _local_configuration_needs_migration(
+        local_configuration.main_path, migration_marker
+    )
     if (
         local_migration_completed
         and local_sources

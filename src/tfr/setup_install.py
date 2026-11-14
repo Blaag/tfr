@@ -233,17 +233,20 @@ def _deployment_path() -> Path:
 
 
 def _save_deployment(profile: Profile, gateway_socket: Path) -> None:
+    value: dict[str, object]
+    if profile == "remote-ui":
+        # Keep this exact schema-1 marker readable by managed releases predating
+        # service metadata. Remote UIs do not use the local Gateway socket.
+        value = {"schema_version": 1, "profile": profile}
+    else:
+        value = {
+            "schema_version": 2,
+            "profile": profile,
+            "gateway_socket": str(gateway_socket),
+        }
     _write_file(
         _deployment_path(),
-        json.dumps(
-            {
-                "schema_version": 2,
-                "profile": profile,
-                "gateway_socket": str(gateway_socket),
-            },
-            separators=(",", ":"),
-        )
-        + "\n",
+        json.dumps(value, separators=(",", ":")) + "\n",
         mode=0o600,
         description="deployment selection",
         replace_confirmed=True,
