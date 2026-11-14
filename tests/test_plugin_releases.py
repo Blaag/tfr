@@ -21,6 +21,18 @@ from tfr.plugin_releases import (
     rollback_plugin_release,
 )
 from tfr.plugin_sources import check_plugin_source_update, load_plugin_sources
+from tfr.updates import BuildIdentity
+
+
+@pytest.fixture(autouse=True)
+def fixed_compatible_tfr_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep plugin-release fixtures independent of release-version preparation."""
+
+    monkeypatch.setattr(
+        plugin_releases,
+        "current_build",
+        lambda: BuildIdentity(version="0.1.0", commit=None),
+    )
 
 
 def git(repository: Path, *arguments: str) -> str:
