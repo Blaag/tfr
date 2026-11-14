@@ -63,13 +63,14 @@ def build_parser() -> argparse.ArgumentParser:
             "pair",
             "devices",
             "revoke-device",
+            "profiles",
         ),
         help="run a client, the Gateway, setup diagnostics, or web-device administration",
     )
     parser.add_argument(
         "admin_action",
         nargs="?",
-        choices=("restart-gateway", "query", "status", "list"),
+        choices=("restart-gateway", "query", "status", "list", "export", "restore"),
         help="admin mode operation",
     )
     parser.add_argument(
@@ -110,6 +111,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--device-id",
         help="revoke-device mode: paired device UUID",
+    )
+    parser.add_argument("--path", type=Path, help="profile export/restore bundle path")
+    parser.add_argument(
+        "--include-token",
+        action="store_true",
+        help="profile export: include the live Gateway token in a private recovery bundle",
+    )
+    parser.add_argument(
+        "--same-ui",
+        action="store_true",
+        help="profile restore: preserve the exported stable UI identity",
+    )
+    parser.add_argument(
+        "--new-ui-name",
+        help="profile restore: create a new UI identity with this display name",
     )
     parser.add_argument(
         "--listen-host",
@@ -369,6 +385,66 @@ def run(argv: Sequence[str] | None = None) -> int:
             print("tfr: releases mode requires status or list", file=sys.stderr)
             return 2
         return _run_releases_cli(args.admin_action)
+
+    if args.mode == "profiles":
+        from tfr.gateway_profiles import GatewayProfileStore
+
+        store = GatewayProfileStore()
+        if args.admin_action == "list":
+            active = store.active
+            for profile in store.profiles():
+                marker = "*" if active is not None and active.name == profile.name else " "
+                print(
+                    f"{marker} {profile.name}  {profile.host}:{profile.port}  "
+                    f"TLS {profile.tls_server_name}"
+                )
+            return 0
+        if args.admin_action == "export":
+            if args.path is None or not args.include_token:
+                print(
+                    "tfr: profiles export requires --path PATH --include-token for a "
+                    "complete recovery bundle",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                destination = store.export_recovery(args.path)
+            except (OSError, RuntimeError, ValueError) as exc:
+                print(f"tfr: profile export failed: {exc}", file=sys.stderr)
+                return 2
+            print(
+                f"Wrote private UI recovery bundle to {destination}. It contains a live "
+                "Gateway token."
+            )
+            return 0
+        if args.admin_action == "restore":
+            if (
+                args.path is None
+                or args.same_ui == (args.new_ui_name is not None)
+                or args.include_token
+            ):
+                print(
+                    "tfr: profiles restore requires --path PATH and exactly one of "
+                    "--same-ui or --new-ui-name NAME",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                restored = store.restore_recovery(
+                    args.path,
+                    recover_identity=args.same_ui,
+                    ui_name=args.new_ui_name,
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                print(f"tfr: profile restore failed: {exc}", file=sys.stderr)
+                return 2
+            print(
+                f"Restored profile {restored.name} for {restored.host}:{restored.port}. "
+                "Run tfr doctor or start the UI to verify it."
+            )
+            return 0
+        print("tfr: profiles mode requires list, export, or restore", file=sys.stderr)
+        return 2
 
     if args.mode == "admin":
         if args.admin_action != "restart-gateway":

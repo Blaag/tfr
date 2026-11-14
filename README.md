@@ -17,6 +17,9 @@ Why use it? It has a bunch of features:
 * JSONL event logging with secret redaction
 
 The complete design and implementation sequence are in [PLAN.md](PLAN.md).
+For complete backup and disaster-recovery procedures for Gateway, UI-only, and
+all-in-one deployments—including all passwords, API keys, TLS keys, and Gateway
+tokens—see [`BACKUP-AND-RESTORE.md`](BACKUP-AND-RESTORE.md).
 
 ## Quick Start
 
@@ -787,16 +790,17 @@ On first run, TFR asks for a profile name, Gateway host and port, TLS certificat
 identity, optional custom CA, authentication token, and proposed UI display
 name. The profile stores only bootstrap metadata and a credential reference.
 On macOS the default store uses Keychain when available; other platforms use a
-private mode-0600 credential file. The token is never written into the profile
-or an export.
+private mode-0600 credential file. The token is never written into the ordinary
+profile document or credential-free display; it is included only in an explicit
+private recovery bundle requested with `--include-token`.
 
 Once connected, manage profiles from TFR with `/gateway setup`, `/gateway
 profiles`, `/gateway switch NAME`, `/gateway rename NAME NEW-NAME`, `/gateway
 repair NAME`, and `/gateway forget NAME --confirm`. Use `/gateway profiles
 export` for a credential-free display. To prepare a replacement or additional
 UI, use `/gateway profiles export PATH --include-token`. This writes a private
-mode-0600 recovery bundle containing the active endpoint, TLS identity, stable
-UI identity, custom CA material when configured, and live Gateway token. It
+mode-0600 recovery bundle containing every stored profile and token, the active
+selection, TLS identities, stable UI identities, and custom CA material. It
 never includes world configuration or message data. Treat the bundle like a
 password: transfer it privately and delete it when no longer needed. During
 `setup-tfr`, choose **Remote UI** and provide the recovery bundle; choose whether
@@ -950,6 +954,11 @@ profiles and `tfr config claim-ui-profile PROFILE_ID --apply` from that UI to
 restore its overrides. Administrators can remove obsolete settings with
 `tfr config remove-ui-profile PROFILE_ID --apply`; this does not require manual
 editing of the live managed document.
+
+These portable archives are only the Gateway-managed portion of a complete
+deployment backup. The Gateway listener token, TLS private key, PWA device state,
+and each UI host's connection tokens require the companion procedures in
+[`BACKUP-AND-RESTORE.md`](BACKUP-AND-RESTORE.md).
 
 Use `--json` for stable machine-readable output, `--ui`, `--ui-type`, `--world`,
 or `--shared` for explicit targeting, and `--gateway-profile NAME` for a stored

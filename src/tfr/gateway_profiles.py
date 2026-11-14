@@ -27,6 +27,7 @@ from tfr.gateway_transport import (
 MAX_PROFILE_NAME_CHARACTERS = 80
 MAX_PROFILES = 32
 MAX_RECOVERY_CA_BYTES = 1_048_576
+MAX_RECOVERY_BUNDLE_BYTES = MAX_PROFILES * (MAX_RECOVERY_CA_BYTES + 16_384)
 RECOVERY_FORMAT = "tfr-ui-recovery"
 
 
@@ -338,22 +339,31 @@ class GatewayProfileStore:
         }
 
     def export_recovery(self, destination: Path | str) -> Path:
-        profile = self.active
-        if profile is None:
+        profiles = self.profiles()
+        if not profiles or self.active is None:
             raise ValueError("no active Gateway profile is available to recover")
+        recovery_profiles = []
+        for profile in profiles:
+            ca_pem = None
+            if profile.tls_ca is not None:
+                ca_path = Path(profile.tls_ca).expanduser()
+                details = ca_path.stat(follow_symlinks=False)
+                if not stat.S_ISREG(details.st_mode) or details.st_size > MAX_RECOVERY_CA_BYTES:
+                    raise ValueError("Gateway profile CA must be a bounded regular file")
+                ca_pem = ca_path.read_text(encoding="ascii")
+            recovery_profiles.append(
+                {
+                    "profile": profile.as_dict(export=True),
+                    "auth_token": self.credentials.load(profile.credential_reference),
+                    "tls_ca_pem": ca_pem,
+                }
+            )
         value: dict[str, object] = {
             "format": RECOVERY_FORMAT,
-            "schema_version": 1,
-            "profile": profile.as_dict(export=True),
-            "auth_token": self.credentials.load(profile.credential_reference),
-            "tls_ca_pem": None,
+            "schema_version": 2,
+            "active": self.active.name,
+            "profiles": recovery_profiles,
         }
-        if profile.tls_ca is not None:
-            ca_path = Path(profile.tls_ca).expanduser()
-            details = ca_path.stat(follow_symlinks=False)
-            if not stat.S_ISREG(details.st_mode) or details.st_size > MAX_RECOVERY_CA_BYTES:
-                raise ValueError("Gateway profile CA must be a bounded regular file")
-            value["tls_ca_pem"] = ca_path.read_text(encoding="ascii")
         path = Path(destination).expanduser()
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -380,56 +390,116 @@ class GatewayProfileStore:
             raise ValueError("Gateway profiles already exist; recovery requires an empty store")
         path = Path(source).expanduser()
         details = path.stat(follow_symlinks=False)
-        if not stat.S_ISREG(details.st_mode) or details.st_size > MAX_RECOVERY_CA_BYTES + 16_384:
+        if not stat.S_ISREG(details.st_mode) or details.st_size > MAX_RECOVERY_BUNDLE_BYTES:
             raise ValueError("UI recovery bundle must be a bounded regular file")
         value = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(value, dict) or set(value) != {
+        if not isinstance(value, dict) or value.get("format") != RECOVERY_FORMAT:
+            raise ValueError("UI recovery bundle is invalid")
+        if value.get("schema_version") == 1 and set(value) == {
             "format",
             "schema_version",
             "profile",
             "auth_token",
             "tls_ca_pem",
         }:
-            raise ValueError("UI recovery bundle is invalid")
-        if value["format"] != RECOVERY_FORMAT or value["schema_version"] != 1:
-            raise ValueError("UI recovery bundle is unsupported")
-        exported = value["profile"]
-        if not isinstance(exported, dict) or set(exported) != {
-            "name",
-            "host",
-            "port",
-            "tls_server_name",
-            "tls_ca",
-            "ui_id",
-            "ui_name",
+            active = value["profile"].get("name") if isinstance(value["profile"], dict) else None
+            entries = [
+                {
+                    "profile": value["profile"],
+                    "auth_token": value["auth_token"],
+                    "tls_ca_pem": value["tls_ca_pem"],
+                }
+            ]
+        elif value.get("schema_version") == 2 and set(value) == {
+            "format",
+            "schema_version",
+            "active",
+            "profiles",
         }:
-            raise ValueError("UI recovery profile is invalid")
-        token = validate_gateway_token(value["auth_token"])
-        ca_pem = value["tls_ca_pem"]
-        tls_ca: str | None = None
-        if ca_pem is not None:
-            if not isinstance(ca_pem, str) or not ca_pem.startswith("-----BEGIN CERTIFICATE-----"):
-                raise ValueError("UI recovery CA is invalid")
-            self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-            ca_path = self.directory / "recovery-ca.pem"
-            descriptor = os.open(
-                ca_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600
+            active = value["active"]
+            entries = value["profiles"]
+        else:
+            raise ValueError("UI recovery bundle is unsupported")
+        if (
+            not isinstance(entries, list)
+            or not 1 <= len(entries) <= MAX_PROFILES
+            or not isinstance(active, str)
+        ):
+            raise ValueError("UI recovery profiles are invalid")
+        prepared: list[tuple[GatewayConnectionProfile, str, str | None]] = []
+        for entry in entries:
+            if not isinstance(entry, dict) or set(entry) != {
+                "profile",
+                "auth_token",
+                "tls_ca_pem",
+            }:
+                raise ValueError("UI recovery profile is invalid")
+            exported = entry["profile"]
+            if not isinstance(exported, dict) or set(exported) != {
+                "name",
+                "host",
+                "port",
+                "tls_server_name",
+                "tls_ca",
+                "ui_id",
+                "ui_name",
+            }:
+                raise ValueError("UI recovery profile is invalid")
+            token = validate_gateway_token(entry["auth_token"])
+            ca_pem = entry["tls_ca_pem"]
+            if ca_pem is not None:
+                try:
+                    ca_bytes = ca_pem.encode("ascii") if isinstance(ca_pem, str) else b""
+                except UnicodeEncodeError as exc:
+                    raise ValueError("UI recovery CA is invalid") from exc
+                if (
+                    not ca_bytes.startswith(b"-----BEGIN CERTIFICATE-----")
+                    or len(ca_bytes) > MAX_RECOVERY_CA_BYTES
+                ):
+                    raise ValueError("UI recovery CA is invalid")
+            prepared.append(
+                (
+                    GatewayConnectionProfile.from_dict(
+                        {
+                            **exported,
+                            "tls_ca": None,
+                            "credential_reference": "credential:pending",
+                            "ui_id": exported["ui_id"] if recover_identity else str(uuid4()),
+                            "ui_name": ui_name or exported["ui_name"],
+                        }
+                    ),
+                    token,
+                    ca_pem,
+                )
             )
-            with os.fdopen(descriptor, "w", encoding="ascii") as stream:
-                stream.write(ca_pem)
-            os.chmod(ca_path, 0o600)
-            tls_ca = str(ca_path)
-        restored = GatewayConnectionProfile.from_dict(
-            {
-                **exported,
-                "tls_ca": tls_ca,
-                "credential_reference": "credential:pending",
-                "ui_id": exported["ui_id"] if recover_identity else str(uuid4()),
-                "ui_name": ui_name or exported["ui_name"],
-            }
-        )
-        self.add(restored, token)
-        return self.get(restored.name)
+        if active.casefold() not in {item[0].name.casefold() for item in prepared}:
+            raise ValueError("UI recovery active profile is invalid")
+        added: list[str] = []
+        ca_paths: list[Path] = []
+        try:
+            for index, (profile, token, ca_pem) in enumerate(prepared):
+                if ca_pem is not None:
+                    self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    ca_path = self.directory / f"recovery-ca-{index}.pem"
+                    descriptor = os.open(
+                        ca_path,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                    )
+                    with os.fdopen(descriptor, "w", encoding="ascii") as stream:
+                        stream.write(ca_pem)
+                    os.chmod(ca_path, 0o600)
+                    ca_paths.append(ca_path)
+                    profile = replace(profile, tls_ca=str(ca_path))
+                self.add(profile, token, activate=profile.name.casefold() == active.casefold())
+                added.append(profile.name)
+        except BaseException:
+            for name in reversed(added):
+                self.forget(name)
+            for ca_path in ca_paths:
+                ca_path.unlink(missing_ok=True)
+            raise
+        return self.get(active)
 
     def _load(self) -> None:
         if not self.path.exists():

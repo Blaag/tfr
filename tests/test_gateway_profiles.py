@@ -96,8 +96,9 @@ def test_private_recovery_bundle_restores_same_ui_identity(tmp_path: Path) -> No
     assert os.stat(bundle).st_mode & 0o777 == 0o600
     value = json.loads(bundle.read_text(encoding="utf-8"))
     assert value["format"] == "tfr-ui-recovery"
-    assert value["auth_token"] == TOKEN
-    assert "credential_reference" not in value["profile"]
+    assert value["schema_version"] == 2
+    assert value["profiles"][0]["auth_token"] == TOKEN
+    assert "credential_reference" not in value["profiles"][0]["profile"]
 
     restored_store = GatewayProfileStore(tmp_path / "restored")
     restored = restored_store.restore_recovery(bundle, recover_identity=True)
@@ -118,6 +119,23 @@ def test_recovery_bundle_can_create_a_distinct_new_ui(tmp_path: Path) -> None:
 
     assert restored.ui_id != original.ui_id
     assert restored.ui_name == "New Laptop"
+
+
+def test_recovery_bundle_preserves_all_profiles_and_active_selection(tmp_path: Path) -> None:
+    source = GatewayProfileStore(tmp_path / "source")
+    first = profile("home")
+    second = profile("office")
+    source.add(first, TOKEN)
+    source.add(second, "b" * 64, activate=True)
+    bundle = source.export_recovery(tmp_path / "ui-recovery.json")
+    restored_store = GatewayProfileStore(tmp_path / "restored")
+
+    restored = restored_store.restore_recovery(bundle, recover_identity=True)
+
+    assert restored.name == "office"
+    assert restored_store.active is not None and restored_store.active.name == "office"
+    assert {item.name for item in restored_store.profiles()} == {"home", "office"}
+    assert {item.ui_id for item in restored_store.profiles()} == {first.ui_id, second.ui_id}
 
 
 def test_recovery_export_refuses_to_overwrite_existing_file(tmp_path: Path) -> None:

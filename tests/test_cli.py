@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 
 from tfr.cli import _configured_default_mode, build_parser, run
+from tfr.gateway_profiles import GatewayConnectionProfile, GatewayProfileStore
 
 
 def write_configuration(directory: Path, *, with_world: bool) -> Path:
@@ -54,6 +55,38 @@ def test_parser_uses_xdg_default_config_path(
     args = build_parser().parse_args([])
 
     assert args.config == tmp_path / "tfr" / "config.jsonc"
+
+
+def test_profile_cli_exports_and_restores_complete_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = GatewayProfileStore(tmp_path / "source")
+    ui_id = uuid4()
+    source.add(
+        GatewayConnectionProfile(
+            name="default",
+            host="gateway.example",
+            port=7347,
+            tls_server_name="gateway.example",
+            tls_ca=None,
+            credential_reference="credential:pending",
+            ui_id=ui_id,
+            ui_name="Old UI",
+        ),
+        "a" * 64,
+    )
+    monkeypatch.setattr("tfr.gateway_profiles.GatewayProfileStore", lambda: source)
+    bundle = tmp_path / "ui-recovery.json"
+
+    assert run(["profiles", "export", "--path", str(bundle), "--include-token"]) == 0
+    assert bundle.exists()
+
+    restored_store = GatewayProfileStore(tmp_path / "restored")
+    monkeypatch.setattr("tfr.gateway_profiles.GatewayProfileStore", lambda: restored_store)
+    assert run(["profiles", "restore", "--path", str(bundle), "--same-ui"]) == 0
+    assert restored_store.active is not None
+    assert restored_store.active.ui_id == ui_id
+    assert restored_store.credentials.load(restored_store.active.credential_reference) == "a" * 64
 
 
 def test_check_config_reports_counts(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
