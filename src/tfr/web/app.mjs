@@ -93,7 +93,6 @@ const elements = {
   console: document.querySelector("#console"),
   settingsButton: document.querySelector("#settings-button"),
   worldName: document.querySelector("#world-name"),
-  worldSignal: document.querySelector("#world-signal"),
   worldActivity: document.querySelector("#world-activity"),
   connectionState: document.querySelector("#connection-state"),
   historyNotice: document.querySelector("#history-notice"),
@@ -160,6 +159,9 @@ const elements = {
   effectsLabCommand: document.querySelector("#effects-lab-command"),
   effectsLabCommandInput: document.querySelector("#effects-lab-command-input"),
   diagnosticsButton: document.querySelector("#diagnostics-button"),
+  helpButton: document.querySelector("#help-button"),
+  helpDialog: document.querySelector("#help-dialog"),
+  helpClose: document.querySelector("#help-close"),
   diagnosticsDialog: document.querySelector("#diagnostics-dialog"),
   diagnosticsOutput: document.querySelector("#diagnostics-output"),
   diagnosticsCopy: document.querySelector("#diagnostics-copy"),
@@ -1077,7 +1079,6 @@ function interruptPasteTransfer() {
 function updateWorldHeader() {
   const world = currentWorld();
   elements.worldName.textContent = world?.world || "Select world";
-  elements.worldSignal.className = `world-signal ${world?.state || ""}`.trim();
   const transferActive = state.paste?.status === "active";
   elements.commandInput.disabled = !world || !connection.ready || transferActive;
   elements.sendButton.disabled = !world || !connection.ready || transferActive;
@@ -1087,11 +1088,16 @@ function updateWorldHeader() {
 function renderWorldActivity() {
   const indicators = state.worlds.map((world) => {
     const unread = state.unread.get(world.world) || 0;
-    const indicator = document.createElement("span");
-    indicator.className = `world-activity-dot${world.world === state.selectedWorld ? " active" : ""}${unread ? " unread" : ""}`;
-    indicator.title = unread
-      ? `${world.world}: ${unread} unread message${unread === 1 ? "" : "s"}`
-      : world.world;
+    const connected = world.state === "connected";
+    const stateLabel = connected ? "connected" : "disconnected";
+    const indicator = document.createElement("button");
+    indicator.type = "button";
+    indicator.className = `world-activity-dot${connected ? " connected" : " disconnected"}${connected && unread ? " unread" : ""}${world.world === state.selectedWorld ? " active" : ""}`;
+    const unreadLabel = unread ? `, ${unread} unread message${unread === 1 ? "" : "s"}` : "";
+    const selectedLabel = world.world === state.selectedWorld ? ", current world" : "";
+    indicator.setAttribute("aria-label", `${world.world}, ${stateLabel}${unreadLabel}${selectedLabel}`);
+    indicator.title = `${world.world}: ${stateLabel}${unreadLabel}`;
+    indicator.addEventListener("click", () => selectWorld(world.world, { focusInput: false }));
     return indicator;
   });
   elements.worldActivity.replaceChildren(...indicators);
@@ -2240,12 +2246,14 @@ async function start() {
         pairingResult,
         document.documentElement.dataset.iosInstallMode,
       )) {
+        safeStore("tfr.helpPending", "yes");
         elements.installOnboarding.hidden = false;
         elements.console.hidden = true;
         return;
       }
       elements.console.hidden = false;
       connect();
+      showWelcomeHelp();
       return;
     }
     if (pairingResult === "invalid") {
@@ -2332,6 +2340,20 @@ function openSettingsDialog(event) {
   elements.settingsDialog.showModal();
   refreshPushStatus();
   scheduleViewportUpdate();
+}
+
+function openHelpDialog() {
+  if (elements.helpDialog.open) return;
+  if (elements.settingsDialog.open) elements.settingsDialog.close();
+  elements.commandInput.blur();
+  elements.helpDialog.showModal();
+  safeStore("tfr.helpSeen", "yes");
+  scheduleViewportUpdate();
+}
+
+function showWelcomeHelp() {
+  if (readStorage("tfr.helpSeen") === "yes") return;
+  window.requestAnimationFrame(() => openHelpDialog());
 }
 
 function currentPushPreferences() {
@@ -2627,6 +2649,8 @@ elements.settingsButton.addEventListener("pointerdown", (event) => {
   if (event.pointerType === "touch") openSettingsDialog(event);
 });
 elements.settingsButton.addEventListener("click", openSettingsDialog);
+elements.helpButton.addEventListener("click", openHelpDialog);
+elements.helpClose.addEventListener("click", () => elements.helpDialog.close());
 elements.pushEnable.addEventListener("click", enablePushNotifications);
 elements.pushDisable.addEventListener("click", disablePushNotifications);
 elements.pushPages.addEventListener("change", savePushPreferences);
@@ -2653,6 +2677,10 @@ elements.continueInBrowser.addEventListener("click", () => {
   elements.installOnboarding.hidden = true;
   elements.console.hidden = false;
   connect();
+  if (readStorage("tfr.helpPending") === "yes") {
+    safeRemove("tfr.helpPending");
+    showWelcomeHelp();
+  }
 });
 elements.uninstallDevice.addEventListener("click", uninstallDevice);
 elements.composer.addEventListener("submit", sendCommand);
@@ -2890,6 +2918,7 @@ elements.transcript.addEventListener(
   (event) => {
     setInputModality("pointer");
     preserveLiveDuringViewportChange = false;
+    if (document.activeElement === elements.commandInput) elements.commandInput.blur();
     if (document.activeElement?.classList?.contains("event")) document.activeElement.blur();
     if (event.touches.length !== 1 || event.target.closest?.("a")) {
       transcriptTouch = null;

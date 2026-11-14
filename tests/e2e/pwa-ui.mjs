@@ -676,7 +676,7 @@ try {
   await page.locator("#command-input").focus();
   await page.waitForTimeout(350);
   assertGeometry(await geometry(), "keyboard-sized landscape");
-  assert.equal(await page.locator(".topbar").evaluate((node) => getComputedStyle(node).display), "none");
+  assert.equal(await page.locator(".topbar").evaluate((node) => getComputedStyle(node).display), "grid");
   assert.equal(
     await page.locator("#history-button").evaluate((node) => getComputedStyle(node).display),
     "none",
