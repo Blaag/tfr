@@ -160,6 +160,13 @@
             <span>Any activity in eligible worlds</span>
             <input id="push-any-activity" type="checkbox" role="switch">
           </label>
+          <label class="setting-row" for="push-preview">
+            <span>Notification preview</span>
+            <select id="push-preview">
+              <option value="private">Private — activity only</option>
+              <option value="details">Details — world and reason</option>
+            </select>
+          </label>
           <button id="push-enable" type="button">Enable notifications</button>
           <button id="push-disable" type="button" hidden>Disable notifications</button>
         </fieldset>

@@ -139,7 +139,7 @@ _PUSH_EVENT_KINDS = frozenset(
         EventKind.SYSTEM,
     }
 )
-_PUSH_MENTION_KINDS = frozenset({EventKind.SPEECH, EventKind.SAY, EventKind.POSE})
+_PUSH_MENTION_KINDS = frozenset({EventKind.SPEECH, EventKind.SAY})
 
 _ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
@@ -888,9 +888,12 @@ def _push_event_reason(
         else event.plain_text or event.canonical_text or ""
     )
     escaped = re.escape(character_name.strip())
-    return "mention" if bool(escaped) and re.search(
-        rf"(?<![\w]){escaped}(?![\w])", text, re.IGNORECASE
-    ) is not None else None
+    return (
+        "mention"
+        if bool(escaped)
+        and re.search(rf"(?<![\w]){escaped}(?![\w])", text, re.IGNORECASE) is not None
+        else None
+    )
 
 
 def _push_event_matches(
@@ -1125,8 +1128,9 @@ class WebGatewayServer:
             self._push_subscription = await self.runtime.history.subscribe(
                 None,
                 include_history=False,
-                event_filter=lambda event: event.kind in _PUSH_EVENT_KINDS
-                or event.kind is EventKind.CONNECTION,
+                event_filter=lambda event: (
+                    event.kind in _PUSH_EVENT_KINDS or event.kind is EventKind.CONNECTION
+                ),
             )
         except BaseException:
             await runner.cleanup()
@@ -2253,7 +2257,13 @@ class WebGatewayServer:
         reason = _push_event_reason(event, push.preferences, character_name=character_name)
         if reason is None:
             return
-        result = await self.push_sender.send(push.endpoint, push.p256dh, push.auth)
+        result = await self.push_sender.send(
+            push.endpoint,
+            push.p256dh,
+            push.auth,
+            world=event.world if push.preferences.preview == "details" else None,
+            reason=reason if push.preferences.preview == "details" else None,
+        )
         now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         self._push_last_result[device.device_id] = {
             "delivered": result.delivered,
@@ -2290,8 +2300,7 @@ class WebGatewayServer:
 
     def _device_is_visible(self, device_id: UUID) -> bool:
         return any(
-            socket in self._visible_sockets
-            for socket in self._active_sockets.get(device_id, ())
+            socket in self._visible_sockets for socket in self._active_sockets.get(device_id, ())
         )
 
     def _native_ui_focused(self) -> bool:

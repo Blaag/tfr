@@ -15,6 +15,7 @@ export function normalizePushPreferences(value, allowedWorlds = []) {
     worlds,
     mentions: value?.mentions !== false,
     pages: value?.pages !== false,
+    preview: value?.preview === "details" ? "details" : "private",
   };
 }
 

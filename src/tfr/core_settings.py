@@ -15,6 +15,7 @@ from tfr.configuration_registry import (
 NATIVE = ("native-ui",)
 ALL_UI = ("native-ui", "pwa")
 GATEWAY = ("gateway",)
+GATEWAY_AND_NATIVE = ("gateway", "native-ui")
 GATEWAY_AND_UI = ("gateway", "native-ui", "pwa")
 
 
@@ -227,7 +228,7 @@ def core_setting_descriptors() -> tuple[SettingDescriptor, ...]:
             "private",
             SettingScope.UI,
             NATIVE,
-            choices=("private", "full"),
+            choices=("private", "details"),
         ),
         _setting("ui.pager.enabled", SettingType.BOOLEAN, True, SettingScope.UI_TYPE, NATIVE),
         _setting(
@@ -550,7 +551,7 @@ def core_setting_descriptors() -> tuple[SettingDescriptor, ...]:
             SettingType.JSON,
             [],
             SettingScope.GATEWAY,
-            GATEWAY,
+            GATEWAY_AND_NATIVE,
             restart=RestartRequirement.GATEWAY_RESTART,
         ),
         _setting(

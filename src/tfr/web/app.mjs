@@ -118,6 +118,7 @@ const elements = {
   pushPages: document.querySelector("#push-pages"),
   pushMentions: document.querySelector("#push-mentions"),
   pushAnyActivity: document.querySelector("#push-any-activity"),
+  pushPreview: document.querySelector("#push-preview"),
   pushWorldList: document.querySelector("#push-world-list"),
   pushEnable: document.querySelector("#push-enable"),
   pushDisable: document.querySelector("#push-disable"),
@@ -2338,6 +2339,7 @@ function currentPushPreferences() {
     any_activity: elements.pushAnyActivity.checked,
     mentions: elements.pushMentions.checked,
     pages: elements.pushPages.checked,
+    preview: elements.pushPreview.value === "details" ? "details" : "private",
     worlds: [...elements.pushWorldList.querySelectorAll("input:checked")].map((input) => input.value),
   }, state.worlds.map((world) => world.world));
 }
@@ -2347,6 +2349,7 @@ function renderPushSettings() {
   elements.pushPages.checked = push.preferences.pages;
   elements.pushMentions.checked = push.preferences.mentions;
   elements.pushAnyActivity.checked = push.preferences.any_activity;
+  elements.pushPreview.value = push.preferences.preview;
   elements.pushEnable.hidden = push.subscribed;
   elements.pushDisable.hidden = !push.subscribed;
   elements.pushEnable.disabled = push.busy || !push.loaded;
@@ -2366,7 +2369,7 @@ function renderPushSettings() {
     label.append(text, input);
     elements.pushWorldList.append(label);
   }
-  for (const input of [elements.pushPages, elements.pushMentions, elements.pushAnyActivity]) {
+  for (const input of [elements.pushPages, elements.pushMentions, elements.pushAnyActivity, elements.pushPreview]) {
     input.disabled = push.busy;
   }
 }
@@ -2629,6 +2632,7 @@ elements.pushDisable.addEventListener("click", disablePushNotifications);
 elements.pushPages.addEventListener("change", savePushPreferences);
 elements.pushMentions.addEventListener("change", savePushPreferences);
 elements.pushAnyActivity.addEventListener("change", savePushPreferences);
+elements.pushPreview.addEventListener("change", savePushPreferences);
 elements.pairUiButton.addEventListener("click", createUiPairing);
 document.addEventListener("visibilitychange", reportVisibility);
 elements.pairingForm.addEventListener("submit", (event) => {

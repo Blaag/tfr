@@ -34,6 +34,7 @@ from tfr.gateway_client import (
     GatewayDisconnectedError,
     GatewayUiRuntime,
     RemoteWorldSession,
+    _local_configuration_needs_migration,
     _recover_local_plugin_bootstrap,
     _retire_local_migration_sources,
     remote_speaker_effects_warning,
@@ -149,6 +150,23 @@ def test_retire_local_migration_sources_backs_up_and_rewrites_config(tmp_path: P
     )
     assert marker["revision"] == 12
     assert len(marker["backups"]) == 2
+
+
+def test_plugin_only_local_bootstrap_never_prompts_for_migration(tmp_path: Path) -> None:
+    main = tmp_path / "config.jsonc"
+    marker = tmp_path / "config.jsonc.tfr-migrated"
+    main.write_text(
+        '{"schema_version":1,"plugins":{"sources":[{"repo":"owner/plugins"}]}}\n',
+        encoding="utf-8",
+    )
+
+    assert _local_configuration_needs_migration(main, marker) is False
+
+    main.write_text('{"schema_version":1,"ui":{"mouse_mode":"terminal"}}\n', encoding="utf-8")
+    assert _local_configuration_needs_migration(main, marker) is True
+
+    marker.write_text("{}\n", encoding="utf-8")
+    assert _local_configuration_needs_migration(main, marker) is False
 
 
 def test_recover_local_plugin_sources_from_verified_migration_backup(tmp_path: Path) -> None:

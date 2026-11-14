@@ -118,7 +118,7 @@ async def test_push_subscription_is_private_persistent_and_latched(tmp_path: Pat
         pairing_code(store.create_pairing_url("Phone", ("alpha", "beta"))),
         "black@example.com",
     )
-    preferences = PushPreferences(worlds=("beta",), mentions=True, pages=False)
+    preferences = PushPreferences(worlds=("beta",), mentions=True, pages=False, preview="details")
 
     subscribed = await store.set_push_subscription(
         device.device_id,
@@ -136,9 +136,23 @@ async def test_push_subscription_is_private_persistent_and_latched(tmp_path: Pat
     assert persisted is not None and persisted.push is not None
     assert persisted.push.latched is True
     assert persisted.push.preferences.worlds == ("beta",)
+    assert persisted.push.preferences.preview == "details"
 
     removed = await reloaded.remove_push_subscription(device.device_id)
     assert removed is not None and removed.push is None
+
+
+def test_push_preferences_migrate_private_preview_and_reject_unknown_values() -> None:
+    legacy = {
+        "any_activity": False,
+        "worlds": ["alpha"],
+        "mentions": True,
+        "pages": True,
+    }
+    assert PushPreferences.from_dict(legacy, ("alpha",)).preview == "private"
+    assert PushPreferences.from_dict({**legacy, "preview": "full"}, ("alpha",)).preview == "details"
+    with pytest.raises(ValueError, match="preview"):
+        PushPreferences.from_dict({**legacy, "preview": "message"}, ("alpha",))
 
 
 async def test_push_subscription_rejects_untrusted_endpoint_and_world(tmp_path: Path) -> None:

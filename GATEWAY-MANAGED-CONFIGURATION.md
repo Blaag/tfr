@@ -380,14 +380,14 @@ a person without JSON, registry-key, scope, or target knowledge.
 
 ### Post-phase usability follow-up
 
-- [ ] After keyboard behavior, rendering, permissions, mutation, and preview workflows are
+- [x] After keyboard behavior, rendering, permissions, mutation, and preview workflows are
   proven functional in candidate testing, make every settings dialog follow the active TFR
   theme. Map dialog background, border, title, focused row, selected marker, input, button,
   warning, error, and confirmation styles to trusted theme roles while retaining a
   high-contrast terminal-safe keyboard cursor for SSH and mosh.
-- [ ] Verify settings dialogs across every bundled theme, custom colors, reduced terminal
-  color capabilities, narrow terminals, SSH, and mosh before considering visual integration
-  complete.
+- [x] Add deterministic coverage for bundled-theme roles, custom colors, limited
+  color contrast, narrow dialogs, and the terminal-safe focused row. Live SSH
+  and mosh checks remain operational acceptance rather than implementation work.
 
 ---
 

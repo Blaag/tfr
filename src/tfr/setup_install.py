@@ -17,6 +17,14 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
+from tfr.service_management import (
+    install_service,
+    remove_service,
+    service_definition,
+    service_file_is_managed,
+    stable_gateway_socket,
+)
+
 Profile = Literal["all-in-one", "local-split", "gateway", "remote-ui"]
 
 PUBLIC_PLUGINS_URL = "https://github.com/Blaag/tfr-plugins-public"
@@ -162,8 +170,10 @@ def _world_entry(existing_names: set[str]) -> tuple[str, dict[str, object]]:
         if len(aliases) > 32:
             print("Enter no more than 32 aliases.")
         elif any(WORLD_ALIAS_PATTERN.fullmatch(alias) is None for alias in aliases):
-            print("Aliases must start with a letter and use at most 64 letters, digits, "
-                  "underscores, or hyphens.")
+            print(
+                "Aliases must start with a letter and use at most 64 letters, digits, "
+                "underscores, or hyphens."
+            )
         elif len(set(normalized_aliases)) != len(aliases):
             print("Aliases must be unique, ignoring case.")
         else:
@@ -222,10 +232,21 @@ def _deployment_path() -> Path:
     return base / "tfr" / "deployment.json"
 
 
-def _save_deployment(profile: Profile) -> None:
+def _save_deployment(profile: Profile, gateway_socket: Path) -> None:
+    value: dict[str, object]
+    if profile == "remote-ui":
+        # Keep this exact schema-1 marker readable by managed releases predating
+        # service metadata. Remote UIs do not use the local Gateway socket.
+        value = {"schema_version": 1, "profile": profile}
+    else:
+        value = {
+            "schema_version": 2,
+            "profile": profile,
+            "gateway_socket": str(gateway_socket),
+        }
     _write_file(
         _deployment_path(),
-        json.dumps({"schema_version": 1, "profile": profile}, separators=(",", ":")) + "\n",
+        json.dumps(value, separators=(",", ":")) + "\n",
         mode=0o600,
         description="deployment selection",
         replace_confirmed=True,
@@ -244,8 +265,8 @@ def empty_agents_config() -> str:
 
 
 def launcher_script(arguments: list[str]) -> str:
-    command = " \\\n+  ".join(shlex.quote(argument) for argument in arguments)
-    return f"#!/bin/sh\nset -eu\n\nexec {command} \"$@\"\n"
+    command = " \\\n  ".join(shlex.quote(argument) for argument in arguments)
+    return f'#!/bin/sh\nset -eu\n\nexec {command} "$@"\n'
 
 
 def _configure_worlds(repository: Path, config_directory: Path) -> None:
@@ -306,12 +327,14 @@ def _configure_worlds(repository: Path, config_directory: Path) -> None:
         replace_confirmed=replace_worlds,
     )
     if not agents_path.exists():
-        agents_content = (repository / "examples" / "agents.jsonc").read_text(
-            encoding="utf-8"
-        ).replace(
-            '"$schema": "../schemas/agents.schema.json"',
-            f'"$schema": "{SCHEMA_ROOT}/agents.schema.json"',
-            1,
+        agents_content = (
+            (repository / "examples" / "agents.jsonc")
+            .read_text(encoding="utf-8")
+            .replace(
+                '"$schema": "../schemas/agents.schema.json"',
+                f'"$schema": "{SCHEMA_ROOT}/agents.schema.json"',
+                1,
+            )
         )
         _write_file(
             agents_path,
@@ -389,6 +412,30 @@ def _remote_ui_details(config_directory: Path) -> dict[str, object]:
         raise ValueError(
             "a Gateway profile already exists; use /gateway repair or remove it before fresh setup"
         )
+    recovery = _path("UI recovery bundle path (blank to pair from an existing UI)", required=False)
+    if recovery is not None:
+        same_ui = _yes_no(
+            "Is this restoring the same UI identity rather than adding a new UI?",
+            default=True,
+        )
+        platform = socket.gethostname().strip() or "Unknown device"
+        ui_name = None
+        if not same_ui:
+            proposed = f"{platform} · Terminal"[:80]
+            ui_name = _ask("New UI display name", proposed)
+        profile = profiles.restore_recovery(
+            recovery,
+            recover_identity=same_ui,
+            ui_name=ui_name,
+        )
+        print(f"Restored Gateway profile {profile.name} from {recovery}.")
+        print("The recovery bundle contains a live Gateway credential; keep or delete it securely.")
+        return {
+            "host": profile.host,
+            "port": profile.port,
+            "ca_file": Path(profile.tls_ca) if profile.tls_ca else None,
+            "tls_server_name": profile.tls_server_name,
+        }
     print("\nOpen an existing authenticated TFR UI and run /ui pair.")
     print("That UI will display a single-use pairing code valid for 30 minutes.")
     print("No Gateway token file or SSH access is needed on this machine.")
@@ -397,9 +444,7 @@ def _remote_ui_details(config_directory: Path) -> dict[str, object]:
         host = _ask("Gateway host or private IP")
     port = _port("Gateway TCP port", DEFAULT_GATEWAY_PORT)
     ca_file = _path("Copied public CA certificate path (blank if not needed)", required=False)
-    tls_server_name = _ask(
-        "TLS certificate hostname (blank when it is the same as Gateway host)"
-    )
+    tls_server_name = _ask("TLS certificate hostname (blank when it is the same as Gateway host)")
     pairing_code = _ask("Pairing code from the existing UI")
     while not pairing_code:
         pairing_code = _ask("Pairing code from the existing UI")
@@ -464,9 +509,19 @@ def _launcher_arguments(
     tfr: Path,
     config: Path,
     details: dict[str, object] | None,
+    gateway_socket: Path,
 ) -> tuple[str, list[str], list[str]]:
     base = [str(tfr)]
-    doctor = [str(tfr), "doctor", "--profile", profile, "--config", str(config)]
+    doctor = [
+        str(tfr),
+        "doctor",
+        "--profile",
+        profile,
+        "--config",
+        str(config),
+        "--socket",
+        str(gateway_socket),
+    ]
     if profile == "all-in-one":
         return "tfr-local", [*base, "--config", str(config)], doctor
     if profile == "local-split":
@@ -487,7 +542,15 @@ def _launcher_arguments(
         ]
         return (
             "tfr-gateway",
-            [*base, "gateway", "--config", str(config), *shared],
+            [
+                *base,
+                "gateway",
+                "--config",
+                str(config),
+                "--socket",
+                str(gateway_socket),
+                *shared,
+            ],
             [*doctor, *shared],
         )
     assert details is not None
@@ -504,19 +567,42 @@ def _write_launchers(
     tfr: Path,
     config: Path,
     details: dict[str, object] | None,
+    gateway_socket: Path,
 ) -> list[Path]:
     launchers: list[tuple[str, list[str]]]
     if profile == "local-split":
         launchers = [
-            ("tfr-gateway", [str(tfr), "gateway", "--config", str(config)]),
-            ("tfr-ui", [str(tfr), "ui", "--config", str(config)]),
+            (
+                "tfr-gateway",
+                [
+                    str(tfr),
+                    "gateway",
+                    "--config",
+                    str(config),
+                    "--socket",
+                    str(gateway_socket),
+                ],
+            ),
+            (
+                "tfr-ui",
+                [str(tfr), "ui", "--config", str(config), "--socket", str(gateway_socket)],
+            ),
             (
                 "tfr-doctor",
-                [str(tfr), "doctor", "--profile", profile, "--config", str(config)],
+                [
+                    str(tfr),
+                    "doctor",
+                    "--profile",
+                    profile,
+                    "--config",
+                    str(config),
+                    "--socket",
+                    str(gateway_socket),
+                ],
             ),
         ]
     else:
-        name, command, doctor = _launcher_arguments(profile, tfr, config, details)
+        name, command, doctor = _launcher_arguments(profile, tfr, config, details, gateway_socket)
         launchers = [(name, command), ("tfr-doctor", doctor)]
     written: list[Path] = []
     for name, command in launchers:
@@ -530,6 +616,81 @@ def _write_launchers(
         ):
             written.append(path)
     return written
+
+
+def _configure_gateway_service(
+    profile: Profile,
+    *,
+    launcher: Path,
+    state_directory: Path,
+) -> bool:
+    definition = service_definition(launcher, state_directory)
+    if definition is None:
+        if profile in {"local-split", "gateway"}:
+            print("Automatic Gateway services are unavailable on this platform.")
+        return False
+    if profile not in {"local-split", "gateway"}:
+        if (
+            definition.path.exists()
+            and service_file_is_managed(definition.path)
+            and _yes_no(
+                f"Disable and remove the existing TFR Gateway service at {definition.path}?",
+                default=False,
+            )
+        ):
+            remove_service(definition)
+            print(f"Removed {definition.path}")
+        return False
+    manager = definition.status_command[0]
+    if shutil.which(manager) is None:
+        print(f"Automatic Gateway service setup is unavailable because {manager} was not found.")
+        return False
+    if not _yes_no("Run the Gateway automatically as a user service?", default=True):
+        print("Keeping launcher-only Gateway operation.")
+        return False
+    if definition.path.exists():
+        if not service_file_is_managed(definition.path):
+            raise RuntimeError(
+                f"refusing to replace non-TFR service definition at {definition.path}"
+            )
+        current = definition.path.read_text(encoding="utf-8")
+        if current != definition.content and not _yes_no(
+            f"Replace changed TFR Gateway service definition at {definition.path}?",
+            default=False,
+        ):
+            print(f"Keeping {definition.path}")
+            return False
+    if not launcher.is_file() or not os.access(launcher, os.X_OK):
+        raise RuntimeError(f"Gateway launcher is unavailable or not executable: {launcher}")
+    if str(stable_gateway_socket(state_directory)) not in launcher.read_text(encoding="utf-8"):
+        raise RuntimeError(
+            "Gateway launcher does not use the stable service socket; rerun setup and "
+            "approve launcher replacement"
+        )
+    if (
+        not definition.path.exists()
+        or definition.path.read_text(encoding="utf-8") != definition.content
+    ):
+        _write_file(
+            definition.path,
+            definition.content,
+            mode=0o644,
+            description="TFR Gateway service definition",
+            replace_confirmed=True,
+        )
+    print("Service commands:")
+    for command in definition.install_commands:
+        print("  " + shlex.join(command))
+    if not _yes_no("Enable and start the TFR Gateway user service now?", default=False):
+        print("Service definition installed but not started.")
+        return False
+    install_service(definition)
+    print("TFR Gateway user service is enabled and started.")
+    if definition.kind == "systemd-user":
+        print("For operation after logout, enable lingering if needed:")
+        print(f"  loginctl enable-linger {shlex.quote(os.environ.get('USER', str(os.getuid())))}")
+    print(f"Service logs: {definition.log_hint}")
+    return True
 
 
 def _gateway_handoff(config_directory: Path, details: dict[str, object]) -> None:
@@ -561,6 +722,8 @@ def run(repository: Path) -> int:
         return 2
     profile = _profile()
     config_directory = _default_config_directory()
+    state_directory = _deployment_path().parent
+    gateway_socket = stable_gateway_socket(state_directory)
     bin_directory = Path.home() / ".local" / "bin"
     tfr = bin_directory / "tfr"
     try:
@@ -586,20 +749,38 @@ def run(repository: Path) -> int:
             tfr,
             config_directory / "config.jsonc",
             details,
+            gateway_socket,
         )
-        _save_deployment(profile)
+        gateway_launcher = bin_directory / "tfr-gateway"
+        service_started = _configure_gateway_service(
+            profile,
+            launcher=gateway_launcher,
+            state_directory=state_directory,
+        )
+        _save_deployment(profile, gateway_socket)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"setup-tfr: {exc}", file=sys.stderr)
         return 2
 
-    print("\nSetup complete. Nothing was started automatically.")
+    print(
+        "\nSetup complete. Gateway user service started."
+        if service_started
+        else "\nSetup complete. Nothing was started automatically."
+    )
     if profile == "all-in-one":
         print(f"Start TFR: {bin_directory / 'tfr-local'}")
     elif profile == "local-split":
-        print(f"First terminal:  {bin_directory / 'tfr-gateway'}")
-        print(f"Second terminal: {bin_directory / 'tfr-ui'}")
+        if service_started:
+            print("Gateway:        running as a user service")
+            print(f"Start UI:       {bin_directory / 'tfr-ui'}")
+        else:
+            print(f"First terminal:  {bin_directory / 'tfr-gateway'}")
+            print(f"Second terminal: {bin_directory / 'tfr-ui'}")
     elif profile == "gateway":
-        print(f"Start Gateway: {bin_directory / 'tfr-gateway'}")
+        if service_started:
+            print("Gateway:      running as a user service")
+        else:
+            print(f"Start Gateway: {bin_directory / 'tfr-gateway'}")
         print(f"UI handoff:   {config_directory / 'remote-ui-handoff.txt'}")
     else:
         print(f"Start remote UI: {bin_directory / 'tfr-remote-ui'}")

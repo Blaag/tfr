@@ -47,7 +47,8 @@ def event(
 
 def test_policy_requires_explicit_focus_out_and_notifies_only_once() -> None:
     policy = NotificationPolicy(
-        NotificationConfig(enabled=True, any_activity=True), characters={"alpha": "Barnaby"}
+        NotificationConfig(enabled=True, any_activity=True, worlds=("alpha",)),
+        characters={"alpha": "Barnaby"},
     )
 
     assert policy.evaluate(event('Alice says, "hello"')) is None
@@ -64,7 +65,13 @@ def test_policy_requires_explicit_focus_out_and_notifies_only_once() -> None:
 
 def test_policy_supports_selected_world_mentions_and_pages() -> None:
     selected = NotificationPolicy(
-        NotificationConfig(enabled=True, worlds=("beta",), mentions=False, pages=False),
+        NotificationConfig(
+            enabled=True,
+            worlds=("beta",),
+            any_activity=True,
+            mentions=False,
+            pages=False,
+        ),
         characters={"alpha": "Barnaby", "beta": "Barnaby"},
     )
     selected.focus_out()
@@ -72,7 +79,13 @@ def test_policy_supports_selected_world_mentions_and_pages() -> None:
     assert selected.evaluate(event("noise", world="beta")) is not None
 
     mention = NotificationPolicy(
-        NotificationConfig(enabled=True, mentions=True, pages=False, preview="full"),
+        NotificationConfig(
+            enabled=True,
+            worlds=("alpha",),
+            mentions=True,
+            pages=False,
+            preview="details",
+        ),
         characters={"alpha": "Barnaby"},
     )
     mention.focus_out()
@@ -82,16 +95,41 @@ def test_policy_supports_selected_world_mentions_and_pages() -> None:
     assert decision.message == "TFR · alpha — Your character name was mentioned"
 
     page = NotificationPolicy(
-        NotificationConfig(enabled=True, mentions=False, pages=True),
+        NotificationConfig(enabled=True, worlds=("alpha",), mentions=False, pages=True),
         characters={"alpha": "Barnaby"},
     )
     page.focus_out()
     assert page.evaluate(event("Alice pages: hello", kind=EventKind.PAGE)) is not None
 
+    empty = NotificationPolicy(
+        NotificationConfig(enabled=True, any_activity=True), characters={"alpha": "Barnaby"}
+    )
+    empty.focus_out()
+    assert empty.evaluate(event("noise")) is None
+
+
+def test_policy_mentions_are_speech_only_and_full_preview_migrates() -> None:
+    config = NotificationConfig.model_validate(
+        {
+            "enabled": True,
+            "worlds": ["alpha"],
+            "mentions": True,
+            "pages": False,
+            "preview": "full",
+        }
+    )
+    assert config.preview == "details"
+    policy = NotificationPolicy(config, characters={"alpha": "Barnaby"})
+    policy.focus_out()
+
+    assert policy.evaluate(event("Barnaby waves.", kind=EventKind.POSE)) is None
+    decision = policy.evaluate(event('Alice says, "Barnaby, hello."', kind=EventKind.SAY))
+    assert decision is not None and decision.reason == "mention"
+
 
 def test_policy_excludes_redacted_outbound_and_partial_name_matches() -> None:
     policy = NotificationPolicy(
-        NotificationConfig(enabled=True, mentions=True, pages=False),
+        NotificationConfig(enabled=True, worlds=("alpha",), mentions=True, pages=False),
         characters={"alpha": "Barnaby"},
     )
     policy.focus_out()

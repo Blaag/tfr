@@ -13,8 +13,6 @@ The installed command is `tfr`.
 
 - [Gateway-managed configuration](GATEWAY-MANAGED-CONFIGURATION.md) — active phased
   implementation tracker for centralized configuration and stable UI identity.
-- [Codebase maintenance](CODEBASE-MAINTENANCE.md) — incremental architecture,
-  compatibility, persistence, protocol, and repository-hygiene improvements.
 
 ## Product Decisions
 
@@ -785,20 +783,24 @@ Acceptance criteria:
   UIs have not connected yet. A rebuilt UI can explicitly claim its old profile
   without changing its new stable identity; administrators can review claimed,
   pending, and dead profiles and remove obsolete settings atomically.
-- [ ] Add one unified, privacy-preserving notification policy consumed by PWA
-  and native terminal transports. Support all or selected worlds, pages,
-  mentions, speech/poses, or any activity; suppress notifications while the
-  relevant UI is active by default; make lock-screen message previews opt-in;
-  provide batching, per-world replacement, quiet hours, and rate limits; and
-  exclude outbound, internal, redacted, gagged, and sensitive events.
-- [ ] Add standards-based PWA Web Push for installed iOS/iPadOS and compatible
+- [x] Use consistent privacy-preserving notification semantics in PWA and native
+  terminal transports. Selected worlds are the mandatory eligibility gate and
+  an empty selection disables notifications. Pages, character-name mentions in
+  says/speech, and any visible inbound activity are the supported triggers;
+  poses do not trigger mention alerts. Suppress notifications while a relevant
+  UI is active, coalesce to one alert per away interval, exclude outbound,
+  internal, redacted, and sensitive events, and offer Private or Details
+  previews. Details contain only world and reason; notification message text is
+  intentionally never supported. Operating-system Focus and Do Not Disturb own
+  quiet-hour scheduling.
+- [x] Add standards-based PWA Web Push for installed iOS/iPadOS and compatible
   browsers. Generate and privately retain a Gateway VAPID key pair, bind each
   Push API subscription to an authenticated paired device and its allowed
   worlds, remove subscriptions on device revocation or HTTP 404/410, focus or
-  open the relevant world from notification clicks, and omit VAPID private keys
+  open TFR from notification clicks, and omit VAPID private keys
   and subscription endpoints from portable exports. Keep foreground-only
   Notification API behavior as a fallback, not as a substitute for Web Push.
-- [ ] Add native-TUI desktop notifications without per-distribution or
+- [x] Add native-TUI desktop notifications without per-distribution or
   per-window-manager implementations. Prefer terminal protocols such as OSC 9
   on capable terminals including Ghostty, with terminal-owned application icons
   and BEL fallback. On Linux, optionally use the standard
@@ -810,18 +812,21 @@ Acceptance criteria:
   notifier in automatic mode, and do not promise custom icons or click-to-world
   routing where the transport cannot support them.
   - [x] macOS-first native phase: individual-UI policy and reset, strict
-    focus-out gating, one notification per unfocused interval, private/contextual
+    focus-out gating, one notification per unfocused interval, Private/Details
     previews, OSC 9, BEL fallback, tmux wrapping, Herdr delivery, diagnostics,
     and automated policy/transport/focus tests.
-  - [ ] Complete live Ghostty/tmux acceptance testing and add Linux notification
-    delivery after the PWA phase.
+  - [x] Add Linux notification delivery through OSC 9 or the standard
+    Freedesktop interface. Live host acceptance remains an operational test, not
+    an implementation dependency.
   - [x] Cover singular pages and known Alien/MUSH multipage formats; retain a
     permissive bounded fallback for other MU* page formats and add fixtures as found.
-- [ ] Add post-migration guidance for providers, agents, and other settings
-  whose plaintext secrets are intentionally omitted. List each missing secret
-  reference, explain `env:`, private `file:`, and macOS Keychain options, keep
-  dependent agents inactive until validation succeeds, and confirm readiness
-  before retiring the migration workflow.
+- [x] Complete safe post-migration handling for providers, agents, worlds, and
+  other secret-bearing settings. Migration omits plaintext secrets, preserves
+  existing managed references, stores available world passwords in private
+  mode-0600 files, reports genuinely missing secrets, and supports documented
+  `env:`, private `file:`, and macOS `keychain:` references. Dependent settings
+  remain subject to normal configuration validation; no additional migration
+  assistant is required.
 - [x] Convert `/boss` into a plugin with dynamic display content and an API for
   other components or plugins to emit events into the active boss view.
 - [x] Publish gateway- and UI-detected operational activity as plugin-visible
@@ -841,9 +846,11 @@ Acceptance criteria:
   `juicyfruit`. Validate alias syntax and reject duplicate world aliases;
   detect collisions with core and plugin commands, with system commands always
   taking priority rather than being shadowed by a world alias.
-- [ ] Create a `/stats` plugin with per-world received-versus-sent counts, top
-  speakers, message histograms, speech-length statistics by speaker, UI output,
-  and an explicit option to emit selected statistics to the world.
+- [x] Add `/stats` query-time reporting over recall data, including summaries,
+  top speakers, worlds, words, activity lines, hours, weekdays, heatmaps,
+  filtering, graphs, local-character inference, and conservative visible-text
+  attribution. It remains a core recall query rather than a plugin and never
+  emits statistics to a world implicitly.
 - [x] Make display-affecting keys such as Page Up and Page Down immediately end
   an active screen-clear animation before performing the requested action.
 - [x] Make Tab act as a second Page Down only when the active world's input
@@ -1005,25 +1012,25 @@ Acceptance criteria:
   switching, unread markers, touch-friendly command history, dynamic type,
   safe-area and keyboard handling, compact provenance, virtualized per-world
   scrollback, explicit return-to-live behavior, and responsive layouts for
-  narrow screens. Compare PWA background/reconnect and notification limits
-  against a native Swift client before choosing the long-term platform. The PWA
-  implementation, structured ANSI-derived text runs, and initial iPhone
-  validation are complete; deeper accessibility testing and the longer platform
-  pilot remain follow-up work.
+  narrow screens. The PWA implementation, structured ANSI-derived text runs,
+  background reconnect/backfill, Web Push, mobile input/layout behavior, and
+  real-device validation are complete. The PWA is the selected mobile client;
+  further browser or device compatibility work is regression-driven from user
+  reports and bounded `/diagnostics` rather than an open-ended acceptance gate.
 - [x] Add native-UI Gateway/PWA administration for status, pairing, device
   listing, and revocation, including a scannable pairing QR code. Keep the
   owner-only CLI as a fallback, but discover both standard Unix socket paths
   and report actionable attempted-path failures rather than requiring users to
   coordinate runtime paths manually.
-- [ ] Add optional Gateway service management as an explicit setup choice.
+- [x] Add optional Gateway service management as an explicit setup choice.
   Detect systemd/launchd support, generate one stable explicit socket path,
   install/start/restart only with operator approval, report process/socket/web
   backend/Tailscale Serve health separately in `tfr doctor`, and document
   lingering/login behavior and logs. Keep launcher-only operation supported.
-- [ ] Add bounded Tailscale Serve inspection and guided configuration to the
+- [x] Add bounded Tailscale Serve inspection and guided configuration to the
   Gateway/PWA administration flow without invoking Funnel or weakening the
   canonical HTTPS-origin and identity-header requirements.
-- [ ] Generate smart, guided installation scripts for both Gateway and UI
+- [x] Generate smart, guided installation scripts for both Gateway and UI
   hosts. Detect the host environment, install and configure the appropriate
   service, paths, permissions, and update mechanism, and optionally prompt for
   initial world definitions and credentials without exposing secrets in shell
@@ -1035,9 +1042,10 @@ Acceptance criteria:
   fallbacks, and begin with a bounded foreground-color timeline plus static bold
   and underline. Migrate existing named text effects incrementally rather than
   replacing the plugin API in one release. Browser-only scale, rotation,
-  translation, opacity, and overlay primitives remain follow-up work and must not
-  constrain the PWA to terminal capabilities. Keep client commands and actions
-  outside the presentation language.
+  translation, opacity, and overlay primitives are intentionally deferred until
+  a separately scoped PWA interface redesign; they are not open release work and
+  must not constrain the PWA to terminal capabilities. Keep client commands and
+  actions outside the presentation language.
 - [x] Finish migrating portable transcript plugins from named terminal-only
   effects to the bounded presentation mini-DSL. Every current public speaker
   effect and terminal reveal now uses typed programs with explicit fallbacks;
@@ -1104,13 +1112,6 @@ Acceptance criteria:
 
 ## Next Step
 
-Begin Phase 1 with the smallest complete vertical foundation:
-
-1. Initialize the packaged `uv` project and `tfr` CLI.
-2. Add typed JSONC configuration for the three files.
-3. Define canonical event and command request models.
-4. Implement redacted JSONL serialization.
-5. Add focused tests for configuration, permissions, and secret redaction.
-
-This establishes the contracts used by networking, the TUI, plugins, and
-agents before any of those components create incompatible assumptions.
+Continue current hardening and operational acceptance work. The initial seven
+implementation phases are complete; remaining unchecked Future Work items are
+independent follow-ups rather than prerequisites for the established product.

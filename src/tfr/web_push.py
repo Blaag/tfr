@@ -168,14 +168,33 @@ class WebPushSender:
         self.keys = keys
         self._semaphore = asyncio.Semaphore(concurrency)
 
-    async def send(self, endpoint: str, p256dh: str, auth: str) -> PushResult:
+    async def send(
+        self,
+        endpoint: str,
+        p256dh: str,
+        auth: str,
+        *,
+        world: str | None = None,
+        reason: str | None = None,
+    ) -> PushResult:
         async with self._semaphore:
-            return await self._send(endpoint, p256dh, auth)
+            return await self._send(endpoint, p256dh, auth, world=world, reason=reason)
 
-    async def _send(self, endpoint: str, p256dh: str, auth: str) -> PushResult:
+    async def _send(
+        self,
+        endpoint: str,
+        p256dh: str,
+        auth: str,
+        *,
+        world: str | None = None,
+        reason: str | None = None,
+    ) -> PushResult:
         try:
+            value: dict[str, object] = {"version": 1, "type": "activity"}
+            if world is not None and reason is not None:
+                value.update({"world": world[:100], "reason": reason})
             payload = json.dumps(
-                {"version": 1, "type": "activity"},
+                value,
                 separators=(",", ":"),
                 ensure_ascii=True,
             ).encode("ascii")
@@ -193,12 +212,15 @@ class WebPushSender:
                 "TTL": str(PUSH_TTL_SECONDS),
             }
             timeout = aiohttp.ClientTimeout(total=PUSH_TIMEOUT_SECONDS)
-            async with aiohttp.ClientSession(timeout=timeout) as session, session.post(
-                endpoint,
-                data=encrypted,
-                headers=headers,
-                allow_redirects=False,
-            ) as response:
+            async with (
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.post(
+                    endpoint,
+                    data=encrypted,
+                    headers=headers,
+                    allow_redirects=False,
+                ) as response,
+            ):
                 status = response.status
                 await response.read()
         except (aiohttp.ClientError, TimeoutError):

@@ -141,14 +141,19 @@ COMMAND_HELP = {
         _command(
             "gateway",
             "Manage Gateway connections and profiles",
-            "/gateway restart|reconnect|setup|profiles [export]|switch NAME|rename NAME NEW|"
+            "/gateway restart|reconnect|setup|profiles [export [PATH --include-token]]|"
+            "switch NAME|rename NAME NEW|"
             "repair NAME|forget NAME --confirm",
             "connections",
             "native Gateway UI",
             examples=("/gateway profiles", "/gateway repair home"),
             availability="gateway",
             related=("config", "ui"),
-            details=("Switching or repairing the active profile reloads this UI.",),
+            details=(
+                "Switching or repairing the active profile reloads this UI.",
+                "profiles export is credential-free; PATH --include-token writes a private",
+                "recovery bundle for setup on a replacement or additional UI.",
+            ),
         ),
         _command(
             "reload",

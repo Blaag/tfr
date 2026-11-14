@@ -29,7 +29,7 @@ _VISIBLE_ACTIVITY = frozenset(
         EventKind.SYSTEM,
     }
 )
-_MENTION_KINDS = frozenset({EventKind.SPEECH, EventKind.SAY, EventKind.POSE})
+_MENTION_KINDS = frozenset({EventKind.SPEECH, EventKind.SAY})
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
@@ -84,13 +84,12 @@ class NotificationPolicy:
             or event.redacted
             or event.kind not in _VISIBLE_ACTIVITY
             or event.metadata.get("sensitive") is True
+            or event.world not in self.config.worlds
         ):
             return None
         reason: str | None = None
         if self.config.any_activity:
             reason = "activity"
-        elif event.world in self.config.worlds:
-            reason = "selected-world"
         elif self.config.pages and event.kind is EventKind.PAGE:
             reason = "page"
         elif self.config.mentions and event.kind in _MENTION_KINDS:
@@ -107,7 +106,6 @@ class NotificationPolicy:
         else:
             labels = {
                 "activity": "New activity",
-                "selected-world": "New activity",
                 "mention": "Your character name was mentioned",
                 "page": "Page received",
             }

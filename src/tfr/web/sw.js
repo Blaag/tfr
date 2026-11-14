@@ -1,4 +1,4 @@
-const CACHE_NAME = "tfr-shell-web1-v69";
+const CACHE_NAME = "tfr-shell-web1-v70";
 const NETWORK_TIMEOUT_MS = 5000;
 const SHELL = [
   "/",
@@ -76,14 +76,29 @@ self.addEventListener("fetch", (event) => {
 
 self.addEventListener("push", (event) => {
   let valid = false;
+  let world = null;
+  let reason = null;
   try {
     const value = event.data?.json();
     valid = value?.version === 1 && value?.type === "activity";
+    if (
+      valid && typeof value.world === "string" && value.world.length > 0 && value.world.length <= 100 &&
+      ["any_activity", "page", "mention"].includes(value.reason)
+    ) {
+      world = value.world;
+      reason = value.reason;
+    }
   } catch {
     valid = false;
   }
+  const labels = {
+    any_activity: "New activity",
+    page: "Page received",
+    mention: "Your character name was mentioned",
+  };
   event.waitUntil(
-    self.registration.showNotification("New activity", {
+    self.registration.showNotification(world ? `TFR · ${world}` : "New activity", {
+      body: world && reason ? labels[reason] : undefined,
       icon: "/icon-512.png",
       badge: "/icon.svg",
       tag: "tfr-activity",

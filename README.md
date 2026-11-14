@@ -17,6 +17,9 @@ Why use it? It has a bunch of features:
 * JSONL event logging with secret redaction
 
 The complete design and implementation sequence are in [PLAN.md](PLAN.md).
+For complete backup and disaster-recovery procedures for Gateway, UI-only, and
+all-in-one deployments—including all passwords, API keys, TLS keys, and Gateway
+tokens—see [`BACKUP-AND-RESTORE.md`](BACKUP-AND-RESTORE.md).
 
 ## Quick Start
 
@@ -37,7 +40,8 @@ remote UI host. It installs the latest verified stable release, creates private
 configuration, can prompt for world connection details, enables the public
 plugin catalog, generates profile launchers, and provides `tfr-doctor` checks.
 Rerun it later to change profiles; it backs up files before approved replacement
-and does not start TFR or install a background service.
+and never starts TFR without confirmation. For local-split and Gateway-host
+profiles, it can optionally install and start a current-user Gateway service.
 
 If `uv` is missing, the assistant offers to run Astral's official installer or
 waits while you install it yourself and re-checks, or exit cleanly. Remote setup
@@ -56,10 +60,41 @@ Remote attached UI:    ~/.local/bin/tfr-remote-ui
 Check selected setup:  ~/.local/bin/tfr-doctor
 ```
 
-Nothing is started automatically. The recommended all-in-one profile does not
-require a Gateway. The local split profile runs `tfr-gateway` in one terminal
-and `tfr-ui` in another. Remote launchers include the selected TLS and token-file
+The recommended all-in-one profile does not require a Gateway. Without the
+optional service, the local split profile runs `tfr-gateway` in one terminal and
+`tfr-ui` in another. Remote launchers include the selected TLS and token-file
 options. Rerun `setup-tfr` later to change profiles.
+
+Gateway service setup is explicit and current-user only: `systemd --user` on
+Linux and a LaunchAgent on macOS. TFR shows the generated definition and exact
+service commands, asks separately before installing/replacing the definition and
+before enabling or starting it, never invokes `sudo`, and refuses to overwrite a
+foreign service file. Launcher-only operation remains supported. Managed Gateway
+and local-UI launchers share the stable socket
+`~/.local/state/tfr/run/gateway.sock` (or the corresponding `XDG_STATE_HOME`
+path), avoiding differences between login and service environments.
+
+Linux service commands are:
+
+```console
+systemctl --user status tfr-gateway.service
+systemctl --user restart tfr-gateway.service
+journalctl --user-unit=tfr-gateway.service
+```
+
+For a headless Gateway that must continue after logout, inspect `tfr-doctor` and
+enable user lingering when it reports that lingering is disabled:
+
+```console
+loginctl enable-linger "$USER"
+```
+
+TFR reports this command but does not run it. On macOS, the LaunchAgent label is
+`org.tfr.gateway`; stdout and stderr are written under
+`~/.local/state/tfr/logs/`. Rerunning setup can safely refresh a TFR-managed
+definition or offer to remove it when switching to a profile without a Gateway.
+`tfr-doctor` reports the service manager, process, socket handshake, web backend,
+Tailscale Serve transport, lingering state, and relevant log location separately.
 
 The bootstrap checkout is not installed as `main`. The underlying installer
 fetches the official stable manifest, verifies its immutable tag and commit,
@@ -683,10 +718,13 @@ Notifications**. The Gateway creates one stable private VAPID P-256 key in the
 web state directory and stores each device's push subscription alongside its
 paired-device record. Notifications are disabled until the device explicitly
 enables them. Checked worlds form the mandatory eligibility gate; within those
-worlds, per-device triggers support pages, character-name mentions, or any
-visible inbound activity. Unchecked worlds never notify. The notification title is the
-private fixed text `New activity` with no body; message text, sender names, and
-world names are never included in the push payload. The Gateway suppresses pushes while
+worlds, per-device triggers support pages, character-name mentions in says or
+speech, or any visible inbound activity. Pose text does not trigger mentions.
+Unchecked worlds never notify, and selecting no worlds effectively disables
+notifications. **Private** previews use the fixed title `New activity` with no
+body. Opt-in **Details** previews include only the world and reason, such as
+`Page received` or `Your character name was mentioned`; message text and sender
+names are never included or supported. The Gateway suppresses pushes while
 that PWA reports itself visible or any connected native TFR UI reports that its
 terminal surface is focused. It sends at most one alert until the PWA becomes
 explicitly visible again; iOS background WebSocket reconnects do not reset that
@@ -752,14 +790,24 @@ On first run, TFR asks for a profile name, Gateway host and port, TLS certificat
 identity, optional custom CA, authentication token, and proposed UI display
 name. The profile stores only bootstrap metadata and a credential reference.
 On macOS the default store uses Keychain when available; other platforms use a
-private mode-0600 credential file. The token is never written into the profile
-or an export.
+private mode-0600 credential file. The token is never written into the ordinary
+profile document or credential-free display; it is included only in an explicit
+private recovery bundle requested with `--include-token`.
 
 Once connected, manage profiles from TFR with `/gateway setup`, `/gateway
 profiles`, `/gateway switch NAME`, `/gateway rename NAME NEW-NAME`, `/gateway
 repair NAME`, and `/gateway forget NAME --confirm`. Use `/gateway profiles
-export` for a credential-free backup. TLS and authentication errors identify
-the failed handshake; repair the selected profile and reconnect.
+export` for a credential-free display. To prepare a replacement or additional
+UI, use `/gateway profiles export PATH --include-token`. This writes a private
+mode-0600 recovery bundle containing every stored profile and token, the active
+selection, TLS identities, stable UI identities, and custom CA material. It
+never includes world configuration or message data. Treat the bundle like a
+password: transfer it privately and delete it when no longer needed. During
+`setup-tfr`, choose **Remote UI** and provide the recovery bundle; choose whether
+to preserve the same UI identity for recovery or generate a distinct identity
+for an additional UI. The token is moved into the normal Keychain/private
+credential backend. TLS and authentication errors identify the failed handshake;
+repair the selected profile and reconnect.
 
 If TFR detects values in a legacy local UI configuration, it offers the
 Gateway-managed migration flow. Run `/config migrate` on each named UI, inspect
@@ -805,7 +853,10 @@ terminal-safe reverse-video keyboard cursor.
 Native terminal UIs can enable individual-UI desktop notifications under
 **Notifications** in `/config`. TFR notifies only after the terminal reports
 that its surface lost focus, sends at most one notification until focus returns,
-and defaults to the private text `TFR has activity`. Automatic delivery uses
+and defaults to the private text `TFR has activity`. The same eligible-world,
+page, speech-mention, any-activity, and Private/Details policy used by the PWA
+applies; no selected worlds means no notifications. Details include only the
+world and reason, never message or sender text. Automatic delivery uses
 BEL-terminated OSC 9 in Ghostty, iTerm2, Kitty, WezTerm, and Warp; tmux output
 is wrapped for passthrough, and Herdr uses `herdr notification show`. On a local
 Linux graphical session, an unknown terminal uses the Freedesktop notification
@@ -903,6 +954,11 @@ profiles and `tfr config claim-ui-profile PROFILE_ID --apply` from that UI to
 restore its overrides. Administrators can remove obsolete settings with
 `tfr config remove-ui-profile PROFILE_ID --apply`; this does not require manual
 editing of the live managed document.
+
+These portable archives are only the Gateway-managed portion of a complete
+deployment backup. The Gateway listener token, TLS private key, PWA device state,
+and each UI host's connection tokens require the companion procedures in
+[`BACKUP-AND-RESTORE.md`](BACKUP-AND-RESTORE.md).
 
 Use `--json` for stable machine-readable output, `--ui`, `--ui-type`, `--world`,
 or `--shared` for explicit targeting, and `--gateway-profile NAME` for a stored

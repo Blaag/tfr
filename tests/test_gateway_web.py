@@ -154,10 +154,28 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v69";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v70";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
-    assert 'showNotification("New activity", {' in worker
+    assert (
+        'self.registration.showNotification(world ? `TFR · ${world}` : "New activity", {' in worker
+    )
     assert 'body: "TFR has activity"' not in worker
+    assert 'url.pathname.startsWith("/api/") || url.pathname === "/ws"' in worker
+    assert "if (url.search) return;" in worker
+    assert "if (!SHELL.includes(url.pathname)) return;" in worker
+
+
+def test_pwa_notification_controls_are_bound_to_persisted_preferences() -> None:
+    asset_directory = files("tfr").joinpath("web")
+    page = asset_directory.joinpath("index.html").read_text(encoding="utf-8")
+    application = asset_directory.joinpath("app.mjs").read_text(encoding="utf-8")
+
+    assert 'id="push-mentions"' in page
+    assert 'id="push-preview"' in page
+    assert "mentions: elements.pushMentions.checked" in application
+    assert 'preview: elements.pushPreview.value === "details"' in application
+    assert 'elements.pushMentions.addEventListener("change", savePushPreferences)' in application
+    assert 'elements.pushPreview.addEventListener("change", savePushPreferences)' in application
 
 
 def test_every_application_module_is_routable_and_in_the_atomic_shell() -> None:
@@ -1289,8 +1307,9 @@ async def test_authenticated_device_manages_private_push_subscription(tmp_path: 
     preferences = {
         "any_activity": False,
         "worlds": [],
-        "mentions": True,
+        "mentions": False,
         "pages": True,
+        "preview": "details",
     }
     try:
         initial = await client.get("/api/push", headers=headers)
@@ -1307,6 +1326,10 @@ async def test_authenticated_device_manages_private_push_subscription(tmp_path: 
         assert registered.status == 200
         assert (await registered.json())["subscribed"] is True
         assert gateway.devices.device_descriptors()[0]["push_enabled"] is True
+        stored = gateway.devices.authenticate(token)
+        assert stored is not None and stored.push is not None
+        assert stored.push.preferences.preview == "details"
+        assert stored.push.preferences.mentions is False
 
         removed = await client.delete("/api/push", headers=headers)
         assert removed.status == 200
@@ -1337,20 +1360,38 @@ def test_push_policy_is_private_inbound_and_trigger_bounded() -> None:
         provenance=Provenance(sender_name="Alice", confidence=Confidence.HIGH),
     )
     ordinary = make_event(text='Alice says, "hello"', kind=EventKind.SAY)
+    pose_mention = replace(
+        make_event(text="Alice mentions Barnaby", kind=EventKind.POSE),
+        provenance=Provenance(sender_name="Alice", confidence=Confidence.HIGH),
+    )
     defaults = PushPreferences(worlds=("alpha",))
 
     assert _push_event_matches(page, defaults, character_name="Barnaby") is True
     assert _push_event_matches(mention, defaults, character_name="Barnaby") is True
+    assert (
+        _push_event_matches(
+            mention,
+            PushPreferences(worlds=("alpha",), mentions=False),
+            character_name="Barnaby",
+        )
+        is False
+    )
     assert _push_event_matches(ordinary, defaults, character_name="Barnaby") is False
-    assert _push_event_matches(
-        replace(mention, direction=Direction.OUTBOUND), defaults, character_name="Barnaby"
-    ) is False
-    assert _push_event_matches(
-        replace(mention, redacted=True), defaults, character_name="Barnaby"
-    ) is False
-    assert _push_event_matches(
-        replace(page, world="beta"), defaults, character_name="Barnaby"
-    ) is False
+    assert _push_event_matches(pose_mention, defaults, character_name="Barnaby") is False
+    assert (
+        _push_event_matches(
+            replace(mention, direction=Direction.OUTBOUND), defaults, character_name="Barnaby"
+        )
+        is False
+    )
+    assert (
+        _push_event_matches(replace(mention, redacted=True), defaults, character_name="Barnaby")
+        is False
+    )
+    assert (
+        _push_event_matches(replace(page, world="beta"), defaults, character_name="Barnaby")
+        is False
+    )
 
 
 def test_connector_diagnostics_include_current_bounded_backoff_status(tmp_path: Path) -> None:
@@ -1409,9 +1450,18 @@ async def test_successful_push_latches_device_until_visibility_reset(
     )
     calls = 0
 
-    async def send(_endpoint: str, _p256dh: str, _auth: str) -> PushResult:
+    async def send(
+        _endpoint: str,
+        _p256dh: str,
+        _auth: str,
+        *,
+        world: str | None = None,
+        reason: str | None = None,
+    ) -> PushResult:
         nonlocal calls
         calls += 1
+        assert world is None
+        assert reason is None
         return PushResult(delivered=True, status=201)
 
     monkeypatch.setattr(gateway.push_sender, "send", send)

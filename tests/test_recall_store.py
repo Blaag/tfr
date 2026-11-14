@@ -342,6 +342,13 @@ async def test_stats_infer_local_and_visible_speakers_without_provenance(tmp_pat
                 "kind": "raw_output",
                 "plain_text": "Unknown system output",
             },
+            {
+                **base,
+                "event_id": str(uuid4()),
+                "world": "alien",
+                "kind": "say",
+                "plain_text": '▶ [2026-09-15T12:40:00Z] Blood says, "old recall"',
+            },
         ]
         store._insert_values(values)
 
@@ -352,9 +359,11 @@ async def test_stats_infer_local_and_visible_speakers_without_provenance(tmp_pat
 
         alien = await store.statistics({"view": "speakers", "world": "alien"})
         assert alien["summary"]["lines"] == 2
+        assert alien["summary"]["unattributed_lines"] == 0
         assert alien["summary"]["inferred_attribution_lines"] == 2
         assert alien["summary"]["poses"] == 1
         assert alien["rows"][0]["name"] == "Blood"
+        assert all(not row["name"].startswith("▶") for row in alien["rows"])
 
         words = await store.statistics({"view": "words", "top": 15})
         tokens = {item["word"] for item in words["words"]}
