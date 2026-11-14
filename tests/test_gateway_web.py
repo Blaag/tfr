@@ -154,7 +154,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v70";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v71";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
     assert (
         'self.registration.showNotification(world ? `TFR · ${world}` : "New activity", {' in worker
@@ -378,7 +378,8 @@ def test_command_history_uses_a_touch_friendly_restore_sheet() -> None:
     assert "elements.historyDialog.close();" in application
     history_button_start = styles.index("\n.history-button {")
     history_button_end = styles.index("}", history_button_start)
-    assert "min-width: 4.6rem;" in styles[history_button_start:history_button_end]
+    assert "min-width: 4.25rem;" in styles[history_button_start:history_button_end]
+    assert "min-height: 2.75rem;" in styles[history_button_start:history_button_end]
     history_row_start = styles.index(".history-list button {")
     history_row_end = styles.index("}", history_row_start)
     assert "min-height: 3.25rem;" in styles[history_row_start:history_row_end]
@@ -419,7 +420,7 @@ def test_mobile_send_submits_before_ios_keyboard_layout_shift() -> None:
     assert "{ passive: false }" in touch_handler
 
 
-def test_mobile_keyboard_preserves_live_edge_and_compacts_landscape() -> None:
+def test_mobile_keyboard_preserves_live_edge_without_moving_header() -> None:
     asset_directory = files("tfr").joinpath("web")
     application = asset_directory.joinpath("app.mjs").read_text(encoding="utf-8")
     styles = asset_directory.joinpath("styles.css").read_text(encoding="utf-8")
@@ -429,9 +430,29 @@ def test_mobile_keyboard_preserves_live_edge_and_compacts_landscape() -> None:
     assert 'toggleAttribute("data-input-focused", inputFocused)' in application
     assert ":root[data-input-focused] .composer" in styles
     assert "@media (orientation: landscape), (max-height: 500px)" in styles
-    assert ":root[data-input-focused] .topbar" in styles
+    assert ":root[data-input-focused] .topbar" not in styles
     assert ":root[data-input-focused] .history-button" in styles
     assert "-webkit-text-size-adjust: 100%;" in styles
+
+
+def test_compact_header_world_balls_and_help_are_accessible() -> None:
+    asset_directory = files("tfr").joinpath("web")
+    page = asset_directory.joinpath("index.html").read_text(encoding="utf-8")
+    styles = asset_directory.joinpath("styles.css").read_text(encoding="utf-8")
+    application = asset_directory.joinpath("app.mjs").read_text(encoding="utf-8")
+
+    assert 'id="world-signal"' not in page
+    assert 'id="world-activity"' in page
+    assert 'id="help-button"' in page
+    assert 'id="help-dialog"' in page
+    assert "min-height: 3.25rem;" in styles
+    assert ".world-activity-dot.connected::before" in styles
+    assert ".world-activity-dot.unread::before" in styles
+    assert ".world-activity-dot.active::before" in styles
+    assert 'indicator = document.createElement("button")' in application
+    assert 'indicator.addEventListener("click", () => selectWorld' in application
+    assert 'indicator.setAttribute("aria-label"' in application
+    assert 'safeStore("tfr.helpSeen", "yes")' in application
 
 
 def test_pwa_uses_accessible_viewport_and_prevents_ios_focus_zoom() -> None:
