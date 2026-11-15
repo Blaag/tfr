@@ -84,7 +84,7 @@ const PRESENTATION_CHARACTER_PRESSURE = 2000;
 const TRANSCRIPT_NODE_PRESSURE = 10000;
 const MIN_TEXT_SIZE = -2;
 const MAX_TEXT_SIZE = 4;
-const SCREEN_CLEAR_PULL_DISTANCE = 96;
+const SCREEN_CLEAR_PULL_DISTANCE = 64;
 
 const elements = {
   pairing: document.querySelector("#pairing"),
@@ -113,6 +113,11 @@ const elements = {
   historyEmpty: document.querySelector("#history-empty"),
   historyList: document.querySelector("#history-list"),
   settingsDialog: document.querySelector("#settings-dialog"),
+  settingsBack: document.querySelector("#settings-back"),
+  settingsTitle: document.querySelector("#settings-dialog-title"),
+  settingsPages: document.querySelector("#settings-dialog .settings-pages"),
+  settingsThemeSummary: document.querySelector("#settings-theme-summary"),
+  settingsNotificationSummary: document.querySelector("#settings-notification-summary"),
   worldList: document.querySelector("#world-list"),
   pushStatus: document.querySelector("#push-status"),
   pushPages: document.querySelector("#push-pages"),
@@ -123,6 +128,7 @@ const elements = {
   pushEnable: document.querySelector("#push-enable"),
   pushDisable: document.querySelector("#push-disable"),
   gatewayVersion: document.querySelector("#gateway-version"),
+  aboutConnectionState: document.querySelector("#about-connection-state"),
   eventDialog: document.querySelector("#event-dialog"),
   eventDialogWorld: document.querySelector("#event-dialog-world"),
   eventSheetBody: document.querySelector("#event-dialog .event-sheet-body"),
@@ -840,6 +846,7 @@ function applyThemePreference(value) {
     document.querySelector("#theme-color"),
   );
   elements.themePreference.value = theme;
+  elements.settingsThemeSummary.textContent = elements.themePreference.selectedOptions[0]?.textContent || theme;
   if (theme === "default") safeRemove("tfr.theme");
   else safeStore("tfr.theme", theme);
 }
@@ -951,6 +958,7 @@ function postPairing(code, delay = 0) {
 function setConnection(label, kind = "") {
   elements.connectionState.textContent = label;
   elements.connectionState.className = `connection-state ${kind}`.trim();
+  elements.aboutConnectionState.textContent = label;
 }
 
 function showToast(message, duration = 2600) {
@@ -2347,12 +2355,35 @@ function showWaitingServiceWorker(worker) {
   elements.updateNotice.hidden = false;
 }
 
+const SETTINGS_TITLES = {
+  home: "Settings",
+  worlds: "Worlds",
+  appearance: "Appearance",
+  composer: "Composer",
+  notifications: "Notifications",
+  tools: "Tools",
+  devices: "Devices",
+  about: "About",
+};
+
+function showSettingsPage(name) {
+  const selected = Object.hasOwn(SETTINGS_TITLES, name) ? name : "home";
+  for (const page of elements.settingsDialog.querySelectorAll("[data-settings-page]")) {
+    page.hidden = page.dataset.settingsPage !== selected;
+  }
+  elements.settingsTitle.textContent = SETTINGS_TITLES[selected];
+  elements.settingsBack.hidden = selected === "home";
+  elements.settingsDialog.dataset.page = selected;
+  elements.settingsPages.scrollTop = 0;
+  if (selected === "notifications") refreshPushStatus();
+}
+
 function openSettingsDialog(event) {
   if (elements.settingsDialog.open) return;
   event?.preventDefault();
   elements.commandInput.blur();
+  showSettingsPage("home");
   elements.settingsDialog.showModal();
-  refreshPushStatus();
   scheduleViewportUpdate();
 }
 
@@ -2388,6 +2419,9 @@ function renderPushSettings() {
   elements.pushPreview.value = push.preferences.preview;
   elements.pushEnable.hidden = push.subscribed;
   elements.pushDisable.hidden = !push.subscribed;
+  elements.settingsNotificationSummary.textContent = push.subscribed
+    ? "Enabled on this device"
+    : "Disabled on this device";
   elements.pushEnable.disabled = push.busy || !push.loaded;
   elements.pushDisable.disabled = push.busy;
   elements.pushWorldList.replaceChildren();
@@ -2663,6 +2697,10 @@ elements.settingsButton.addEventListener("pointerdown", (event) => {
   if (event.pointerType === "touch") openSettingsDialog(event);
 });
 elements.settingsButton.addEventListener("click", openSettingsDialog);
+elements.settingsBack.addEventListener("click", () => showSettingsPage("home"));
+for (const button of elements.settingsDialog.querySelectorAll("[data-settings-target]")) {
+  button.addEventListener("click", () => showSettingsPage(button.dataset.settingsTarget));
+}
 elements.helpButton.addEventListener("click", openHelpDialog);
 elements.helpClose.addEventListener("click", () => elements.helpDialog.close());
 elements.pushEnable.addEventListener("click", enablePushNotifications);
@@ -2884,7 +2922,7 @@ elements.screenClearHandle.addEventListener("pointermove", (event) => {
   elements.screenClearHandle.toggleAttribute("data-armed", screenClearPull.armed);
   elements.screenClearHandle.style.setProperty(
     "--screen-clear-pull",
-    `${-Math.min(distance, SCREEN_CLEAR_PULL_DISTANCE + 24)}px`,
+    `${-Math.min(distance * 0.1, 6)}px`,
   );
 });
 function finishScreenClearPull(event, cancelled = false) {

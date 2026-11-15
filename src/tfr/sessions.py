@@ -7,11 +7,12 @@ import ssl
 import time
 from collections import deque
 from collections.abc import Sequence
+from dataclasses import replace
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from tfr.adapters import ServerAdapter, adapter_for
+from tfr.adapters import ParsedInbound, ServerAdapter, adapter_for, classify_message
 from tfr.config import TlsConfig, WorldConfig, WorldDefaults
 from tfr.core import CommandBus, EventBus
 from tfr.events import (
@@ -173,6 +174,7 @@ class WorldSession:
         self._quit_requested = False
         self._backoff.reset()
         self._nospoof_senders: deque[str] = deque(maxlen=MAX_NOSPOOF_SENDERS)
+        self._nospoof_dbref_senders: dict[int, str] = {}
         self._expect_nospoof_continuation = False
         if config.login is not None:
             self._remember_nospoof_sender(config.login.character)
@@ -296,6 +298,7 @@ class WorldSession:
         self._connected_since = time.monotonic()
         self.connection_generation += 1
         self._nospoof_senders.clear()
+        self._nospoof_dbref_senders.clear()
         self._expect_nospoof_continuation = False
         if self.config.login is not None:
             self._remember_nospoof_sender(self.config.login.character)
@@ -480,6 +483,7 @@ class WorldSession:
 
     async def _publish_inbound(self, text: str) -> None:
         parsed = self.adapter.parse(text, show_prefix=self.show_nospoof_prefix)
+        parsed = self._enrich_terse_provenance(parsed)
         missing_nospoof_prefix = self._expect_nospoof_continuation
         if parsed.provenance is not None:
             self._expect_nospoof_continuation = True
@@ -521,6 +525,40 @@ class WorldSession:
         self._nospoof_senders.clear()
         self._nospoof_senders.extend(retained)
         self._nospoof_senders.append(sender)
+
+    def _enrich_terse_provenance(self, parsed: ParsedInbound) -> ParsedInbound:
+        provenance = parsed.provenance
+        if provenance is None or provenance.sender_dbref is None:
+            return parsed
+        sender = provenance.sender_name
+        if sender:
+            self._remember_nospoof_dbref(provenance.sender_dbref, sender)
+            return parsed
+        if self.config.login is not None and parsed.message_text.casefold().startswith("you say,"):
+            sender = self.config.login.character
+            self._remember_nospoof_dbref(provenance.sender_dbref, sender)
+        else:
+            sender = self._nospoof_dbref_senders.get(provenance.sender_dbref)
+        if not sender:
+            return parsed
+        enriched = replace(provenance, sender_name=sender)
+        classification = classify_message(
+            parsed.message_text,
+            source=provenance.server_source,
+            sender_name=sender,
+        )
+        return replace(
+            parsed,
+            kind=classification.kind,
+            confidence=classification.confidence,
+            provenance=enriched,
+        )
+
+    def _remember_nospoof_dbref(self, dbref: int, sender: str) -> None:
+        self._nospoof_dbref_senders.pop(dbref, None)
+        self._nospoof_dbref_senders[dbref] = sender
+        while len(self._nospoof_dbref_senders) > MAX_NOSPOOF_SENDERS:
+            del self._nospoof_dbref_senders[next(iter(self._nospoof_dbref_senders))]
 
     async def _publish_telnet(self, event: TelnetEvent) -> None:
         await self._publish(

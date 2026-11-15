@@ -157,7 +157,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v72";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v73";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
     assert (
         'self.registration.showNotification(world ? `TFR · ${world}` : "New activity", {' in worker
@@ -469,6 +469,37 @@ def test_compact_header_world_balls_and_help_are_accessible() -> None:
     assert 'indicator.addEventListener("click", () => selectWorld' in application
     assert 'indicator.setAttribute("aria-label"' in application
     assert 'safeStore("tfr.helpSeen", "yes")' in application
+
+
+def test_settings_use_layered_full_height_navigation() -> None:
+    asset_directory = files("tfr").joinpath("web")
+    page = asset_directory.joinpath("index.html").read_text(encoding="utf-8")
+    styles = asset_directory.joinpath("styles.css").read_text(encoding="utf-8")
+    application = asset_directory.joinpath("app.mjs").read_text(encoding="utf-8")
+
+    assert "Field console" not in page
+    for name in (
+        "home",
+        "worlds",
+        "appearance",
+        "composer",
+        "notifications",
+        "tools",
+        "devices",
+        "about",
+    ):
+        assert f'data-settings-page="{name}"' in page
+    assert "#settings-dialog {" in styles
+    assert "height: calc(var(--viewport-height) - var(--safe-top));" in styles
+    assert 'showSettingsPage("home")' in application
+    assert "elements.settingsPages.scrollTop = 0;" in application
+
+
+def test_screen_clear_pull_has_short_visual_travel() -> None:
+    application = files("tfr").joinpath("web", "app.mjs").read_text(encoding="utf-8")
+
+    assert "const SCREEN_CLEAR_PULL_DISTANCE = 64;" in application
+    assert "Math.min(distance * 0.1, 6)" in application
 
 
 def test_pwa_uses_accessible_viewport_and_prevents_ios_focus_zoom() -> None:

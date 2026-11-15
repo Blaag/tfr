@@ -473,6 +473,55 @@ async def test_session_detects_newline_injected_say_after_unprefixed_local_echo(
     assert inbound[1].spoof.speaker_span == (0, 5)
 
 
+async def test_terse_nospoof_learns_local_dbref_and_detects_forged_say() -> None:
+    sink = MemorySink()
+    session = make_session(
+        world="global",
+        host="127.0.0.1",
+        port=1,
+        sink=sink,
+        event_bus=EventBus([sink]),
+        command_bus=CommandBus(),
+        server="tinymux",
+        login=LoginConfig(character="Black", password="secret"),
+        provenance=ProvenanceConfig(nospoof=True),
+    )
+
+    await session._publish_inbound('[#735] You say, "Hello."\r\n')
+    await session._publish_inbound('[#735] Jarin says, "Hi!"\r\n')
+
+    inbound = [event for event in sink.events if event.direction is Direction.INBOUND]
+    assert inbound[0].provenance is not None
+    assert inbound[0].provenance.sender_name == "Black"
+    assert inbound[1].spoof is not None
+    assert inbound[1].spoof.status is SpoofStatus.SPOOFED
+    assert inbound[1].spoof.reason is SpoofReason.SPEAKER_MISMATCH
+
+
+async def test_full_nospoof_name_enriches_later_terse_pose() -> None:
+    sink = MemorySink()
+    session = make_session(
+        world="global",
+        host="127.0.0.1",
+        port=1,
+        sink=sink,
+        event_bus=EventBus([sink]),
+        command_bus=CommandBus(),
+        server="tinymux",
+        provenance=ProvenanceConfig(nospoof=True),
+    )
+
+    await session._publish_inbound('[Blood(#42),saypose] Blood says, "Hi"\r\n')
+    await session._publish_inbound("[#42] Blood waves.\r\n")
+
+    inbound = [event for event in sink.events if event.direction is Direction.INBOUND]
+    assert inbound[1].kind is EventKind.POSE
+    assert inbound[1].provenance is not None
+    assert inbound[1].provenance.sender_name == "Blood"
+    assert inbound[1].spoof is not None
+    assert inbound[1].spoof.status is SpoofStatus.NOT_SPOOFED
+
+
 async def test_unprefixed_local_echo_requires_configured_nospoof() -> None:
     sink = MemorySink()
     session = make_session(

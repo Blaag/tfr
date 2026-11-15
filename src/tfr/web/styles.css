@@ -832,6 +832,15 @@ select {
   color: var(--text);
 }
 
+#settings-dialog {
+  position: fixed;
+  inset: calc(var(--viewport-offset-top) + var(--safe-top)) 0 0;
+  width: 100%;
+  height: calc(var(--viewport-height) - var(--safe-top));
+  max-height: none;
+  margin: 0;
+}
+
 .settings-dialog::backdrop,
 .history-dialog::backdrop,
 .event-dialog::backdrop,
@@ -851,6 +860,96 @@ select {
   border-radius: var(--radius-large) var(--radius-large) 0 0;
   background: var(--panel);
 }
+
+#settings-dialog .settings-sheet {
+  height: 100%;
+  max-height: none;
+  display: flex;
+  flex-direction: column;
+  padding: 0.75rem 0.9rem calc(0.75rem + var(--safe-bottom));
+  overflow: hidden;
+}
+
+#settings-dialog .settings-header {
+  flex: 0 0 auto;
+  align-items: center;
+  min-height: 2.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.settings-header h2 {
+  flex: 1;
+  text-align: center;
+}
+
+.settings-back,
+.settings-header .close-button {
+  width: 2.75rem;
+  height: 2.75rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1.8rem;
+}
+
+.settings-back[hidden] {
+  display: block !important;
+  visibility: hidden;
+}
+
+.settings-pages {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0.25rem 0 0.5rem;
+}
+
+.settings-page {
+  min-height: 100%;
+}
+
+.settings-menu {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.settings-menu button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.15rem 0.75rem;
+  min-height: 4rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-medium);
+  background: var(--panel-2);
+  color: var(--text);
+  text-align: left;
+}
+
+.settings-menu button span { font-weight: 650; }
+.settings-menu button small { grid-column: 1; color: var(--muted); }
+.settings-menu button b {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  color: var(--muted);
+  font-size: 1.4rem;
+}
+
+.settings-card {
+  display: grid;
+  gap: 0.85rem;
+  padding: 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-medium);
+  background: color-mix(in srgb, var(--panel-2) 72%, transparent);
+}
+
+.settings-card + .settings-card { margin-top: 0.75rem; }
+.settings-card > button { min-height: 2.7rem; border: 1px solid var(--line-bright); }
+.danger-card { border-color: color-mix(in srgb, var(--error) 55%, var(--line)); }
 
 .settings-sheet header,
 .history-sheet header,
