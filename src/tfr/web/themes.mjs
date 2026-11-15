@@ -1,4 +1,19 @@
 export const THEME_PALETTES = Object.freeze({
+  "abyss": {
+    "accent": "#56b6ff",
+    "background": "#020611",
+    "error": "#ff7085",
+    "info": "#55d6d0",
+    "muted": "#7891aa",
+    "overlay": "#18304d",
+    "secondary": "#ad7cff",
+    "selected_text": "#f2f8ff",
+    "selection": "#153e66",
+    "success": "#72d19c",
+    "surface": "#07101f",
+    "text": "#d9e7f5",
+    "warning": "#e6bd69"
+  },
   "1976": {
     "accent": "#e5a93c",
     "background": "#2b231d",
@@ -73,6 +88,21 @@ export const THEME_PALETTES = Object.freeze({
     "surface": "#313244",
     "text": "#cdd6f4",
     "warning": "#f9e2af"
+  },
+  "carbon": {
+    "accent": "#7ee787",
+    "background": "#050505",
+    "error": "#ff6b6b",
+    "info": "#76b7e5",
+    "muted": "#8d978d",
+    "overlay": "#303530",
+    "secondary": "#d2a85a",
+    "selected_text": "#f5fff5",
+    "selection": "#244a2d",
+    "success": "#5fd35f",
+    "surface": "#101210",
+    "text": "#e2e6e2",
+    "warning": "#e0b85a"
   },
   "default": {
     "accent": "#b5ec72",
@@ -164,6 +194,21 @@ export const THEME_PALETTES = Object.freeze({
     "text": "#d8dee9",
     "warning": "#ebcb8b"
   },
+  "oled": {
+    "accent": "#58a6ff",
+    "background": "#000000",
+    "error": "#ff7b72",
+    "info": "#79c0ff",
+    "muted": "#8b949e",
+    "overlay": "#252a30",
+    "secondary": "#d2a8ff",
+    "selected_text": "#ffffff",
+    "selection": "#1f6feb",
+    "success": "#56d364",
+    "surface": "#080a0c",
+    "text": "#e6edf3",
+    "warning": "#e3b341"
+  },
   "solarized-dark": {
     "accent": "#268bd2",
     "background": "#002b36",
@@ -203,10 +248,17 @@ export function normalizeTheme(value) {
 export function applyTheme(root, value, themeMeta = null) {
   const name = normalizeTheme(value);
   const palette = THEME_PALETTES[name];
+  const light = name === "catppuccin-latte";
+  const panel = light
+    ? palette.surface
+    : `color-mix(in srgb, ${palette.surface} 82%, ${palette.background})`;
+  const secondaryPanel = light
+    ? `color-mix(in srgb, ${palette.surface} 84%, ${palette.background})`
+    : `color-mix(in srgb, ${palette.surface} 62%, ${palette.background})`;
   const variables = {
     "--ink": palette.background,
-    "--panel": palette.surface,
-    "--panel-2": `color-mix(in srgb, ${palette.surface} 84%, ${palette.background})`,
+    "--panel": panel,
+    "--panel-2": secondaryPanel,
     "--line": palette.overlay,
     "--line-bright": palette.selection,
     "--text": palette.text,
@@ -223,7 +275,7 @@ export function applyTheme(root, value, themeMeta = null) {
   };
   for (const [key, color] of Object.entries(variables)) root.style.setProperty(key, color);
   root.dataset.theme = name;
-  root.style.colorScheme = name === "catppuccin-latte" ? "light" : "dark";
+  root.style.colorScheme = light ? "light" : "dark";
   if (themeMeta) themeMeta.content = palette.background;
   return name;
 }

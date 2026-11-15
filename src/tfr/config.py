@@ -148,6 +148,9 @@ class ThemeConfig(StrictModel):
         "nightfly",
         "kanagawa",
         "1976",
+        "oled",
+        "abyss",
+        "carbon",
     ] = "default"
     colors: ThemeColorsConfig = Field(default_factory=ThemeColorsConfig)
 
