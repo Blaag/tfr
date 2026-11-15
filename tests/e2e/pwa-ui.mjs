@@ -463,7 +463,13 @@ try {
     });
   });
   const detailedEvent = page.locator('[data-event-id="details-scroll-event"]');
-  await detailedEvent.waitFor();
+  await page.waitForFunction(() => (
+    document.querySelector('[data-event-id="details-scroll-event"]') ||
+    !document.querySelector("#return-live")?.hidden
+  ));
+  if (await page.locator("#return-live").isVisible()) await page.locator("#return-live").click();
+  await detailedEvent.waitFor({ state: "attached" });
+  await detailedEvent.scrollIntoViewIfNeeded();
   await detailedEvent.click();
   await page.locator("#event-dialog[open]").waitFor();
   const eventSheetBody = page.locator("#event-dialog .event-sheet-body");
