@@ -866,7 +866,7 @@ select {
   max-height: none;
   display: flex;
   flex-direction: column;
-  padding: 0.75rem 0.9rem calc(0.75rem + var(--safe-bottom));
+  padding: 0.75rem max(0.9rem, env(safe-area-inset-right)) calc(0.75rem + var(--safe-bottom)) max(0.9rem, env(safe-area-inset-left));
   overflow: hidden;
 }
 
@@ -889,8 +889,42 @@ select {
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--muted);
-  font-size: 1.8rem;
+  color: var(--text);
+  font-size: 1.45rem;
+}
+
+.settings-close {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.close-icon {
+  position: relative;
+  display: block;
+  width: 18px;
+  height: 18px;
+}
+
+.close-icon::before,
+.close-icon::after {
+  position: absolute;
+  top: 8px;
+  left: 1px;
+  width: 16px;
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
+  content: "";
+}
+
+.close-icon::before { transform: rotate(45deg); }
+.close-icon::after { transform: rotate(-45deg); }
+
+:root:not([data-input-modality="keyboard"]) .settings-close:focus {
+  outline: none;
 }
 
 .settings-back[hidden] {
@@ -950,6 +984,33 @@ select {
 .settings-card + .settings-card { margin-top: 0.75rem; }
 .settings-card > button { min-height: 2.7rem; border: 1px solid var(--line-bright); }
 .danger-card { border-color: color-mix(in srgb, var(--error) 55%, var(--line)); }
+
+.device-list,
+.statistics-results {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.device-item,
+.statistics-item {
+  padding: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-small);
+  background: var(--ink);
+}
+
+.device-item header,
+.device-item footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.device-item p { margin: 0.35rem 0; color: var(--muted); }
+.device-item button { min-height: 44px; }
+.statistics-results h3 { margin: 0; }
+.statistics-bar { height: 0.45rem; border-radius: 999px; background: var(--signal); }
 
 .settings-sheet header,
 .history-sheet header,

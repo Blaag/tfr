@@ -3960,6 +3960,19 @@ class GatewayServer:
             self._update_gateway_restart = update_gateway
             return staged
 
+    async def request_web_update(self) -> dict[str, Any]:
+        staged = await self._stage_gateway_update()
+        if staged is None:
+            return {"updated": False}
+        self._update_task = asyncio.create_task(
+            self._coordinate_update(), name="tfr-gateway-coordinated-web-update"
+        )
+        return {
+            "updated": True,
+            "version": staged.version,
+            "release_url": staged.release_url,
+        }
+
     async def _coordinate_update(self) -> None:
         staged = self._staged_update
         if staged is None:
@@ -4450,6 +4463,8 @@ async def run_gateway(
         application_restart_factory=lambda: request_gateway_restart(connector_path),
         ui_store=ui_store,
     )
+    if web_manager is not None:
+        web_manager.set_update_request_factory(server.request_web_update)
     stop = asyncio.Event()
     application_restart = asyncio.Event()
     loop = asyncio.get_running_loop()

@@ -133,7 +133,7 @@
         <header class="settings-header">
           <button id="settings-back" class="settings-back" type="button" aria-label="Back" hidden>‹</button>
           <h2 id="settings-dialog-title">Settings</h2>
-          <button class="close-button" value="cancel" aria-label="Close settings">×</button>
+          <button class="close-button settings-close" value="cancel" aria-label="Close settings"><span class="close-icon" aria-hidden="true"></span></button>
         </header>
         <div class="settings-pages">
           <section class="settings-page" data-settings-page="home">
@@ -142,8 +142,9 @@
               <button type="button" data-settings-target="appearance"><span>Appearance</span><small id="settings-theme-summary">Theme, text, wrapping, motion</small><b>›</b></button>
               <button type="button" data-settings-target="composer"><span>Composer</span><small>Spelling, speech, and history</small><b>›</b></button>
               <button type="button" data-settings-target="notifications"><span>Notifications</span><small id="settings-notification-summary">Device alerts and privacy</small><b>›</b></button>
-              <button type="button" data-settings-target="tools"><span>Tools</span><small>Effects Lab, diagnostics, and help</small><b>›</b></button>
-              <button type="button" data-settings-target="devices"><span>Devices</span><small>Pair, unpair, or reset</small><b>›</b></button>
+              <button type="button" data-settings-target="updates"><span>Updates</span><small id="settings-update-summary">PWA and Gateway software</small><b>›</b></button>
+              <button type="button" data-settings-target="tools"><span>Tools</span><small>Statistics, diagnostics, effects, and help</small><b>›</b></button>
+              <button type="button" data-settings-target="devices"><span>Devices</span><small>Paired UIs, pairing, and reset</small><b>›</b></button>
               <button type="button" data-settings-target="about"><span>About</span><small>Version and connection information</small><b>›</b></button>
             </nav>
           </section>
@@ -189,17 +190,51 @@
             <button id="push-enable" type="button">Enable notifications</button><button id="push-disable" type="button" hidden>Disable notifications</button>
           </div></section>
 
+          <section class="settings-page" data-settings-page="updates" hidden>
+            <div class="settings-card">
+              <h3>PWA</h3>
+              <p id="pwa-update-status" class="fine-print" role="status">Ready to check for application updates.</p>
+              <button id="pwa-update-check" type="button">Check PWA</button>
+              <button id="pwa-update-reload" type="button" hidden>Reload and update</button>
+            </div>
+            <div class="settings-card">
+              <h3>Gateway</h3>
+              <div class="about-row"><span>Installed</span><span id="update-installed-version">Unknown</span></div>
+              <div class="about-row"><span>Channel</span><span id="update-channel">Unknown</span></div>
+              <div class="about-row"><span>Available</span><span id="update-available-version">Not checked</span></div>
+              <p id="gateway-update-status" class="fine-print" role="status"></p>
+              <button id="gateway-update-check" type="button">Check Gateway</button>
+              <button id="gateway-update-apply" type="button" hidden>Install Gateway update</button>
+            </div>
+          </section>
+
           <section class="settings-page" data-settings-page="tools" hidden><div class="settings-menu">
+            <button type="button" data-settings-target="statistics"><span>Statistics</span><small>Conversation activity and speakers</small><b>›</b></button>
             <button id="effects-lab-button" type="button"><span>Effects Lab</span><small>Preview effects locally</small><b>›</b></button>
             <button id="diagnostics-button" type="button"><span>Diagnostics</span><small>Inspect private local status</small><b>›</b></button>
             <button id="help-button" type="button"><span>Help / Using TFR</span><small>Worlds, reading, and sending</small><b>›</b></button>
           </div></section>
 
+          <section class="settings-page" data-settings-page="statistics" hidden>
+            <div id="statistics-form" class="settings-card">
+              <label class="setting-row" for="statistics-scope"><span>Worlds</span><select id="statistics-scope"><option value="current">Current world</option><option value="all">All recall-enabled worlds</option></select></label>
+              <label class="setting-row" for="statistics-view"><span>View</span><select id="statistics-view"><option value="summary">Summary</option><option value="speakers">Speakers</option><option value="worlds">Worlds</option><option value="words">Words</option><option value="activity">Activity</option><option value="hours">Hours</option><option value="weekdays">Weekdays</option><option value="heatmap">Heatmap</option></select></label>
+              <label class="setting-row" for="statistics-range"><span>Range</span><select id="statistics-range"><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option><option value="all">All retained history</option></select></label>
+              <label for="statistics-speaker"><span>Speaker (optional)</span><input id="statistics-speaker" type="text" maxlength="64" autocomplete="off"></label>
+              <label class="setting-row" for="statistics-top"><span>Maximum results</span><select id="statistics-top"><option value="10">10</option><option value="25">25</option><option value="50">50</option></select></label>
+              <button id="statistics-submit" type="button">Show statistics</button>
+            </div>
+            <div id="statistics-results" class="settings-card statistics-results" role="status" hidden></div>
+          </section>
+
           <section class="settings-page" data-settings-page="devices" hidden><div class="settings-card">
+            <h3>Paired UIs</h3>
+            <div id="paired-device-list" class="device-list" role="status"><p class="fine-print">Loading paired devices…</p></div>
+            <button id="refresh-devices" type="button">Refresh devices</button>
             <button id="pair-ui-button" type="button">Pair a New UI</button><label id="pair-ui-result" hidden><span>Single-use code (expires in 30 minutes)</span><textarea id="pair-ui-code" readonly rows="3"></textarea></label>
           </div><div class="settings-card danger-card"><button id="unpair-device" class="unpair-device" type="button">Unpair this phone</button><button id="uninstall-device" class="unpair-device" type="button">Reset and uninstall</button></div></section>
 
-          <section class="settings-page" data-settings-page="about" hidden><div class="settings-card"><div class="about-row"><span>TFR Gateway</span><span id="gateway-version">Unknown</span></div><div class="about-row"><span>Connection</span><span id="about-connection-state">Unknown</span></div></div></section>
+          <section class="settings-page" data-settings-page="about" hidden><div class="settings-card"><div class="about-row"><span>TFR Gateway</span><span id="gateway-version">Unknown</span></div><div class="about-row"><span>PWA shell</span><span id="pwa-version">Unknown</span></div><div class="about-row"><span>Connection</span><span id="about-connection-state">Unknown</span></div></div></section>
         </div>
       </form>
     </dialog>

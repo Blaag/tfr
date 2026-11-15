@@ -278,6 +278,7 @@ class WebGatewayManager:
         self.snapshot_events = snapshot_events
         self.speaking_streaks_enabled = speaking_streaks_enabled
         self.ui_store = ui_store
+        self.update_request_factory: Any = None
         self._server: WebGatewayServer | None = None
         self._lock = asyncio.Lock()
         self._state_path = self.state_directory / "provisioning.json"
@@ -390,6 +391,11 @@ class WebGatewayManager:
     async def revoke_device(self, device_id: UUID) -> bool:
         return await self._server.revoke_device(device_id) if self._server is not None else False
 
+    def set_update_request_factory(self, factory: Any) -> None:
+        self.update_request_factory = factory
+        if self._server is not None:
+            self._server.update_request_factory = factory
+
     def diagnostic_entries(self, category: str | None = None) -> list[dict[str, Any]]:
         return self._server.diagnostic_entries(category) if self._server is not None else []
 
@@ -430,6 +436,7 @@ class WebGatewayManager:
             ui_store=self.ui_store,
             transport=self.transport,
             ssl_context=self._ssl_context,
+            update_request_factory=self.update_request_factory,
         )
         await server.start()
         self._server = server
@@ -937,6 +944,7 @@ class WebGatewayServer:
         ui_store: UiStore | None = None,
         transport: str = "tailscale",
         ssl_context: ssl.SSLContext | None = None,
+        update_request_factory: Any = None,
     ) -> None:
         if transport not in {"tailscale", "direct"}:
             raise ValueError("web gateway transport must be 'tailscale' or 'direct'")
@@ -974,6 +982,7 @@ class WebGatewayServer:
         self.snapshot_events = snapshot_events
         self.speaking_streaks_enabled = speaking_streaks_enabled
         self.ui_store = ui_store
+        self.update_request_factory = update_request_factory
         private_state = Path(state_directory).expanduser()
         self.devices = DeviceStore(private_state, self.origin)
         self.push_keys = VapidKeyStore(private_state, self.origin)
@@ -1166,6 +1175,12 @@ class WebGatewayServer:
                 web.post("/api/logout", self._logout),
                 web.post("/api/diagnostics", self._report_diagnostic),
                 web.post("/api/ui-pairing", self._create_ui_pairing),
+                web.post("/api/statistics", self._statistics),
+                web.get("/api/devices", self._list_devices),
+                web.delete("/api/devices/{device_id}", self._revoke_device_api),
+                web.get("/api/updates", self._update_status),
+                web.post("/api/updates/check", self._check_updates),
+                web.post("/api/updates/apply", self._apply_update),
                 web.get("/api/push", self._push_status),
                 web.put("/api/push", self._register_push),
                 web.delete("/api/push", self._remove_push),
@@ -1392,6 +1407,187 @@ class WebGatewayServer:
                 "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
             }
         )
+
+    async def _statistics(self, request: web.Request) -> web.Response:
+        self._validate_public_request(request, require_origin=True)
+        device = self._authenticate(request)
+        if device is None:
+            raise web.HTTPUnauthorized(text="Pair this device first")
+        try:
+            query = await request.json(loads=json.loads)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            raise web.HTTPBadRequest(text="Invalid statistics query") from None
+        if not isinstance(query, dict):
+            raise web.HTTPBadRequest(text="Invalid statistics query")
+        if not set(query) <= {
+            "view",
+            "world",
+            "speaker",
+            "after",
+            "top",
+            "timezone_offset_minutes",
+        }:
+            raise web.HTTPBadRequest(text="Statistics query has unsupported fields")
+        if query.get("view", "summary") not in {
+            "summary",
+            "speakers",
+            "worlds",
+            "words",
+            "activity",
+            "hours",
+            "weekdays",
+            "heatmap",
+        }:
+            raise web.HTTPBadRequest(text="Statistics view is invalid")
+        speaker = query.get("speaker")
+        if speaker is not None and (
+            not isinstance(speaker, str) or not 1 <= len(speaker) <= 64 or not speaker.isprintable()
+        ):
+            raise web.HTTPBadRequest(text="Statistics speaker is invalid")
+        world = query.get("world")
+        if world is not None and not isinstance(world, str):
+            raise web.HTTPBadRequest(text="Statistics world is invalid")
+        if world is not None and world not in self._authorized_worlds(device):
+            raise web.HTTPForbidden(text="Statistics world is not authorized")
+        if world is None and self._authorized_worlds(device) != self._non_agent_worlds():
+            raise web.HTTPForbidden(text="All-world statistics require access to every world")
+        try:
+            result = await self.runtime.statistics(query)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from None
+        return self._json_response(result)
+
+    async def _list_devices(self, request: web.Request) -> web.Response:
+        self._validate_public_request(request, require_origin=False)
+        device = self._authenticate(request)
+        if device is None:
+            raise web.HTTPUnauthorized(text="Pair this device first")
+        descriptors = []
+        represented_uis: set[str] = set()
+        for item in self.device_descriptors():
+            ui_id = str(item.get("ui_id", ""))
+            represented_uis.add(ui_id)
+            ui_record = (
+                self.ui_store.get(UUID(ui_id)) if self.ui_store is not None and ui_id else None
+            )
+            descriptors.append(
+                {
+                    "device_id": item["device_id"],
+                    "label": item["label"],
+                    "ui_name": item.get("ui_name"),
+                    "created_at": item["created_at"],
+                    "last_used_at": item["last_used_at"],
+                    "active": bool(item.get("active")),
+                    "push_enabled": bool(item.get("push_enabled")),
+                    "current": item["device_id"] == str(device.device_id),
+                    "type": "PWA",
+                    "platform": ui_record.platform if ui_record is not None else None,
+                    "version": dict(ui_record.versions).get("tfr")
+                    if ui_record is not None
+                    else None,
+                    "revocable": item["device_id"] != str(device.device_id),
+                }
+            )
+        if self.ui_store is not None:
+            for record in self.ui_store.records():
+                if str(record.ui_id) in represented_uis:
+                    continue
+                descriptors.append(
+                    {
+                        "device_id": None,
+                        "label": record.display_name,
+                        "ui_name": record.display_name,
+                        "created_at": record.created_at.astimezone(UTC)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                        "last_used_at": record.last_seen_at.astimezone(UTC)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                        "active": None,
+                        "push_enabled": False,
+                        "current": False,
+                        "type": "Native UI" if record.client_type == "terminal" else "PWA",
+                        "platform": record.platform,
+                        "version": dict(record.versions).get("tfr"),
+                        "revocable": False,
+                    }
+                )
+        return self._json_response({"devices": descriptors})
+
+    async def _revoke_device_api(self, request: web.Request) -> web.Response:
+        self._validate_public_request(request, require_origin=True)
+        device = self._authenticate(request)
+        if device is None:
+            raise web.HTTPUnauthorized(text="Pair this device first")
+        try:
+            target = UUID(request.match_info["device_id"])
+        except (KeyError, ValueError):
+            raise web.HTTPBadRequest(text="Invalid device identifier") from None
+        if target == device.device_id:
+            raise web.HTTPBadRequest(text="Use Unpair this phone to revoke the current device")
+        if not await self.revoke_device(target):
+            raise web.HTTPNotFound(text="Device is unavailable")
+        return self._json_response({"revoked": True})
+
+    def _update_value(self, result: Any) -> dict[str, Any]:
+        manifest = result.manifest
+        build = self.runtime.build
+        checker = getattr(self.runtime, "update_checker", None)
+        return {
+            "managed": self.update_request_factory is not None,
+            "channel": checker.config.channel if checker is not None else None,
+            "installed": build.as_dict(),
+            "checked_at": (
+                result.checked_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
+                if result.checked_at is not None
+                else None
+            ),
+            "available": result.available_for(build),
+            "available_version": manifest.version if manifest is not None else None,
+            "release_url": manifest.release_url if manifest is not None else None,
+            "error": result.error,
+        }
+
+    async def _update_status(self, request: web.Request) -> web.Response:
+        self._validate_public_request(request, require_origin=False)
+        if self._authenticate(request) is None:
+            raise web.HTTPUnauthorized(text="Pair this device first")
+        checker = getattr(self.runtime, "update_checker", None)
+        if checker is None or checker.result.checked_at is None:
+            return self._json_response(
+                {
+                    "managed": self.update_request_factory is not None,
+                    "channel": checker.config.channel if checker is not None else None,
+                    "installed": self.runtime.build.as_dict(),
+                    "checked_at": None,
+                    "available": False,
+                    "available_version": None,
+                    "release_url": None,
+                    "error": None if checker is not None else "Update checks are unavailable",
+                }
+            )
+        return self._json_response(self._update_value(checker.result))
+
+    async def _check_updates(self, request: web.Request) -> web.Response:
+        self._validate_public_request(request, require_origin=True)
+        if self._authenticate(request) is None:
+            raise web.HTTPUnauthorized(text="Pair this device first")
+        checker = getattr(self.runtime, "update_checker", None)
+        if checker is None:
+            raise web.HTTPServiceUnavailable(text="Update checks are unavailable")
+        return self._json_response(self._update_value(await checker.check()))
+
+    async def _apply_update(self, request: web.Request) -> web.Response:
+        self._validate_public_request(request, require_origin=True)
+        if self._authenticate(request) is None:
+            raise web.HTTPUnauthorized(text="Pair this device first")
+        if self.update_request_factory is None:
+            raise web.HTTPServiceUnavailable(text="Managed updates are unavailable")
+        try:
+            result = await self.update_request_factory()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from None
+        return self._json_response(result, status=202 if result.get("updated") else 200)
 
     async def _register_push(self, request: web.Request) -> web.Response:
         self._validate_public_request(request, require_origin=True)
