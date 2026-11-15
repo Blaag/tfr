@@ -157,7 +157,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v74";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v75";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
     assert (
         'self.registration.showNotification(world ? `TFR · ${world}` : "New activity", {' in worker
@@ -484,7 +484,9 @@ def test_settings_use_layered_full_height_navigation() -> None:
         "appearance",
         "composer",
         "notifications",
+        "updates",
         "tools",
+        "statistics",
         "devices",
         "about",
     ):
@@ -493,6 +495,12 @@ def test_settings_use_layered_full_height_navigation() -> None:
     assert "height: calc(var(--viewport-height) - var(--safe-top));" in styles
     assert 'showSettingsPage("home")' in application
     assert "elements.settingsPages.scrollTop = 0;" in application
+    assert 'class="close-icon"' in page
+    assert "min-width: 44px;" in styles
+    assert "width: 18px;" in styles
+    assert "env(safe-area-inset-right)" in styles
+    assert 'storeSession("tfr.updateDrafts"' in application
+    assert 'sessionStorage.removeItem("tfr.updateDrafts")' in application
 
 
 def test_screen_clear_pull_has_short_visual_travel() -> None:
@@ -1352,6 +1360,7 @@ async def paired_client(
     *,
     snapshot_events: int = 20,
     speaking_streaks_enabled: bool = True,
+    update_request_factory: object | None = None,
 ) -> tuple[WebGatewayServer, TestClient, str]:
     gateway = WebGatewayServer(
         runtime,  # type: ignore[arg-type]
@@ -1362,6 +1371,7 @@ async def paired_client(
         snapshot_events=snapshot_events,
         speaking_streaks_enabled=speaking_streaks_enabled,
         ui_store=UiStore(tmp_path / "managed"),
+        update_request_factory=update_request_factory,
     )
     client = TestClient(TestServer(gateway.application()))
     await client.start_server()
@@ -1437,6 +1447,133 @@ async def test_authenticated_pwa_creates_remote_ui_pairing_code(tmp_path: Path) 
         value = await response.json()
         assert value["code"].startswith("tfr-pair-v1:")
         assert value["expires_at"].endswith("Z")
+    finally:
+        await client.close()
+
+
+async def test_authenticated_pwa_queries_structured_statistics(tmp_path: Path) -> None:
+    runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 5}))
+    queries: list[dict[str, object]] = []
+
+    async def statistics(query: dict[str, object]) -> dict[str, object]:
+        queries.append(query)
+        return {
+            "view": "summary",
+            "world": "alpha",
+            "summary": {"lines": 12, "speakers": 3},
+            "scanned_lines": 12,
+        }
+
+    runtime.statistics = statistics  # type: ignore[attr-defined]
+    _gateway, client, token = await paired_client(tmp_path, runtime)
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        response = await client.post(
+            "/api/statistics",
+            headers=headers,
+            json={"view": "summary", "world": "alpha", "top": 10},
+        )
+        assert response.status == 200
+        assert (await response.json())["summary"]["lines"] == 12
+        assert queries == [{"view": "summary", "world": "alpha", "top": 10}]
+
+        forbidden = await client.post(
+            "/api/statistics",
+            headers=headers,
+            json={"view": "summary", "world": "agent-world"},
+        )
+        assert forbidden.status == 403
+
+        async def failing_statistics(_query: dict[str, object]) -> dict[str, object]:
+            raise RuntimeError("private path /Users/operator/recall.db")
+
+        runtime.statistics = failing_statistics  # type: ignore[attr-defined]
+        failed = await client.post(
+            "/api/statistics",
+            headers=headers,
+            json={"view": "summary", "world": "alpha"},
+        )
+        assert failed.status == 400
+        assert await failed.text() == "Statistics are unavailable for this request"
+    finally:
+        await client.close()
+
+
+async def test_authenticated_pwa_lists_and_revokes_other_web_devices(tmp_path: Path) -> None:
+    runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 5}))
+    gateway, client, token = await paired_client(tmp_path, runtime)
+    pairing_url = gateway.create_pairing_url("Other phone")
+    code = parse_qs(urlsplit(pairing_url).fragment)["pair"][0]
+    other, _other_token = await gateway.devices.redeem(code, "black@example.com")
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        listed = await client.get("/api/devices", headers=headers)
+        assert listed.status == 200
+        devices = (await listed.json())["devices"]
+        assert len(devices) == 2
+        assert sum(device["current"] for device in devices) == 1
+        assert all("token" not in key for device in devices for key in device)
+
+        revoked = await client.delete(f"/api/devices/{other.device_id}", headers=headers)
+        assert revoked.status == 200
+        assert gateway.devices.authenticate_by_id(other.device_id) is None
+
+        current_id = next(device["device_id"] for device in devices if device["current"])
+        current = await client.delete(f"/api/devices/{current_id}", headers=headers)
+        assert current.status == 400
+    finally:
+        await client.close()
+
+
+async def test_pwa_update_status_is_bounded_when_updates_are_unavailable(tmp_path: Path) -> None:
+    runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 5}))
+    _gateway, client, token = await paired_client(tmp_path, runtime)
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        response = await client.get("/api/updates", headers=headers)
+        assert response.status == 200
+        assert await response.json() == {
+            "managed": False,
+            "channel": None,
+            "installed": {"version": "1.2.3", "commit": "a" * 40, "protocol": 2},
+            "checked_at": None,
+            "available": False,
+            "available_version": None,
+            "release_url": None,
+            "error": "Update checks are unavailable",
+        }
+    finally:
+        await client.close()
+
+
+async def test_authenticated_pwa_can_initiate_managed_gateway_update(tmp_path: Path) -> None:
+    runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 5}))
+    calls = 0
+
+    async def update() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {"updated": True, "version": "1.2.4", "release_url": "https://example.com"}
+
+    gateway, client, token = await paired_client(
+        tmp_path,
+        runtime,
+        update_request_factory=update,
+    )
+    headers = {**PUBLIC_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        response = await client.post("/api/updates/apply", headers=headers)
+        assert response.status == 202
+        assert (await response.json())["version"] == "1.2.4"
+        assert calls == 1
+
+        async def failing_update() -> dict[str, object]:
+            raise RuntimeError("secret token and /private/release/path")
+
+        gateway.update_request_factory = failing_update
+        failed = await client.post("/api/updates/apply", headers=headers)
+        assert failed.status == 400
+        assert await failed.text() == "Gateway update could not be started"
     finally:
         await client.close()
 

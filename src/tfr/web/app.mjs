@@ -118,6 +118,7 @@ const elements = {
   settingsPages: document.querySelector("#settings-dialog .settings-pages"),
   settingsThemeSummary: document.querySelector("#settings-theme-summary"),
   settingsNotificationSummary: document.querySelector("#settings-notification-summary"),
+  settingsUpdateSummary: document.querySelector("#settings-update-summary"),
   worldList: document.querySelector("#world-list"),
   pushStatus: document.querySelector("#push-status"),
   pushPages: document.querySelector("#push-pages"),
@@ -128,6 +129,7 @@ const elements = {
   pushEnable: document.querySelector("#push-enable"),
   pushDisable: document.querySelector("#push-disable"),
   gatewayVersion: document.querySelector("#gateway-version"),
+  pwaVersion: document.querySelector("#pwa-version"),
   aboutConnectionState: document.querySelector("#about-connection-state"),
   eventDialog: document.querySelector("#event-dialog"),
   eventDialogWorld: document.querySelector("#event-dialog-world"),
@@ -141,6 +143,24 @@ const elements = {
   lineWrap: document.querySelector("#line-wrap"),
   spellingSuggestions: document.querySelector("#spelling-suggestions"),
   automaticSay: document.querySelector("#automatic-say"),
+  statisticsScope: document.querySelector("#statistics-scope"),
+  statisticsView: document.querySelector("#statistics-view"),
+  statisticsRange: document.querySelector("#statistics-range"),
+  statisticsSpeaker: document.querySelector("#statistics-speaker"),
+  statisticsTop: document.querySelector("#statistics-top"),
+  statisticsSubmit: document.querySelector("#statistics-submit"),
+  statisticsResults: document.querySelector("#statistics-results"),
+  pairedDeviceList: document.querySelector("#paired-device-list"),
+  refreshDevices: document.querySelector("#refresh-devices"),
+  pwaUpdateStatus: document.querySelector("#pwa-update-status"),
+  pwaUpdateCheck: document.querySelector("#pwa-update-check"),
+  pwaUpdateReload: document.querySelector("#pwa-update-reload"),
+  gatewayUpdateStatus: document.querySelector("#gateway-update-status"),
+  gatewayUpdateCheck: document.querySelector("#gateway-update-check"),
+  gatewayUpdateApply: document.querySelector("#gateway-update-apply"),
+  updateInstalledVersion: document.querySelector("#update-installed-version"),
+  updateChannel: document.querySelector("#update-channel"),
+  updateAvailableVersion: document.querySelector("#update-available-version"),
   unpairDevice: document.querySelector("#unpair-device"),
   pairUiButton: document.querySelector("#pair-ui-button"),
   pairUiResult: document.querySelector("#pair-ui-result"),
@@ -216,6 +236,7 @@ const state = {
   screenClearCutoffs: new Map(),
   lastScreenClearEffects: new Map(),
   paste: null,
+  gatewayUpdate: null,
   push: {
     busy: false,
     saveRequested: false,
@@ -916,6 +937,30 @@ function storeSession(key, value) {
     // The initial navigation can still succeed when tab-scoped storage is unavailable.
   }
 }
+
+function restoreUpdateDrafts() {
+  const raw = readSessionStorage("tfr.updateDrafts");
+  try {
+    sessionStorage.removeItem("tfr.updateDrafts");
+  } catch {
+    // A failed one-time handoff leaves drafts memory-only as usual.
+  }
+  if (!raw) return;
+  try {
+    const entries = JSON.parse(raw);
+    if (!Array.isArray(entries)) return;
+    state.drafts = new Map(
+      entries
+        .filter((entry) => Array.isArray(entry) && typeof entry[0] === "string" && typeof entry[1] === "string")
+        .slice(0, 100)
+        .map(([world, draft]) => [world, draft.slice(0, MAX_STORED_COMMAND_CHARACTERS)]),
+    );
+  } catch {
+    // Invalid tab-scoped state is ignored and removed.
+  }
+}
+
+restoreUpdateDrafts();
 
 function clearPairingState() {
   window.clearTimeout(pairingRecoveryTimer);
@@ -1817,6 +1862,7 @@ function handleMessage(message) {
       typeof buildVersion === "string"
         ? `${buildVersion}${typeof buildCommit === "string" ? ` (${buildCommit.slice(0, 8)})` : ""}`
         : "Unknown";
+    elements.pwaVersion.textContent = typeof buildVersion === "string" ? buildVersion : "Unknown";
     state.worlds = Array.isArray(message.worlds) ? message.worlds : [];
     state.effectDemos = validatedEffectDemos(message.effect_demos);
     state.screenClearConfig = validatedScreenClearConfig(message.screen_clear);
@@ -2061,6 +2107,10 @@ function sendCommand(event) {
   acknowledgeInteraction(elements.sendButton);
   const world = currentWorld();
   const draft = normalizeWorldCommand(elements.commandInput.value);
+  if (draft.trimStart().startsWith("/")) {
+    showToast("Slash commands aren’t available here. Open Tools instead.", 4200);
+    return;
+  }
   const text = commandWithAutomaticSay(draft, automaticSayPreference());
   if (
     !world ||
@@ -2353,6 +2403,9 @@ async function resume() {
 function showWaitingServiceWorker(worker) {
   if (!worker) return;
   elements.updateNotice.hidden = false;
+  elements.pwaUpdateReload.hidden = false;
+  elements.pwaUpdateStatus.textContent = "A PWA update is ready.";
+  elements.settingsUpdateSummary.textContent = "PWA update ready";
 }
 
 const SETTINGS_TITLES = {
@@ -2361,7 +2414,9 @@ const SETTINGS_TITLES = {
   appearance: "Appearance",
   composer: "Composer",
   notifications: "Notifications",
+  updates: "Updates",
   tools: "Tools",
+  statistics: "Statistics",
   devices: "Devices",
   about: "About",
 };
@@ -2376,6 +2431,245 @@ function showSettingsPage(name) {
   elements.settingsDialog.dataset.page = selected;
   elements.settingsPages.scrollTop = 0;
   if (selected === "notifications") refreshPushStatus();
+  if (selected === "updates") refreshUpdateStatus();
+  if (selected === "devices") refreshDevices();
+}
+
+async function apiJson(path, options = {}) {
+  const response = await fetch(path, {
+    cache: "no-store",
+    credentials: "same-origin",
+    ...options,
+    headers: options.body
+      ? { "Content-Type": "application/json", ...(options.headers || {}) }
+      : options.headers,
+  });
+  if (!response.ok) throw new Error((await response.text()).slice(0, 240) || `Request failed (${response.status})`);
+  return response.json();
+}
+
+function appendStatisticItem(container, label, value, maximum = 0) {
+  const item = document.createElement("div");
+  item.className = "statistics-item";
+  const row = document.createElement("div");
+  row.className = "about-row";
+  const name = document.createElement("span");
+  name.textContent = label;
+  const count = document.createElement("strong");
+  count.textContent = String(value);
+  row.append(name, count);
+  item.append(row);
+  if (maximum > 0) {
+    const bar = document.createElement("div");
+    bar.className = "statistics-bar";
+    bar.style.width = `${Math.max(1, Math.round((Number(value) / maximum) * 100))}%`;
+    item.append(bar);
+  }
+  container.append(item);
+}
+
+function renderStatistics(result) {
+  const output = elements.statisticsResults;
+  output.replaceChildren();
+  output.hidden = false;
+  const title = document.createElement("h3");
+  title.textContent = `Statistics — ${result.world || "all worlds"}`;
+  output.append(title);
+  const summary = result.summary && typeof result.summary === "object" ? result.summary : {};
+  for (const [label, key] of [["Lines", "lines"], ["Speakers", "speakers"], ["Words", "words"], ["Unattributed", "unattributed_lines"]]) {
+    if (Number.isFinite(Number(summary[key]))) appendStatisticItem(output, label, Number(summary[key]));
+  }
+  const rows = Array.isArray(result.rows) ? result.rows : [];
+  const words = Array.isArray(result.words) ? result.words : [];
+  const series = Array.isArray(result.series) ? result.series : [];
+  const values = rows.length
+    ? rows.map((row) => ({ label: row.name, value: row.lines }))
+    : words.length
+      ? words.map((row) => ({ label: row.word, value: row.count }))
+      : series.map((row) => ({ label: row.label, value: row.count }));
+  const maximum = Math.max(0, ...values.map((item) => Number(item.value) || 0));
+  for (const item of values) appendStatisticItem(output, String(item.label || "Unknown"), Number(item.value) || 0, maximum);
+  if (Array.isArray(result.word_groups)) {
+    for (const group of result.word_groups) {
+      const heading = document.createElement("h3");
+      heading.textContent = `Top words — ${group.name || "Unknown"}`;
+      output.append(heading);
+      const groupWords = Array.isArray(group.words) ? group.words : [];
+      const groupMaximum = Math.max(0, ...groupWords.map((item) => Number(item.count) || 0));
+      for (const item of groupWords) appendStatisticItem(output, String(item.word), Number(item.count) || 0, groupMaximum);
+    }
+  }
+  if (Array.isArray(result.matrix)) {
+    const matrix = document.createElement("pre");
+    matrix.textContent = result.matrix.map((row) => Array.isArray(row) ? row.join(" ") : "").join("\n");
+    output.append(matrix);
+  }
+  const scanned = document.createElement("p");
+  scanned.className = "fine-print";
+  scanned.textContent = `Scanned ${Number(result.scanned_lines) || 0} recalled conversational lines.`;
+  output.append(scanned);
+}
+
+async function loadStatistics() {
+  const world = currentWorld();
+  if (!world && elements.statisticsScope.value === "current") return;
+  elements.statisticsSubmit.disabled = true;
+  elements.statisticsResults.hidden = false;
+  elements.statisticsResults.textContent = "Loading statistics…";
+  const query = {
+    view: elements.statisticsView.value,
+    top: Number(elements.statisticsTop.value),
+    timezone_offset_minutes: -new Date().getTimezoneOffset(),
+  };
+  if (elements.statisticsScope.value === "current") query.world = world.world;
+  const speaker = elements.statisticsSpeaker.value.trim();
+  if (speaker) query.speaker = speaker;
+  if (elements.statisticsRange.value !== "all") {
+    query.after = new Date(Date.now() - Number(elements.statisticsRange.value) * 86400000).toISOString();
+  }
+  try {
+    renderStatistics(await apiJson("/api/statistics", { method: "POST", body: JSON.stringify(query) }));
+  } catch (error) {
+    elements.statisticsResults.textContent = `Statistics failed: ${error.message}`;
+  } finally {
+    elements.statisticsSubmit.disabled = false;
+  }
+}
+
+function formatDeviceTime(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? "Unknown" : date.toLocaleString();
+}
+
+function renderDevices(devices) {
+  elements.pairedDeviceList.replaceChildren();
+  if (!devices.length) {
+    const empty = document.createElement("p");
+    empty.className = "fine-print";
+    empty.textContent = "No paired PWAs.";
+    elements.pairedDeviceList.append(empty);
+    return;
+  }
+  for (const device of devices) {
+    const item = document.createElement("article");
+    item.className = "device-item";
+    const header = document.createElement("header");
+    const name = document.createElement("strong");
+    name.textContent = device.ui_name || device.label || "PWA";
+    const stateLabel = document.createElement("span");
+    stateLabel.textContent = device.current
+      ? "This device"
+      : device.active === true
+        ? "Connected"
+        : device.active === false
+          ? "Offline"
+          : "Registered";
+    header.append(name, stateLabel);
+    const details = document.createElement("p");
+    details.textContent = [
+      device.type || "PWA",
+      device.version ? `TFR ${device.version}` : null,
+      device.platform || null,
+      `Last seen ${formatDeviceTime(device.last_used_at)}`,
+    ].filter(Boolean).join(" · ");
+    item.append(header, details);
+    if (device.revocable) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "Revoke";
+      button.addEventListener("click", async () => {
+        if (!window.confirm(`Revoke ${name.textContent}?`)) return;
+        button.disabled = true;
+        try {
+          await apiJson(`/api/devices/${encodeURIComponent(device.device_id)}`, { method: "DELETE" });
+          await refreshDevices();
+        } catch (error) {
+          showToast(`Could not revoke device: ${error.message}`, 5000);
+          button.disabled = false;
+        }
+      });
+      item.append(button);
+    }
+    elements.pairedDeviceList.append(item);
+  }
+}
+
+async function refreshDevices() {
+  elements.refreshDevices.disabled = true;
+  try {
+    const value = await apiJson("/api/devices");
+    renderDevices(Array.isArray(value.devices) ? value.devices : []);
+  } catch (error) {
+    elements.pairedDeviceList.textContent = `Could not load devices: ${error.message}`;
+  } finally {
+    elements.refreshDevices.disabled = false;
+  }
+}
+
+function renderGatewayUpdate(value) {
+  state.gatewayUpdate = value;
+  elements.updateInstalledVersion.textContent = value.installed?.version || "Unknown";
+  elements.updateChannel.textContent = value.channel || "Unavailable";
+  elements.updateAvailableVersion.textContent = value.available
+    ? value.available_version || "Available"
+    : "Up to date";
+  elements.gatewayUpdateStatus.textContent = value.error || (value.checked_at
+    ? `Checked ${formatDeviceTime(value.checked_at)}`
+    : "Not checked yet.");
+  elements.gatewayUpdateApply.hidden = !(value.available && value.managed);
+  elements.settingsUpdateSummary.textContent = value.available
+    ? `Gateway ${value.available_version} available`
+    : "PWA and Gateway software";
+}
+
+async function refreshUpdateStatus() {
+  elements.pwaUpdateReload.hidden = !state.serviceWorkerRegistration?.waiting;
+  elements.pwaUpdateStatus.textContent = state.serviceWorkerRegistration?.waiting
+    ? "A PWA update is ready."
+    : "PWA is current as of the last browser check.";
+  try {
+    renderGatewayUpdate(await apiJson("/api/updates"));
+  } catch (error) {
+    elements.gatewayUpdateStatus.textContent = `Update status unavailable: ${error.message}`;
+  }
+}
+
+async function checkPwaUpdate() {
+  elements.pwaUpdateCheck.disabled = true;
+  elements.pwaUpdateStatus.textContent = "Checking PWA…";
+  try {
+    const registration = state.serviceWorkerRegistration || await navigator.serviceWorker?.getRegistration("/");
+    if (!registration) throw new Error("Service worker is unavailable");
+    state.serviceWorkerRegistration = registration;
+    await registration.update();
+    elements.pwaUpdateReload.hidden = !registration.waiting;
+    elements.pwaUpdateStatus.textContent = registration.waiting
+      ? "A PWA update is ready."
+      : registration.installing
+        ? "Downloading a PWA update…"
+        : "PWA is up to date.";
+  } catch (error) {
+    elements.pwaUpdateStatus.textContent = `PWA check failed: ${error.message}`;
+  } finally {
+    elements.pwaUpdateCheck.disabled = false;
+  }
+}
+
+function applyPwaUpdate() {
+  const worker = state.serviceWorkerRegistration?.waiting;
+  if (!worker) return;
+  const hasDraft = [...state.drafts.values()].some((draft) => draft.trim()) || elements.commandInput.value.trim();
+  if (hasDraft && !window.confirm("Reload and keep your saved world drafts?")) return;
+  if (state.selectedWorld) {
+    state.drafts.set(
+      state.selectedWorld,
+      elements.commandInput.value.slice(0, MAX_STORED_COMMAND_CHARACTERS),
+    );
+  }
+  storeSession("tfr.updateDrafts", JSON.stringify([...state.drafts]));
+  state.reloadingForUpdate = true;
+  elements.pwaUpdateReload.disabled = true;
+  worker.postMessage({ type: "SKIP_WAITING" });
 }
 
 function openSettingsDialog(event) {
@@ -2881,6 +3175,36 @@ elements.spellingSuggestions.addEventListener("change", () => {
 elements.automaticSay.addEventListener("change", () => {
   applyAutomaticSay(elements.automaticSay.checked);
 });
+elements.statisticsSubmit.addEventListener("click", loadStatistics);
+elements.refreshDevices.addEventListener("click", refreshDevices);
+elements.pwaUpdateCheck.addEventListener("click", checkPwaUpdate);
+elements.pwaUpdateReload.addEventListener("click", applyPwaUpdate);
+elements.gatewayUpdateCheck.addEventListener("click", async () => {
+  elements.gatewayUpdateCheck.disabled = true;
+  elements.gatewayUpdateStatus.textContent = "Checking Gateway…";
+  try {
+    renderGatewayUpdate(await apiJson("/api/updates/check", { method: "POST" }));
+  } catch (error) {
+    elements.gatewayUpdateStatus.textContent = `Gateway check failed: ${error.message}`;
+  } finally {
+    elements.gatewayUpdateCheck.disabled = false;
+  }
+});
+elements.gatewayUpdateApply.addEventListener("click", async () => {
+  const version = state.gatewayUpdate?.available_version || "the available release";
+  if (!window.confirm(`Install Gateway ${version}? Connections will briefly restart.`)) return;
+  elements.gatewayUpdateApply.disabled = true;
+  elements.gatewayUpdateStatus.textContent = "Preparing Gateway update…";
+  try {
+    const result = await apiJson("/api/updates/apply", { method: "POST" });
+    elements.gatewayUpdateStatus.textContent = result.updated
+      ? `Installing ${result.version}. The PWA will reconnect automatically.`
+      : "Gateway is already up to date.";
+  } catch (error) {
+    elements.gatewayUpdateStatus.textContent = `Gateway update failed: ${error.message}`;
+    elements.gatewayUpdateApply.disabled = false;
+  }
+});
 elements.pasteConfirm.addEventListener("click", startPasteTransfer);
 elements.pasteStop.addEventListener("click", stopPasteTransfer);
 elements.pasteCancel.addEventListener("click", () => {
@@ -2897,13 +3221,7 @@ elements.pasteDialog.addEventListener("close", () => {
   if (!state.paste || !["active", "stopping"].includes(state.paste.status)) state.paste = null;
   updateWorldHeader();
 });
-elements.applyUpdate.addEventListener("click", () => {
-  const worker = state.serviceWorkerRegistration?.waiting;
-  if (!worker) return;
-  state.reloadingForUpdate = true;
-  elements.applyUpdate.disabled = true;
-  worker.postMessage({ type: "SKIP_WAITING" });
-});
+elements.applyUpdate.addEventListener("click", applyPwaUpdate);
 elements.returnLive.addEventListener("click", () => {
   preserveLiveDuringViewportChange = document.activeElement === elements.commandInput;
   renderTranscript({ scrollToLive: true, smoothScroll: true });

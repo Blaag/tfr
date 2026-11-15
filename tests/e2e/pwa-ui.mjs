@@ -587,6 +587,26 @@ try {
   assert.ok(streakPosition.noticeTop < streakPosition.transcriptTop + (streakPosition.transcriptBottom - streakPosition.transcriptTop) / 2);
   const sentBeforeLab = await page.evaluate(() => window.__sentCommands.length);
   await page.locator("#settings-button").click();
+  const settingsCloseGeometry = await page.locator("#settings-dialog .settings-close").evaluate((button) => {
+    const target = button.getBoundingClientRect();
+    const icon = button.querySelector(".close-icon").getBoundingClientRect();
+    return {
+      targetWidth: target.width,
+      targetHeight: target.height,
+      iconWidth: icon.width,
+      iconHeight: icon.height,
+      rightGap: innerWidth - target.right,
+      top: target.top,
+      outline: getComputedStyle(button).outlineStyle,
+    };
+  });
+  assert.ok(settingsCloseGeometry.targetWidth >= 44);
+  assert.ok(settingsCloseGeometry.targetHeight >= 44);
+  assert.ok(settingsCloseGeometry.iconWidth <= 18);
+  assert.ok(settingsCloseGeometry.iconHeight <= 18);
+  assert.ok(settingsCloseGeometry.rightGap >= 8);
+  assert.ok(settingsCloseGeometry.top >= 8);
+  assert.equal(settingsCloseGeometry.outline, "none");
   await page.locator('[data-settings-target="tools"]').click();
   await page.locator("#effects-lab-button").click();
   await page.locator("#effects-lab[open]").waitFor();
@@ -655,6 +675,16 @@ try {
   await page.locator("#command-input").fill("I love my cat");
   await page.locator("#command-input").press("Enter");
   assert.equal(await page.evaluate(() => window.__sentCommands.at(-1).text), "say I love my cat");
+  await page.locator("#command-input").fill("WHO");
+  await page.locator("#command-input").press("Enter");
+  assert.equal(await page.evaluate(() => window.__sentCommands.at(-1).text), "WHO");
+  const sentBeforeSlash = await page.evaluate(() => window.__sentCommands.length);
+  await page.locator("#command-input").fill("/stats");
+  await page.locator("#command-input").press("Enter");
+  assert.equal(await page.evaluate(() => window.__sentCommands.length), sentBeforeSlash);
+  assert.equal(await page.locator("#command-input").inputValue(), "/stats");
+  assert.match(await page.locator("#toast").innerText(), /Slash commands aren’t available/);
+  await page.locator("#command-input").fill("");
   await page.locator("#settings-button").click();
   await page.locator('[data-settings-target="composer"]').click();
   await page.locator("#automatic-say").uncheck();
@@ -730,6 +760,14 @@ try {
     { world: "dev-local", text: "one\ntwo" },
   );
   await page.locator("#paste-cancel").click();
+
+  await page.evaluate(() => {
+    sessionStorage.setItem("tfr.updateDrafts", JSON.stringify([["dev-local", "restored update draft"]]));
+  });
+  await page.reload();
+  await page.locator("#console:not([hidden])").waitFor();
+  assert.equal(await page.locator("#command-input").inputValue(), "restored update draft");
+  assert.equal(await page.evaluate(() => sessionStorage.getItem("tfr.updateDrafts")), null);
 
   const unpairedContext = await browser.newContext({
     viewport: { width: 390, height: 844 },

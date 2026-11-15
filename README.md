@@ -710,8 +710,21 @@ the device-local Settings toggle controls browser `spellcheck`/`autocorrect` and
 does not run or synchronize TFR's Python spellchecker. The composer also offers
 a device-local, off-by-default setting that prefixes ordinary text with `say `;
 explicit `:`, `;`, and `@` commands and the first tokens `p`, `po`, `pos`,
-`pose`, `sa`, and `say` are left unchanged. Effects Lab command input keeps
-native spelling disabled.
+`pose`, `sa`, and `say` are left unchanged. Exact uppercase `WHO` is also sent
+as a world command. Leading `/` input is retained and rejected locally rather
+than spoken or sent: the touch-first PWA exposes supported TFR operations through
+Settings instead of implementing the terminal UI's slash-command surface.
+Effects Lab command input keeps native spelling disabled.
+
+Settings → Tools provides structured conversation Statistics for the active
+world by default, with an explicit all-recall-enabled-worlds scope, views, time
+ranges, speaker filtering, and bounded result counts. Settings → Devices lists
+Gateway-known native and PWA identities without exposing credentials; another
+PWA device can be revoked directly, while the current phone retains its separate
+Unpair action. Settings → Updates checks both the browser service-worker shell
+and the Gateway's configured managed-release channel. A ready browser update
+requires an explicit reload, and a Gateway update requires confirmation before
+the existing coordinated managed-update path is started.
 
 An installed PWA can enable standards-based Web Push under **Settings →
 Notifications**. The Gateway creates one stable private VAPID P-256 key in the
@@ -766,9 +779,9 @@ from the last committed cursor. If retained history no longer covers the gap,
 the app reports that truncation instead of pretending the transcript is
 complete.
 
-PWA Settings → Display includes the same named color presets as the terminal UI:
-Default, Catppuccin Latte/Frappé/Macchiato/Mocha, Gruvbox, Tokyo Night,
-Dracula, Nord, Solarized Dark, Nightfly, Kanagawa, and 1976. The selection is
+PWA Settings → Appearance includes the same named color presets as the terminal UI:
+Default, OLED, Abyss, Carbon, Catppuccin Latte/Frappé/Macchiato/Mocha, Gruvbox,
+Tokyo Night, Dracula, Nord, Solarized Dark, Nightfly, Kanagawa, and 1976. The selection is
 local to that browser device. PWA interface controls use the native platform UI
 font (SF Pro on iOS), while transcript and diagnostics use the locally bundled
 JetBrains Mono. No font is fetched from a third party. Theme colors apply to UI

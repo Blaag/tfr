@@ -30,6 +30,14 @@ test("automatic say prefixes ordinary text and preserves explicit commands", () 
   assert.equal(commandWithAutomaticSay("hello", false), "hello");
 });
 
+test("automatic say preserves only the exact uppercase WHO command", () => {
+  assert.equal(commandWithAutomaticSay("WHO", true), "WHO");
+  assert.equal(commandWithAutomaticSay("  WHO  ", true), "  WHO  ");
+  assert.equal(commandWithAutomaticSay("who", true), "say who");
+  assert.equal(commandWithAutomaticSay("WHO here", true), "say WHO here");
+  assert.equal(commandWithAutomaticSay("Who is here?", true), "say Who is here?");
+});
+
 test("detects multiline command paste across newline conventions", () => {
   assert.equal(isMultilineWorldCommand("one line"), false);
   assert.equal(isMultilineWorldCommand("one\ntwo"), true);
