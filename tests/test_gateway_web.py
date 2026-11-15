@@ -52,6 +52,7 @@ from tfr.gateway_web import (
 )
 from tfr.plugins import PluginManager
 from tfr.presentation import color_pulse
+from tfr.themes import _PALETTES
 from tfr.updates import BuildIdentity
 from tfr.web_push import PushResult
 
@@ -149,12 +150,14 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
         "icon-512.png",
         "apple-touch-icon.png",
     } <= {asset.name for asset in asset_directory.iterdir()}
+    assert asset_directory.joinpath("fonts", "JetBrainsMono-Variable.ttf").is_file()
+    assert asset_directory.joinpath("fonts", "JetBrainsMono-OFL.txt").is_file()
 
 
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v71";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v72";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
     assert (
         'self.registration.showNotification(world ? `TFR · ${world}` : "New activity", {' in worker
@@ -188,6 +191,19 @@ def test_every_application_module_is_routable_and_in_the_atomic_shell() -> None:
 
     assert application_modules <= {name.removeprefix("/") for name in gateway_web._ASSETS}
     assert application_modules == shell_modules
+
+
+def test_pwa_named_theme_palettes_match_terminal_definitions() -> None:
+    source = files("tfr").joinpath("web", "themes.mjs").read_text(encoding="utf-8")
+    encoded = source.split("Object.freeze(", 1)[1].split(");\n\n", 1)[0]
+    browser = json.loads(encoded)
+
+    for name, palette in _PALETTES.items():
+        if name == "default":
+            continue
+        assert browser[name] == {
+            field: getattr(palette, field) for field in palette.__dataclass_fields__
+        }
 
 
 async def test_all_declared_pwa_assets_are_routable(tmp_path: Path) -> None:
@@ -278,7 +294,7 @@ def test_pwa_header_uses_one_shared_font_size() -> None:
     topbar_start = styles.index(".topbar {")
     topbar_end = styles.index("}", topbar_start)
     assert "font-size: 0.82rem;" in styles[topbar_start:topbar_end]
-    for selector in (".settings-button {", ".settings-glyph {", ".active-world strong {"):
+    for selector in (".settings-button {", ".active-world strong {"):
         start = styles.index(selector)
         end = styles.index("}", start)
         assert "font-size: inherit;" in styles[start:end]
@@ -378,8 +394,8 @@ def test_command_history_uses_a_touch_friendly_restore_sheet() -> None:
     assert "elements.historyDialog.close();" in application
     history_button_start = styles.index("\n.history-button {")
     history_button_end = styles.index("}", history_button_start)
-    assert "min-width: 4.25rem;" in styles[history_button_start:history_button_end]
-    assert "min-height: 2.75rem;" in styles[history_button_start:history_button_end]
+    assert "min-width: 4rem;" in styles[history_button_start:history_button_end]
+    assert "min-height: 2.25rem;" in styles[history_button_start:history_button_end]
     history_row_start = styles.index(".history-list button {")
     history_row_end = styles.index("}", history_row_start)
     assert "min-height: 3.25rem;" in styles[history_row_start:history_row_end]
@@ -1201,6 +1217,26 @@ def test_browser_projection_reports_verified_nospoof_source() -> None:
         {"text": "You", "style": {}, "role": "speaker"},
         {"text": ' say, "Hello"', "style": {}},
     ]
+
+
+def test_browser_projection_promotes_tinymux_terse_pose_for_display() -> None:
+    original = make_event(kind=EventKind.RAW_OUTPUT, text="Blood waves.")
+    event = replace(
+        original,
+        provenance=Provenance(
+            sender_dbref=42,
+            adapter="tinymux",
+            confidence=Confidence.HIGH,
+        ),
+        parser_name="tinymux",
+    )
+
+    projected = browser_event(1, event)
+
+    assert projected is not None
+    assert projected["event"]["kind"] == "pose"
+    assert projected["event"]["provenance"]["sender_name"] == "Blood"
+    assert projected["event"]["provenance"]["confidence"] == "inferred"
 
 
 def test_browser_projection_reports_mismatched_say_speaker_as_spoofed() -> None:

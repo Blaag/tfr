@@ -46,7 +46,7 @@ def _page_speaker(plain_text: str) -> str | None:
 
 def infer_presentation_speaker(event: Event, event_text: str | None) -> Event:
     """Return a display-only event with conservative bare-output speaker attribution."""
-    if event_text is None or event.provenance is not None:
+    if event_text is None:
         return event
     plain_text = terminal_plain_text(event_text).lstrip()
     if event.kind is EventKind.PAGE:
@@ -64,18 +64,37 @@ def infer_presentation_speaker(event: Event, event_text: str | None) -> Event:
         )
     if event.kind not in {EventKind.RAW_OUTPUT, EventKind.SAY}:
         return event
+    if event.provenance is not None and event.provenance.sender_name is not None:
+        speaker = event.provenance.sender_name
+        suffix = (
+            plain_text[len(speaker) :]
+            if plain_text[: len(speaker)].casefold() == speaker.casefold()
+            else ""
+        )
+        if event.kind is EventKind.RAW_OUTPUT and suffix and suffix[0].isspace():
+            return replace(event, kind=EventKind.POSE, confidence=Confidence.INFERRED)
+        return event
+    if event.provenance is not None and not (
+        event.provenance.adapter == "tinymux" and event.provenance.sender_dbref is not None
+    ):
+        return event
     token = plain_text.split(maxsplit=1)[0] if plain_text else ""
     if token.casefold().endswith(("'s", "’s")):
         token = token[:-2]
     if not token or len(token) > MAX_INFERRED_SPEAKER_LENGTH:
         return event
-    return replace(
-        event,
-        kind=EventKind.POSE if event.kind is EventKind.RAW_OUTPUT else event.kind,
-        provenance=Provenance(
+    provenance = (
+        replace(event.provenance, sender_name=token, confidence=Confidence.INFERRED)
+        if event.provenance is not None
+        else Provenance(
             sender_name=token,
             adapter=event.parser_name,
             confidence=Confidence.INFERRED,
-        ),
+        )
+    )
+    return replace(
+        event,
+        kind=EventKind.POSE if event.kind is EventKind.RAW_OUTPUT else event.kind,
+        provenance=provenance,
         confidence=Confidence.INFERRED,
     )

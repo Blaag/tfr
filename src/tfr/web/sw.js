@@ -1,4 +1,4 @@
-const CACHE_NAME = "tfr-shell-web1-v71";
+const CACHE_NAME = "tfr-shell-web1-v72";
 const NETWORK_TIMEOUT_MS = 5000;
 const SHELL = [
   "/",
@@ -22,12 +22,14 @@ const SHELL = [
   "/service-worker.mjs",
   "/swipe.mjs",
   "/text-runs.mjs",
+  "/themes.mjs",
   "/transcript-events.mjs",
   "/styles.css",
   "/manifest.webmanifest",
   "/icon.svg",
   "/icon-512.png",
   "/apple-touch-icon.png",
+  "/fonts/JetBrainsMono-Variable.ttf",
 ];
 
 self.addEventListener("install", (event) => {

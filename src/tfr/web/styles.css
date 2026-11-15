@@ -1,3 +1,11 @@
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/JetBrainsMono-Variable.ttf") format("truetype-variations");
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+}
+
 :root {
   color-scheme: dark;
   --ink: #07100f;
@@ -12,13 +20,17 @@
   --amber: #f1bb63;
   --error: #ff8378;
   --outbound: #9ad7e8;
+  --radius-small: 0.65rem;
+  --radius-medium: 1rem;
+  --radius-large: 1.35rem;
+  --composer-safe-bottom: max(0px, calc(var(--safe-bottom) - 1.25rem));
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-top: env(safe-area-inset-top, 0px);
   --viewport-height: 100dvh;
   --viewport-offset-top: 0px;
   --transcript-font-size: clamp(0.82rem, 3.6vw, 0.94rem);
   font: -apple-system-body;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
   background: var(--ink);
   color: var(--text);
   font-synthesis: none;
@@ -41,7 +53,7 @@ body {
   margin: 0;
   overflow: hidden;
   background:
-    radial-gradient(circle at 15% -10%, rgba(79, 132, 112, 0.15), transparent 35%),
+    radial-gradient(circle at 15% -10%, color-mix(in srgb, var(--accent, var(--signal)) 15%, transparent), transparent 35%),
     var(--ink);
 }
 
@@ -52,6 +64,7 @@ input {
 
 button {
   color: inherit;
+  border-radius: var(--radius-small);
 }
 
 button,
@@ -106,15 +119,15 @@ a:focus-visible {
   padding: 2rem 1.6rem;
   border: 1px solid var(--line);
   border-top-color: var(--signal-soft);
-  background: linear-gradient(155deg, rgba(18, 35, 33, 0.96), rgba(9, 20, 19, 0.96));
+  border-radius: var(--radius-large);
+  background: linear-gradient(155deg, var(--panel-2), var(--panel));
   box-shadow: 0 1.5rem 5rem rgba(0, 0, 0, 0.45);
 }
 
 .pairing-panel h1,
 .settings-sheet h2 {
   margin: 0;
-  font-family: Iowan Old Style, Baskerville, Georgia, serif;
-  font-weight: 500;
+  font-weight: 650;
   letter-spacing: -0.025em;
 }
 
@@ -155,7 +168,7 @@ a:focus-visible {
   min-height: 2.8rem;
   padding: 0 0.75rem;
   border: 1px solid var(--line-bright);
-  border-radius: 0;
+  border-radius: var(--radius-small);
   background: var(--ink);
   color: var(--text);
   font-size: 1rem;
@@ -279,29 +292,35 @@ a:focus-visible {
   gap: 0.6rem;
   padding: 0.28rem 0.75rem 0.25rem;
   border-bottom: 1px solid var(--line);
-  background: rgba(7, 16, 15, 0.92);
+  background: color-mix(in srgb, var(--ink) 92%, transparent);
   backdrop-filter: blur(14px);
   font-size: 0.82rem;
   line-height: 1.2;
+}
+
+.topbar > * {
+  position: relative;
+  top: 8px;
 }
 
 .settings-button {
   min-width: 0;
   display: flex;
   align-items: center;
-  justify-self: start;
-  gap: 0.42rem;
-  padding: 0.5rem 0.35rem;
+  justify-self: end;
+  min-width: 2.5rem;
+  min-height: 2.5rem;
+  padding: 0.45rem;
   border: 0;
+  border-radius: var(--radius-small);
   background: transparent;
   color: var(--muted);
   font-size: inherit;
   touch-action: manipulation;
 }
 
-.settings-glyph {
-  color: var(--signal);
-  font-size: inherit;
+.settings-button svg {
+  fill: currentColor;
 }
 
 .active-world {
@@ -388,7 +407,7 @@ a:focus-visible {
 
 .connection-state {
   min-width: 0;
-  justify-self: end;
+  justify-self: start;
   color: var(--muted);
   font-size: inherit;
   letter-spacing: 0.04em;
@@ -450,7 +469,7 @@ a:focus-visible {
   right: 1rem;
   left: 1rem;
   pointer-events: none;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
   font-weight: 900;
   text-align: center;
   text-shadow: 0 0 0.7rem currentColor;
@@ -500,7 +519,8 @@ a:focus-visible {
   overflow: hidden;
   padding: 2rem 1rem;
   border: 1px solid var(--line);
-  background: #07100f;
+  border-radius: var(--radius-medium);
+  background: var(--ink);
 }
 .effects-lab-stage .combo-notice { position: absolute; top: 0.75rem; }
 .effects-lab-stage .combo-fireworks { position: absolute; inset: 0; }
@@ -522,18 +542,14 @@ a:focus-visible {
   cursor: pointer;
 }
 
-.event + .event {
-  border-top: 1px solid rgba(41, 65, 61, 0.24);
-}
-
 .event.outbound {
   border-left-color: var(--outbound);
-  background: rgba(154, 215, 232, 0.035);
+  background: color-mix(in srgb, var(--outbound) 4%, transparent);
 }
 
 .event.internal {
   border-left-color: var(--amber);
-  color: #c9c0a7;
+  color: var(--muted);
 }
 
 .event-body {
@@ -543,7 +559,7 @@ a:focus-visible {
 .event-text {
   margin: 0;
   color: inherit;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
   font-size: var(--transcript-font-size);
   line-height: 1.25;
   overflow-wrap: anywhere;
@@ -654,10 +670,10 @@ a:focus-visible {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 0.35rem;
-  padding: 0.3rem 0.5rem calc(0.3rem + var(--safe-bottom));
+  gap: 0.3rem;
+  padding: 0.2rem 0.4rem calc(0.2rem + var(--composer-safe-bottom));
   border-top: 1px solid var(--line);
-  background: rgba(8, 18, 17, 0.97);
+  background: color-mix(in srgb, var(--ink) 97%, transparent);
 }
 
 .screen-clear-handle {
@@ -711,7 +727,7 @@ a:focus-visible {
 }
 
 :root[data-input-focused] .composer {
-  padding-bottom: 0.3rem;
+  padding-bottom: 0.2rem;
 }
 
 @media (orientation: landscape), (max-height: 500px) {
@@ -728,7 +744,7 @@ a:focus-visible {
 
   :root[data-input-focused] .command-field input,
   :root[data-input-focused] .send-button {
-    height: 2.35rem;
+    height: 2.25rem;
   }
 }
 
@@ -740,18 +756,19 @@ a:focus-visible {
 
 .history-button {
   align-self: stretch;
-  min-width: 4.25rem;
-  min-height: 2.75rem;
+  min-width: 4rem;
+  min-height: 2.25rem;
   padding: 0 0.5rem;
   border: 1px solid var(--line-bright);
-  border-radius: 0;
+  border-radius: var(--radius-small);
   background: var(--panel-2);
   color: var(--muted);
   font-size: 0.72rem;
 }
 
 .history-button:disabled {
-  color: #53645e;
+  color: var(--muted);
+  opacity: 0.55;
 }
 
 .command-field {
@@ -760,17 +777,17 @@ a:focus-visible {
 
 .command-field input {
   width: 100%;
-  height: 2.75rem;
+  height: 2.25rem;
   padding: 0 0.65rem;
   border: 1px solid var(--line);
-  border-radius: 0;
+  border-radius: var(--radius-small);
   background: var(--panel);
   color: var(--text);
   font-size: 1rem;
   appearance: none;
 }
 
-.command-field input::placeholder { color: #667a73; }
+.command-field input::placeholder { color: var(--muted); }
 
 input[type="text"],
 input[type="url"],
@@ -785,12 +802,12 @@ select {
 }
 
 .send-button {
-  height: 2.75rem;
-  padding: 0 0.72rem;
+  height: 2.25rem;
+  padding: 0 0.65rem;
   border: 1px solid var(--signal-soft);
-  border-radius: 0;
+  border-radius: var(--radius-small);
   background: var(--signal);
-  color: #0b160d;
+  color: var(--selected-text, #0b160d);
   font-weight: 800;
   letter-spacing: 0.03em;
 }
@@ -831,6 +848,7 @@ select {
   overflow: auto;
   padding: 1rem 0.9rem calc(1.1rem + var(--safe-bottom));
   border-top: 1px solid var(--line-bright);
+  border-radius: var(--radius-large) var(--radius-large) 0 0;
   background: var(--panel);
 }
 
@@ -849,9 +867,8 @@ select {
 .event-sheet h2,
 .paste-sheet h2 {
   margin: 0;
-  font-family: Iowan Old Style, Baskerville, Georgia, serif;
   font-size: 1.8rem;
-  font-weight: 500;
+  font-weight: 650;
   letter-spacing: -0.025em;
 }
 
@@ -922,6 +939,7 @@ select {
   padding: 0.75rem;
   overflow: auto;
   border: 1px solid var(--line);
+  border-radius: var(--radius-small);
   background: var(--ink);
   color: var(--text);
   font: inherit;
@@ -943,6 +961,7 @@ select {
   min-height: 2.7rem;
   padding: 0 0.85rem;
   border: 1px solid var(--line-bright);
+  border-radius: var(--radius-small);
   background: var(--panel-2);
   color: var(--text);
 }
@@ -956,6 +975,7 @@ select {
   max-height: min(52dvh, 24rem);
   overflow: auto;
   border: 1px solid var(--line);
+  border-radius: var(--radius-medium);
   background: var(--line);
 }
 
@@ -963,6 +983,7 @@ select {
   min-height: 3.25rem;
   padding: 0.75rem;
   border: 0;
+  border-radius: var(--radius-small);
   background: var(--panel-2);
   color: var(--text);
   line-height: 1.35;
@@ -1031,6 +1052,7 @@ select {
   gap: 1px;
   background: var(--line);
   border: 1px solid var(--line);
+  border-radius: var(--radius-medium);
   max-height: 55dvh;
   overflow: auto;
 }
@@ -1051,6 +1073,7 @@ select {
   min-height: 3.7rem;
   padding: 0.6rem 0.78rem;
   border: 0;
+  border-radius: var(--radius-small);
   background: var(--panel-2);
   text-align: left;
 }
@@ -1071,12 +1094,14 @@ select {
   margin: 1rem 0 0;
   padding: 0.8rem;
   border: 1px solid var(--line);
+  border-radius: var(--radius-medium);
 }
 
 .about-settings {
   margin-top: 1rem;
   padding: 0.8rem;
   border: 1px solid var(--line);
+  border-radius: var(--radius-medium);
 }
 
 .about-row {
@@ -1115,6 +1140,8 @@ select {
   display: flex;
   gap: 1px;
   background: var(--line);
+  border-radius: var(--radius-small);
+  overflow: hidden;
 }
 
 .text-size-controls button,
@@ -1138,6 +1165,7 @@ select {
   margin: auto;
   padding: 0;
   border: 1px solid var(--line-bright);
+  border-radius: var(--radius-large);
   background: var(--panel);
   color: var(--text);
 }
@@ -1166,9 +1194,11 @@ select {
   padding: 0.8rem;
   overflow: auto;
   border: 1px solid var(--line);
+  border-radius: var(--radius-small);
   background: var(--ink);
   color: var(--muted);
   font-size: 0.72rem;
+  font-family: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -1179,13 +1209,14 @@ select {
 }
 
 .text-size-controls button:disabled {
-  color: #53645e;
+  color: var(--muted);
+  opacity: 0.55;
 }
 
 .setting-row select {
   padding: 0 1.8rem 0 0.7rem;
   border: 1px solid var(--line-bright);
-  border-radius: 0;
+  border-radius: var(--radius-small);
 }
 
 .setting-row input[role="switch"] {

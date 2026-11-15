@@ -167,6 +167,7 @@ _ASSETS = {
     "/service-worker.mjs": ("service-worker.mjs", "text/javascript; charset=utf-8"),
     "/swipe.mjs": ("swipe.mjs", "text/javascript; charset=utf-8"),
     "/text-runs.mjs": ("text-runs.mjs", "text/javascript; charset=utf-8"),
+    "/themes.mjs": ("themes.mjs", "text/javascript; charset=utf-8"),
     "/transcript-events.mjs": ("transcript-events.mjs", "text/javascript; charset=utf-8"),
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
@@ -177,6 +178,10 @@ _ASSETS = {
     "/icon.svg": ("icon.svg", "image/svg+xml"),
     "/icon-512.png": ("icon-512.png", "image/png"),
     "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"),
+    "/fonts/JetBrainsMono-Variable.ttf": (
+        "fonts/JetBrainsMono-Variable.ttf",
+        "font/ttf",
+    ),
 }
 
 
@@ -589,6 +594,12 @@ def browser_event(
     if text_truncated:
         text = _truncate_with_ellipsis(encoded_text, MAX_WEB_EVENT_TEXT_BYTES)
         spans = _truncate_browser_spans(spans, text)
+    presentation_event = infer_presentation_speaker(event, text)
+    projected_event = (
+        presentation_event
+        if event.kind is EventKind.RAW_OUTPUT and event.provenance is not None
+        else event
+    )
     value: dict[str, Any] = {
         "type": "event",
         "protocol": WEB_PROTOCOL_VERSION,
@@ -599,20 +610,20 @@ def browser_event(
             "world": event.world,
             "connection_generation": str(event.connection_generation),
             "direction": event.direction.value,
-            "kind": event.kind.value,
+            "kind": projected_event.kind.value,
             "text": text,
             "redacted": event.redacted,
             "text_truncated": text_truncated,
         },
     }
-    if event.provenance is not None:
+    if projected_event.provenance is not None:
         provenance = {
             key: _bounded_visible_text(item, MAX_WEB_PROVENANCE_BYTES)
             for key, item in {
-                "sender_name": event.provenance.sender_name,
-                "owner_name": event.provenance.owner_name,
-                "server_source": event.provenance.server_source,
-                "confidence": event.provenance.confidence.value,
+                "sender_name": projected_event.provenance.sender_name,
+                "owner_name": projected_event.provenance.owner_name,
+                "server_source": projected_event.provenance.server_source,
+                "confidence": projected_event.provenance.confidence.value,
             }.items()
             if item is not None
         }
@@ -644,7 +655,6 @@ def browser_event(
     if text_runs is not None:
         value["event"]["text_runs"] = text_runs
     if plugins is not None:
-        presentation_event = infer_presentation_speaker(event, text)
         programs = plugins.presentation_programs(presentation_event, text)
         if programs:
             value["event"]["presentation"] = effect_programs_as_dict(programs)
@@ -1164,11 +1174,12 @@ class WebGatewayServer:
                     "/{asset:index.html|app.mjs|bootstrap.mjs|command.mjs|connection-lifecycle.mjs|"
                     "diagnostics.mjs|event-details.mjs|effects-lab.mjs|history-notice.mjs|linkify.mjs|motion.mjs|pairing.mjs|paste.mjs|"
                     "presentation.mjs|push.mjs|scroll-restoration.mjs|screen-clear.mjs|service-worker.mjs|combo.mjs|swipe.mjs|text-runs.mjs|"
-                    "transcript-events.mjs|styles.css|manifest.webmanifest|"
+                    "themes.mjs|transcript-events.mjs|styles.css|manifest.webmanifest|"
                     "repair.html|repair.css|repair.mjs|sw.js|icon.svg|icon-512.png|"
                     "apple-touch-icon.png}",
                     self._asset,
                 ),
+                web.get("/fonts/JetBrainsMono-Variable.ttf", self._asset),
                 web.get("/", self._asset),
             ]
         )

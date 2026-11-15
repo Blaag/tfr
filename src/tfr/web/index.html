@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <meta name="theme-color" content="#0d1717">
+    <meta id="theme-color" name="theme-color" content="#000000">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="TFR">
@@ -78,15 +78,17 @@
 
     <main id="console" class="console" hidden>
       <header class="topbar">
-        <button id="settings-button" class="settings-button" type="button" aria-haspopup="dialog">
-          <span class="settings-glyph" aria-hidden="true">☰</span>
-          <span>Settings</span>
-        </button>
+        <div id="connection-state" class="connection-state" role="status">Offline</div>
         <div class="active-world" aria-label="Active world">
           <strong id="world-name">Select world</strong>
           <div id="world-activity" class="world-activity" aria-label="World activity"></div>
         </div>
-        <div id="connection-state" class="connection-state" role="status">Offline</div>
+        <button id="settings-button" class="settings-button" type="button"
+                aria-haspopup="dialog" aria-label="Settings" title="Settings">
+          <svg aria-hidden="true" viewBox="0 0 24 24" width="22" height="22">
+            <path d="M19.14 12.94a7.7 7.7 0 0 0 .05-.94 7.7 7.7 0 0 0-.05-.94l2.03-1.58-1.92-3.32-2.39.96a7.45 7.45 0 0 0-1.62-.94L14.88 3h-3.76l-.36 3.18c-.58.24-1.12.56-1.62.94l-2.39-.96-1.92 3.32 2.03 1.58a7.7 7.7 0 0 0-.05.94c0 .32.02.63.05.94l-2.03 1.58 1.92 3.32 2.39-.96c.5.38 1.04.7 1.62.94l.36 3.18h3.76l.36-3.18c.58-.24 1.12-.56 1.62-.94l2.39.96 1.92-3.32-2.03-1.58ZM13 16a4 4 0 1 1 0-8 4 4 0 0 1 0 8Z"/>
+          </svg>
+        </button>
       </header>
 
       <section id="history-notice" class="history-notice" hidden></section>
@@ -190,6 +192,24 @@
               <option value="system">System</option>
               <option value="reduced">Reduced</option>
               <option value="full">Full</option>
+            </select>
+          </label>
+          <label class="setting-row" for="theme-preference">
+            <span>Theme</span>
+            <select id="theme-preference">
+              <option value="default">Default</option>
+              <option value="catppuccin-latte">Catppuccin Latte</option>
+              <option value="catppuccin-frappe">Catppuccin Frappé</option>
+              <option value="catppuccin-macchiato">Catppuccin Macchiato</option>
+              <option value="catppuccin-mocha">Catppuccin Mocha</option>
+              <option value="gruvbox">Gruvbox</option>
+              <option value="tokyo-night">Tokyo Night</option>
+              <option value="dracula">Dracula</option>
+              <option value="nord">Nord</option>
+              <option value="solarized-dark">Solarized Dark</option>
+              <option value="nightfly">Nightfly</option>
+              <option value="kanagawa">Kanagawa</option>
+              <option value="1976">1976</option>
             </select>
           </label>
           <label class="setting-row" for="line-wrap">
