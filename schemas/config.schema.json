@@ -623,7 +623,10 @@
             "solarized-dark",
             "nightfly",
             "kanagawa",
-            "1976"
+            "1976",
+            "oled",
+            "abyss",
+            "carbon"
           ],
           "title": "Preset",
           "type": "string"

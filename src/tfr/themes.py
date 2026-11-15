@@ -241,6 +241,51 @@ _PALETTES = {
         selection="#556b2f",
         selected_text="#ebdcb9",
     ),
+    "oled": ThemePalette(
+        background="#000000",
+        surface="#080a0c",
+        overlay="#252a30",
+        text="#e6edf3",
+        muted="#8b949e",
+        accent="#58a6ff",
+        secondary="#d2a8ff",
+        info="#79c0ff",
+        success="#56d364",
+        warning="#e3b341",
+        error="#ff7b72",
+        selection="#1f6feb",
+        selected_text="#ffffff",
+    ),
+    "abyss": ThemePalette(
+        background="#020611",
+        surface="#07101f",
+        overlay="#18304d",
+        text="#d9e7f5",
+        muted="#7891aa",
+        accent="#56b6ff",
+        secondary="#ad7cff",
+        info="#55d6d0",
+        success="#72d19c",
+        warning="#e6bd69",
+        error="#ff7085",
+        selection="#153e66",
+        selected_text="#f2f8ff",
+    ),
+    "carbon": ThemePalette(
+        background="#050505",
+        surface="#101210",
+        overlay="#303530",
+        text="#e2e6e2",
+        muted="#8d978d",
+        accent="#7ee787",
+        secondary="#d2a85a",
+        info="#76b7e5",
+        success="#5fd35f",
+        warning="#e0b85a",
+        error="#ff6b6b",
+        selection="#244a2d",
+        selected_text="#f5fff5",
+    ),
 }
 
 _DEFAULT_STYLES = MappingProxyType(
@@ -326,9 +371,7 @@ def _legacy_styles(palette: ThemePalette, overridden: set[str]) -> Mapping[str, 
         styles["world.unread"] = f"bold fg:{palette.info}"
     if "warning" in overridden:
         styles["border.activity"] = f"fg:{palette.warning}"
-        styles["status.lowbw"] = _replace_style_color(
-            styles["status.lowbw"], "bg", palette.warning
-        )
+        styles["status.lowbw"] = _replace_style_color(styles["status.lowbw"], "bg", palette.warning)
     if "error" in overridden:
         styles["status.more"] = _replace_style_color(styles["status.more"], "bg", palette.error)
     if {"selection", "selected_text"} & overridden:

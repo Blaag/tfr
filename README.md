@@ -1098,6 +1098,9 @@ above.
 Available `ui.theme.preset` values are:
 
 - `default`
+- `oled`
+- `abyss`
+- `carbon`
 - `catppuccin-latte`
 - `catppuccin-frappe`
 - `catppuccin-macchiato`
@@ -1117,6 +1120,9 @@ foreground and background to the full UI, including world markers, borders,
 prompts, status bars, selection, boss views, and TFR-generated notices.
 The `1976` preset uses dark walnut and parchment neutrals with harvest gold,
 burnt orange, avocado green, and terracotta accents.
+The `oled`, `abyss`, and `carbon` presets use near-black backgrounds and
+surfaces: OLED is pure black with cool accents, Abyss is deep navy with cyan
+and violet accents, and Carbon is neutral black with green and amber accents.
 
 Override any semantic role without redefining the component style map:
 

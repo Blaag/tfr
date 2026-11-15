@@ -21,6 +21,9 @@ from tfr.themes import resolve_theme
         ("nightfly", "#011627", "#acb4c2"),
         ("kanagawa", "#1f1f28", "#dcd7ba"),
         ("1976", "#2b231d", "#ebdcb9"),
+        ("oled", "#000000", "#e6edf3"),
+        ("abyss", "#020611", "#d9e7f5"),
+        ("carbon", "#050505", "#e2e6e2"),
     ],
 )
 def test_resolves_named_presets(preset: str, background: str, text: str) -> None:
@@ -50,6 +53,15 @@ def test_1976_theme_uses_the_requested_retro_palette() -> None:
     assert palette.secondary == "#d35400"
     assert palette.success == "#556b2f"
     assert palette.error == "#962d2d"
+
+
+@pytest.mark.parametrize("preset", ["oled", "abyss", "carbon"])
+def test_deep_dark_themes_keep_background_and_surface_near_black(preset: str) -> None:
+    palette = resolve_theme(ThemeConfig(preset=preset)).palette  # type: ignore[arg-type]
+
+    for color in (palette.background, palette.surface):
+        red, green, blue = (int(color[index : index + 2], 16) for index in (1, 3, 5))
+        assert max(red, green, blue) <= 31
 
 
 def test_semantic_colors_override_the_selected_palette() -> None:
