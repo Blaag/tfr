@@ -581,6 +581,7 @@ try {
   assert.ok(streakPosition.noticeTop < streakPosition.transcriptTop + (streakPosition.transcriptBottom - streakPosition.transcriptTop) / 2);
   const sentBeforeLab = await page.evaluate(() => window.__sentCommands.length);
   await page.locator("#settings-button").click();
+  await page.locator('[data-settings-target="tools"]').click();
   await page.locator("#effects-lab-button").click();
   await page.locator("#effects-lab[open]").waitFor();
   assert.equal(
@@ -624,6 +625,7 @@ try {
   assert.equal(await page.evaluate(() => window.__sentCommands.length), sentBeforeLab);
   await page.locator("#effects-lab-close").click();
   await page.locator("#settings-button").click();
+  await page.locator('[data-settings-target="tools"]').click();
   await page.locator("#diagnostics-button").click();
   const diagnostics = await page.locator("#diagnostics-output").innerText();
   assert.match(diagnostics, /gateway_omitted/);
@@ -632,6 +634,7 @@ try {
   assert.match(diagnostics, /tracks=hue_wave\+reveal/);
   await page.locator("#diagnostics-close").click();
   await page.locator("#settings-button").click();
+  await page.locator('[data-settings-target="composer"]').click();
   await page.locator("#spelling-suggestions").uncheck();
   assert.equal(await page.locator("#command-input").getAttribute("spellcheck"), "false");
   assert.equal(await page.locator("#command-input").getAttribute("autocorrect"), "off");
@@ -647,6 +650,7 @@ try {
   await page.locator("#command-input").press("Enter");
   assert.equal(await page.evaluate(() => window.__sentCommands.at(-1).text), "say I love my cat");
   await page.locator("#settings-button").click();
+  await page.locator('[data-settings-target="composer"]').click();
   await page.locator("#automatic-say").uncheck();
   await page.locator("#settings-dialog .close-button").click();
 
