@@ -4,7 +4,7 @@ from uuid import UUID
 
 import pytest
 
-from tfr.events import Direction, Event, EventKind
+from tfr.events import Confidence, Direction, Event, EventKind, Provenance
 from tfr.presentation_events import infer_presentation_speaker
 
 
@@ -43,3 +43,31 @@ def test_unknown_page_format_prefers_bounded_first_token_attribution() -> None:
     inferred = infer_presentation_speaker(event, event.display_text)
     assert inferred.provenance is not None
     assert inferred.provenance.sender_name == "A"
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    (
+        Provenance(sender_name="Blood", adapter="tinymux", confidence=Confidence.HIGH),
+        Provenance(sender_dbref=42, adapter="tinymux", confidence=Confidence.HIGH),
+    ),
+)
+def test_provenance_bearing_raw_pose_is_inferred_for_display(provenance: Provenance) -> None:
+    event = Event(
+        session_id=UUID(int=1),
+        world="alpha",
+        connection_generation=1,
+        sequence=1,
+        direction=Direction.INBOUND,
+        kind=EventKind.RAW_OUTPUT,
+        plain_text="Blood waves.",
+        display_text="Blood waves.",
+        provenance=provenance,
+        parser_name="tinymux",
+    )
+
+    inferred = infer_presentation_speaker(event, event.display_text)
+
+    assert inferred.kind is EventKind.POSE
+    assert inferred.provenance is not None
+    assert inferred.provenance.sender_name == "Blood"

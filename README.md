@@ -766,6 +766,14 @@ from the last committed cursor. If retained history no longer covers the gap,
 the app reports that truncation instead of pretending the transcript is
 complete.
 
+PWA Settings → Display includes the same named color presets as the terminal UI:
+Default, Catppuccin Latte/Frappé/Macchiato/Mocha, Gruvbox, Tokyo Night,
+Dracula, Nord, Solarized Dark, Nightfly, Kanagawa, and 1976. The selection is
+local to that browser device. PWA interface controls use the native platform UI
+font (SF Pro on iOS), while transcript and diagnostics use the locally bundled
+JetBrains Mono. No font is fetched from a third party. Theme colors apply to UI
+chrome and plain output without overriding world ANSI colors or speaker effects.
+
 ## Separate Linux UI Host
 
 The UI can run on a Linux computer other than the Gateway host. Install the

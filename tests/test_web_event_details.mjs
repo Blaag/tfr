@@ -51,14 +51,12 @@ test("shows a server-derived NOSPOOF verdict", () => {
     [
       ["Time", "2026-09-26T12:34:56Z"],
       ["World", "global"],
-      ["Direction", "Inbound"],
-      ["Type", "Raw output"],
-      ["Spoof status", "Not spoofed; NOSPOOF sender matches speaker"],
+      ["Type", "Unclassified output"],
+      ["Spoof status", "Not spoofed"],
       ["Sender", "Widget"],
       ["Owner", "Alice"],
       ["Server source", "saypose"],
       ["Attribution confidence", "High"],
-      ["Text", "Complete"],
     ],
   );
 });
@@ -77,7 +75,7 @@ test("shows a mismatched NOSPOOF sender as spoofed", () => {
 
   assert.equal(
     rows.find(([label]) => label === "Spoof status")[1],
-    "Spoofed; NOSPOOF source differs from speaker",
+    "Spoofed",
   );
 });
 
@@ -97,16 +95,15 @@ test("shows an inferred sender for a multiline spoof", () => {
 
   assert.equal(
     rows.find(([label]) => label === "Spoof status")[1],
-    "Spoofed; missing NOSPOOF prefix",
+    "Spoofed",
   );
-  assert.deepEqual(rows.slice(-3), [
+  assert.deepEqual(rows.slice(-2), [
     ["Likely sender", "Black2"],
     ["Spoof attribution confidence", "Inferred"],
-    ["Text", "Complete"],
   ]);
 });
 
-test("reports limited evidence and content handling", () => {
+test("reports limited spoof evidence without internal transport fields", () => {
   const rows = eventDetailRows({
     timestamp: "invalid",
     world: "global",
@@ -116,7 +113,8 @@ test("reports limited evidence and content handling", () => {
     text_truncated: true,
   });
 
-  assert.deepEqual(rows.at(-1), ["Text", "Redacted; Truncated"]);
+  assert.equal(rows.some(([label]) => label === "Direction"), false);
+  assert.equal(rows.some(([label]) => label === "Text"), false);
   assert.equal(rows.find(([label]) => label === "Spoof status")[1], "Undetermined; no reliable attribution");
 });
 
@@ -133,6 +131,6 @@ test("does not infer a verdict from high-confidence attribution alone", () => {
 
   assert.equal(
     rows.find(([label]) => label === "Spoof status")[1],
-    "Undetermined; source attribution available",
+    "Undetermined; no reliable attribution",
   );
 });

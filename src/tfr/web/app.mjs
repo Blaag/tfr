@@ -61,6 +61,7 @@ import {
 } from "./screen-clear.mjs";
 import { swipeDirection } from "./swipe.mjs";
 import { installTextRunColors, textRunClassNames, validatedTextRuns } from "./text-runs.mjs";
+import { applyTheme, normalizeTheme } from "./themes.mjs";
 import { isTranscriptEvent } from "./transcript-events.mjs";
 
 const MAX_EVENTS_PER_WORLD = 2500;
@@ -130,6 +131,7 @@ const elements = {
   textReset: document.querySelector("#text-reset"),
   textLarger: document.querySelector("#text-larger"),
   motionPreference: document.querySelector("#motion-preference"),
+  themePreference: document.querySelector("#theme-preference"),
   lineWrap: document.querySelector("#line-wrap"),
   spellingSuggestions: document.querySelector("#spelling-suggestions"),
   automaticSay: document.querySelector("#automatic-say"),
@@ -831,6 +833,17 @@ function applyMotionPreference(value) {
   elements.motionPreference.value = motion;
 }
 
+function applyThemePreference(value) {
+  const theme = applyTheme(
+    document.documentElement,
+    normalizeTheme(value),
+    document.querySelector("#theme-color"),
+  );
+  elements.themePreference.value = theme;
+  if (theme === "default") safeRemove("tfr.theme");
+  else safeStore("tfr.theme", theme);
+}
+
 function lineWrapPreference() {
   return readStorage("tfr.lineWrap") !== "off";
 }
@@ -875,6 +888,7 @@ function applyAutomaticSay(enabled) {
 }
 
 applyTextSize(textSizePreference());
+applyThemePreference(readStorage("tfr.theme") || "default");
 applyMotionPreference(readStorage("tfr.motion") || "system");
 applyLineWrap(lineWrapPreference());
 applySpellingSuggestions(spellingSuggestionsPreference());
@@ -2747,6 +2761,9 @@ elements.motionPreference.addEventListener("change", () => {
   cancelComboVisuals();
   applyMotionPreference(elements.motionPreference.value);
   renderTranscript({ restorePosition: true });
+});
+elements.themePreference.addEventListener("change", () => {
+  applyThemePreference(elements.themePreference.value);
 });
 elements.effectsLabButton.addEventListener("click", () => {
   renderEffectsLabCatalog();

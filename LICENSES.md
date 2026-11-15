@@ -55,6 +55,10 @@ dependencies, reviewed on 2026-09-28:
 | playwright | 1.63.0 | Apache-2.0 |
 | playwright-core | 1.63.0 | Apache-2.0 |
 
+The PWA bundles JetBrains Mono Variable for transcript and diagnostic text.
+JetBrains Mono is licensed under the SIL Open Font License 1.1; the complete
+font license is shipped at `src/tfr/web/fonts/JetBrainsMono-OFL.txt`.
+
 TinyFugue is GPLv2 software. TFR uses behavioral inspiration only and contains
 no copied TinyFugue implementation code. TinyMUX source was consulted to verify
 the NOSPOOF wire grammar; no TinyMUX source code is included.
