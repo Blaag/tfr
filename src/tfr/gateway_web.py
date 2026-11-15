@@ -1453,8 +1453,16 @@ class WebGatewayServer:
             raise web.HTTPForbidden(text="All-world statistics require access to every world")
         try:
             result = await self.runtime.statistics(query)
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise web.HTTPBadRequest(text=str(exc)) from None
+        except (OSError, RuntimeError, ValueError):
+            self.diagnostics.record(
+                severity="warning",
+                component="web",
+                code="statistics_failed",
+                message="PWA statistics request failed",
+                operation="statistics",
+                device_id_suffix=str(device.device_id)[-8:],
+            )
+            raise web.HTTPBadRequest(text="Statistics are unavailable for this request") from None
         return self._json_response(result)
 
     async def _list_devices(self, request: web.Request) -> web.Response:
@@ -1579,14 +1587,23 @@ class WebGatewayServer:
 
     async def _apply_update(self, request: web.Request) -> web.Response:
         self._validate_public_request(request, require_origin=True)
-        if self._authenticate(request) is None:
+        device = self._authenticate(request)
+        if device is None:
             raise web.HTTPUnauthorized(text="Pair this device first")
         if self.update_request_factory is None:
             raise web.HTTPServiceUnavailable(text="Managed updates are unavailable")
         try:
             result = await self.update_request_factory()
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise web.HTTPBadRequest(text=str(exc)) from None
+        except (OSError, RuntimeError, ValueError):
+            self.diagnostics.record(
+                severity="warning",
+                component="web",
+                code="update_start_failed",
+                message="PWA Gateway update request failed",
+                operation="update",
+                device_id_suffix=str(device.device_id)[-8:],
+            )
+            raise web.HTTPBadRequest(text="Gateway update could not be started") from None
         return self._json_response(result, status=202 if result.get("updated") else 200)
 
     async def _register_push(self, request: web.Request) -> web.Response:

@@ -1483,6 +1483,18 @@ async def test_authenticated_pwa_queries_structured_statistics(tmp_path: Path) -
             json={"view": "summary", "world": "agent-world"},
         )
         assert forbidden.status == 403
+
+        async def failing_statistics(_query: dict[str, object]) -> dict[str, object]:
+            raise RuntimeError("private path /Users/operator/recall.db")
+
+        runtime.statistics = failing_statistics  # type: ignore[attr-defined]
+        failed = await client.post(
+            "/api/statistics",
+            headers=headers,
+            json={"view": "summary", "world": "alpha"},
+        )
+        assert failed.status == 400
+        assert await failed.text() == "Statistics are unavailable for this request"
     finally:
         await client.close()
 
@@ -1543,7 +1555,7 @@ async def test_authenticated_pwa_can_initiate_managed_gateway_update(tmp_path: P
         calls += 1
         return {"updated": True, "version": "1.2.4", "release_url": "https://example.com"}
 
-    _gateway, client, token = await paired_client(
+    gateway, client, token = await paired_client(
         tmp_path,
         runtime,
         update_request_factory=update,
@@ -1554,6 +1566,14 @@ async def test_authenticated_pwa_can_initiate_managed_gateway_update(tmp_path: P
         assert response.status == 202
         assert (await response.json())["version"] == "1.2.4"
         assert calls == 1
+
+        async def failing_update() -> dict[str, object]:
+            raise RuntimeError("secret token and /private/release/path")
+
+        gateway.update_request_factory = failing_update
+        failed = await client.post("/api/updates/apply", headers=headers)
+        assert failed.status == 400
+        assert await failed.text() == "Gateway update could not be started"
     finally:
         await client.close()
 
