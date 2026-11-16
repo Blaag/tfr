@@ -670,6 +670,18 @@ if [ "$current_branch" != main ]; then
     git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
 fi
 
+if [ "$current_branch" != main ]; then
+    git switch main
+    git pull --ff-only origin main
+    assert_clean_checkout
+    if [ "$(uv version --short)" = "$version" ]; then
+        continue_publishing=true
+        release_head=
+        printf '\nDetected: feature merged into an already-versioned candidate; skipping redundant version preparation.\n'
+    fi
+fi
+
+if [ "$continue_publishing" = false ]; then
 git switch --create "$release_branch" --track "origin/main"
 release_base=$(git rev-parse HEAD)
 version_preparation_pending=true
@@ -704,6 +716,7 @@ release_pr=$(gh pr view "$release_pr_url" --repo "$EXPECTED_REPOSITORY" \
     --json number --jq .number)
 wait_for_pr_checks "$release_pr" "$release_head" release
 merge_pr "$release_pr" release
+fi
 fi
 
 git switch main

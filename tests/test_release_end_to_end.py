@@ -793,6 +793,39 @@ def test_agent_release_driver_handles_candidate_prompts(tmp_path: Path) -> None:
     assert "Test this candidate in the candidate channel" in result.stdout
 
 
+def test_release_end_to_end_publishes_next_candidate_without_version_bump(
+    tmp_path: Path,
+) -> None:
+    repository, environment = create_fixture(tmp_path)
+    feature_commit = git(repository, "rev-parse", "feature")
+    git(repository, "switch", "--quiet", "main")
+    (repository / "pyproject.toml").write_text(
+        '[project]\nname = "tfr"\nversion = "0.1.1"\n', encoding="utf-8"
+    )
+    (repository / "uv.lock").write_text('version = "0.1.1"\n', encoding="utf-8")
+    git(repository, "add", "pyproject.toml", "uv.lock")
+    git(repository, "commit", "--quiet", "-m", "release: v0.1.1")
+    candidate_commit = git(repository, "rev-parse", "HEAD")
+    git(repository, "tag", "-a", "v0.1.1-candidate.1", "-m", "candidate 1")
+    git(repository, "push", "--quiet", "origin", "main", "refs/tags/v0.1.1-candidate.1")
+    git(repository, "switch", "--quiet", "-C", "feature", "main")
+    git(repository, "cherry-pick", "--quiet", feature_commit)
+
+    returncode, output = run_with_confirmations(
+        repository,
+        environment,
+        ["v0.1.1-candidate.2", "v0.1.1-candidate.2"],
+    )
+
+    assert returncode == 0, output
+    assert "already-versioned candidate" in output
+    assert git(repository, "rev-parse", "v0.1.1-candidate.1^{}") == candidate_commit
+    log = Path(environment["TFR_FAKE_LOG"]).read_text(encoding="utf-8")
+    assert "uv version 0.1.1 --no-sync" not in log
+    assert "publish --candidate 2\n" in log
+    assert "publish --candidate 2 --push\n" in log
+
+
 def test_agent_release_driver_handles_approval_only_retry(tmp_path: Path) -> None:
     repository, environment = create_fixture(tmp_path)
     environment["TFR_FAKE_NO_CANDIDATE"] = "1"
