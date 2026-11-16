@@ -84,6 +84,7 @@ from tfr.gateway_protocol import (
     read_message,
     write_message,
 )
+from tfr.gateway_recovery import build_gateway_recovery
 from tfr.gateway_transport import (
     DEFAULT_GATEWAY_PORT,
     create_gateway_server_tls_context,
@@ -1614,6 +1615,7 @@ class GatewayServer:
         configuration_notice: Callable[[], Awaitable[None]] | None = None,
         application_restart_factory: Callable[[], Awaitable[None]] | None = None,
         ui_store: UiStore | None = None,
+        recovery_export_factory: Callable[[], dict[str, object]] | None = None,
     ) -> None:
         if (
             maximum_clients < 1
@@ -1658,6 +1660,7 @@ class GatewayServer:
         self.configuration_notice = configuration_notice
         self.application_restart_factory = application_restart_factory
         self.ui_store = ui_store
+        self.recovery_export_factory = recovery_export_factory
         managed_configuration = getattr(runtime, "gateway_configuration", None)
         base_configuration = getattr(runtime, "base_configuration_bundle", None)
         self.configuration_transfer = (
@@ -3076,7 +3079,17 @@ class GatewayServer:
                     raise ValueError("configuration export options are invalid")
                 if include_secrets and not confirm:
                     raise ValueError("exporting plaintext secrets requires explicit confirmation")
-                result = {"document": transfer.export(include_secrets=include_secrets)}
+                recovery = (
+                    self.recovery_export_factory()
+                    if include_secrets and self.recovery_export_factory is not None
+                    else None
+                )
+                result = {
+                    "document": transfer.export(
+                        include_secrets=include_secrets,
+                        recovery=recovery,
+                    )
+                }
             elif message_type == "config_import_preview":
                 transfer = self.configuration_transfer
                 if transfer is None:
@@ -4437,6 +4450,52 @@ async def run_gateway(
             transport=web_transport,
             ssl_context=web_ssl_context,
         )
+    recovery_export_factory: Callable[[], dict[str, object]] | None = None
+    if (
+        listen_host is not None
+        and token_file is not None
+        and tls_certificate is not None
+        and tls_private_key is not None
+    ):
+
+        def recovery_export_factory() -> dict[str, object]:
+            web_config = bundle.main.web_gateway
+            manager_origin = web_manager.origin if web_manager is not None else None
+            web_target = None
+            if web_manager is not None and web_manager.transport == "tailscale":
+                target_host = (
+                    f"[{web_manager.host}]" if ":" in web_manager.host else web_manager.host
+                )
+                web_target = f"http://{target_host}:{web_manager.port}"
+            return build_gateway_recovery(
+                listen_host=listen_host,
+                listen_port=listen_port,
+                token_file=Path(token_file).expanduser(),
+                tls_certificate=Path(tls_certificate).expanduser(),
+                tls_private_key=Path(tls_private_key).expanduser(),
+                ui_state=ui_store.recovery_state(),
+                web_state_directory=web_config.state_directory,
+                web_origin=manager_origin or web_config.canonical_origin,
+                web_transport=web_config.transport,
+                web_target=web_target,
+                web_enabled=web_config.enabled,
+                web_mode=web_config.mode,
+                web_listen_host=web_config.listen_host,
+                web_listen_port=web_config.listen_port,
+                web_direct_host=web_config.direct_host,
+                web_direct_port=web_config.direct_port,
+                web_tls_certificate=(
+                    Path(web_config.tls_cert).expanduser()
+                    if web_config.tls_cert is not None
+                    else None
+                ),
+                web_tls_private_key=(
+                    Path(web_config.tls_key).expanduser()
+                    if web_config.tls_key is not None
+                    else None
+                ),
+            )
+
     server = GatewayServer(
         runtime,
         gateway_path,
@@ -4462,6 +4521,7 @@ async def run_gateway(
         ),
         application_restart_factory=lambda: request_gateway_restart(connector_path),
         ui_store=ui_store,
+        recovery_export_factory=recovery_export_factory,
     )
     if web_manager is not None:
         web_manager.set_update_request_factory(server.request_web_update)

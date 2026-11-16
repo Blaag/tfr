@@ -5,12 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from tfr.config import WorldsConfig
+from tfr.config import WorldsConfig, load_configuration
 from tfr.service_management import service_definition
 from tfr.setup_install import (
     SCHEMA_ROOT,
     _configure_gateway_service,
+    _configure_recovery_bootstrap,
     _configure_worlds,
+    _load_gateway_recovery,
     _save_deployment,
     _world_entry,
     _write_launchers,
@@ -85,6 +87,58 @@ def test_remote_ui_deployment_marker_remains_compatible_with_older_releases(
 
     value = json.loads((tmp_path / "tfr/deployment.json").read_text(encoding="utf-8"))
     assert value == {"schema_version": 1, "profile": "remote-ui"}
+
+
+def test_gateway_recovery_archive_must_be_private(tmp_path: Path) -> None:
+    archive = tmp_path / "recovery.json"
+    archive.write_text("{}\n", encoding="utf-8")
+    archive.chmod(0o644)
+
+    with pytest.raises(ValueError, match="mode 0600 or stricter"):
+        _load_gateway_recovery(archive)
+
+
+def test_recovery_bootstrap_uses_standard_state_and_direct_tls(tmp_path: Path) -> None:
+    config = tmp_path / "config"
+    state = tmp_path / "state"
+    config.mkdir()
+
+    _configure_recovery_bootstrap(
+        config,
+        state,
+        {
+            "web": {
+                "enabled": True,
+                "mode": "on-demand",
+                "transport": "direct",
+                "origin": None,
+                "listen_host": "0.0.0.0",
+                "listen_port": 7348,
+                "direct_host": "gateway.example.com",
+                "direct_port": 7443,
+                "tls_certificate": "certificate",
+                "tls_private_key": "key",
+            }
+        },
+    )
+
+    document = json.loads((config / "config.jsonc").read_text(encoding="utf-8"))
+    assert document["managed_settings"]["state_directory"] == str(state / "settings")
+    assert document["web_gateway"] == {
+        "enabled": True,
+        "mode": "on-demand",
+        "transport": "direct",
+        "listen_host": "0.0.0.0",
+        "listen_port": 7348,
+        "state_directory": str(state / "web"),
+        "direct_host": "gateway.example.com",
+        "direct_port": 7443,
+        "tls_cert": str(config / "web-gateway.crt"),
+        "tls_key": str(config / "web-gateway.key"),
+    }
+    bundle = load_configuration(config / "config.jsonc")
+    assert bundle.worlds.worlds == {}
+    assert bundle.agents.agents == {}
 
 
 def test_gateway_service_requires_separate_start_confirmation(

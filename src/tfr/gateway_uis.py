@@ -170,7 +170,6 @@ class UiRecord:
             applied_config_revision=revision,
         )
 
-
     @staticmethod
     def _versions(value: object) -> tuple[tuple[str, str], ...]:
         if (
@@ -294,6 +293,29 @@ class UiStore:
 
     def profile_claims(self) -> dict[UUID, UUID]:
         return dict(self._configuration_profiles)
+
+    def recovery_state(self) -> dict[str, object]:
+        """Return the complete credential-bearing authority for private recovery."""
+
+        return {
+            "schema_version": 3,
+            "uis": [
+                record.as_dict()
+                for record in sorted(self._records.values(), key=lambda item: str(item.ui_id))
+            ],
+            "configuration_profiles": {
+                str(ui_id): str(profile_id)
+                for ui_id, profile_id in sorted(
+                    self._configuration_profiles.items(), key=lambda item: str(item[0])
+                )
+            },
+            "credentials": {
+                str(ui_id): digest
+                for ui_id, digest in sorted(
+                    self._credential_digests.items(), key=lambda item: str(item[0])
+                )
+            },
+        }
 
     async def claim_configuration_profile(self, ui_id: UUID, profile_id: UUID) -> None:
         """Link a rebuilt UI to one unclaimed imported configuration profile."""
@@ -608,8 +630,7 @@ class UiStore:
         except (TypeError, ValueError, AttributeError) as exc:
             raise ValueError("UI credentials are invalid") from exc
         if any(
-            len(digest) != 64
-            or any(character not in "0123456789abcdef" for character in digest)
+            len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest)
             for digest in credentials.values()
         ):
             raise ValueError("UI credentials are invalid")
@@ -663,25 +684,7 @@ class UiStore:
         if self.path.exists() or self.path.is_symlink():
             descriptor = self._open_private_file()
             os.close(descriptor)
-        value = {
-            "schema_version": 3,
-            "uis": [
-                record.as_dict()
-                for record in sorted(self._records.values(), key=lambda item: str(item.ui_id))
-            ],
-            "configuration_profiles": {
-                str(ui_id): str(profile_id)
-                for ui_id, profile_id in sorted(
-                    self._configuration_profiles.items(), key=lambda item: str(item[0])
-                )
-            },
-            "credentials": {
-                str(ui_id): digest
-                for ui_id, digest in sorted(
-                    self._credential_digests.items(), key=lambda item: str(item[0])
-                )
-            },
-        }
+        value = self.recovery_state()
         temporary = self.path.with_name(f".{self.path.name}.{secrets.token_hex(8)}.tmp")
         flags = (
             os.O_WRONLY
