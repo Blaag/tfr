@@ -169,6 +169,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 "action": "export",
                 "path": str(args.path.expanduser()),
                 "included_secrets": args.include_secrets,
+                "included_recovery": document.get("recovery") is not None,
                 "omitted_keys": (
                     secrets_section.get("omitted_keys", [])
                     if isinstance(secrets_section, dict)
@@ -357,7 +358,9 @@ def _human_output(result: dict[str, Any]) -> str:
         omitted = result.get("omitted_keys", [])
         return (
             f"Configuration exported to {result.get('path')}.{warning}\n"
-            f"Omitted secret keys: {len(omitted) if isinstance(omitted, list) else 0}"
+            f"Omitted secret keys: {len(omitted) if isinstance(omitted, list) else 0}\n"
+            "Gateway recovery state: "
+            f"{'included' if result.get('included_recovery') else 'not included'}"
         )
     if action == "import":
         state = "Imported" if result.get("applied") else "Preview only; add --apply to restore"
@@ -367,6 +370,8 @@ def _human_output(result: dict[str, Any]) -> str:
                 f"Changes: {result.get('change_count', 0)}",
                 f"Pending UI profiles: {len(result.get('pending_profiles', []))}",
                 f"Missing secrets: {len(result.get('missing_secret_keys', []))}",
+                "Gateway recovery state: "
+                f"{'included' if result.get('recovery_included') else 'not included'}",
                 f"Required action: {result.get('restart', 'live')}",
             )
         )

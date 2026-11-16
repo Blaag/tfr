@@ -10,13 +10,18 @@ import secrets
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
+from tfr.configuration_cli import read_configuration_archive
+from tfr.configuration_transfer import _validate_archive
+from tfr.gateway_recovery import restore_gateway_recovery
 from tfr.service_management import (
     install_service,
     remove_service,
@@ -716,7 +721,179 @@ def _gateway_handoff(config_directory: Path, details: dict[str, object]) -> None
     )
 
 
-def run(repository: Path) -> int:
+def _load_gateway_recovery(path: Path) -> tuple[dict[str, object], dict[str, object]]:
+    details = path.stat(follow_symlinks=False)
+    if not stat.S_ISREG(details.st_mode) or path.is_symlink():
+        raise ValueError(f"Gateway recovery must be a regular file: {path}")
+    if os.name == "posix" and (details.st_uid != os.geteuid() or details.st_mode & 0o077):
+        raise ValueError("Gateway recovery must be owned by this user and mode 0600 or stricter")
+    archive, _digest = _validate_archive(read_configuration_archive(path))
+    recovery = archive.get("recovery")
+    if not isinstance(recovery, dict):
+        raise ValueError(
+            "Gateway recovery requires a complete export created with --include-secrets"
+        )
+    return archive, recovery
+
+
+def _configure_recovery_bootstrap(
+    config_directory: Path,
+    state_directory: Path,
+    details: dict[str, object],
+) -> None:
+    web = details.get("web")
+    if not isinstance(web, dict):
+        raise ValueError("Gateway recovery web bootstrap is invalid")
+    web_config: dict[str, object] = {
+        "enabled": web["enabled"],
+        "mode": web["mode"],
+        "transport": web["transport"],
+        "listen_host": web["listen_host"],
+        "listen_port": web["listen_port"],
+        "state_directory": str(state_directory / "web"),
+    }
+    if web["transport"] == "tailscale" and web["origin"] is not None:
+        web_config["origin"] = web["origin"]
+    if web["transport"] == "direct":
+        web_config["direct_host"] = web["direct_host"]
+        if web["direct_port"] is not None:
+            web_config["direct_port"] = web["direct_port"]
+        if web["tls_certificate"] is not None:
+            web_config["tls_cert"] = str(config_directory / "web-gateway.crt")
+            web_config["tls_key"] = str(config_directory / "web-gateway.key")
+    document = {
+        "$schema": f"{SCHEMA_ROOT}/config.schema.json",
+        "schema_version": 1,
+        "worlds_file": "worlds.jsonc",
+        "agents_file": "agents.jsonc",
+        "managed_settings": {"state_directory": str(state_directory / "settings")},
+        "web_gateway": web_config,
+    }
+    _write_recovery_file(
+        config_directory / "config.jsonc",
+        json.dumps(document, ensure_ascii=True, indent=2) + "\n",
+        mode=0o600,
+        description="Gateway recovery bootstrap",
+    )
+    _write_recovery_file(
+        config_directory / "worlds.jsonc",
+        generate_worlds_config({}),
+        mode=0o600,
+        description="empty recovery worlds bootstrap",
+    )
+    _write_recovery_file(
+        config_directory / "agents.jsonc",
+        empty_agents_config(),
+        mode=0o600,
+        description="empty recovery agents bootstrap",
+    )
+
+
+def _write_recovery_file(path: Path, content: str, *, mode: int, description: str) -> bool:
+    if path.is_file() and not path.is_symlink():
+        try:
+            details = path.stat(follow_symlinks=False)
+            if path.read_text(encoding="utf-8") == content and (
+                os.name != "posix"
+                or (details.st_uid == os.geteuid() and stat.S_IMODE(details.st_mode) & ~mode == 0)
+            ):
+                print(f"Keeping identical {path}")
+                return False
+        except (OSError, UnicodeError):
+            pass
+    return _write_file(path, content, mode=mode, description=description)
+
+
+def _apply_recovery_import(tfr: Path, socket_path: Path, archive_path: Path) -> None:
+    for _attempt in range(100):
+        if socket_path.exists():
+            break
+        time.sleep(0.1)
+    # The executable and argument structure are generated locally; no shell is used.
+    result = subprocess.run(  # nosec B603
+        [
+            str(tfr),
+            "config",
+            "--socket",
+            str(socket_path),
+            "import",
+            str(archive_path),
+            "--apply",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(f"Gateway recovery configuration import failed: {detail[:500]}")
+    print(result.stdout.strip())
+
+
+def _restore_tailscale_route(details: dict[str, object]) -> None:
+    if details.get("web_transport") != "tailscale" or not details.get("web_origin"):
+        return
+    target = details.get("web_target")
+    if not isinstance(target, str):
+        raise ValueError("Gateway recovery is missing its Tailscale Serve target")
+    if shutil.which("tailscale") is None:
+        raise RuntimeError("Tailscale is required to restore the existing PWA origin")
+    from tfr.gateway_web import _serve_root_proxy, _tailscale_origin
+
+    # Fixed local command; no shell is used.
+    status_result = subprocess.run(  # nosec B603
+        ("tailscale", "status", "--json"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if status_result.returncode:
+        raise RuntimeError("Tailscale is not running or logged in")
+    try:
+        status = json.loads(status_result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Tailscale returned invalid status") from exc
+    actual_origin = _tailscale_origin(status)
+    expected_origin = str(details["web_origin"]).rstrip("/")
+    if actual_origin != expected_origin:
+        raise RuntimeError(
+            f"Tailscale identity is {actual_origin}, but existing PWAs require {expected_origin}"
+        )
+    # Fixed local command; no shell is used.
+    serve_result = subprocess.run(  # nosec B603
+        ("tailscale", "serve", "status", "--json"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if serve_result.returncode:
+        raise RuntimeError("Tailscale Serve status is unavailable")
+    try:
+        existing = _serve_root_proxy(json.loads(serve_result.stdout), expected_origin)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise RuntimeError("Tailscale Serve returned invalid status") from exc
+    if existing is not None and existing.rstrip("/") != target.rstrip("/"):
+        raise RuntimeError(
+            f"Tailscale Serve root is already used by {existing!r}; TFR did not replace it"
+        )
+    if existing is None:
+        # The only variable argument is a validated loopback HTTP target; no shell is used.
+        configured = subprocess.run(  # nosec B603
+            ("tailscale", "serve", "--bg", "--yes", target),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if configured.returncode:
+            detail = (configured.stderr or configured.stdout).strip()
+            raise RuntimeError(f"Tailscale Serve recovery failed: {detail[:500]}")
+    print(f"Verified private Tailscale Serve route {expected_origin} → {target}.")
+
+
+def run(repository: Path, *, recovery_path: Path | None = None) -> int:
     if not sys.stdin.isatty():
         print("setup-tfr: interactive terminal input is required", file=sys.stderr)
         return 2
@@ -727,19 +904,35 @@ def run(repository: Path) -> int:
     bin_directory = Path.home() / ".local" / "bin"
     tfr = bin_directory / "tfr"
     try:
+        recovery_archive: dict[str, object] | None = None
+        recovery: dict[str, object] | None = None
+        if recovery_path is not None:
+            recovery_path = recovery_path.expanduser().resolve()
+            recovery_archive, recovery = _load_gateway_recovery(recovery_path)
+            if profile != "gateway":
+                raise ValueError("a Gateway recovery export can only restore the Gateway profile")
         _install_release(repository)
         config_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         config_directory.chmod(0o700)
         # Remote UIs use generated connection bootstrap only; they never need
         # a preferences JSONC file. Gateway/standalone profiles retain the
         # installer input as a one-time managed-configuration import source.
-        if profile != "remote-ui":
+        if profile != "remote-ui" and recovery is None:
             _configure_main(repository, config_directory)
         details: dict[str, object] | None = None
-        if profile != "remote-ui":
+        if profile != "remote-ui" and recovery is None:
             _configure_worlds(repository, config_directory)
         if profile == "gateway":
-            details = _gateway_details(config_directory)
+            if recovery is None:
+                details = _gateway_details(config_directory)
+            else:
+                details = restore_gateway_recovery(
+                    recovery,
+                    config_directory=config_directory,
+                    managed_state_directory=state_directory / "settings",
+                    web_state_directory=state_directory / "web",
+                )
+                _configure_recovery_bootstrap(config_directory, state_directory, details)
             _gateway_handoff(config_directory, details)
         elif profile == "remote-ui":
             details = _remote_ui_details(config_directory)
@@ -758,6 +951,15 @@ def run(repository: Path) -> int:
             state_directory=state_directory,
         )
         _save_deployment(profile, gateway_socket)
+        if recovery_archive is not None:
+            if not service_started:
+                raise RuntimeError(
+                    "Gateway recovery requires enabling and starting the generated user service"
+                )
+            if recovery_path is None or details is None:  # pragma: no cover
+                raise RuntimeError("validated Gateway recovery state is unavailable")
+            _apply_recovery_import(tfr, gateway_socket, recovery_path)
+            _restore_tailscale_route(details)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"setup-tfr: {exc}", file=sys.stderr)
         return 2
@@ -797,8 +999,13 @@ def run(repository: Path) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Interactive stable TFR setup")
     parser.add_argument("--repository", type=Path, required=True)
+    parser.add_argument(
+        "--recovery",
+        type=Path,
+        help="restore a complete private Gateway export created with --include-secrets",
+    )
     arguments = parser.parse_args()
-    raise SystemExit(run(arguments.repository.resolve()))
+    raise SystemExit(run(arguments.repository.resolve(), recovery_path=arguments.recovery))
 
 
 if __name__ == "__main__":

@@ -21,11 +21,11 @@ their configured directories separately if you also want those records.
 
 ## Gateway: Complete Configuration and Credential Backup
 
-A complete Gateway recovery has two parts:
-
-1. A portable Gateway configuration archive created with `--include-secrets`.
-2. The Gateway host bootstrap credentials: listener token, TLS certificate and
-   private key, and optionally PWA device state.
+A complete Gateway recovery uses one private portable archive created with
+`--include-secrets` through the Gateway's local owner socket. In addition to the
+managed configuration, it contains the Gateway listener token and TLS keypair,
+stable native-UI authority, PWA credentials and push subscriptions, the VAPID
+private key, and the expected private web origin/route.
 
 The portable archive includes all managed worlds, plugins and plugin sources,
 shared/Gateway/UI settings, named-UI settings, and the **resolved plaintext value
@@ -51,50 +51,40 @@ From the Gateway host using its owner Unix socket:
 tfr config export /absolute/private/path/tfr-gateway-complete.json --include-secrets
 ```
 
-Or from a UI-only host using a stored authenticated profile:
+An authenticated remote profile can export the managed configuration and its
+managed secrets, but cannot read Gateway host recovery state:
 
 ```sh
 tfr config --gateway-profile default export \
   /absolute/private/path/tfr-gateway-complete.json --include-secrets
 ```
 
-### Back up Gateway bootstrap credentials
+Use the local owner-socket form when the archive must rebuild the host without
+re-pairing clients.
 
-The portable configuration archive does not contain the token or TLS private
-key used to reach the Gateway itself. On the Gateway host, inspect the generated
-launcher to see the exact `--token-file`, `--tls-cert`, and `--tls-key` paths:
-
-```sh
-cat ~/.local/bin/tfr-gateway
-```
-
-Copy all three files to private backup storage, preserving permissions. Also
-copy the Gateway bootstrap and web-device state:
-
-```sh
-mkdir -m 700 /absolute/private/path/tfr-gateway-host
-cp -p /path/from/--token-file /absolute/private/path/tfr-gateway-host/
-cp -p /path/from/--tls-cert /absolute/private/path/tfr-gateway-host/
-cp -p /path/from/--tls-key /absolute/private/path/tfr-gateway-host/
-cp -a ~/.config/tfr /absolute/private/path/tfr-gateway-host/config
-cp -a ~/.local/state/tfr/web /absolute/private/path/tfr-gateway-host/web
-```
-
-The `web` directory preserves paired PWA credentials, push subscriptions, and
-the VAPID private key. Omit it only if re-pairing every browser device is
-acceptable.
+The export reports whether Gateway recovery state was included. Treat an export
+that says `not included` as a managed-configuration archive, not a complete host
+backup. Complete recovery export is intentionally unavailable through an
+unprivileged remote connection.
 
 ### Restore a Gateway
 
-1. Install TFR on the replacement Gateway host and choose **Gateway server** in
-   `./scripts/setup-tfr`.
-2. Restore the saved listener token, TLS certificate, and TLS private key to the
-   paths used by the generated Gateway launcher. Keep tokens/private keys mode
-   `0600`.
-3. Restore `~/.local/state/tfr/web` before starting the Gateway if existing PWA
-   devices must remain paired.
-4. Start the Gateway and verify it with `tfr-doctor`.
-5. Import the complete configuration archive using either interface below.
+1. Install or check out the desired current TFR release on the replacement host.
+2. Ensure Tailscale is logged in as the same node identity when existing PWA URLs
+   must remain valid.
+3. Run setup with the private archive and choose **Gateway server**:
+
+```sh
+./scripts/setup-tfr --recovery /absolute/private/path/tfr-gateway-complete.json
+```
+
+4. Approve the generated user service and start it. Setup restores private state,
+   imports the managed configuration, verifies the private Tailscale Serve route,
+   and refuses a different Tailscale origin rather than silently breaking PWAs.
+5. Verify with `tfr config status` and `tfr-doctor`.
+
+The lower-level preview/apply commands remain available when restoring managed
+configuration without replacing the host:
 
 From an attached native UI, preview and then apply:
 
@@ -111,8 +101,9 @@ tfr config import /absolute/private/path/tfr-gateway-complete.json --apply
 ```
 
 For a remote stored profile, add `--gateway-profile NAME` before `import`.
-Import writes every included secret into new private files and restores managed
-references atomically. It reports and restarts the Gateway when required.
+Import writes every included managed secret into new private files and restores
+managed references atomically. Host bootstrap and client-continuity state are
+restored only by `setup-tfr --recovery`.
 
 Verify:
 
@@ -217,10 +208,8 @@ tfr
 
 For a Gateway plus one or more UI hosts, a complete recoverable set is:
 
-- [ ] Gateway portable archive created with `--include-secrets`.
-- [ ] Gateway listener token.
-- [ ] Gateway TLS certificate and private key.
-- [ ] Gateway `web` state if PWA devices must stay paired.
+- [ ] Gateway portable archive created locally with `--include-secrets` and
+      reporting `Gateway recovery state: included`.
 - [ ] One UI recovery bundle from each UI host whose profiles or stable identity
       must be recoverable. One bundle includes all profiles on that host.
 - [ ] Any desired logs, recall database, or transcripts archived separately.

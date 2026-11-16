@@ -43,6 +43,16 @@ Rerun it later to change profiles; it backs up files before approved replacement
 and never starts TFR without confirmation. For local-split and Gateway-host
 profiles, it can optionally install and start a current-user Gateway service.
 
+A complete private Gateway export can rebuild a current installation without
+re-pairing its native UIs or PWAs. Create it through the local owner socket with
+`tfr config export PATH --include-secrets`, then use
+`./scripts/setup-tfr --recovery PATH` and choose **Gateway server**. Setup restores
+the listener/TLS bootstrap, UI and PWA credential authority, push identity, and
+private web route; generates a fresh current-user service; starts it with explicit
+confirmation; and applies the managed configuration import. See
+[`BACKUP-AND-RESTORE.md`](BACKUP-AND-RESTORE.md) for security and Tailscale identity
+requirements.
+
 If `uv` is missing, the assistant offers to run Astral's official installer or
 waits while you install it yourself and re-checks, or exit cleanly. Remote setup
 explains which token and public CA files a UI needs and which Gateway secrets

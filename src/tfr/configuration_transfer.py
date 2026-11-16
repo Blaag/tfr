@@ -18,10 +18,11 @@ from tfr.gateway_configuration import (
     _resolve_secret_reference,
     apply_gateway_configuration,
 )
+from tfr.gateway_recovery import validate_gateway_recovery
 from tfr.gateway_uis import UiRecord, UiStore
 
 PORTABLE_CONFIGURATION_FORMAT = "tfr-gateway-configuration"
-PORTABLE_CONFIGURATION_VERSION = 1
+PORTABLE_CONFIGURATION_VERSION = 2
 MAX_PORTABLE_CONFIGURATION_BYTES = 4 * 1024 * 1024
 MAX_PORTABLE_SECRET_BYTES = 65_536
 
@@ -57,7 +58,17 @@ class GatewayConfigurationTransfer:
         self.state_path = self.directory / "configuration-import-state.json"
         self._state = self._load_state()
 
-    def export(self, *, include_secrets: bool = False) -> dict[str, object]:
+    def export(
+        self,
+        *,
+        include_secrets: bool = False,
+        recovery: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        recovery_value = (
+            validate_gateway_recovery(recovery)
+            if include_secrets and recovery is not None
+            else None
+        )
         document = self.configuration.document
         records = self.ui_store.records()
         by_profile: dict[str, UiRecord] = {}
@@ -123,6 +134,7 @@ class GatewayConfigurationTransfer:
                 "values": secret_values,
                 "omitted_keys": omitted,
             },
+            "recovery": recovery_value,
         }
         _encoded_archive(archive)
         return archive
@@ -242,6 +254,7 @@ class GatewayConfigurationTransfer:
             "included_secret_keys": sorted(included_values),
             "preserved_secret_keys": sorted(omitted - set(missing)),
             "missing_secret_keys": missing,
+            "recovery_included": normalized.get("recovery") is not None,
             "restart": restart,
             "requires_confirmation": True,
         }
@@ -524,16 +537,22 @@ class GatewayConfigurationTransfer:
 
 def _validate_archive(value: object) -> tuple[dict[str, object], str]:
     data = _encoded_archive(value)
-    if not isinstance(value, dict) or set(value) != {
+    if not isinstance(value, dict):
+        raise GatewayConfigurationError("portable configuration has invalid fields")
+    version = value.get("format_version")
+    expected_fields = {
         "format",
         "format_version",
         "exported_at",
         "source_revision",
         "configuration",
         "secrets",
-    }:
+    }
+    if version == 2:
+        expected_fields.add("recovery")
+    if set(value) != expected_fields:
         raise GatewayConfigurationError("portable configuration has invalid fields")
-    if value["format"] != PORTABLE_CONFIGURATION_FORMAT or value["format_version"] != 1:
+    if value["format"] != PORTABLE_CONFIGURATION_FORMAT or version not in {1, 2}:
         raise GatewayConfigurationError("portable configuration format is unsupported")
     if not isinstance(value["source_revision"], int) or isinstance(value["source_revision"], bool):
         raise GatewayConfigurationError("portable configuration revision is invalid")
@@ -591,6 +610,17 @@ def _validate_archive(value: object) -> tuple[dict[str, object], str]:
         or set(values) & set(omitted)
     ):
         raise GatewayConfigurationError("portable secret values are invalid")
+    if version == 2:
+        recovery = value["recovery"]
+        if recovery is not None:
+            if secret_section["included"] is not True:
+                raise GatewayConfigurationError(
+                    "Gateway recovery state requires an export with included secrets"
+                )
+            try:
+                validate_gateway_recovery(recovery)
+            except ValueError as exc:
+                raise GatewayConfigurationError(str(exc)) from exc
     return copy.deepcopy(value), hashlib.sha256(data).hexdigest()
 
 
