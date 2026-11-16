@@ -78,6 +78,15 @@ unprivileged remote connection.
 ./scripts/setup-tfr --recovery /absolute/private/path/tfr-gateway-complete.json
 ```
 
+While acceptance-testing a published candidate, check out that exact candidate
+tag and add `--candidate`. Setup verifies that `HEAD` has exactly one candidate
+tag and installs that checkout instead of silently downgrading to latest stable:
+
+```sh
+./scripts/setup-tfr --candidate \
+  --recovery /absolute/private/path/tfr-gateway-complete.json
+```
+
 4. Approve the generated user service and start it. Setup restores private state,
    imports the managed configuration, verifies the private Tailscale Serve route,
    and refuses a different Tailscale origin rather than silently breaking PWAs.
