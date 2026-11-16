@@ -23,6 +23,13 @@ from tfr.setup_install import (
 )
 
 
+def test_setup_wrapper_uses_locked_project_dependencies() -> None:
+    wrapper = (Path(__file__).parents[1] / "scripts/setup-tfr").read_text(encoding="utf-8")
+
+    assert '--isolated --frozen --project "$repository"' in wrapper
+    assert "--no-project" not in wrapper
+
+
 def test_generated_worlds_config_is_valid_and_escapes_credentials() -> None:
     content = generate_worlds_config(
         {
