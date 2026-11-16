@@ -52,6 +52,9 @@ private web route; generates a fresh current-user service; starts it with explic
 confirmation; and applies the managed configuration import. See
 [`BACKUP-AND-RESTORE.md`](BACKUP-AND-RESTORE.md) for security and Tailscale identity
 requirements.
+For candidate acceptance testing, check out the exact published candidate tag and
+add `--candidate`; setup verifies the tag and installs that checkout rather than
+the latest stable release.
 
 If `uv` is missing, the assistant offers to run Astral's official installer or
 waits while you install it yourself and re-checks, or exit cleanly. Remote setup

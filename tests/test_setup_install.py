@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from tfr.setup_install import (
     _configure_gateway_service,
     _configure_recovery_bootstrap,
     _configure_worlds,
+    _install_release,
     _load_gateway_recovery,
     _save_deployment,
     _world_entry,
@@ -96,6 +98,56 @@ def test_gateway_recovery_archive_must_be_private(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="mode 0600 or stricter"):
         _load_gateway_recovery(archive)
+
+
+def test_candidate_setup_installs_exact_tagged_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def execute(arguments: tuple[str, ...] | list[str], **_values: object):
+        command = tuple(arguments)
+        calls.append(command)
+        if "tag" in command:
+            return subprocess.CompletedProcess(command, 0, "v0.1.124-candidate.1\n", "")
+        if "ls-remote" in command:
+            return subprocess.CompletedProcess(command, 0, "candidate tag\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("tfr.setup_install.subprocess.run", execute)
+    monkeypatch.setattr("tfr.setup_install.shutil.which", lambda _name: "/usr/bin/git")
+
+    _install_release(tmp_path, candidate=True)
+
+    assert calls[-1] == (str(tmp_path / "scripts/install-from-checkout"),)
+
+
+def test_candidate_setup_rejects_untagged_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "tfr.setup_install.subprocess.run",
+        lambda arguments, **_values: subprocess.CompletedProcess(arguments, 0, "", ""),
+    )
+    monkeypatch.setattr("tfr.setup_install.shutil.which", lambda _name: "/usr/bin/git")
+
+    with pytest.raises(RuntimeError, match="published candidate tag"):
+        _install_release(tmp_path, candidate=True)
+
+
+def test_candidate_setup_rejects_local_only_tag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def execute(arguments: tuple[str, ...], **_values: object):
+        if "tag" in arguments:
+            return subprocess.CompletedProcess(arguments, 0, "v0.1.124-candidate.1\n", "")
+        return subprocess.CompletedProcess(arguments, 2, "", "not found")
+
+    monkeypatch.setattr("tfr.setup_install.subprocess.run", execute)
+    monkeypatch.setattr("tfr.setup_install.shutil.which", lambda _name: "/usr/bin/git")
+
+    with pytest.raises(RuntimeError, match="not published on origin"):
+        _install_release(tmp_path, candidate=True)
 
 
 def test_recovery_bootstrap_uses_standard_state_and_direct_tls(tmp_path: Path) -> None:

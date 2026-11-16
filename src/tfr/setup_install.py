@@ -487,14 +487,60 @@ def _remote_ui_details(config_directory: Path) -> dict[str, object]:
     }
 
 
-def _install_release(repository: Path) -> None:
-    print("\nInstalling the latest verified stable TFR release...")
+def _install_release(repository: Path, *, candidate: bool = False) -> None:
+    arguments = [str(repository / "scripts" / "install-from-checkout")]
+    if candidate:
+        # A candidate setup deliberately installs this exact tagged checkout.
+        git = shutil.which("git")
+        if git is None:
+            raise RuntimeError("git is required to verify a candidate checkout")
+        tag = subprocess.run(  # nosec B603
+            (
+                git,
+                "-C",
+                str(repository),
+                "tag",
+                "--points-at",
+                "HEAD",
+                "--list",
+                "v*-candidate.*",
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        tags = [value for value in tag.stdout.splitlines() if value]
+        if tag.returncode or len(tags) != 1:
+            raise RuntimeError(
+                "--candidate requires a checkout at exactly one published candidate tag"
+            )
+        published = subprocess.run(  # nosec B603
+            (
+                git,
+                "-C",
+                str(repository),
+                "ls-remote",
+                "--exit-code",
+                "--tags",
+                "origin",
+                f"refs/tags/{tags[0]}",
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if published.returncode or not published.stdout.strip():
+            raise RuntimeError(f"candidate tag is not published on origin: {tags[0]}")
+        print(f"\nInstalling verified TFR candidate {tags[0]} from this checkout...")
+    else:
+        arguments.append("--latest-stable")
+        print("\nInstalling the latest verified stable TFR release...")
     result = subprocess.run(
-        [str(repository / "scripts" / "install-from-checkout"), "--latest-stable"],
+        arguments,
         check=False,
     )
     if result.returncode:
-        raise RuntimeError("stable TFR installation failed")
+        raise RuntimeError(f"{'candidate' if candidate else 'stable'} TFR installation failed")
 
 
 def _configure_main(repository: Path, config_directory: Path) -> None:
@@ -893,7 +939,12 @@ def _restore_tailscale_route(details: dict[str, object]) -> None:
     print(f"Verified private Tailscale Serve route {expected_origin} → {target}.")
 
 
-def run(repository: Path, *, recovery_path: Path | None = None) -> int:
+def run(
+    repository: Path,
+    *,
+    recovery_path: Path | None = None,
+    candidate: bool = False,
+) -> int:
     if not sys.stdin.isatty():
         print("setup-tfr: interactive terminal input is required", file=sys.stderr)
         return 2
@@ -911,7 +962,7 @@ def run(repository: Path, *, recovery_path: Path | None = None) -> int:
             recovery_archive, recovery = _load_gateway_recovery(recovery_path)
             if profile != "gateway":
                 raise ValueError("a Gateway recovery export can only restore the Gateway profile")
-        _install_release(repository)
+        _install_release(repository, candidate=candidate)
         config_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         config_directory.chmod(0o700)
         # Remote UIs use generated connection bootstrap only; they never need
@@ -1004,8 +1055,19 @@ def main() -> None:
         type=Path,
         help="restore a complete private Gateway export created with --include-secrets",
     )
+    parser.add_argument(
+        "--candidate",
+        action="store_true",
+        help="install this exact published candidate checkout instead of latest stable",
+    )
     arguments = parser.parse_args()
-    raise SystemExit(run(arguments.repository.resolve(), recovery_path=arguments.recovery))
+    raise SystemExit(
+        run(
+            arguments.repository.resolve(),
+            recovery_path=arguments.recovery,
+            candidate=arguments.candidate,
+        )
+    )
 
 
 if __name__ == "__main__":
