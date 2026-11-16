@@ -138,7 +138,10 @@ async def _connect(args: argparse.Namespace) -> GatewayClient:
         )
     from tfr.gateway import default_gateway_socket
 
-    return await GatewayClient.connect(args.socket or default_gateway_socket())
+    return await GatewayClient.connect(
+        args.socket or default_gateway_socket(),
+        allow_empty_worlds=True,
+    )
 
 
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
