@@ -294,6 +294,56 @@ class UiStore:
     def profile_claims(self) -> dict[UUID, UUID]:
         return dict(self._configuration_profiles)
 
+    async def reset_configuration_convergence(
+        self,
+    ) -> tuple[
+        dict[UUID, int | None],
+        dict[UUID, tuple[int, str, tuple[str, ...]]],
+    ]:
+        """Clear source-Gateway revisions before a complete recovery import."""
+
+        async with self._lock:
+            previous = {
+                ui_id: record.applied_config_revision for ui_id, record in self._records.items()
+            }
+            reports = dict(self._configuration_reports)
+            self._records = {
+                ui_id: replace(record, applied_config_revision=None)
+                for ui_id, record in self._records.items()
+            }
+            self._configuration_reports.clear()
+            try:
+                self._save()
+            except BaseException:
+                self._records = {
+                    ui_id: replace(record, applied_config_revision=previous[ui_id])
+                    for ui_id, record in self._records.items()
+                }
+                self._configuration_reports = reports
+                raise
+            return previous, reports
+
+    async def restore_configuration_convergence(
+        self,
+        snapshot: tuple[
+            Mapping[UUID, int | None],
+            Mapping[UUID, tuple[int, str, tuple[str, ...]]],
+        ],
+    ) -> None:
+        """Restore revisions when a recovery import fails after reset."""
+
+        async with self._lock:
+            revisions, reports = snapshot
+            self._records = {
+                ui_id: replace(
+                    record,
+                    applied_config_revision=revisions.get(ui_id, record.applied_config_revision),
+                )
+                for ui_id, record in self._records.items()
+            }
+            self._configuration_reports = dict(reports)
+            self._save()
+
     def recovery_state(self) -> dict[str, object]:
         """Return the complete credential-bearing authority for private recovery."""
 
