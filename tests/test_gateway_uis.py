@@ -75,6 +75,31 @@ async def test_register_persists_and_reuses_stable_ui_record(tmp_path) -> None:
     assert store.find_by_name("missing · Terminal") is None
 
 
+async def test_recovery_convergence_snapshot_restores_revision_and_report(tmp_path) -> None:
+    store = UiStore(tmp_path)
+    ui_id = UUID("33333333-3333-4333-8333-333333333333")
+    await store.register(
+        ui_id=ui_id,
+        client_type="terminal",
+        platform="restored-mac",
+        versions={},
+        capabilities=(),
+        applied_config_revision=28,
+    )
+    await store.report_configuration(ui_id, 28, "unsupported", ("old issue",))
+
+    snapshot = await store.reset_configuration_convergence()
+
+    assert store.get(ui_id) is not None
+    assert store.get(ui_id).applied_config_revision is None  # type: ignore[union-attr]
+    assert store.configuration_report(ui_id) is None
+
+    await store.restore_configuration_convergence(snapshot)
+
+    assert store.get(ui_id).applied_config_revision == 28  # type: ignore[union-attr]
+    assert store.configuration_report(ui_id) == (28, "unsupported", ("old issue",))
+
+
 async def test_duplicate_default_names_receive_stable_short_suffix(tmp_path) -> None:
     store = UiStore(tmp_path)
     first = await store.register(

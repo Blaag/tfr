@@ -128,6 +128,52 @@ def test_private_configuration_export_carries_validated_recovery(tmp_path: Path)
     assert preview["recovery_included"] is True
 
 
+@pytest.mark.asyncio
+async def test_recovery_import_rebases_ui_convergence_revisions(tmp_path: Path) -> None:
+    base = ConfigurationBundle(
+        main_path=tmp_path / "config.jsonc",
+        worlds_path=tmp_path / "worlds.jsonc",
+        agents_path=tmp_path / "agents.jsonc",
+        main=MainConfig.model_validate(
+            {"managed_settings": {"state_directory": str(tmp_path / "managed")}}
+        ),
+        worlds=WorldsConfig(),
+        agents=AgentsConfig(),
+    )
+    store = GatewayConfigurationStore(
+        base.main.managed_settings.state_directory, core_configuration_registry()
+    )
+    uis = UiStore(base.main.managed_settings.state_directory)
+    ui_id = UUID("22222222-2222-4222-8222-222222222222")
+    await uis.register(
+        ui_id=ui_id,
+        client_type="terminal",
+        platform="restored-host",
+        versions={},
+        capabilities=(),
+        applied_config_revision=28,
+    )
+    transfer = GatewayConfigurationTransfer(
+        base.main.managed_settings.state_directory,
+        store,
+        uis,
+        base,
+    )
+    archive = transfer.export(include_secrets=True, recovery=recovery_source(tmp_path / "source"))
+    proposal = transfer.preview_import(archive)
+
+    await transfer.apply_import(
+        archive,
+        expected_revision=0,
+        expected_digest=proposal.digest,
+        actor_ui_id="local-admin",
+        actor_ui_name="Local administrator",
+    )
+
+    assert uis.get(ui_id) is not None
+    assert uis.get(ui_id).applied_config_revision is None  # type: ignore[union-attr]
+
+
 def test_recovery_rejects_mismatched_tls_key(tmp_path: Path) -> None:
     recovery = recovery_source(tmp_path)
     gateway = recovery["gateway"]

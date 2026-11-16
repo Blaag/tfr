@@ -37,6 +37,7 @@ class ImportProposal:
     pending_profiles: tuple[dict[str, object], ...]
     profile_links: tuple[tuple[UUID, UUID], ...]
     secret_values: dict[str, str]
+    reset_ui_convergence: bool
 
 
 class GatewayConfigurationTransfer:
@@ -265,6 +266,7 @@ class GatewayConfigurationTransfer:
             tuple(pending),
             tuple(links),
             included_values,
+            normalized.get("recovery") is not None,
         )
 
     async def apply_import(
@@ -285,6 +287,13 @@ class GatewayConfigurationTransfer:
         previous_claims = self.ui_store.profile_claims()
         backup_path = self._write_backup(previous_document, expected_revision)
         created: list[str] = []
+        convergence_snapshot: (
+            tuple[
+                dict[UUID, int | None],
+                dict[UUID, tuple[int, str, tuple[str, ...]]],
+            ]
+            | None
+        ) = None
         try:
             for key, value in proposal.secret_values.items():
                 path = self.secret_directory / _secret_name(key, proposal.digest, expected_revision)
@@ -305,6 +314,8 @@ class GatewayConfigurationTransfer:
                 },
             }
             self._save_state()
+            if proposal.reset_ui_convergence:
+                convergence_snapshot = await self.ui_store.reset_configuration_convergence()
             for ui_id, profile_id in proposal.profile_links:
                 await self.ui_store.claim_configuration_profile(ui_id, profile_id)
             mutation = self.configuration.replace_document(
@@ -316,6 +327,8 @@ class GatewayConfigurationTransfer:
                 restart=str(proposal.preview["restart"]),
             )
         except BaseException:
+            if convergence_snapshot is not None:
+                await self.ui_store.restore_configuration_convergence(convergence_snapshot)
             for ui_id, _profile_id in proposal.profile_links:
                 previous_profile = previous_claims.get(ui_id, ui_id)
                 await self.ui_store.claim_configuration_profile(ui_id, previous_profile)
