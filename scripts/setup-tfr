@@ -54,9 +54,8 @@ command -v git >/dev/null 2>&1 || {
     exit 2
 }
 
-PYTHONPATH="$repository/src"
 PYTHONNOUSERSITE=1
 PATH=$(dirname "$uv_command"):$PATH
-export PYTHONPATH PYTHONNOUSERSITE PATH
-exec "$uv_command" run --quiet --isolated --no-project --no-config --python 3.12 \
+export PYTHONNOUSERSITE PATH
+exec "$uv_command" run --quiet --isolated --frozen --project "$repository" --python 3.12 \
     python -P -m tfr.setup_install --repository "$repository" "$@"
