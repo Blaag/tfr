@@ -563,6 +563,7 @@ class GatewayClient:
         gateway_id: UUID | None = None,
         after_cursor: int | None = None,
         ui_registration: UiRegistration | None = None,
+        allow_empty_worlds: bool = False,
     ) -> GatewayClient:
         resolved_client_id = client_id or uuid4()
         socket_path = Path(path).expanduser()
@@ -587,6 +588,7 @@ class GatewayClient:
             gateway_id=gateway_id,
             after_cursor=after_cursor,
             ui_registration=ui_registration,
+            allow_empty_worlds=allow_empty_worlds,
         )
 
         async def reconnect_factory(gateway: UUID, cursor: int) -> GatewayClient:
@@ -597,6 +599,7 @@ class GatewayClient:
                 gateway_id=gateway,
                 after_cursor=cursor,
                 ui_registration=ui_registration,
+                allow_empty_worlds=allow_empty_worlds,
             )
 
         client._reconnect_factory = reconnect_factory
@@ -673,6 +676,7 @@ class GatewayClient:
         after_cursor: int | None,
         auth_token: str | None = None,
         ui_registration: UiRegistration | None = None,
+        allow_empty_worlds: bool = False,
     ) -> GatewayClient:
         try:
             hello_request: dict[str, Any] = {
@@ -725,7 +729,7 @@ class GatewayClient:
                     "speaking_streaks_enabled": True,
                 },
             )
-            if not isinstance(worlds, list) or not worlds:
+            if not isinstance(worlds, list) or (not worlds and not allow_empty_worlds):
                 raise GatewayProtocolError("gateway hello contains no worlds")
             if not isinstance(agents, list):
                 raise GatewayProtocolError("gateway agents must be a list")

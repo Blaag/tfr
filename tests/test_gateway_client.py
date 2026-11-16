@@ -133,6 +133,28 @@ async def test_remote_ui_pairing_issues_a_persistent_client_credential(tmp_path:
         await asyncio.wait_for(history.stop(), timeout=2)
 
 
+async def test_only_explicit_local_admin_client_accepts_empty_bootstrap(tmp_path: Path) -> None:
+    history = EventHistory(EventBus(), {})
+    history.start()
+    runtime = FakeRuntime(history)
+    runtime.world_descriptors = lambda: []  # type: ignore[method-assign]
+    runtime.agent_descriptors = lambda: []  # type: ignore[method-assign]
+    socket_path = Path("/tmp") / f"tfr-empty-bootstrap-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    try:
+        with pytest.raises(GatewayProtocolError, match="contains no worlds"):
+            await GatewayClient.connect(socket_path)
+
+        client = await GatewayClient.connect(socket_path, allow_empty_worlds=True)
+        assert client.sessions == []
+        await client.stop()
+        await client.event_bus.close()
+    finally:
+        await server.stop()
+        await history.stop()
+
+
 def test_retire_local_migration_sources_backs_up_and_rewrites_config(tmp_path: Path) -> None:
     main = tmp_path / "config.jsonc"
     auxiliary = tmp_path / "worlds.jsonc"
