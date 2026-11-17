@@ -34,7 +34,9 @@ from tfr.gateway_client import (
     GatewayDisconnectedError,
     GatewayUiRuntime,
     RemoteWorldSession,
+    _adopt_verified_explicit_connection,
     _local_configuration_needs_migration,
+    _profile_schema,
     _recover_local_plugin_bootstrap,
     _retire_local_migration_sources,
     remote_speaker_effects_warning,
@@ -98,6 +100,32 @@ async def test_client_queries_and_reports_compatibility() -> None:
 
     assert client._request.await_args_list[0].args[0]["type"] == "compatibility_status"
     assert client._request.await_args_list[1].args[0]["type"] == "ui_compatibility_report"
+
+
+def test_verified_explicit_connection_is_adopted_without_changing_ui_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    ui_id = UUID("ead86f89-0ca6-4247-b08a-25ef09c2703b")
+
+    profiles = _adopt_verified_explicit_connection(
+        host="192.168.1.7",
+        port=7347,
+        tls_server_name="phrasing.tail2beeb4.ts.net",
+        tls_ca=None,
+        token="a" * 64,
+        ui_id=ui_id,
+        ui_name="phrasing · Terminal",
+    )
+
+    assert profiles is not None
+    assert profiles.active is not None
+    assert profiles.active.ui_id == ui_id
+    assert profiles.credentials.load(profiles.active.credential_reference) == "a" * 64
+    assert _profile_schema() == 1
+    deployment = json.loads((tmp_path / "state/tfr/deployment.json").read_text(encoding="utf-8"))
+    assert deployment == {"schema_version": 2, "profile": "remote-ui"}
 
 
 async def test_remote_ui_pairing_issues_a_persistent_client_credential(tmp_path: Path) -> None:

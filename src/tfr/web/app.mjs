@@ -2468,6 +2468,12 @@ function renderCompatibility(report) {
       `${client.name || "Unknown UI"} · ${client.type || "unknown"}`,
       `${client.version || "unknown"} · ${client.report_status || "unknown"}`,
     );
+    for (const issue of Array.isArray(client.issues) ? client.issues : []) {
+      const item = document.createElement("p");
+      item.className = "fine-print";
+      item.textContent = `${client.name || "UI"}: ${issue}`;
+      output.append(item);
+    }
   }
   for (const blocker of Array.isArray(report.blockers) ? report.blockers : []) {
     const item = document.createElement("p");
