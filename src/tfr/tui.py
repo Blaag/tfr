@@ -6361,6 +6361,11 @@ class TfrTui:
                 include_secrets = len(parameters) == 3 and parameters[2] == "--include-secrets"
                 if len(parameters) == 3 and not include_secrets:
                     raise ValueError("export accepts only --include-secrets")
+                if include_secrets:
+                    raise ValueError(
+                        "complete private recovery exports include Gateway world logs and must "
+                        "run on the Gateway host: tfr config export PATH --include-secrets"
+                    )
                 document = await self.service_runtime.config_export(
                     include_secrets=include_secrets,
                     confirm=include_secrets,
@@ -7482,7 +7487,13 @@ class TfrTui:
             if not isinstance(event, dict):
                 continue
             marker = "▶" if event.get("matched") else " "
-            speaker = f" {event['speaker']}:" if event.get("speaker") else ""
+            attribution = event.get("speaker_attribution")
+            if event.get("speaker") and attribution == "visible-text":
+                speaker = f" [apparent {event['speaker']}]"
+            elif event.get("speaker") and attribution == "configured-character":
+                speaker = f" [local {event['speaker']}]"
+            else:
+                speaker = f" {event['speaker']}:" if event.get("speaker") else ""
             lines.append(
                 f"{marker} [{event.get('timestamp', '?')}] {event.get('world', '?')}{speaker} "
                 f"{event.get('text', '')}"

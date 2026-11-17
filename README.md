@@ -991,13 +991,15 @@ tfr config reset ui.typing_glow.enabled --apply
 
 Portable Gateway backups use the same connected owner interface. Export omits
 secrets by default and records their setting keys; `--include-secrets` writes
-their resolved plaintext values to a new owner-only file, so protect that file
-as you would the original credentials. Import always previews first and commits
-one complete validated snapshot only with `--apply`:
+one complete owner-only Gateway recovery archive from the local owner socket,
+including resolved plaintext values, client continuity state, and hash-manifested
+canonical JSONL world logs. Protect that file as you would the original
+credentials. Import always previews first and commits one complete validated
+snapshot only with `--apply`:
 
 ```bash
 tfr config export tfr-backup.json
-tfr config export tfr-private-backup.json --include-secrets
+tfr config export tfr-private-backup.tfr-recovery --include-secrets
 tfr config import tfr-backup.json
 tfr config import tfr-backup.json --apply
 tfr config import-status
@@ -1011,10 +1013,9 @@ restore its overrides. Administrators can remove obsolete settings with
 `tfr config remove-ui-profile PROFILE_ID --apply`; this does not require manual
 editing of the live managed document.
 
-These portable archives are only the Gateway-managed portion of a complete
-deployment backup. The Gateway listener token, TLS private key, PWA device state,
-and each UI host's connection tokens require the companion procedures in
-[`BACKUP-AND-RESTORE.md`](BACKUP-AND-RESTORE.md).
+Exports without `--include-secrets` contain only portable managed configuration.
+Complete Gateway recovery and separate UI-host credential procedures are detailed
+in [`BACKUP-AND-RESTORE.md`](BACKUP-AND-RESTORE.md).
 
 Use `--json` for stable machine-readable output, `--ui`, `--ui-type`, `--world`,
 or `--shared` for explicit targeting, and `--gateway-profile NAME` for a stored
@@ -1456,12 +1457,14 @@ use `graph:none` for tables only. Hour and weekday buckets use the native UI's
 current local UTC offset, which is displayed by the query response and may be
 off by one hour across a historical daylight-saving transition.
 
-For worlds without NOSPOOF, stats infer speakers from visible `Name says,` lines
-and use those names to recognize poses. Local `You say,` echoes and poses are
-mapped to the configured character for that world. This inference happens only
-during stats queries; recall rows and event logs are unchanged. Word analysis
-strips inferred line prefixes before tokenization so speaker names do not
-dominate top-word results.
+For worlds without NOSPOOF, Recall records a bounded apparent speaker from visible
+`Name says,` lines so `s:` filters match what the user sees. Results label this as
+`apparent`; it never upgrades text inference into verified transport provenance or
+weakens spoof reporting. Local `You say,` echoes map to the configured character.
+Existing schema-1 Recall databases are upgraded in place from their retained text
+without deleting rows or requiring a log rebuild. Stats also use known names to
+recognize poses. Word analysis strips inferred line prefixes before tokenization
+so speaker names do not dominate top-word results.
 
 Use `/sh` to temporarily open the local interactive shell and return to TFR by
 exiting it. Input beginning with `!` runs a one-shot local shell command, such as

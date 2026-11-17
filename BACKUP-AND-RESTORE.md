@@ -15,9 +15,9 @@ these backups on trusted private storage and delete them securely when they are
 no longer needed. TFR creates its own private exports with mode `0600` and
 refuses to overwrite an existing file.
 
-These procedures back up **configuration and credentials**. Logs, recall data,
-and transcript/message history are operational data, not configuration; archive
-their configured directories separately if you also want those records.
+Complete private Gateway recovery also includes the canonical JSONL world logs.
+The Recall SQLite database is a derived search projection and is rebuilt from
+those logs; it does not need to be copied as authoritative state.
 
 ## Gateway: Complete Configuration and Credential Backup
 
@@ -25,7 +25,9 @@ A complete Gateway recovery uses one private portable archive created with
 `--include-secrets` through the Gateway's local owner socket. In addition to the
 managed configuration, it contains the Gateway listener token and TLS keypair,
 stable native-UI authority, PWA credentials and push subscriptions, the VAPID
-private key, and the expected private web origin/route.
+private key, the expected private web origin/route, and every canonical JSONL
+world log from the configured logging directory. Each log is size-bounded and
+recorded in a strict manifest with its SHA-256 digest.
 
 The portable archive includes all managed worlds, plugins and plugin sources,
 shared/Gateway/UI settings, named-UI settings, and the **resolved plaintext value
@@ -33,34 +35,19 @@ of every managed secret**, including world passwords and provider/API keys. If
 any secret reference cannot be resolved, export fails rather than silently
 creating an incomplete private backup.
 
-### Export from an attached TFR UI
-
-Run this slash command inside an authenticated native UI:
-
-```text
-/config export /absolute/private/path/tfr-gateway-complete.json --include-secrets
-```
-
-The file is written on the UI host. The UI must have owner/admin authority.
-
-### Export from a shell
+### Export from the Gateway host
 
 From the Gateway host using its owner Unix socket:
 
 ```sh
-tfr config export /absolute/private/path/tfr-gateway-complete.json --include-secrets
+tfr config export /absolute/private/path/tfr-gateway-complete.tfr-recovery --include-secrets
 ```
 
-An authenticated remote profile can export the managed configuration and its
-managed secrets, but cannot read Gateway host recovery state:
-
-```sh
-tfr config --gateway-profile default export \
-  /absolute/private/path/tfr-gateway-complete.json --include-secrets
-```
-
-Use the local owner-socket form when the archive must rebuild the host without
-re-pairing clients.
+Complete export is deliberately unavailable from a native UI or authenticated
+remote profile: those processes cannot safely snapshot Gateway-owned logs.
+Run the owner-socket command on the Gateway host. A single private ZIP archive is
+written atomically; an incomplete final JSONL record or unreadable log fails the
+export rather than silently creating an incomplete backup.
 
 The export reports whether Gateway recovery state was included. Treat an export
 that says `not included` as a managed-configuration archive, not a complete host
@@ -75,7 +62,7 @@ unprivileged remote connection.
 3. Run setup with the private archive and choose **Gateway server**:
 
 ```sh
-./scripts/setup-tfr --recovery /absolute/private/path/tfr-gateway-complete.json
+./scripts/setup-tfr --recovery /absolute/private/path/tfr-gateway-complete.tfr-recovery
 ```
 
 While acceptance-testing a published candidate, check out that exact candidate
@@ -84,12 +71,13 @@ tag and installs that checkout instead of silently downgrading to latest stable:
 
 ```sh
 ./scripts/setup-tfr --candidate \
-  --recovery /absolute/private/path/tfr-gateway-complete.json
+  --recovery /absolute/private/path/tfr-gateway-complete.tfr-recovery
 ```
 
 4. Approve the generated user service and start it. Setup restores private state,
-   imports the managed configuration, verifies the private Tailscale Serve route,
-   and refuses a different Tailscale origin rather than silently breaking PWAs.
+   restores and hash-verifies canonical logs before service start, imports the
+   managed configuration, verifies the private Tailscale Serve route, and refuses
+   a different Tailscale origin rather than silently breaking PWAs.
 5. Verify with `tfr config status` and `tfr-doctor`.
 
 Setup records private, archive-bound progress through validation, state restore,
@@ -227,7 +215,7 @@ For a Gateway plus one or more UI hosts, a complete recoverable set is:
       reporting `Gateway recovery state: included`.
 - [ ] One UI recovery bundle from each UI host whose profiles or stable identity
       must be recoverable. One bundle includes all profiles on that host.
-- [ ] Any desired logs, recall database, or transcripts archived separately.
+- [ ] Complete archive reports the expected canonical log file and byte counts.
 - [ ] Restore tested with `tfr-doctor` and `tfr config status`.
 
 After a real recovery, retain the mode-0600 archive and any pre-migration

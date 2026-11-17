@@ -15,7 +15,7 @@ import regex as safe_regex
 
 from tfr.events import Event
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PROJECTION_VERSION = "inbound-only-v1"
 BACKFILL_BATCH_LINES = 500
 QUERY_CANDIDATE_LIMIT = 20_000
@@ -162,6 +162,7 @@ class RecallStore:
                 direction TEXT NOT NULL,
                 speaker TEXT,
                 speaker_folded TEXT,
+                attribution TEXT NOT NULL DEFAULT 'unattributed',
                 text TEXT NOT NULL,
                 display_text TEXT NOT NULL
             );
@@ -186,7 +187,14 @@ class RecallStore:
         row = connection.execute(
             "SELECT value FROM recall_metadata WHERE key='schema_version'"
         ).fetchone()
-        if row is not None and int(row[0]) != SCHEMA_VERSION:
+        existing_schema = int(row[0]) if row is not None else None
+        if existing_schema == 1:
+            connection.execute(
+                "ALTER TABLE recall_events ADD COLUMN attribution "
+                "TEXT NOT NULL DEFAULT 'unattributed'"
+            )
+            self._migrate_speaker_attribution(connection)
+        elif existing_schema not in {None, SCHEMA_VERSION}:
             connection.close()
             raise ValueError("recall database schema is unsupported")
         connection.execute(
@@ -212,6 +220,26 @@ class RecallStore:
         if os.name == "posix":
             os.chmod(self.path, 0o600)
         self._connection = connection
+
+    def _migrate_speaker_attribution(self, connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            "SELECT id, world, kind, speaker, text FROM recall_events"
+        ).fetchall()
+        for row in rows:
+            if row["speaker"]:
+                connection.execute(
+                    "UPDATE recall_events SET attribution='stored' WHERE id=?", (row["id"],)
+                )
+                continue
+            speaker, attribution = self._apparent_speaker(
+                str(row["world"]), str(row["kind"]), str(row["text"])
+            )
+            if speaker is not None:
+                connection.execute(
+                    "UPDATE recall_events SET speaker=?, speaker_folded=?, attribution=? "
+                    "WHERE id=?",
+                    (speaker, speaker.casefold(), attribution, row["id"]),
+                )
 
     async def write(self, event: Event) -> None:
         if self._writer_error is not None:
@@ -281,8 +309,8 @@ class RecallStore:
                     """
                     INSERT OR IGNORE INTO recall_events(
                         event_id, world, timestamp, timestamp_us, kind, direction,
-                        speaker, speaker_folded, text, display_text
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        speaker, speaker_folded, attribution, text, display_text
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     row,
                 )
@@ -313,6 +341,7 @@ class RecallStore:
             return None
         provenance = value.get("provenance")
         spoof = value.get("spoof")
+        attribution = "unattributed"
         speaker = (
             provenance.get("sender_name")
             if isinstance(provenance, dict) and isinstance(provenance.get("sender_name"), str)
@@ -320,6 +349,10 @@ class RecallStore:
             if isinstance(spoof, dict) and isinstance(spoof.get("speaker"), str)
             else None
         )
+        if speaker is not None:
+            attribution = "verified" if isinstance(provenance, dict) else "spoof-assessed"
+        else:
+            speaker, attribution = self._apparent_speaker(str(world), str(value.get("kind")), text)
         event_id = value.get("event_id")
         if not isinstance(event_id, str) or not event_id:
             return None
@@ -333,9 +366,25 @@ class RecallStore:
             str(value.get("direction", "unknown")),
             speaker,
             speaker.casefold() if speaker else None,
+            attribution,
             text,
             display if isinstance(display, str) and display else text,
         )
+
+    def _apparent_speaker(self, world: str, kind: str, text: str) -> tuple[str | None, str]:
+        if kind != "say":
+            return None, "unattributed"
+        visible = text.lstrip()
+        policy = self.worlds.get(world)
+        if policy and policy.character_name and visible.casefold().startswith("you say,"):
+            return policy.character_name, "configured-character"
+        match = _VISIBLE_SAY.match(visible)
+        if match is None:
+            return None, "unattributed"
+        speaker = match.group("speaker").strip()
+        if speaker.casefold() == "you" or _INFERRED_SPEAKER.fullmatch(speaker) is None:
+            return None, "unattributed"
+        return speaker, "visible-text"
 
     async def _backfill(self) -> None:
         self._backfill_state = "running"
@@ -493,7 +542,8 @@ class RecallStore:
         rows = (
             self._require_connection()
             .execute(
-                "SELECT world, timestamp, timestamp_us, kind, speaker, speaker_folded, text "
+                "SELECT world, timestamp, timestamp_us, kind, speaker, speaker_folded, "
+                "attribution, text "
                 "FROM recall_events WHERE direction='inbound' "
                 "AND kind IN ('say','pose','speech','raw_output') "
                 "AND (? IS NULL OR world=?) "
@@ -533,9 +583,7 @@ class RecallStore:
 
     def _infer_stats_values(self, values: list[dict[str, Any]]) -> list[dict[str, Any]]:
         values = [
-            value
-            for value in values
-            if not str(value.get("text", "")).lstrip().startswith("▶ [")
+            value for value in values if not str(value.get("text", "")).lstrip().startswith("▶ [")
         ]
         known: dict[str, dict[str, str]] = defaultdict(dict)
         for world, policy in self.worlds.items():
@@ -544,7 +592,8 @@ class RecallStore:
         for value in values:
             speaker = value.get("speaker")
             if speaker:
-                value["attribution"] = "stored"
+                if value.get("attribution") in {None, "unattributed"}:
+                    value["attribution"] = "stored"
                 known[str(value["world"])][str(speaker).casefold()] = str(speaker)
                 continue
             if value["kind"] != "say":
@@ -960,6 +1009,7 @@ class RecallStore:
             "kind": row["kind"],
             "direction": row["direction"],
             "speaker": row["speaker"],
+            "speaker_attribution": row["attribution"],
             "text": row["display_text"],
             "matched": matched,
         }
