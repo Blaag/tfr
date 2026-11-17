@@ -95,6 +95,10 @@ systemctl --user restart tfr-gateway.service
 journalctl --user-unit=tfr-gateway.service
 ```
 
+These commands require `--user`; the system-wide unit is intentionally absent.
+With the unit enabled and `Linger=yes`, the Gateway starts during boot without an
+interactive login.
+
 For a headless Gateway that must continue after logout, inspect `tfr-doctor` and
 enable user lingering when it reports that lingering is disabled:
 

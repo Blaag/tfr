@@ -92,6 +92,12 @@ tag and installs that checkout instead of silently downgrading to latest stable:
    and refuses a different Tailscale origin rather than silently breaking PWAs.
 5. Verify with `tfr config status` and `tfr-doctor`.
 
+Setup records private, archive-bound progress through validation, state restore,
+service start, configuration import, explicit service restart, route verification,
+and final health verification. Rerunning the same command resumes from the first
+incomplete phase; a different archive is refused until the prior recovery is
+resolved. Review progress with `tfr config import-status`.
+
 The lower-level preview/apply commands remain available when restoring managed
 configuration without replacing the host:
 
@@ -223,6 +229,22 @@ For a Gateway plus one or more UI hosts, a complete recoverable set is:
       must be recoverable. One bundle includes all profiles on that host.
 - [ ] Any desired logs, recall database, or transcripts archived separately.
 - [ ] Restore tested with `tfr-doctor` and `tfr config status`.
+
+After a real recovery, retain the mode-0600 archive and any pre-migration
+quarantine until the replacement survives a reboot and all native/PWA clients
+reconnect. Verify after reboot:
+
+```sh
+systemctl --user is-enabled tfr-gateway.service
+systemctl --user is-active tfr-gateway.service
+loginctl show-user "$USER" --property=Linger --value
+tfr-doctor
+```
+
+Copy the archive to trusted off-host storage before removing the quarantine.
+When it is no longer needed, securely remove every plaintext copy according to
+the storage medium's guarantees; ordinary unlinking is not a reliable secure
+erase on snapshots, SSDs, or copy-on-write filesystems.
 
 Never use the credential-free `/gateway profiles export` display or a Gateway
 configuration export without `--include-secrets` as the only disaster-recovery

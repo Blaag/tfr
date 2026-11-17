@@ -265,6 +265,10 @@ def restore_gateway_recovery(
     web_state_directory: Path,
 ) -> dict[str, object]:
     recovery = validate_gateway_recovery(value)
+    details = gateway_recovery_details(
+        recovery,
+        config_directory=config_directory,
+    )
     gateway = recovery["gateway"]
     web = recovery["web"]
     if not isinstance(gateway, dict) or not isinstance(web, dict):  # pragma: no cover
@@ -327,6 +331,19 @@ def restore_gateway_recovery(
         for target in reversed(created):
             target.unlink(missing_ok=True)
         raise
+    return details
+
+
+def gateway_recovery_details(
+    value: object,
+    *,
+    config_directory: Path,
+) -> dict[str, object]:
+    recovery = validate_gateway_recovery(value)
+    gateway = recovery["gateway"]
+    web = recovery["web"]
+    if not isinstance(gateway, dict) or not isinstance(web, dict):  # pragma: no cover
+        raise ValueError("validated Gateway recovery has invalid sections")
     return {
         "listen_host": gateway["listen_host"],
         "port": gateway["listen_port"],

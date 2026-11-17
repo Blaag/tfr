@@ -126,6 +126,31 @@ def test_gateway_bootstrap_accepts_minimal_document(tmp_path: Path) -> None:
     assert bundle.agents.agents == {}
 
 
+def test_gateway_bootstrap_accepts_recovery_web_tls_pair(tmp_path: Path) -> None:
+    path = tmp_path / "gateway.jsonc"
+    path.write_text(
+        '{"schema_version":1,"state_directory":"state",'
+        '"web_tls_cert":"web.crt","web_tls_key":"web.key"}',
+        encoding="utf-8",
+    )
+
+    bundle = gateway_bootstrap_bundle(load_gateway_bootstrap(path))
+
+    assert bundle.main.web_gateway.tls_cert == (tmp_path / "web.crt").resolve()
+    assert bundle.main.web_gateway.tls_key == (tmp_path / "web.key").resolve()
+
+
+def test_gateway_bootstrap_rejects_incomplete_recovery_web_tls_pair(tmp_path: Path) -> None:
+    path = tmp_path / "gateway.jsonc"
+    path.write_text(
+        '{"schema_version":1,"state_directory":"state","web_tls_cert":"web.crt"}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="must be non-empty paths together"):
+        load_gateway_bootstrap(path)
+
+
 def test_gateway_bootstrap_warns_and_ignores_legacy_values(tmp_path: Path) -> None:
     path = tmp_path / "config.jsonc"
     path.write_text(

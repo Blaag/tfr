@@ -3113,15 +3113,18 @@ class GatewayServer:
                     "expected_revision",
                     "expected_digest",
                     "confirm",
+                    "defer_restart",
                 }:
                     raise ValueError("config_import_apply has invalid fields")
                 expected = message.get("expected_revision")
                 digest = message.get("expected_digest")
+                defer_restart = message.get("defer_restart")
                 if (
                     not isinstance(expected, int)
                     or isinstance(expected, bool)
                     or not isinstance(digest, str)
                     or message.get("confirm") is not True
+                    or not isinstance(defer_restart, bool)
                 ):
                     raise ValueError("configuration import confirmation is invalid")
                 actor = self.ui_store.get(ui_id) if self.ui_store and ui_id else None
@@ -3133,7 +3136,7 @@ class GatewayServer:
                     actor_ui_name=actor.display_name if actor else "Local administrator",
                 )
                 await self._broadcast_configuration()
-                if result.get("restart") == "gateway-restart":
+                if result.get("restart") == "gateway-restart" and not defer_restart:
                     result["restarting"] = True
                     restart_gateway = True
             elif message_type == "config_import_status":

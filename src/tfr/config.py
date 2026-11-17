@@ -711,6 +711,8 @@ class GatewayBootstrapConfiguration(StrictModel):
 
     main_path: Path
     state_directory: Path
+    web_tls_cert: Path | None = None
+    web_tls_key: Path | None = None
     warnings: tuple[str, ...] = ()
     legacy: bool = False
 
@@ -750,7 +752,13 @@ def load_gateway_bootstrap(main_path: Path | str | None = None) -> GatewayBootst
     if not isinstance(data, dict):
         raise ConfigurationError(f"invalid {resolved}: <root>: expected an object")
 
-    bootstrap_fields = {"$schema", "schema_version", "state_directory"}
+    bootstrap_fields = {
+        "$schema",
+        "schema_version",
+        "state_directory",
+        "web_tls_cert",
+        "web_tls_key",
+    }
     if set(data) <= bootstrap_fields:
         unknown_version = data.get("schema_version", 1)
         if unknown_version != 1:
@@ -760,10 +768,33 @@ def load_gateway_bootstrap(main_path: Path | str | None = None) -> GatewayBootst
             raise ConfigurationError(
                 f"invalid {resolved}: state_directory: expected a non-empty path"
             )
+        web_tls_cert = data.get("web_tls_cert")
+        web_tls_key = data.get("web_tls_key")
+        if (web_tls_cert is None) != (web_tls_key is None) or not all(
+            value is None or isinstance(value, str) and value
+            for value in (web_tls_cert, web_tls_key)
+        ):
+            raise ConfigurationError(
+                f"invalid {resolved}: web_tls_cert and web_tls_key must be non-empty paths together"
+            )
         return GatewayBootstrapConfiguration(
             main_path=resolved,
             state_directory=_absolute_path_without_symlink_resolution(
                 Path(state), relative_to=resolved.parent
+            ),
+            web_tls_cert=(
+                _absolute_path_without_symlink_resolution(
+                    Path(web_tls_cert), relative_to=resolved.parent
+                )
+                if web_tls_cert is not None
+                else None
+            ),
+            web_tls_key=(
+                _absolute_path_without_symlink_resolution(
+                    Path(web_tls_key), relative_to=resolved.parent
+                )
+                if web_tls_key is not None
+                else None
             ),
         )
 
@@ -823,7 +854,11 @@ def gateway_bootstrap_bundle(
                 update={"state_directory": _resolve_path(main.updates.state_directory)}
             ),
             "web_gateway": main.web_gateway.model_copy(
-                update={"state_directory": _resolve_path(main.web_gateway.state_directory)}
+                update={
+                    "state_directory": _resolve_path(main.web_gateway.state_directory),
+                    "tls_cert": bootstrap.web_tls_cert,
+                    "tls_key": bootstrap.web_tls_key,
+                }
             ),
             "plugins": main.plugins.model_copy(
                 update={"state_directory": _resolve_path(main.plugins.state_directory)}

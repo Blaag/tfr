@@ -346,13 +346,34 @@ class GatewayConfigurationTransfer:
 
     def status(self) -> dict[str, object]:
         applied = self._state.get("applied_revision")
+        setup = self._setup_status()
         return {
             "revision": self.configuration.revision,
             "applied_revision": applied,
             "applied_at": self._state.get("applied_at"),
             "rollback_safe": isinstance(applied, int) and applied == self.configuration.revision,
             "pending_profiles": copy.deepcopy(self._state.get("pending_profiles", [])),
+            "recovery_setup": setup,
         }
+
+    def _setup_status(self) -> dict[str, object] | None:
+        path = self.directory / "recovery-setup.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(value, dict):
+            return None
+        phase = value.get("phase")
+        updated_at = value.get("updated_at")
+        digest = value.get("archive_digest")
+        if (
+            not isinstance(phase, str)
+            or not isinstance(updated_at, str)
+            or not isinstance(digest, str)
+        ):
+            return None
+        return {"phase": phase, "updated_at": updated_at, "archive_digest": digest[:12]}
 
     async def rollback(
         self, *, expected_revision: int, actor_ui_id: str, actor_ui_name: str

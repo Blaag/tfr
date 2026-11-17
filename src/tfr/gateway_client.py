@@ -1389,6 +1389,7 @@ class GatewayClient:
         expected_revision: int,
         expected_digest: str,
         confirm: bool,
+        defer_restart: bool = False,
     ) -> dict[str, object]:
         request_id = uuid4()
         result = await self._request(
@@ -1399,6 +1400,7 @@ class GatewayClient:
                 "expected_revision": expected_revision,
                 "expected_digest": expected_digest,
                 "confirm": confirm,
+                "defer_restart": defer_restart,
             },
             request_id,
         )

@@ -200,6 +200,7 @@ async def run_doctor(
         except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
             doctor.fail(f"Gateway application is not reachable at {target_socket}: {exc}")
         else:
+            client.start()
             await _check_web_status(doctor, client)
             await client.stop()
             await client.event_bus.close()
