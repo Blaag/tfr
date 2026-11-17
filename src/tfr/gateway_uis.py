@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from tfr.compatibility import validate_ui_compatibility_report
+
 MAX_UI_NAME_CHARACTERS = 80
 MAX_UI_PLATFORM_CHARACTERS = 80
 MAX_UI_CAPABILITIES = 64
@@ -23,6 +25,8 @@ MAX_UI_VERSION_VALUE_CHARACTERS = 80
 UI_CLIENT_TYPES = frozenset({"terminal", "pwa"})
 UI_PAIRING_TTL_SECONDS = 30 * 60
 MAX_ACTIVE_UI_PAIRINGS = 32
+MAX_UI_COMPATIBILITY_REPORTS = 256
+MAX_UI_COMPATIBILITY_BYTES = 256 * 1024
 UI_PAIRING_PREFIX = "tfr-pair-v1:"
 
 
@@ -220,20 +224,48 @@ class UiStore:
     ) -> None:
         self.state_directory = Path(state_directory).expanduser()
         self.path = self.state_directory / "uis.json"
+        self.compatibility_path = self.state_directory / "ui-compatibility.json"
         self._clock = clock or (lambda: datetime.now(UTC))
         self._records: dict[UUID, UiRecord] = {}
         self._configuration_profiles: dict[UUID, UUID] = {}
         self._configuration_reports: dict[UUID, tuple[int, str, tuple[str, ...]]] = {}
         self._credential_digests: dict[UUID, str] = {}
+        self._compatibility_reports: dict[UUID, dict[str, object]] = {}
         self._pairings: dict[str, UiPairingChallenge] = {}
         self._lock = asyncio.Lock()
         self._load()
+        self._load_compatibility()
 
     def get(self, ui_id: UUID) -> UiRecord | None:
         return self._records.get(ui_id)
 
     def records(self) -> tuple[UiRecord, ...]:
         return tuple(sorted(self._records.values(), key=lambda item: item.display_name.casefold()))
+
+    def compatibility_reports(self) -> dict[UUID, dict[str, object]]:
+        return {ui_id: dict(report) for ui_id, report in self._compatibility_reports.items()}
+
+    async def report_compatibility(self, ui_id: UUID, value: object) -> dict[str, object]:
+        report = validate_ui_compatibility_report(value)
+        async with self._lock:
+            if ui_id not in self._records:
+                raise ValueError(f"unknown UI ID: {ui_id}")
+            if (
+                ui_id not in self._compatibility_reports
+                and len(self._compatibility_reports) >= MAX_UI_COMPATIBILITY_REPORTS
+            ):
+                raise ValueError("UI compatibility report limit reached")
+            previous = self._compatibility_reports.get(ui_id)
+            self._compatibility_reports[ui_id] = report
+            try:
+                self._save_compatibility()
+            except BaseException:
+                if previous is None:
+                    self._compatibility_reports.pop(ui_id, None)
+                else:
+                    self._compatibility_reports[ui_id] = previous
+                raise
+            return dict(report)
 
     def create_pairing_code(self) -> tuple[str, datetime]:
         now = self._now()
@@ -685,6 +717,81 @@ class UiStore:
         ):
             raise ValueError("UI credentials are invalid")
         self._credential_digests = credentials
+
+    def _load_compatibility(self) -> None:
+        try:
+            descriptor = os.open(
+                self.compatibility_path,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except FileNotFoundError:
+            return
+        try:
+            details = os.fstat(descriptor)
+            if not stat.S_ISREG(details.st_mode) or (
+                os.name == "posix"
+                and (details.st_uid != os.geteuid() or stat.S_IMODE(details.st_mode) & 0o077)
+            ):
+                raise ValueError("UI compatibility state must be a private regular file")
+            if details.st_size > MAX_UI_COMPATIBILITY_BYTES:
+                raise ValueError("UI compatibility state exceeds its size limit")
+            with os.fdopen(descriptor, encoding="utf-8") as stream:
+                descriptor = -1
+                value = json.load(stream)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"schema_version", "reports"}
+            or value["schema_version"] != 1
+            or not isinstance(value["reports"], dict)
+            or len(value["reports"]) > MAX_UI_COMPATIBILITY_REPORTS
+        ):
+            raise ValueError("UI compatibility state is invalid")
+        try:
+            reports = {
+                UUID(raw_ui_id): validate_ui_compatibility_report(report)
+                for raw_ui_id, report in value["reports"].items()
+            }
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("UI compatibility state is invalid") from exc
+        self._compatibility_reports = reports
+
+    def _save_compatibility(self) -> None:
+        self._ensure_private_directory()
+        value = {
+            "schema_version": 1,
+            "reports": {
+                str(ui_id): report
+                for ui_id, report in sorted(
+                    self._compatibility_reports.items(), key=lambda item: str(item[0])
+                )
+            },
+        }
+        encoded = (json.dumps(value, ensure_ascii=True, separators=(",", ":")) + "\n").encode()
+        if len(encoded) > MAX_UI_COMPATIBILITY_BYTES:
+            raise ValueError("UI compatibility state exceeds its size limit")
+        temporary = self.compatibility_path.with_name(
+            f".{self.compatibility_path.name}.{secrets.token_hex(8)}.tmp"
+        )
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = -1
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.compatibility_path)
+            os.chmod(self.compatibility_path, 0o600)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
 
     def _ensure_private_directory(self) -> None:
         try:

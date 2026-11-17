@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from tfr.configuration_cli import read_configuration_archive
 from tfr.configuration_transfer import _validate_archive
-from tfr.gateway_recovery import restore_gateway_recovery
+from tfr.gateway_recovery import gateway_recovery_details, restore_gateway_recovery
 from tfr.service_management import (
     install_service,
     remove_service,
@@ -31,6 +31,16 @@ from tfr.service_management import (
 )
 
 Profile = Literal["all-in-one", "local-split", "gateway", "remote-ui"]
+_RECOVERY_PHASES = (
+    "validated",
+    "installed",
+    "state-restored",
+    "service-started",
+    "configuration-imported",
+    "service-restarted",
+    "route-verified",
+    "verified",
+)
 
 PUBLIC_PLUGINS_URL = "https://github.com/Blaag/tfr-plugins-public"
 DEFAULT_GATEWAY_PORT = 7347
@@ -744,7 +754,12 @@ def _configure_gateway_service(
     return True
 
 
-def _gateway_handoff(config_directory: Path, details: dict[str, object]) -> None:
+def _gateway_handoff(
+    config_directory: Path,
+    details: dict[str, object],
+    *,
+    recovery: bool = False,
+) -> None:
     ca_file = details.get("ca_file")
     content = (
         "TFR remote UI handoff (this file contains no token value)\n"
@@ -759,7 +774,8 @@ def _gateway_handoff(config_directory: Path, details: dict[str, object]) -> None
         "and UI TFR versions compatible and allow the configured port through your\n"
         "private-network firewall/Tailscale ACL.\n"
     )
-    _write_file(
+    writer = _write_recovery_file if recovery else _write_file
+    writer(
         config_directory / "remote-ui-handoff.txt",
         content,
         mode=0o600,
@@ -767,19 +783,81 @@ def _gateway_handoff(config_directory: Path, details: dict[str, object]) -> None
     )
 
 
-def _load_gateway_recovery(path: Path) -> tuple[dict[str, object], dict[str, object]]:
+def _load_gateway_recovery(path: Path) -> tuple[dict[str, object], dict[str, object], str]:
     details = path.stat(follow_symlinks=False)
     if not stat.S_ISREG(details.st_mode) or path.is_symlink():
         raise ValueError(f"Gateway recovery must be a regular file: {path}")
     if os.name == "posix" and (details.st_uid != os.geteuid() or details.st_mode & 0o077):
         raise ValueError("Gateway recovery must be owned by this user and mode 0600 or stricter")
-    archive, _digest = _validate_archive(read_configuration_archive(path))
+    archive, digest = _validate_archive(read_configuration_archive(path))
     recovery = archive.get("recovery")
     if not isinstance(recovery, dict):
         raise ValueError(
             "Gateway recovery requires a complete export created with --include-secrets"
         )
-    return archive, recovery
+    return archive, recovery, digest
+
+
+def _load_recovery_progress(path: Path, digest: str) -> str | None:
+    if not path.exists():
+        return None
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"Gateway recovery progress is invalid: {path}")
+    details = path.stat(follow_symlinks=False)
+    if os.name == "posix" and (details.st_uid != os.geteuid() or details.st_mode & 0o077):
+        raise ValueError("Gateway recovery progress must be owned by this user and private")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read Gateway recovery progress: {path}") from exc
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "archive_digest", "phase", "updated_at"}
+        or value["schema_version"] != 1
+        or value["archive_digest"] != digest
+        or value["phase"] not in _RECOVERY_PHASES
+    ):
+        raise ValueError("Gateway recovery progress does not match this archive")
+    return str(value["phase"])
+
+
+def _save_recovery_progress(path: Path, digest: str, phase: str) -> None:
+    if phase not in _RECOVERY_PHASES:
+        raise ValueError(f"invalid Gateway recovery phase: {phase}")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = -1
+            json.dump(
+                {
+                    "schema_version": 1,
+                    "archive_digest": digest,
+                    "phase": phase,
+                    "updated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                },
+                stream,
+                separators=(",", ":"),
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def _phase_complete(current: str | None, phase: str) -> bool:
+    return current is not None and _RECOVERY_PHASES.index(current) >= _RECOVERY_PHASES.index(phase)
 
 
 def _configure_recovery_bootstrap(
@@ -787,51 +865,20 @@ def _configure_recovery_bootstrap(
     state_directory: Path,
     details: dict[str, object],
 ) -> None:
-    web = details.get("web")
-    if not isinstance(web, dict):
-        raise ValueError("Gateway recovery web bootstrap is invalid")
-    web_config: dict[str, object] = {
-        "enabled": web["enabled"],
-        "mode": web["mode"],
-        "transport": web["transport"],
-        "listen_host": web["listen_host"],
-        "listen_port": web["listen_port"],
-        "state_directory": str(state_directory / "web"),
-    }
-    if web["transport"] == "tailscale" and web["origin"] is not None:
-        web_config["origin"] = web["origin"]
-    if web["transport"] == "direct":
-        web_config["direct_host"] = web["direct_host"]
-        if web["direct_port"] is not None:
-            web_config["direct_port"] = web["direct_port"]
-        if web["tls_certificate"] is not None:
-            web_config["tls_cert"] = str(config_directory / "web-gateway.crt")
-            web_config["tls_key"] = str(config_directory / "web-gateway.key")
     document = {
         "$schema": f"{SCHEMA_ROOT}/config.schema.json",
         "schema_version": 1,
-        "worlds_file": "worlds.jsonc",
-        "agents_file": "agents.jsonc",
-        "managed_settings": {"state_directory": str(state_directory / "settings")},
-        "web_gateway": web_config,
+        "state_directory": str(state_directory / "settings"),
     }
+    web = details.get("web")
+    if isinstance(web, dict) and web.get("tls_certificate") is not None:
+        document["web_tls_cert"] = str(config_directory / "web-gateway.crt")
+        document["web_tls_key"] = str(config_directory / "web-gateway.key")
     _write_recovery_file(
         config_directory / "config.jsonc",
         json.dumps(document, ensure_ascii=True, indent=2) + "\n",
         mode=0o600,
         description="Gateway recovery bootstrap",
-    )
-    _write_recovery_file(
-        config_directory / "worlds.jsonc",
-        generate_worlds_config({}),
-        mode=0o600,
-        description="empty recovery worlds bootstrap",
-    )
-    _write_recovery_file(
-        config_directory / "agents.jsonc",
-        empty_agents_config(),
-        mode=0o600,
-        description="empty recovery agents bootstrap",
     )
 
 
@@ -865,6 +912,7 @@ def _apply_recovery_import(tfr: Path, socket_path: Path, archive_path: Path) -> 
             "import",
             str(archive_path),
             "--apply",
+            "--defer-restart",
         ],
         check=False,
         capture_output=True,
@@ -873,6 +921,49 @@ def _apply_recovery_import(tfr: Path, socket_path: Path, archive_path: Path) -> 
     if result.returncode:
         detail = (result.stderr or result.stdout).strip()
         raise RuntimeError(f"Gateway recovery configuration import failed: {detail[:500]}")
+    print(result.stdout.strip())
+
+
+def _restart_recovered_service(tfr: Path, socket_path: Path) -> None:
+    result = subprocess.run(  # nosec B603
+        ("systemctl", "--user", "restart", "tfr-gateway.service"),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(f"Gateway recovery service restart failed: {detail[:500]}")
+    for _attempt in range(100):
+        if socket_path.exists():
+            status = subprocess.run(  # nosec B603
+                (
+                    str(tfr),
+                    "config",
+                    "--socket",
+                    str(socket_path),
+                    "status",
+                ),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if status.returncode == 0:
+                return
+        time.sleep(0.1)
+    raise RuntimeError("Gateway recovery service did not become ready after restart")
+
+
+def _verify_recovered_gateway(doctor: Path) -> None:
+    result = subprocess.run(  # nosec B603
+        (str(doctor),),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(f"Gateway recovery verification failed: {detail[:500]}")
     print(result.stdout.strip())
 
 
@@ -957,12 +1048,23 @@ def run(
     try:
         recovery_archive: dict[str, object] | None = None
         recovery: dict[str, object] | None = None
+        recovery_digest: str | None = None
+        recovery_phase: str | None = None
+        progress_path = state_directory / "settings" / "recovery-setup.json"
         if recovery_path is not None:
             recovery_path = recovery_path.expanduser().resolve()
-            recovery_archive, recovery = _load_gateway_recovery(recovery_path)
+            recovery_archive, recovery, recovery_digest = _load_gateway_recovery(recovery_path)
             if profile != "gateway":
                 raise ValueError("a Gateway recovery export can only restore the Gateway profile")
-        _install_release(repository, candidate=candidate)
+            recovery_phase = _load_recovery_progress(progress_path, recovery_digest)
+            if recovery_phase is None:
+                _save_recovery_progress(progress_path, recovery_digest, "validated")
+                recovery_phase = "validated"
+        if not _phase_complete(recovery_phase, "installed"):
+            _install_release(repository, candidate=candidate)
+            if recovery_digest is not None:
+                _save_recovery_progress(progress_path, recovery_digest, "installed")
+                recovery_phase = "installed"
         config_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         config_directory.chmod(0o700)
         # Remote UIs use generated connection bootstrap only; they never need
@@ -977,31 +1079,53 @@ def run(
             if recovery is None:
                 details = _gateway_details(config_directory)
             else:
-                details = restore_gateway_recovery(
-                    recovery,
-                    config_directory=config_directory,
-                    managed_state_directory=state_directory / "settings",
-                    web_state_directory=state_directory / "web",
-                )
+                if _phase_complete(recovery_phase, "state-restored"):
+                    details = gateway_recovery_details(
+                        recovery,
+                        config_directory=config_directory,
+                    )
+                else:
+                    details = restore_gateway_recovery(
+                        recovery,
+                        config_directory=config_directory,
+                        managed_state_directory=state_directory / "settings",
+                        web_state_directory=state_directory / "web",
+                    )
+                    if recovery_digest is None:  # pragma: no cover
+                        raise RuntimeError("validated Gateway recovery digest is unavailable")
+                    _save_recovery_progress(progress_path, recovery_digest, "state-restored")
+                    recovery_phase = "state-restored"
                 _configure_recovery_bootstrap(config_directory, state_directory, details)
-            _gateway_handoff(config_directory, details)
+            _gateway_handoff(config_directory, details, recovery=recovery is not None)
         elif profile == "remote-ui":
             details = _remote_ui_details(config_directory)
-        launchers = _write_launchers(
-            profile,
-            bin_directory,
-            tfr,
-            config_directory / "config.jsonc",
-            details,
-            gateway_socket,
+        launchers = (
+            []
+            if _phase_complete(recovery_phase, "service-started")
+            else _write_launchers(
+                profile,
+                bin_directory,
+                tfr,
+                config_directory / "config.jsonc",
+                details,
+                gateway_socket,
+            )
         )
         gateway_launcher = bin_directory / "tfr-gateway"
-        service_started = _configure_gateway_service(
-            profile,
-            launcher=gateway_launcher,
-            state_directory=state_directory,
-        )
-        _save_deployment(profile, gateway_socket)
+        if _phase_complete(recovery_phase, "service-started"):
+            service_started = True
+        else:
+            service_started = _configure_gateway_service(
+                profile,
+                launcher=gateway_launcher,
+                state_directory=state_directory,
+            )
+            if recovery_digest is not None and service_started:
+                _save_deployment(profile, gateway_socket)
+                _save_recovery_progress(progress_path, recovery_digest, "service-started")
+                recovery_phase = "service-started"
+        if recovery_digest is None:
+            _save_deployment(profile, gateway_socket)
         if recovery_archive is not None:
             if not service_started:
                 raise RuntimeError(
@@ -1009,8 +1133,24 @@ def run(
                 )
             if recovery_path is None or details is None:  # pragma: no cover
                 raise RuntimeError("validated Gateway recovery state is unavailable")
-            _apply_recovery_import(tfr, gateway_socket, recovery_path)
-            _restore_tailscale_route(details)
+            if recovery_digest is None:  # pragma: no cover
+                raise RuntimeError("validated Gateway recovery digest is unavailable")
+            if not _phase_complete(recovery_phase, "configuration-imported"):
+                _apply_recovery_import(tfr, gateway_socket, recovery_path)
+                _save_recovery_progress(progress_path, recovery_digest, "configuration-imported")
+                recovery_phase = "configuration-imported"
+            if not _phase_complete(recovery_phase, "service-restarted"):
+                _restart_recovered_service(tfr, gateway_socket)
+                _save_recovery_progress(progress_path, recovery_digest, "service-restarted")
+                recovery_phase = "service-restarted"
+            if not _phase_complete(recovery_phase, "route-verified"):
+                _restore_tailscale_route(details)
+                _save_recovery_progress(progress_path, recovery_digest, "route-verified")
+                recovery_phase = "route-verified"
+            if not _phase_complete(recovery_phase, "verified"):
+                _verify_recovered_gateway(bin_directory / "tfr-doctor")
+                _save_recovery_progress(progress_path, recovery_digest, "verified")
+                recovery_phase = "verified"
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"setup-tfr: {exc}", file=sys.stderr)
         return 2

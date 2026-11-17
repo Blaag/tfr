@@ -157,7 +157,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v75";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v76";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
     assert (
         'self.registration.showNotification(world ? `TFR · ${world}` : "New activity", {' in worker
@@ -487,6 +487,7 @@ def test_settings_use_layered_full_height_navigation() -> None:
         "updates",
         "tools",
         "statistics",
+        "compatibility",
         "devices",
         "about",
     ):
@@ -1361,6 +1362,7 @@ async def paired_client(
     snapshot_events: int = 20,
     speaking_streaks_enabled: bool = True,
     update_request_factory: object | None = None,
+    compatibility_status_factory: object | None = None,
 ) -> tuple[WebGatewayServer, TestClient, str]:
     gateway = WebGatewayServer(
         runtime,  # type: ignore[arg-type]
@@ -1372,6 +1374,7 @@ async def paired_client(
         speaking_streaks_enabled=speaking_streaks_enabled,
         ui_store=UiStore(tmp_path / "managed"),
         update_request_factory=update_request_factory,
+        compatibility_status_factory=compatibility_status_factory,
     )
     client = TestClient(TestServer(gateway.application()))
     await client.start_server()
@@ -1392,6 +1395,30 @@ async def paired_client(
     assert 0 < int(morsel["max-age"]) <= 180 * 24 * 60 * 60
     assert parsedate_to_datetime(morsel["expires"]).timestamp() > time.time()
     return gateway, client, morsel.value
+
+
+async def test_authenticated_pwa_reads_redacted_compatibility_status(tmp_path: Path) -> None:
+    runtime = FakeRuntime(EventHistory(EventBus(), {"alpha": 5}))
+    report = {
+        "report_version": 1,
+        "compatibility_floor": "0.1.122",
+        "ready_for_cleanup": True,
+        "clients": [],
+        "blockers": [],
+        "warnings": [],
+    }
+    _gateway, client, token = await paired_client(
+        tmp_path,
+        runtime,
+        compatibility_status_factory=lambda: report,
+    )
+    headers = {**NAVIGATION_HEADERS, "Cookie": f"{SESSION_COOKIE}={token}"}
+    try:
+        response = await client.get("/api/compatibility", headers=headers)
+        assert response.status == 200
+        assert await response.json() == report
+    finally:
+        await client.close()
 
 
 async def test_authenticated_device_manages_private_push_subscription(tmp_path: Path) -> None:

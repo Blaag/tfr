@@ -57,6 +57,7 @@ def build_config_parser() -> argparse.ArgumentParser:
     import_parser = commands.add_parser("import", help="preview or restore a portable backup")
     import_parser.add_argument("path", type=Path)
     import_parser.add_argument("--apply", action="store_true", help="persist the import")
+    import_parser.add_argument("--defer-restart", action="store_true", help=argparse.SUPPRESS)
     commands.add_parser("import-status", help="show import rollback and pending UI status")
     rollback = commands.add_parser("rollback-import", help="preview or roll back the latest import")
     rollback.add_argument("--apply", action="store_true", help="persist the rollback")
@@ -189,6 +190,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 expected_revision=int(preview["base_revision"]),
                 expected_digest=str(preview["digest"]),
                 confirm=True,
+                defer_restart=args.defer_restart,
             )
             return {"action": "import", "applied": True, **result}
         if args.action == "import-status":

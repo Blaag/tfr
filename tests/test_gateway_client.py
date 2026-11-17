@@ -67,6 +67,39 @@ def make_event(sequence: int) -> Event:
     )
 
 
+async def test_configuration_import_can_defer_gateway_restart_to_setup() -> None:
+    client = object.__new__(GatewayClient)
+    client._request = AsyncMock(return_value={"applied": True})  # type: ignore[method-assign]
+
+    await client.config_import_apply(
+        {},
+        expected_revision=0,
+        expected_digest="a" * 64,
+        confirm=True,
+        defer_restart=True,
+    )
+
+    request = client._request.await_args.args[0]
+    assert request["defer_restart"] is True
+
+
+async def test_client_queries_and_reports_compatibility() -> None:
+    client = object.__new__(GatewayClient)
+    client.gateway_capabilities = ("compatibility-status-v1",)
+    client._request = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            {"ready_for_cleanup": True},
+            {"report": {"report_version": 1}},
+        ]
+    )
+
+    assert (await client.compatibility_status())["ready_for_cleanup"] is True
+    await client.report_ui_compatibility({"report_version": 1})
+
+    assert client._request.await_args_list[0].args[0]["type"] == "compatibility_status"
+    assert client._request.await_args_list[1].args[0]["type"] == "ui_compatibility_report"
+
+
 async def test_remote_ui_pairing_issues_a_persistent_client_credential(tmp_path: Path) -> None:
     ca = trustme.CA()
     certificate = ca.issue_cert("localhost")
@@ -167,9 +200,7 @@ def test_retire_local_migration_sources_backs_up_and_rewrites_config(tmp_path: P
     assert json.loads(main.read_text(encoding="utf-8")) == {"schema_version": 1}
     assert main.stat().st_mode & 0o777 == 0o600
     assert not auxiliary.exists()
-    marker = json.loads(
-        main.with_name("config.jsonc.tfr-migrated").read_text(encoding="utf-8")
-    )
+    marker = json.loads(main.with_name("config.jsonc.tfr-migrated").read_text(encoding="utf-8"))
     assert marker["revision"] == 12
     assert len(marker["backups"]) == 2
 
@@ -196,8 +227,7 @@ def test_recover_local_plugin_sources_from_verified_migration_backup(tmp_path: P
     main.write_text('{"schema_version":1}\n', encoding="utf-8")
     backup = tmp_path / "backup.jsonc"
     backup.write_text(
-        '{"plugins":{"sources":[{"repo":"owner/ui-effects"}],'
-        '"state_directory":"./plugins"}}\n',
+        '{"plugins":{"sources":[{"repo":"owner/ui-effects"}],"state_directory":"./plugins"}}\n',
         encoding="utf-8",
     )
     marker = tmp_path / "config.jsonc.tfr-migrated"
@@ -1021,9 +1051,7 @@ async def test_gateway_configuration_mutation_preview_history_and_undo(tmp_path:
                 "target": None,
             },
         ]
-        batch_preview = await client.config_batch(
-            batch_changes, expected_revision=2, confirm=False
-        )
+        batch_preview = await client.config_batch(batch_changes, expected_revision=2, confirm=False)
         assert batch_preview["requires_confirmation"] is True
         assert len(batch_preview["changes"]) == 2
         batch = await client.config_batch(batch_changes, expected_revision=2, confirm=True)
@@ -1818,7 +1846,9 @@ async def test_owner_restart_hands_off_to_connector_supervisor() -> None:
     handoff = AsyncMock()
     socket_path = Path("/tmp") / f"tfr-restart-{uuid4().hex[:8]}" / "gateway.sock"
     server = GatewayServer(
-        runtime, socket_path, application_restart_factory=handoff  # type: ignore[arg-type]
+        runtime,
+        socket_path,
+        application_restart_factory=handoff,  # type: ignore[arg-type]
     )
     await server.start()
     client = await GatewayClient.connect(socket_path)
@@ -1863,7 +1893,9 @@ async def test_registered_native_ui_reports_focus_and_disconnect_clears_it(
     runtime = FakeRuntime(history)
     socket_path = Path("/tmp") / f"tfr-focus-{uuid4().hex[:8]}" / "gateway.sock"
     server = GatewayServer(
-        runtime, socket_path, ui_store=UiStore(tmp_path / "gateway-state")  # type: ignore[arg-type]
+        runtime,
+        socket_path,
+        ui_store=UiStore(tmp_path / "gateway-state"),  # type: ignore[arg-type]
     )
     await server.start()
     client = await GatewayClient.connect(
@@ -2094,8 +2126,7 @@ async def test_manual_reconnect_accepts_replacement_gateway_and_retargets_plugin
     message = await runtime.reconnect()
 
     assert message == (
-        "Reconnected to replacement Gateway after restart or reboot; "
-        "restored 2 missed events"
+        "Reconnected to replacement Gateway after restart or reboot; restored 2 missed events"
     )
     plugins.retarget.assert_called_once_with({"alpha": new_session})
     assert runtime.diagnostic_status()["restart_phase"] == "reconnected"
@@ -2516,9 +2547,7 @@ async def test_authenticated_native_ui_can_administer_gateway_configuration(
             confirm=True,
         )
         assert shared["revision"] == 2
-        assert (await client.config_changes())["changes"][-1]["key"] == (
-            "ui.spellcheck.enabled"
-        )
+        assert (await client.config_changes())["changes"][-1]["key"] == ("ui.spellcheck.enabled")
     finally:
         await client.stop()
         await server.stop()
@@ -2545,9 +2574,7 @@ async def test_gateway_client_queries_recall_database(tmp_path: Path) -> None:
         }
     )
     runtime.recall_status = AsyncMock(return_value={"enabled": True, "worlds": []})
-    runtime.statistics = AsyncMock(
-        return_value={"view": "summary", "summary": {"lines": 3}}
-    )
+    runtime.statistics = AsyncMock(return_value={"view": "summary", "summary": {"lines": 3}})
     runtime.release_status = AsyncMock(
         return_value={"managed": True, "installed_count": 5, "releases": []}
     )
@@ -2562,9 +2589,7 @@ async def test_gateway_client_queries_recall_database(tmp_path: Path) -> None:
         assert (await client.recall_status())["enabled"] is True
         assert (await client.statistics({"view": "summary"}))["summary"]["lines"] == 3
         assert (await client.release_status())["installed_count"] == 5
-        runtime.recall_query.assert_awaited_once_with(
-            {"speaker": "Alice", "words": "dragon"}
-        )
+        runtime.recall_query.assert_awaited_once_with({"speaker": "Alice", "words": "dragon"})
     finally:
         await client.stop()
         await client.event_bus.close()

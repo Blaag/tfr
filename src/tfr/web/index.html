@@ -210,6 +210,7 @@
 
           <section class="settings-page" data-settings-page="tools" hidden><div class="settings-menu">
             <button type="button" data-settings-target="statistics"><span>Statistics</span><small>Conversation activity and speakers</small><b>›</b></button>
+            <button type="button" data-settings-target="compatibility"><span>Compatibility</span><small>Schema readiness and connected UIs</small><b>›</b></button>
             <button id="effects-lab-button" type="button"><span>Effects Lab</span><small>Preview effects locally</small><b>›</b></button>
             <button id="diagnostics-button" type="button"><span>Diagnostics</span><small>Inspect private local status</small><b>›</b></button>
             <button id="help-button" type="button"><span>Help / Using TFR</span><small>Worlds, reading, and sending</small><b>›</b></button>
@@ -225,6 +226,17 @@
               <button id="statistics-submit" type="button">Show statistics</button>
             </div>
             <div id="statistics-results" class="settings-card statistics-results" role="status" hidden></div>
+          </section>
+
+          <section class="settings-page" data-settings-page="compatibility" hidden>
+            <div class="settings-card">
+              <h3>Compatibility readiness</h3>
+              <p class="fine-print">Gateway-owned, redacted schema and client status.</p>
+              <button id="compatibility-refresh" type="button">Refresh compatibility</button>
+            </div>
+            <div id="compatibility-results" class="settings-card statistics-results" role="status">
+              <p class="fine-print">Open this page to check compatibility.</p>
+            </div>
           </section>
 
           <section class="settings-page" data-settings-page="devices" hidden><div class="settings-card">

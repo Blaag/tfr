@@ -771,6 +771,13 @@ Acceptance criteria:
 
 ## Future Work
 
+- [ ] After every retained installation reports compatibility with the 0.1.122
+  floor, retire pre-floor Gateway JSONC migration, obsolete state-schema readers,
+  legacy speaker-rule adapters, and old deployment metadata handling. Keep current
+  plugin API/manifest compatibility checks and any backup readers explicitly
+  promised for 0.1.122 exports. Require a clean centralized compatibility report
+  before deleting each compatibility path.
+
 - [x] Add portable Gateway-managed configuration export/import. Export a
   versioned document with shared, Gateway, UI-type, named-UI, world, plugin, and
   plugin-source settings while omitting secrets by default and listing omitted

@@ -95,6 +95,10 @@ systemctl --user restart tfr-gateway.service
 journalctl --user-unit=tfr-gateway.service
 ```
 
+These commands require `--user`; the system-wide unit is intentionally absent.
+With the unit enabled and `Linger=yes`, the Gateway starts during boot without an
+interactive login.
+
 For a headless Gateway that must continue after logout, inspect `tfr-doctor` and
 enable user lingering when it reports that lingering is disabled:
 
@@ -108,6 +112,21 @@ TFR reports this command but does not run it. On macOS, the LaunchAgent label is
 definition or offer to remove it when switching to a profile without a Gateway.
 `tfr-doctor` reports the service manager, process, socket handshake, web backend,
 Tailscale Serve transport, lingering state, and relevant log location separately.
+
+Current Gateway deployments also expose one bounded compatibility snapshot to
+doctor, native UIs, and paired PWAs. Native UIs submit safe local schema metadata
+when they connect; the report never includes credentials, paths, endpoints, world
+names, or configuration values. Query it from the Gateway or a remote UI host:
+
+```console
+tfr-doctor --compatibility
+tfr-doctor --compatibility --json
+```
+
+Inside the terminal UI use `/compatibility` or `/compatibility json`. In the PWA,
+open **Settings → Tools → Compatibility**. Missing, stale, and incompatible native
+UI reports remain explicit blockers until that UI reconnects or its retained record
+is removed.
 
 The bootstrap checkout is not installed as `main`. The underlying installer
 fetches the official stable manifest, verifies its immutable tag and commit,

@@ -127,6 +127,24 @@ def test_private_configuration_export_carries_validated_recovery(tmp_path: Path)
     assert archive["recovery"] is not None
     assert preview["recovery_included"] is True
 
+    progress = base.main.managed_settings.state_directory / "recovery-setup.json"
+    progress.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "archive_digest": "a" * 64,
+                "phase": "route-verified",
+                "updated_at": "2026-11-16T20:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert transfer.status()["recovery_setup"] == {
+        "phase": "route-verified",
+        "updated_at": "2026-11-16T20:00:00Z",
+        "archive_digest": "a" * 12,
+    }
+
 
 @pytest.mark.asyncio
 async def test_recovery_import_rebases_ui_convergence_revisions(tmp_path: Path) -> None:

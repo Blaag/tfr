@@ -279,6 +279,7 @@ class WebGatewayManager:
         self.speaking_streaks_enabled = speaking_streaks_enabled
         self.ui_store = ui_store
         self.update_request_factory: Any = None
+        self.compatibility_status_factory: Any = None
         self._server: WebGatewayServer | None = None
         self._lock = asyncio.Lock()
         self._state_path = self.state_directory / "provisioning.json"
@@ -396,6 +397,11 @@ class WebGatewayManager:
         if self._server is not None:
             self._server.update_request_factory = factory
 
+    def set_compatibility_status_factory(self, factory: Any) -> None:
+        self.compatibility_status_factory = factory
+        if self._server is not None:
+            self._server.compatibility_status_factory = factory
+
     def diagnostic_entries(self, category: str | None = None) -> list[dict[str, Any]]:
         return self._server.diagnostic_entries(category) if self._server is not None else []
 
@@ -437,6 +443,7 @@ class WebGatewayManager:
             transport=self.transport,
             ssl_context=self._ssl_context,
             update_request_factory=self.update_request_factory,
+            compatibility_status_factory=self.compatibility_status_factory,
         )
         await server.start()
         self._server = server
@@ -945,6 +952,7 @@ class WebGatewayServer:
         transport: str = "tailscale",
         ssl_context: ssl.SSLContext | None = None,
         update_request_factory: Any = None,
+        compatibility_status_factory: Any = None,
     ) -> None:
         if transport not in {"tailscale", "direct"}:
             raise ValueError("web gateway transport must be 'tailscale' or 'direct'")
@@ -983,6 +991,7 @@ class WebGatewayServer:
         self.speaking_streaks_enabled = speaking_streaks_enabled
         self.ui_store = ui_store
         self.update_request_factory = update_request_factory
+        self.compatibility_status_factory = compatibility_status_factory
         private_state = Path(state_directory).expanduser()
         self.devices = DeviceStore(private_state, self.origin)
         self.push_keys = VapidKeyStore(private_state, self.origin)
@@ -1179,6 +1188,7 @@ class WebGatewayServer:
                 web.get("/api/devices", self._list_devices),
                 web.delete("/api/devices/{device_id}", self._revoke_device_api),
                 web.get("/api/updates", self._update_status),
+                web.get("/api/compatibility", self._compatibility_status),
                 web.post("/api/updates/check", self._check_updates),
                 web.post("/api/updates/apply", self._apply_update),
                 web.get("/api/push", self._push_status),
@@ -1575,6 +1585,14 @@ class WebGatewayServer:
                 }
             )
         return self._json_response(self._update_value(checker.result))
+
+    async def _compatibility_status(self, request: web.Request) -> web.Response:
+        self._validate_public_request(request, require_origin=False)
+        if self._authenticate(request) is None:
+            raise web.HTTPUnauthorized(text="Pair this device first")
+        if self.compatibility_status_factory is None:
+            raise web.HTTPServiceUnavailable(text="Compatibility status is unavailable")
+        return self._json_response(self.compatibility_status_factory())
 
     async def _check_updates(self, request: web.Request) -> web.Response:
         self._validate_public_request(request, require_origin=True)

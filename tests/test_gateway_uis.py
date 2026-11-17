@@ -100,6 +100,42 @@ async def test_recovery_convergence_snapshot_restores_revision_and_report(tmp_pa
     assert store.configuration_report(ui_id) == (28, "unsupported", ("old issue",))
 
 
+async def test_ui_compatibility_report_is_validated_and_persisted(tmp_path) -> None:
+    store = UiStore(tmp_path)
+    ui_id = UUID("44444444-4444-4444-8444-444444444444")
+    await store.register(
+        ui_id=ui_id,
+        client_type="terminal",
+        platform="current-mac",
+        versions={"tfr": "0.1.125"},
+        capabilities=(),
+    )
+    report = {
+        "report_version": 1,
+        "checked_at": "2026-11-17T12:00:00Z",
+        "tfr_version": "0.1.125",
+        "protocol": 2,
+        "profile_schema": 1,
+        "identity_schema": 1,
+        "deployment_schema": 2,
+        "legacy_configuration_detected": False,
+    }
+
+    await store.report_compatibility(ui_id, report)
+
+    assert UiStore(tmp_path).compatibility_reports()[ui_id] == report
+    assert (tmp_path / "ui-compatibility.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_ui_compatibility_state_is_size_bounded(tmp_path) -> None:
+    path = tmp_path / "ui-compatibility.json"
+    path.write_bytes(b" " * (256 * 1024 + 1))
+    path.chmod(0o600)
+
+    with pytest.raises(ValueError, match="size limit"):
+        UiStore(tmp_path)
+
+
 async def test_duplicate_default_names_receive_stable_short_suffix(tmp_path) -> None:
     store = UiStore(tmp_path)
     first = await store.register(
