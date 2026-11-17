@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import hashlib
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from uuid import uuid4
 from tfr.configuration_cli import read_configuration_archive
 from tfr.configuration_transfer import _validate_archive
 from tfr.gateway_recovery import gateway_recovery_details, restore_gateway_recovery
+from tfr.recovery_archive import is_complete_recovery_archive, restore_complete_recovery_logs
 from tfr.service_management import (
     install_service,
     remove_service,
@@ -788,6 +790,12 @@ def _load_gateway_recovery(path: Path) -> tuple[dict[str, object], dict[str, obj
     if os.name == "posix" and (details.st_uid != os.geteuid() or details.st_mode & 0o077):
         raise ValueError("Gateway recovery must be owned by this user and mode 0600 or stricter")
     archive, digest = _validate_archive(read_configuration_archive(path))
+    if is_complete_recovery_archive(path):
+        checksum = hashlib.sha256()
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                checksum.update(chunk)
+        digest = checksum.hexdigest()
     recovery = archive.get("recovery")
     if not isinstance(recovery, dict):
         raise ValueError(
@@ -1088,6 +1096,11 @@ def run(
                         config_directory=config_directory,
                         managed_state_directory=state_directory / "settings",
                         web_state_directory=state_directory / "web",
+                    )
+                    restored_logs = restore_complete_recovery_logs(recovery_path)
+                    print(
+                        "Restored canonical Gateway logs: "
+                        f"{restored_logs['files']} file(s), {restored_logs['bytes']} byte(s)."
                     )
                     if recovery_digest is None:  # pragma: no cover
                         raise RuntimeError("validated Gateway recovery digest is unavailable")

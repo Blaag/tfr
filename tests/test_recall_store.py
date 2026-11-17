@@ -12,7 +12,7 @@ from tfr.recall_store import RecallStore, RecallWorldPolicy
 def recall_event(
     text: str,
     *,
-    speaker: str,
+    speaker: str | None,
     seconds: int = 0,
     direction: Direction = Direction.INBOUND,
 ) -> Event:
@@ -28,7 +28,11 @@ def recall_event(
         canonical_text=text,
         plain_text=text,
         display_text=text,
-        provenance=Provenance(sender_name=speaker, confidence=Confidence.HIGH),
+        provenance=(
+            Provenance(sender_name=speaker, confidence=Confidence.HIGH)
+            if speaker is not None
+            else None
+        ),
     )
 
 
@@ -66,6 +70,68 @@ async def test_recall_store_matches_whole_words_wildcards_regex_and_context(tmp_
         assert regexp["matches"] == 2
     finally:
         await store.close()
+
+
+async def test_recall_speaker_filter_uses_bounded_visible_say_attribution(tmp_path) -> None:
+    store = RecallStore(
+        tmp_path / "recall.sqlite3",
+        worlds={"alpha": RecallWorldPolicy(enabled=True, retention_days=None)},
+        log_directory=tmp_path / "logs",
+    )
+    await store.start()
+    try:
+        await store.write(recall_event('Blood says, "visible words"', speaker=None, seconds=1))
+        await store.write(
+            recall_event('A Very Long Invalid Speaker Name says, "visible words"', speaker=None)
+        )
+        result = await store.query({"speaker": "blood", "words": "visible"})
+        assert result["matches"] == 1
+        assert result["events"][0]["speaker"] == "Blood"
+        assert result["events"][0]["speaker_attribution"] == "visible-text"
+    finally:
+        await store.close()
+
+
+async def test_recall_schema_one_migrates_visible_speakers_without_logs(tmp_path) -> None:
+    database = tmp_path / "recall.sqlite3"
+    original = RecallStore(
+        database,
+        worlds={"alpha": RecallWorldPolicy(enabled=True, retention_days=None)},
+        log_directory=tmp_path / "logs",
+    )
+    await original.start()
+    await original.close()
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("UPDATE recall_metadata SET value='1' WHERE key='schema_version'")
+        connection.execute("ALTER TABLE recall_events RENAME TO recall_events_v2")
+        connection.execute(
+            "CREATE TABLE recall_events AS SELECT id, event_id, world, timestamp, timestamp_us, "
+            "kind, direction, speaker, speaker_folded, text, display_text FROM recall_events_v2"
+        )
+        connection.execute("DROP TABLE recall_events_v2")
+        connection.execute(
+            "INSERT INTO recall_events VALUES(1, ?, 'alpha', '2026-11-11T12:00:00Z', 1, "
+            "'say', 'inbound', NULL, NULL, 'Blood says, \"historic words\"', "
+            "'Blood says, \"historic words\"')",
+            (str(uuid4()),),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    migrated = RecallStore(
+        database,
+        worlds={"alpha": RecallWorldPolicy(enabled=True, retention_days=None)},
+        log_directory=tmp_path / "logs",
+    )
+    await migrated.start()
+    try:
+        result = await migrated.query({"speaker": "Blood", "regexp": "historic"})
+        assert result["matches"] == 1
+        assert result["events"][0]["speaker_attribution"] == "visible-text"
+    finally:
+        await migrated.close()
 
 
 async def test_recall_projection_rebuilds_existing_database_as_inbound_only(tmp_path) -> None:

@@ -13,6 +13,11 @@ from typing import Any
 from tfr.gateway_client import GatewayClient
 from tfr.gateway_profiles import GatewayProfileStore
 from tfr.gateway_transport import create_gateway_client_tls_context
+from tfr.recovery_archive import (
+    is_complete_recovery_archive,
+    read_complete_recovery_configuration,
+    write_complete_recovery_archive,
+)
 from tfr.settings_ui import parse_setting_value
 
 
@@ -163,17 +168,36 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 raise ValueError("--limit must be between 1 and 1000")
             return {"action": "changes", **await client.config_changes(args.limit)}
         if args.action == "export":
+            if args.include_secrets and args.gateway_profile is not None:
+                raise ValueError(
+                    "complete private recovery exports must run on the Gateway host "
+                    "through its local socket"
+                )
+            log_directory = None
+            if args.include_secrets:
+                log_setting = await client.config_show("logging.directory")
+                log_value = log_setting.get("value")
+                if not isinstance(log_value, str) or not log_value:
+                    raise ValueError("Gateway logging directory is unavailable")
+                log_directory = Path(log_value)
             document = await client.config_export(
                 include_secrets=args.include_secrets,
                 confirm=args.include_secrets,
             )
-            write_configuration_archive(args.path, document)
+            log_summary = write_configuration_archive(
+                args.path,
+                document,
+                include_recovery_logs=args.include_secrets,
+                recovery_log_directory=log_directory,
+            )
             secrets_section = document.get("secrets", {})
             return {
                 "action": "export",
                 "path": str(args.path.expanduser()),
                 "included_secrets": args.include_secrets,
                 "included_recovery": document.get("recovery") is not None,
+                "included_log_files": log_summary["files"],
+                "included_log_bytes": log_summary["bytes"],
                 "omitted_keys": (
                     secrets_section.get("omitted_keys", [])
                     if isinstance(secrets_section, dict)
@@ -365,7 +389,9 @@ def _human_output(result: dict[str, Any]) -> str:
             f"Configuration exported to {result.get('path')}.{warning}\n"
             f"Omitted secret keys: {len(omitted) if isinstance(omitted, list) else 0}\n"
             "Gateway recovery state: "
-            f"{'included' if result.get('included_recovery') else 'not included'}"
+            f"{'included' if result.get('included_recovery') else 'not included'}\n"
+            f"Canonical world logs: {result.get('included_log_files', 0)} file(s), "
+            f"{result.get('included_log_bytes', 0)} byte(s)"
         )
     if action == "import":
         state = "Imported" if result.get("applied") else "Preview only; add --apply to restore"
@@ -399,6 +425,8 @@ def read_configuration_archive(path: Path) -> dict[str, object]:
     path = path.expanduser()
     if not path.is_file() or path.is_symlink():
         raise ValueError(f"configuration import must be a regular file: {path}")
+    if is_complete_recovery_archive(path):
+        return read_complete_recovery_configuration(path)
     if path.stat().st_size > 4 * 1024 * 1024:
         raise ValueError("configuration import exceeds 4 MiB")
     try:
@@ -410,11 +438,21 @@ def read_configuration_archive(path: Path) -> dict[str, object]:
     return value
 
 
-def write_configuration_archive(path: Path, value: dict[str, object]) -> None:
+def write_configuration_archive(
+    path: Path,
+    value: dict[str, object],
+    *,
+    include_recovery_logs: bool = False,
+    recovery_log_directory: Path | None = None,
+) -> dict[str, int]:
     path = path.expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() or path.is_symlink():
         raise ValueError(f"refusing to overwrite existing export: {path}")
+    if include_recovery_logs:
+        if recovery_log_directory is None:
+            raise ValueError("Gateway logging directory is required for complete recovery")
+        return write_complete_recovery_archive(path, value, recovery_log_directory)
     temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
     descriptor = os.open(
         temporary,
@@ -434,3 +472,4 @@ def write_configuration_archive(path: Path, value: dict[str, object]) -> None:
         if descriptor >= 0:
             os.close(descriptor)
         temporary.unlink(missing_ok=True)
+    return {"files": 0, "bytes": 0}
