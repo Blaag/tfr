@@ -16,6 +16,7 @@ import ssl
 import stat
 import sys
 import tempfile
+import time
 from collections import Counter, deque
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -27,6 +28,7 @@ from uuid import UUID, uuid4
 
 from tfr.agents import AgentRuntime
 from tfr.ansi import terminal_plain_text
+from tfr.compatibility import compatibility_snapshot, legacy_speaker_rule_count
 from tfr.config import (
     ConfigurationBundle,
     ConfigurationError,
@@ -105,6 +107,7 @@ from tfr.plugins import PluginLifecycleEvent, PluginManager, PluginWorldInfo
 from tfr.presentation import effect_programs_as_dict
 from tfr.presentation_events import infer_presentation_speaker
 from tfr.recall_store import RecallStore, RecallWorldPolicy
+from tfr.service_management import service_definition, service_status
 from tfr.sessions import (
     ConnectorSessionBridge,
     ConnectorWorldSession,
@@ -1616,6 +1619,7 @@ class GatewayServer:
         application_restart_factory: Callable[[], Awaitable[None]] | None = None,
         ui_store: UiStore | None = None,
         recovery_export_factory: Callable[[], dict[str, object]] | None = None,
+        compatibility_status_factory: Callable[[], dict[str, object]] | None = None,
     ) -> None:
         if (
             maximum_clients < 1
@@ -1661,6 +1665,7 @@ class GatewayServer:
         self.application_restart_factory = application_restart_factory
         self.ui_store = ui_store
         self.recovery_export_factory = recovery_export_factory
+        self.compatibility_status_factory = compatibility_status_factory
         managed_configuration = getattr(runtime, "gateway_configuration", None)
         base_configuration = getattr(runtime, "base_configuration_bundle", None)
         self.configuration_transfer = (
@@ -2052,6 +2057,7 @@ class GatewayServer:
                 "effect_demos": self._native_effect_demos(),
                 "speaker_effects": self._speaker_effects_summary(),
                 "build": getattr(self.runtime, "build", current_build()).as_dict(),
+                "capabilities": ["compatibility-status-v1"],
                 "new_plugins": list(getattr(self.runtime, "new_plugins", ())),
             }
             if ui_record is not None:
@@ -2653,6 +2659,20 @@ class GatewayServer:
                 if set(message) != {"type", "protocol", "request_id"}:
                     raise ValueError("release_status has invalid fields")
                 result = await self.runtime.release_status()
+            elif message_type == "compatibility_status":
+                if self.compatibility_status_factory is None:
+                    raise ValueError("compatibility status is unavailable")
+                if set(message) != {"type", "protocol", "request_id"}:
+                    raise ValueError("compatibility_status has invalid fields")
+                result = self.compatibility_status_factory()
+            elif message_type == "ui_compatibility_report":
+                if self.ui_store is None or ui_id is None:
+                    raise ValueError("UI compatibility reporting requires a registered UI")
+                if set(message) != {"type", "protocol", "request_id", "report"}:
+                    raise ValueError("ui_compatibility_report has invalid fields")
+                result = {
+                    "report": await self.ui_store.report_compatibility(ui_id, message.get("report"))
+                }
             elif message_type == "clear_diagnostics":
                 if not allow_admin or self.diagnostic_clear_factory is None:
                     raise ValueError("diagnostics are unavailable")
@@ -4499,6 +4519,51 @@ async def run_gateway(
                 ),
             )
 
+    compatibility_cache: tuple[float, dict[str, object]] | None = None
+
+    def compatibility_status_factory() -> dict[str, object]:
+        nonlocal compatibility_cache
+        now = time.monotonic()
+        if compatibility_cache is not None and now - compatibility_cache[0] < 5:
+            return compatibility_cache[1]
+        migration = getattr(runtime, "gateway_migration", None)
+        migration_status = migration.status() if migration is not None else {}
+        migration_pending = bool(migration_status.get("proposal_count"))
+        service = service_status(
+            service_definition(
+                Path.home() / ".local/bin/tfr-gateway",
+                bootstrap.state_directory.parent,
+            )
+        )
+        web_status = web_manager.status() if web_manager is not None else {"enabled": False}
+        report = compatibility_snapshot(
+            migration_pending=migration_pending,
+            legacy_bootstrap=bootstrap.legacy,
+            legacy_plugin_sources=sum(
+                source.policy == "legacy" for source in bundle.main.plugins.sources
+            ),
+            legacy_speaker_rules=legacy_speaker_rule_count(
+                getattr(runtime.gateway_configuration, "document", None).as_dict()
+                if getattr(runtime, "gateway_configuration", None) is not None
+                else {}
+            ),
+            ui_records=[record.as_dict() for record in ui_store.records()],
+            ui_reports={
+                str(ui_id): report for ui_id, report in ui_store.compatibility_reports().items()
+            },
+            pwa_device_count=(
+                len(web_manager.device_descriptors()) if web_manager is not None else 0
+            ),
+            service={
+                "active": service.active,
+                "enabled": service.enabled,
+                "linger": service.linger,
+            },
+            web=dict(web_status),
+        )
+        compatibility_cache = (now, report)
+        return report
+
     server = GatewayServer(
         runtime,
         gateway_path,
@@ -4525,9 +4590,11 @@ async def run_gateway(
         application_restart_factory=lambda: request_gateway_restart(connector_path),
         ui_store=ui_store,
         recovery_export_factory=recovery_export_factory,
+        compatibility_status_factory=compatibility_status_factory,
     )
     if web_manager is not None:
         web_manager.set_update_request_factory(server.request_web_update)
+        web_manager.set_compatibility_status_factory(compatibility_status_factory)
     stop = asyncio.Event()
     application_restart = asyncio.Event()
     loop = asyncio.get_running_loop()

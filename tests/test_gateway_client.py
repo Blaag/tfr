@@ -83,6 +83,23 @@ async def test_configuration_import_can_defer_gateway_restart_to_setup() -> None
     assert request["defer_restart"] is True
 
 
+async def test_client_queries_and_reports_compatibility() -> None:
+    client = object.__new__(GatewayClient)
+    client.gateway_capabilities = ("compatibility-status-v1",)
+    client._request = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            {"ready_for_cleanup": True},
+            {"report": {"report_version": 1}},
+        ]
+    )
+
+    assert (await client.compatibility_status())["ready_for_cleanup"] is True
+    await client.report_ui_compatibility({"report_version": 1})
+
+    assert client._request.await_args_list[0].args[0]["type"] == "compatibility_status"
+    assert client._request.await_args_list[1].args[0]["type"] == "ui_compatibility_report"
+
+
 async def test_remote_ui_pairing_issues_a_persistent_client_credential(tmp_path: Path) -> None:
     ca = trustme.CA()
     certificate = ca.issue_cert("localhost")

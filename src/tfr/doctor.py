@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
 from pathlib import Path
 from typing import Literal
 
+from tfr.compatibility import compatibility_text
 from tfr.config import (
     ConfigurationError,
     MainConfig,
@@ -29,18 +31,22 @@ DoctorProfile = Literal["all-in-one", "local-split", "gateway", "remote-ui"]
 
 
 class Doctor:
-    def __init__(self) -> None:
+    def __init__(self, *, quiet: bool = False) -> None:
         self.failures = 0
+        self.quiet = quiet
 
     def ok(self, message: str) -> None:
-        print(f"[ok] {message}")
+        if not self.quiet:
+            print(f"[ok] {message}")
 
     def fail(self, message: str) -> None:
         self.failures += 1
-        print(f"[fail] {message}")
+        if not self.quiet:
+            print(f"[fail] {message}")
 
     def warning(self, message: str) -> None:
-        print(f"[warning] {message}")
+        if not self.quiet:
+            print(f"[warning] {message}")
 
     def check_private_file(self, path: Path, label: str) -> None:
         try:
@@ -70,8 +76,11 @@ async def run_doctor(
     tls_private_key: Path | None,
     tls_ca: Path | None,
     tls_server_name: str | None,
+    compatibility: bool = False,
+    json_output: bool = False,
 ) -> int:
-    doctor = Doctor()
+    doctor = Doctor(quiet=json_output)
+    compatibility_report: dict[str, object] | None = None
     build = current_build()
     doctor.ok(f"TFR {build.version}" + (f" ({build.commit[:12]})" if build.commit else ""))
     if shutil.which("git") is None:
@@ -201,6 +210,8 @@ async def run_doctor(
             doctor.fail(f"Gateway application is not reachable at {target_socket}: {exc}")
         else:
             client.start()
+            if compatibility:
+                compatibility_report = await client.compatibility_status()
             await _check_web_status(doctor, client)
             await client.stop()
             await client.event_bus.close()
@@ -241,17 +252,43 @@ async def run_doctor(
                 doctor.fail(
                     f"remote Gateway handshake failed for {gateway_host}:{gateway_port}: {exc}"
                 )
-                print("Check DNS/private routing, firewall or Tailscale ACL, TLS hostname/CA, ")
-                print("token contents, and that the Gateway and UI run compatible TFR versions.")
+                if not json_output:
+                    print("Check DNS/private routing, firewall or Tailscale ACL, TLS hostname/CA, ")
+                    print(
+                        "token contents, and that the Gateway and UI run compatible TFR versions."
+                    )
             else:
+                client.start()
+                if compatibility:
+                    compatibility_report = await client.compatibility_status()
                 await client.stop()
                 await client.event_bus.close()
                 doctor.ok(f"remote Gateway handshake succeeded at {gateway_host}:{gateway_port}")
 
+    if compatibility_report is not None:
+        if json_output:
+            print(json.dumps(compatibility_report, ensure_ascii=False, sort_keys=True))
+        else:
+            print("\n" + compatibility_text(compatibility_report))
+    elif compatibility:
+        doctor.warning("Compatibility status was not available from a Gateway")
+        if json_output:
+            print(
+                json.dumps(
+                    {
+                        "report_version": 1,
+                        "ready_for_cleanup": False,
+                        "error": "compatibility status unavailable",
+                    },
+                    sort_keys=True,
+                )
+            )
     if doctor.failures:
-        print(f"Doctor found {doctor.failures} problem(s).")
+        if not json_output:
+            print(f"Doctor found {doctor.failures} problem(s).")
         return 2
-    print("Doctor found no problems.")
+    if not json_output:
+        print("Doctor found no problems.")
     return 0
 
 

@@ -150,6 +150,8 @@ const elements = {
   statisticsTop: document.querySelector("#statistics-top"),
   statisticsSubmit: document.querySelector("#statistics-submit"),
   statisticsResults: document.querySelector("#statistics-results"),
+  compatibilityRefresh: document.querySelector("#compatibility-refresh"),
+  compatibilityResults: document.querySelector("#compatibility-results"),
   pairedDeviceList: document.querySelector("#paired-device-list"),
   refreshDevices: document.querySelector("#refresh-devices"),
   pwaUpdateStatus: document.querySelector("#pwa-update-status"),
@@ -2417,6 +2419,7 @@ const SETTINGS_TITLES = {
   updates: "Updates",
   tools: "Tools",
   statistics: "Statistics",
+  compatibility: "Compatibility",
   devices: "Devices",
   about: "About",
 };
@@ -2433,6 +2436,57 @@ function showSettingsPage(name) {
   if (selected === "notifications") refreshPushStatus();
   if (selected === "updates") refreshUpdateStatus();
   if (selected === "devices") refreshDevices();
+  if (selected === "compatibility") refreshCompatibility();
+}
+
+function compatibilityRow(container, label, value) {
+  const row = document.createElement("div");
+  row.className = "about-row";
+  const name = document.createElement("span");
+  name.textContent = label;
+  const result = document.createElement("strong");
+  result.textContent = String(value);
+  row.append(name, result);
+  container.append(row);
+}
+
+function renderCompatibility(report) {
+  const output = elements.compatibilityResults;
+  output.replaceChildren();
+  compatibilityRow(output, "Compatibility floor", report.compatibility_floor || "Unknown");
+  compatibilityRow(output, "Ready for cleanup", report.ready_for_cleanup ? "Yes" : "No");
+  const gateway = report.gateway || {};
+  compatibilityRow(output, "Gateway bootstrap", gateway.bootstrap || "Unknown");
+  compatibilityRow(output, "UI authority schema", gateway.ui_authority ?? "Unknown");
+  compatibilityRow(output, "PWA device schema", gateway.pwa_devices ?? "Unknown");
+  const heading = document.createElement("h3");
+  heading.textContent = "Clients";
+  output.append(heading);
+  for (const client of Array.isArray(report.clients) ? report.clients : []) {
+    compatibilityRow(
+      output,
+      `${client.name || "Unknown UI"} · ${client.type || "unknown"}`,
+      `${client.version || "unknown"} · ${client.report_status || "unknown"}`,
+    );
+  }
+  for (const blocker of Array.isArray(report.blockers) ? report.blockers : []) {
+    const item = document.createElement("p");
+    item.className = "fine-print";
+    item.textContent = `Blocker: ${blocker}`;
+    output.append(item);
+  }
+}
+
+async function refreshCompatibility() {
+  elements.compatibilityRefresh.disabled = true;
+  elements.compatibilityResults.textContent = "Checking compatibility…";
+  try {
+    renderCompatibility(await apiJson("/api/compatibility"));
+  } catch (error) {
+    elements.compatibilityResults.textContent = `Compatibility unavailable: ${error.message}`;
+  } finally {
+    elements.compatibilityRefresh.disabled = false;
+  }
 }
 
 async function apiJson(path, options = {}) {
@@ -3176,6 +3230,7 @@ elements.automaticSay.addEventListener("change", () => {
   applyAutomaticSay(elements.automaticSay.checked);
 });
 elements.statisticsSubmit.addEventListener("click", loadStatistics);
+elements.compatibilityRefresh.addEventListener("click", refreshCompatibility);
 elements.refreshDevices.addEventListener("click", refreshDevices);
 elements.pwaUpdateCheck.addEventListener("click", checkPwaUpdate);
 elements.pwaUpdateReload.addEventListener("click", applyPwaUpdate);

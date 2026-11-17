@@ -196,6 +196,18 @@ COMMAND_HELP = {
             ),
         ),
         _command(
+            "compatibility",
+            "Show the Gateway-owned compatibility and schema readiness report",
+            "/compatibility [json]",
+            "diagnostics",
+            "Compatibility readiness",
+            availability="gateway",
+            details=(
+                "Reports Gateway schemas, legacy blockers, host health, and current UI reports.",
+                "The JSON form is bounded and excludes credentials, paths, endpoints, and worlds.",
+            ),
+        ),
+        _command(
             "settings",
             "Open the interactive settings browser",
             "/settings",

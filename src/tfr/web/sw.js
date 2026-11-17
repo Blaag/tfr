@@ -1,4 +1,4 @@
-const CACHE_NAME = "tfr-shell-web1-v75";
+const CACHE_NAME = "tfr-shell-web1-v76";
 const NETWORK_TIMEOUT_MS = 5000;
 const SHELL = [
   "/",

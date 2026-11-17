@@ -60,6 +60,7 @@ from tfr.borders import BorderEdge, border_cell
 from tfr.clear_effects import ScreenClearContext
 from tfr.combo import Combo, ComboTracker
 from tfr.command_help import COMMAND_HELP, TOPIC_SUMMARIES, CommandHelp, command_usage, suggest_help
+from tfr.compatibility import compatibility_text
 from tfr.config import (
     ConfigurationBundle,
     NotificationConfig,
@@ -3608,6 +3609,25 @@ class TfrTui:
             await self._handle_ui_command(alias, parameters)
         elif command == "diagnostics":
             await self._handle_diagnostics_command(alias, parameters)
+        elif command == "compatibility":
+            if parameters not in ([], ["json"]):
+                self.add_notice(alias, "Usage: /compatibility [json]")
+            elif self.service_runtime is None or not hasattr(
+                self.service_runtime, "compatibility_status"
+            ):
+                self.add_notice(alias, "Compatibility status requires a Gateway")
+            else:
+                try:
+                    report = await self.service_runtime.compatibility_status()
+                except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+                    self.add_notice(alias, f"Compatibility status unavailable: {exc}")
+                else:
+                    self.add_notice(
+                        alias,
+                        json.dumps(report, indent=2, ensure_ascii=False)
+                        if parameters == ["json"]
+                        else compatibility_text(report),
+                    )
         elif command == "releases":
             await self._handle_releases_command(alias, parameters)
         elif command == "plugins":

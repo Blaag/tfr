@@ -20,6 +20,7 @@ import jsonc
 from pydantic import BaseModel
 
 from tfr.agents import AgentInspection
+from tfr.compatibility import ui_compatibility_report
 from tfr.config import (
     GatewayReconnectConfig,
     MainConfig,
@@ -502,6 +503,7 @@ class GatewayClient:
         configuration_requirements: dict[str, str] | None = None,
         new_plugins: tuple[str, ...] = (),
         pending_configuration_profiles: tuple[dict[str, object], ...] = (),
+        gateway_capabilities: tuple[str, ...] = (),
     ) -> None:
         self.reader = reader
         self.writer = writer
@@ -527,6 +529,7 @@ class GatewayClient:
         self.configuration_requirements = configuration_requirements or {}
         self.new_plugins = new_plugins
         self.pending_configuration_profiles = pending_configuration_profiles
+        self.gateway_capabilities = gateway_capabilities
         self.command_bus = RemoteCommandBus(self)
         self.agents: RemoteAgentRuntime | None = None
         self._write_lock = asyncio.Lock()
@@ -709,6 +712,11 @@ class GatewayClient:
                 isinstance(item, str) and item for item in raw_new_plugins
             ):
                 raise GatewayProtocolError("Gateway new plugin list is invalid")
+            raw_gateway_capabilities = hello.get("capabilities", [])
+            if not isinstance(raw_gateway_capabilities, list) or not all(
+                isinstance(item, str) and 1 <= len(item) <= 64 for item in raw_gateway_capabilities
+            ):
+                raise GatewayProtocolError("Gateway capability list is invalid")
             cursor = cls._non_negative_integer(hello.get("cursor"), "cursor")
             oldest_cursor = cls._non_negative_integer(hello.get("oldest_cursor"), "oldest_cursor")
             snapshot_count = cls._non_negative_integer(
@@ -797,6 +805,7 @@ class GatewayClient:
                 configuration_requirements=configuration_requirements,
                 new_plugins=tuple(raw_new_plugins),
                 pending_configuration_profiles=tuple(raw_pending_profiles),
+                gateway_capabilities=tuple(sorted(set(raw_gateway_capabilities))),
             )
             try:
                 client.sessions.extend(
@@ -1809,6 +1818,30 @@ class GatewayClient:
             raise GatewayProtocolError("Gateway returned an invalid release status")
         return result
 
+    async def compatibility_status(self) -> dict[str, Any]:
+        request_id = uuid4()
+        result = await self._request(
+            {"type": "compatibility_status", "request_id": str(request_id)}, request_id
+        )
+        if result is None or not isinstance(result.get("ready_for_cleanup"), bool):
+            raise GatewayProtocolError("Gateway returned an invalid compatibility status")
+        return result
+
+    async def report_ui_compatibility(self, report: dict[str, object]) -> None:
+        if "compatibility-status-v1" not in self.gateway_capabilities:
+            return
+        request_id = uuid4()
+        result = await self._request(
+            {
+                "type": "ui_compatibility_report",
+                "request_id": str(request_id),
+                "report": report,
+            },
+            request_id,
+        )
+        if result is None or not isinstance(result.get("report"), dict):
+            raise GatewayProtocolError("Gateway rejected the UI compatibility report")
+
     async def clear_diagnostics(self) -> None:
         request_id = uuid4()
         await self._request(
@@ -2415,9 +2448,7 @@ class GatewayUiRuntime:
         self._restart_expected = False
         self._restart_phase = "idle"
 
-    def _complete_configuration_restart(
-        self, result: dict[str, object], operation: str
-    ) -> None:
+    def _complete_configuration_restart(self, result: dict[str, object], operation: str) -> None:
         if result.get("restarting") is not True:
             self._cancel_configuration_restart()
             return
@@ -2614,6 +2645,9 @@ class GatewayUiRuntime:
 
     async def release_status(self) -> dict[str, Any]:
         return await self.client.release_status()
+
+    async def compatibility_status(self) -> dict[str, Any]:
+        return await self.client.compatibility_status()
 
     async def clear_diagnostics(self) -> None:
         self.connection_diagnostics.clear()
@@ -3064,9 +3098,7 @@ class GatewayUiRuntime:
                     await self._set_gateway_connected(True)
                     await self._reconcile_world_states()
                     self.notify(
-                        self._format_reconnect_message(
-                            restored, previous_gateway=old_gateway
-                        )
+                        self._format_reconnect_message(restored, previous_gateway=old_gateway)
                     )
                     return
 
@@ -3200,6 +3232,26 @@ async def run_gateway_ui(
             )
         ),
     )
+    deployment_schema = None
+    deployment_path = (
+        Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "tfr/deployment.json"
+    )
+    try:
+        deployment_value = json.loads(deployment_path.read_text(encoding="utf-8"))
+        if isinstance(deployment_value, dict) and isinstance(
+            deployment_value.get("schema_version"), int
+        ):
+            deployment_schema = int(deployment_value["schema_version"])
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        pass
+    local_compatibility = ui_compatibility_report(
+        tfr_version=build.version,
+        protocol=build.protocol,
+        deployment_schema=deployment_schema,
+        legacy_configuration_detected=_local_configuration_needs_migration(
+            local_configuration.main_path, migration_marker
+        ),
+    )
     connection_options = {
         "show_nospoof_prefix": configuration.main.ui.show_nospoof_prefix,
         "client_id": client_id
@@ -3290,6 +3342,7 @@ async def run_gateway_ui(
             )
             client.migration_source_files = local_sources
             client.start()
+            await client.report_ui_compatibility(local_compatibility)
             await client.update_ui_capabilities(
                 tuple(
                     sorted(

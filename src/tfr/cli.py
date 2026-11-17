@@ -164,6 +164,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("all-in-one", "local-split", "gateway", "remote-ui"),
         help="doctor mode: deployment profile to validate",
     )
+    parser.add_argument(
+        "--compatibility",
+        action="store_true",
+        help="doctor mode: include the Gateway-owned compatibility report",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="doctor compatibility mode: emit the report as JSON",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {build_version}")
     parser.add_argument("--speaker", help="recall query: exact attributed speaker")
     parser.add_argument("--words", help="recall query: whole words, phrase, or * wildcard")
@@ -669,6 +679,8 @@ def run(argv: Sequence[str] | None = None) -> int:
                     tls_private_key=args.tls_key,
                     tls_ca=args.tls_ca,
                     tls_server_name=args.tls_server_name,
+                    compatibility=args.compatibility,
+                    json_output=args.json,
                 )
             )
         except KeyboardInterrupt:
