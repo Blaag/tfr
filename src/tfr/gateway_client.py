@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import socket
 import ssl
@@ -172,6 +173,95 @@ def _local_configuration_is_retired(path: Path) -> bool:
 
 def _local_configuration_needs_migration(path: Path, marker: Path) -> bool:
     return path.is_file() and not marker.is_file() and not _local_configuration_is_retired(path)
+
+
+def _deployment_path() -> Path:
+    configured = os.environ.get("XDG_STATE_HOME")
+    base = Path(configured).expanduser() if configured else Path.home() / ".local/state"
+    return base / "tfr/deployment.json"
+
+
+def _deployment_schema() -> int | None:
+    try:
+        value = json.loads(_deployment_path().read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    schema = value.get("schema_version") if isinstance(value, dict) else None
+    return schema if isinstance(schema, int) and not isinstance(schema, bool) else None
+
+
+def _profile_schema() -> int | None:
+    from tfr.gateway_profiles import default_gateway_profiles_directory
+
+    path = default_gateway_profiles_directory() / "profiles.json"
+    try:
+        if path.stat(follow_symlinks=False).st_size > 1_048_576:
+            return None
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    schema = value.get("schema_version") if isinstance(value, dict) else None
+    return schema if isinstance(schema, int) and not isinstance(schema, bool) else None
+
+
+def _write_remote_ui_deployment() -> None:
+    path = _deployment_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    value = {"schema_version": 2, "profile": "remote-ui"}
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = -1
+            json.dump(value, stream, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def _adopt_verified_explicit_connection(
+    *,
+    host: str,
+    port: int,
+    tls_server_name: str,
+    tls_ca: Path | str | None,
+    token: str,
+    ui_id: UUID,
+    ui_name: str,
+):
+    from tfr.gateway_profiles import GatewayConnectionProfile, GatewayProfileStore
+
+    profiles = GatewayProfileStore()
+    if not profiles.profiles():
+        profiles.add(
+            GatewayConnectionProfile(
+                name="default",
+                host=host,
+                port=port,
+                tls_server_name=tls_server_name,
+                tls_ca=str(Path(tls_ca).expanduser()) if tls_ca is not None else None,
+                credential_reference="credential:pending",
+                ui_id=ui_id,
+                ui_name=ui_name,
+            ),
+            token,
+        )
+    active = profiles.active
+    if active is None or active.host != host or active.port != port or active.ui_id != ui_id:
+        return None
+    _write_remote_ui_deployment()
+    return profiles
 
 
 def _recover_local_plugin_bootstrap(main: Path, marker: Path) -> bool:
@@ -3232,26 +3322,6 @@ async def run_gateway_ui(
             )
         ),
     )
-    deployment_schema = None
-    deployment_path = (
-        Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "tfr/deployment.json"
-    )
-    try:
-        deployment_value = json.loads(deployment_path.read_text(encoding="utf-8"))
-        if isinstance(deployment_value, dict) and isinstance(
-            deployment_value.get("schema_version"), int
-        ):
-            deployment_schema = int(deployment_value["schema_version"])
-    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-        pass
-    local_compatibility = ui_compatibility_report(
-        tfr_version=build.version,
-        protocol=build.protocol,
-        deployment_schema=deployment_schema,
-        legacy_configuration_detected=_local_configuration_needs_migration(
-            local_configuration.main_path, migration_marker
-        ),
-    )
     connection_options = {
         "show_nospoof_prefix": configuration.main.ui.show_nospoof_prefix,
         "client_id": client_id
@@ -3295,6 +3365,32 @@ async def run_gateway_ui(
             ):
                 raise
             await asyncio.sleep(1)
+    if gateway_host is not None and gateway_profiles is None and os.environ.get("TFR_MANAGED_ROOT"):
+        resolved_ui_id = connection_options["client_id"]
+        if not isinstance(resolved_ui_id, UUID):  # pragma: no cover
+            raise ValueError("resolved UI identity is invalid")
+        gateway_profiles = _adopt_verified_explicit_connection(
+            host=gateway_host,
+            port=gateway_port,
+            tls_server_name=tls_server_name or gateway_host,
+            tls_ca=tls_ca,
+            token=auth_token or load_gateway_token(token_file),
+            ui_id=resolved_ui_id,
+            ui_name=(
+                client.ui_record.display_name
+                if client.ui_record is not None
+                else f"{platform_name} · Terminal"[:80]
+            ),
+        )
+    local_compatibility = ui_compatibility_report(
+        tfr_version=build.version,
+        protocol=build.protocol,
+        deployment_schema=_deployment_schema(),
+        profile_schema=_profile_schema(),
+        legacy_configuration_detected=_local_configuration_needs_migration(
+            local_configuration.main_path, migration_marker
+        ),
+    )
     manager = SessionManager(client.sessions)  # type: ignore[arg-type]
     client.migration_values = {}
     client.migration_source_files = ()

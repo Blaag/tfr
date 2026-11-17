@@ -28,7 +28,11 @@ from uuid import UUID, uuid4
 
 from tfr.agents import AgentRuntime
 from tfr.ansi import terminal_plain_text
-from tfr.compatibility import compatibility_snapshot, legacy_speaker_rule_count
+from tfr.compatibility import (
+    compatibility_snapshot,
+    legacy_speaker_rule_count,
+    migration_is_pending,
+)
 from tfr.config import (
     ConfigurationBundle,
     ConfigurationError,
@@ -4528,7 +4532,7 @@ async def run_gateway(
             return compatibility_cache[1]
         migration = getattr(runtime, "gateway_migration", None)
         migration_status = migration.status() if migration is not None else {}
-        migration_pending = bool(migration_status.get("proposal_count"))
+        migration_pending = migration_is_pending(migration_status)
         service = service_status(
             service_definition(
                 Path.home() / ".local/bin/tfr-gateway",

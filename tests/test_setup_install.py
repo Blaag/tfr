@@ -92,7 +92,7 @@ def test_local_split_launchers_share_explicit_stable_socket(tmp_path: Path) -> N
         assert str(socket) in content
 
 
-def test_remote_ui_deployment_marker_remains_compatible_with_older_releases(
+def test_remote_ui_deployment_marker_uses_current_schema(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
@@ -100,7 +100,7 @@ def test_remote_ui_deployment_marker_remains_compatible_with_older_releases(
     _save_deployment("remote-ui", tmp_path / "ignored.sock")
 
     value = json.loads((tmp_path / "tfr/deployment.json").read_text(encoding="utf-8"))
-    assert value == {"schema_version": 1, "profile": "remote-ui"}
+    assert value == {"schema_version": 2, "profile": "remote-ui"}
 
 
 def test_gateway_recovery_archive_must_be_private(tmp_path: Path) -> None:

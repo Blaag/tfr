@@ -44,8 +44,13 @@ def validate_ui_compatibility_report(value: object) -> dict[str, object]:
         or not 1 <= len(value["tfr_version"]) <= 80
         or not isinstance(value["protocol"], int)
         or isinstance(value["protocol"], bool)
-        or not isinstance(value["profile_schema"], int)
-        or isinstance(value["profile_schema"], bool)
+        or (
+            value["profile_schema"] is not None
+            and (
+                not isinstance(value["profile_schema"], int)
+                or isinstance(value["profile_schema"], bool)
+            )
+        )
         or not isinstance(value["identity_schema"], int)
         or isinstance(value["identity_schema"], bool)
         or (
@@ -72,6 +77,7 @@ def ui_compatibility_report(
     tfr_version: str,
     protocol: int,
     deployment_schema: int | None,
+    profile_schema: int | None,
     legacy_configuration_detected: bool,
 ) -> dict[str, object]:
     return validate_ui_compatibility_report(
@@ -80,7 +86,7 @@ def ui_compatibility_report(
             "checked_at": utc_text(),
             "tfr_version": tfr_version,
             "protocol": protocol,
-            "profile_schema": CURRENT_SCHEMAS["ui_profiles"],
+            "profile_schema": profile_schema,
             "identity_schema": CURRENT_SCHEMAS["ui_identity"],
             "deployment_schema": deployment_schema,
             "legacy_configuration_detected": legacy_configuration_detected,
@@ -118,20 +124,30 @@ def compatibility_snapshot(
             else "missing"
         )
         report_checked = None
+        issues: list[str] = []
         if client_type == "terminal" and report is not None:
             validated = validate_ui_compatibility_report(report)
             report_checked = str(validated["checked_at"])
             timestamp = datetime.fromisoformat(report_checked.replace("Z", "+00:00")).astimezone(
                 UTC
             )
-            incompatible = (
-                not _version_at_least_floor(str(validated["tfr_version"]))
-                or validated["protocol"] != CURRENT_GATEWAY_PROTOCOL
-                or validated["profile_schema"] != CURRENT_SCHEMAS["ui_profiles"]
-                or validated["identity_schema"] != CURRENT_SCHEMAS["ui_identity"]
-                or validated["deployment_schema"] not in {1, 2}
-                or validated["legacy_configuration_detected"] is True
-            )
+            if not _version_at_least_floor(str(validated["tfr_version"])):
+                issues.append("below-version-floor")
+            if validated["protocol"] != CURRENT_GATEWAY_PROTOCOL:
+                issues.append("protocol-mismatch")
+            if validated["profile_schema"] is None:
+                issues.append("profile-store-missing")
+            elif validated["profile_schema"] != CURRENT_SCHEMAS["ui_profiles"]:
+                issues.append("unsupported-profile-schema")
+            if validated["identity_schema"] != CURRENT_SCHEMAS["ui_identity"]:
+                issues.append("unsupported-identity-schema")
+            if validated["deployment_schema"] is None:
+                issues.append("deployment-metadata-missing")
+            elif validated["deployment_schema"] != 2:
+                issues.append("unsupported-deployment-schema")
+            if validated["legacy_configuration_detected"] is True:
+                issues.append("legacy-configuration-detected")
+            incompatible = bool(issues)
             status = (
                 "incompatible"
                 if incompatible
@@ -139,6 +155,10 @@ def compatibility_snapshot(
                 if checked - timestamp > COMPATIBILITY_REPORT_MAX_AGE
                 else "current"
             )
+            if status == "stale":
+                issues.append("report-stale")
+        elif client_type == "terminal":
+            issues.append("report-missing")
         if status in {"missing", "stale", "incompatible"}:
             blockers.append(f"client:{ui_id}:{status}")
         clients.append(
@@ -151,6 +171,13 @@ def compatibility_snapshot(
                 )[:80],
                 "report_status": status,
                 "checked_at": report_checked,
+                "issues": issues,
+                "remediation": (
+                    "adopt-verified-explicit-connection"
+                    if set(issues) <= {"profile-store-missing", "deployment-metadata-missing"}
+                    and bool(issues)
+                    else None
+                ),
             }
         )
     if migration_pending:
@@ -213,6 +240,12 @@ def legacy_speaker_rule_count(value: object) -> int:
     return 0
 
 
+def migration_is_pending(status: dict[str, object]) -> bool:
+    return bool(status.get("proposal_count")) and not isinstance(
+        status.get("applied_revision"), int
+    )
+
+
 def compatibility_text(report: dict[str, Any]) -> str:
     gateway = report.get("gateway", {})
     host = report.get("host", {})
@@ -241,6 +274,10 @@ def compatibility_text(report: dict[str, Any]) -> str:
             f"  {client.get('name')} · {client.get('type')} · {client.get('version')}"
             f" · {client.get('report_status')}"
         )
+        for issue in client.get("issues", []):
+            lines.append(f"    issue: {issue}")
+        if client.get("remediation"):
+            lines.append(f"    remediation: {client.get('remediation')}")
     blockers = report.get("blockers", [])
     if blockers:
         lines.extend(("", "Blockers", *(f"  {item}" for item in blockers)))

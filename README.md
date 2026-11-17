@@ -127,6 +127,9 @@ Inside the terminal UI use `/compatibility` or `/compatibility json`. In the PWA
 open **Settings → Tools → Compatibility**. Missing, stale, and incompatible native
 UI reports remain explicit blockers until that UI reconnects or its retained record
 is removed.
+See [`COMPATIBILITY-FLOOR.md`](COMPATIBILITY-FLOOR.md) for remediation steps,
+including automatic adoption of verified legacy explicit UI connections without
+changing stable UI identity.
 
 The bootstrap checkout is not installed as `main`. The underlying installer
 fetches the official stable manifest, verifies its immutable tag and commit,
