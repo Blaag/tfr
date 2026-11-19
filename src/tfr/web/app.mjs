@@ -59,6 +59,19 @@ import {
   selectScreenClearEffect,
   validatedScreenClearConfig,
 } from "./screen-clear.mjs";
+import {
+  effectsForGateway,
+  parseScreenClearState,
+  recordScreenClearEffect,
+  serializeScreenClearState,
+} from "./screen-clear-state.mjs";
+import {
+  activitySparkline,
+  barGlyph,
+  compactSummary,
+  heatmapLegend,
+  heatmapModel,
+} from "./statistics.mjs";
 import { swipeDirection } from "./swipe.mjs";
 import { installTextRunColors, textRunClassNames, validatedTextRuns } from "./text-runs.mjs";
 import { applyTheme, normalizeTheme } from "./themes.mjs";
@@ -85,6 +98,9 @@ const TRANSCRIPT_NODE_PRESSURE = 10000;
 const MIN_TEXT_SIZE = -2;
 const MAX_TEXT_SIZE = 4;
 const SCREEN_CLEAR_PULL_DISTANCE = 64;
+const SCREEN_CLEAR_STATE_KEY = "tfr.screenClearEffects";
+const storedScreenClearGateways = parseScreenClearState(readStorage(SCREEN_CLEAR_STATE_KEY));
+const storedGatewayId = readStorage("tfr.gatewayId");
 
 const elements = {
   pairing: document.querySelector("#pairing"),
@@ -210,7 +226,7 @@ const elements = {
 
 const state = {
   historyReset: false,
-  gatewayId: readStorage("tfr.gatewayId"),
+  gatewayId: storedGatewayId,
   cursor: null,
   worlds: [],
   events: new Map(),
@@ -236,7 +252,8 @@ const state = {
   effectDemos: [],
   screenClearConfig: validatedScreenClearConfig(null),
   screenClearCutoffs: new Map(),
-  lastScreenClearEffects: new Map(),
+  screenClearGateways: storedScreenClearGateways,
+  lastScreenClearEffects: effectsForGateway(storedScreenClearGateways, storedGatewayId),
   paste: null,
   gatewayUpdate: null,
   push: {
@@ -1519,7 +1536,15 @@ function clearSelectedScreen() {
     state.screenClearConfig,
     state.lastScreenClearEffects.get(world),
   );
-  if (effect) state.lastScreenClearEffects.set(world, effect.name);
+  if (effect) {
+    state.lastScreenClearEffects.set(world, effect.name);
+    if (recordScreenClearEffect(
+      state.screenClearGateways,
+      state.gatewayId,
+      world,
+      effect.name,
+    )) safeStore(SCREEN_CLEAR_STATE_KEY, serializeScreenClearState(state.screenClearGateways));
+  }
   state.screenClearCutoffs.set(world, cutoff.id);
   cancelScreenClearAnimation();
   renderTranscript({ scrollToLive: true });
@@ -1778,7 +1803,6 @@ function resetGatewayState() {
   state.shownHistoryNotices.clear();
   state.comboStreaks.clear();
   state.screenClearCutoffs.clear();
-  state.lastScreenClearEffects.clear();
   state.cursor = null;
   safeRemove("tfr.cursor");
 }
@@ -1853,10 +1877,17 @@ function handleMessage(message) {
   if (message.type === "hello") {
     connection.ready = false;
     state.historyReset = message.history_reset === true;
-    if (message.history_reset || (state.gatewayId && state.gatewayId !== message.gateway_id)) {
+    const gatewayChanged = state.gatewayId && state.gatewayId !== message.gateway_id;
+    if (message.history_reset || gatewayChanged) {
       resetGatewayState();
     }
     state.gatewayId = message.gateway_id;
+    if (gatewayChanged || !(state.lastScreenClearEffects instanceof Map)) {
+      state.lastScreenClearEffects = effectsForGateway(
+        state.screenClearGateways,
+        state.gatewayId,
+      );
+    }
     safeStore("tfr.gatewayId", state.gatewayId);
     const buildVersion = message.build?.version;
     const buildCommit = message.build?.commit;
@@ -2195,6 +2226,8 @@ async function clearLocalData() {
   resetGatewayState();
   state.worlds = [];
   state.gatewayId = null;
+  state.screenClearGateways = new Map();
+  state.lastScreenClearEffects = new Map();
   state.selectedWorld = null;
   state.drafts = new Map();
   state.commandHistory = new Map();
@@ -2206,6 +2239,7 @@ async function clearLocalData() {
     "tfr.selectedWorld",
     "tfr.drafts",
     "tfr.commandHistory",
+    SCREEN_CLEAR_STATE_KEY,
   ]) {
     safeRemove(key);
   }
@@ -2508,24 +2542,101 @@ async function apiJson(path, options = {}) {
   return response.json();
 }
 
-function appendStatisticItem(container, label, value, maximum = 0) {
-  const item = document.createElement("div");
-  item.className = "statistics-item";
-  const row = document.createElement("div");
-  row.className = "about-row";
-  const name = document.createElement("span");
-  name.textContent = label;
-  const count = document.createElement("strong");
-  count.textContent = String(value);
-  row.append(name, count);
-  item.append(row);
-  if (maximum > 0) {
-    const bar = document.createElement("div");
-    bar.className = "statistics-bar";
-    bar.style.width = `${Math.max(1, Math.round((Number(value) / maximum) * 100))}%`;
-    item.append(bar);
+function appendStatisticBars(container, values) {
+  const maximum = Math.max(0, ...values.map((item) => Number(item.value) || 0));
+  const chart = document.createElement("div");
+  chart.className = "statistics-bars";
+  for (const item of values) {
+    const row = document.createElement("div");
+    row.className = "statistics-bar-row";
+    const label = document.createElement("span");
+    label.className = "statistics-bar-label";
+    label.textContent = String(item.label || "Unknown");
+    label.title = label.textContent;
+    const bar = document.createElement("span");
+    bar.className = "statistics-bar-glyph";
+    bar.textContent = barGlyph(item.value, maximum);
+    bar.setAttribute("aria-hidden", "true");
+    const value = document.createElement("strong");
+    value.textContent = String(Number(item.value) || 0);
+    row.setAttribute("aria-label", `${label.textContent}: ${value.textContent}`);
+    row.append(label, bar, value);
+    chart.append(row);
   }
-  container.append(item);
+  container.append(chart);
+}
+
+function appendStatisticsSummary(container, rawSummary) {
+  const summary = compactSummary(rawSummary);
+  const block = document.createElement("div");
+  block.className = "statistics-summary";
+  const primary = document.createElement("p");
+  primary.textContent = `${summary.lines} lines · ${summary.speakers} speakers · ${summary.unattributed} unattributed`;
+  const classification = document.createElement("p");
+  classification.textContent = `Says ${summary.sayPercent}% · poses ${summary.posePercent}% · coverage ${summary.coverage}%`;
+  block.append(primary, classification);
+  if (summary.first || summary.last) {
+    const range = document.createElement("p");
+    range.className = "fine-print";
+    range.textContent = `${summary.first || "Unknown"} through ${summary.last || "Unknown"}`;
+    block.append(range);
+  }
+  container.append(block);
+}
+
+function appendActivitySparkline(container, series) {
+  const model = activitySparkline(series, 42);
+  const chart = document.createElement("div");
+  chart.className = "statistics-sparkline";
+  const plot = document.createElement("div");
+  plot.className = "statistics-sparkline-plot";
+  plot.textContent = model.plot ? `${model.maximum} ┤${model.plot}` : "No activity";
+  const labels = document.createElement("div");
+  labels.className = "statistics-sparkline-labels";
+  labels.append(Object.assign(document.createElement("span"), { textContent: model.first || "" }));
+  labels.append(Object.assign(document.createElement("span"), { textContent: model.last || "" }));
+  chart.append(plot, labels);
+  container.append(chart);
+}
+
+function appendHeatmap(container, matrix) {
+  const chart = document.createElement("div");
+  chart.className = "statistics-heatmap";
+  const header = document.createElement("div");
+  header.className = "statistics-heatmap-row statistics-heatmap-header";
+  header.append(document.createElement("span"));
+  for (let hour = 0; hour < 24; hour += 1) {
+    const label = document.createElement("span");
+    label.textContent = [0, 6, 12, 18, 23].includes(hour) ? String(hour).padStart(2, "0") : "";
+    header.append(label);
+  }
+  chart.append(header);
+  for (const day of heatmapModel(matrix)) {
+    const row = document.createElement("div");
+    row.className = "statistics-heatmap-row";
+    const name = document.createElement("strong");
+    name.textContent = day.name;
+    row.append(name);
+    for (const cell of day.cells) {
+      const glyph = document.createElement("span");
+      glyph.className = `statistics-heatmap-cell heat-${cell.level}`;
+      glyph.textContent = cell.glyph;
+      glyph.title = cell.label;
+      glyph.setAttribute("role", "img");
+      glyph.setAttribute("aria-label", cell.label);
+      row.append(glyph);
+    }
+    chart.append(row);
+  }
+  const legend = document.createElement("div");
+  legend.className = "statistics-heatmap-legend";
+  for (const item of heatmapLegend) {
+    const entry = document.createElement("span");
+    entry.className = `heat-${item.level}`;
+    entry.textContent = `${item.glyph} ${item.label}`;
+    legend.append(entry);
+  }
+  container.append(chart, legend);
 }
 
 function renderStatistics(result) {
@@ -2535,34 +2646,30 @@ function renderStatistics(result) {
   const title = document.createElement("h3");
   title.textContent = `Statistics — ${result.world || "all worlds"}`;
   output.append(title);
-  const summary = result.summary && typeof result.summary === "object" ? result.summary : {};
-  for (const [label, key] of [["Lines", "lines"], ["Speakers", "speakers"], ["Words", "words"], ["Unattributed", "unattributed_lines"]]) {
-    if (Number.isFinite(Number(summary[key]))) appendStatisticItem(output, label, Number(summary[key]));
-  }
+  appendStatisticsSummary(output, result.summary);
+  const view = typeof result.view === "string" ? result.view : "summary";
   const rows = Array.isArray(result.rows) ? result.rows : [];
   const words = Array.isArray(result.words) ? result.words : [];
   const series = Array.isArray(result.series) ? result.series : [];
-  const values = rows.length
-    ? rows.map((row) => ({ label: row.name, value: row.lines }))
-    : words.length
-      ? words.map((row) => ({ label: row.word, value: row.count }))
-      : series.map((row) => ({ label: row.label, value: row.count }));
-  const maximum = Math.max(0, ...values.map((item) => Number(item.value) || 0));
-  for (const item of values) appendStatisticItem(output, String(item.label || "Unknown"), Number(item.value) || 0, maximum);
+  if (["speakers", "speaker", "worlds"].includes(view)) {
+    appendStatisticBars(output, rows.map((row) => ({ label: row.name, value: row.lines })));
+  } else if (view === "words" && words.length) {
+    appendStatisticBars(output, words.map((row) => ({ label: row.word, value: row.count })));
+  } else if (["hours", "weekdays"].includes(view)) {
+    appendStatisticBars(output, series.map((row) => ({ label: row.label, value: row.count })));
+  } else if (view === "activity") {
+    appendActivitySparkline(output, series);
+  } else if (view === "heatmap") {
+    appendHeatmap(output, result.matrix);
+  }
   if (Array.isArray(result.word_groups)) {
     for (const group of result.word_groups) {
       const heading = document.createElement("h3");
       heading.textContent = `Top words — ${group.name || "Unknown"}`;
       output.append(heading);
       const groupWords = Array.isArray(group.words) ? group.words : [];
-      const groupMaximum = Math.max(0, ...groupWords.map((item) => Number(item.count) || 0));
-      for (const item of groupWords) appendStatisticItem(output, String(item.word), Number(item.count) || 0, groupMaximum);
+      appendStatisticBars(output, groupWords.map((item) => ({ label: item.word, value: item.count })));
     }
-  }
-  if (Array.isArray(result.matrix)) {
-    const matrix = document.createElement("pre");
-    matrix.textContent = result.matrix.map((row) => Array.isArray(row) ? row.join(" ") : "").join("\n");
-    output.append(matrix);
   }
   const scanned = document.createElement("p");
   scanned.className = "fine-print";
@@ -2594,6 +2701,11 @@ async function loadStatistics() {
   } finally {
     elements.statisticsSubmit.disabled = false;
   }
+}
+
+function updateStatisticsControls() {
+  const usesMaximum = ["speakers", "worlds", "words"].includes(elements.statisticsView.value);
+  elements.statisticsTop.closest("label").hidden = !usesMaximum;
 }
 
 function formatDeviceTime(value) {
@@ -3236,6 +3348,8 @@ elements.automaticSay.addEventListener("change", () => {
   applyAutomaticSay(elements.automaticSay.checked);
 });
 elements.statisticsSubmit.addEventListener("click", loadStatistics);
+elements.statisticsView.addEventListener("change", updateStatisticsControls);
+updateStatisticsControls();
 elements.compatibilityRefresh.addEventListener("click", refreshCompatibility);
 elements.refreshDevices.addEventListener("click", refreshDevices);
 elements.pwaUpdateCheck.addEventListener("click", checkPwaUpdate);

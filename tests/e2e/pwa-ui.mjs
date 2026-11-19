@@ -377,6 +377,29 @@ const page = await context.newPage();
 await page.route("**/api/session", (route) =>
   route.fulfill({ status: 200, contentType: "application/json", body: '{"paired":true}' }),
 );
+await page.route("**/api/statistics", (route) => {
+  const matrix = Array.from({ length: 7 }, (_unused, day) =>
+    Array.from({ length: 24 }, (_hour, hour) => day * 24 + hour),
+  );
+  return route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      view: "heatmap",
+      world: "dev-local",
+      summary: {
+        lines: 366,
+        speakers: 6,
+        unattributed_lines: 0,
+        say_percent: 70,
+        pose_percent: 30,
+        classification_coverage: 100,
+      },
+      matrix,
+      scanned_lines: 366,
+    }),
+  });
+});
 
 async function geometry() {
   return page.evaluate(() => {
@@ -608,6 +631,26 @@ try {
   assert.ok(settingsCloseGeometry.top >= 8);
   assert.equal(settingsCloseGeometry.outline, "none");
   await page.locator('[data-settings-target="tools"]').click();
+  await page.locator('[data-settings-target="statistics"]').click();
+  await page.locator("#statistics-view").selectOption("heatmap");
+  assert.equal(await page.locator("#statistics-top").evaluate((node) => node.closest("label").hidden), true);
+  await page.locator("#statistics-submit").click();
+  await page.locator(".statistics-heatmap").waitFor();
+  assert.equal(await page.locator(".statistics-heatmap-cell").count(), 168);
+  assert.match(await page.locator(".statistics-summary").innerText(), /366 lines · 6 speakers/);
+  assert.match(await page.locator(".statistics-heatmap-legend").innerText(), /· none.*█ peak/s);
+  const statisticsGeometry = await page.locator("#statistics-results").evaluate((node) => ({
+    left: node.getBoundingClientRect().left,
+    right: node.getBoundingClientRect().right,
+    width: node.getBoundingClientRect().width,
+    scrollWidth: node.scrollWidth,
+    viewport: innerWidth,
+  }));
+  assert.ok(statisticsGeometry.left >= 0);
+  assert.ok(statisticsGeometry.right <= statisticsGeometry.viewport);
+  assert.ok(statisticsGeometry.scrollWidth <= statisticsGeometry.width + 1);
+  await page.locator("#settings-back").click();
+  await page.locator('[data-settings-target="tools"]').click();
   await page.locator("#effects-lab-button").click();
   await page.locator("#effects-lab[open]").waitFor();
   assert.equal(
@@ -700,6 +743,10 @@ try {
   assertGeometry(await geometry(), "keyboard-sized portrait");
   await page.evaluate(() => document.querySelector("#screen-clear-handle").click());
   await page.waitForFunction(() => document.querySelectorAll("#event-list .event").length === 0);
+  assert.match(
+    await page.evaluate(() => localStorage.getItem("tfr.screenClearEffects") || ""),
+    /water_ripple/,
+  );
   const keyboardTranscript = await page.locator("#transcript").boundingBox();
   const keyboardCanvas = await page.locator("#screen-clear-overlay").boundingBox();
   const keyboardHeader = await page.locator(".topbar").boundingBox();

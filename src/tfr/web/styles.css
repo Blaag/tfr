@@ -991,6 +991,11 @@ select {
   gap: 0.65rem;
 }
 
+.statistics-results {
+  min-width: 0;
+  overflow: hidden;
+}
+
 .device-item,
 .statistics-item {
   padding: 0.7rem;
@@ -1010,7 +1015,101 @@ select {
 .device-item p { margin: 0.35rem 0; color: var(--muted); }
 .device-item button { min-height: 44px; }
 .statistics-results h3 { margin: 0; }
-.statistics-bar { height: 0.45rem; border-radius: 999px; background: var(--signal); }
+.statistics-summary {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+  padding-block: 0.15rem 0.35rem;
+  border-bottom: 1px solid var(--line);
+}
+.statistics-summary p { margin: 0; }
+.statistics-summary p:first-child { font-weight: 650; }
+.statistics-bars { display: grid; gap: 0.22rem; min-width: 0; }
+.statistics-bar-row {
+  display: grid;
+  grid-template-columns: minmax(5rem, 28%) minmax(0, 1fr) max-content;
+  align-items: baseline;
+  gap: 0.45rem;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+.statistics-bar-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.statistics-bar-glyph {
+  overflow: hidden;
+  color: var(--signal);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: clamp(0.65rem, 2.6vw, 0.9rem);
+  letter-spacing: -0.08em;
+  white-space: nowrap;
+}
+.statistics-sparkline {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+  padding-block: 0.25rem;
+}
+.statistics-sparkline-plot {
+  overflow: hidden;
+  color: var(--signal);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: clamp(0.72rem, 2.8vw, 1rem);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.statistics-sparkline-labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.statistics-heatmap {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+  width: 100%;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.statistics-heatmap-row {
+  display: grid;
+  grid-template-columns: 2rem repeat(24, minmax(0, 1fr));
+  align-items: center;
+  min-width: 0;
+}
+.statistics-heatmap-row > strong {
+  font-size: 0.66rem;
+  font-weight: 600;
+}
+.statistics-heatmap-header {
+  color: var(--muted);
+  font-size: clamp(0.48rem, 1.8vw, 0.62rem);
+}
+.statistics-heatmap-header span,
+.statistics-heatmap-cell { text-align: center; }
+.statistics-heatmap-cell {
+  overflow: hidden;
+  font-size: clamp(0.62rem, 2.4vw, 0.84rem);
+  line-height: 1.15;
+  white-space: nowrap;
+}
+.statistics-heatmap-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.6rem;
+  color: var(--muted);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 0.65rem;
+}
+.heat-0 { color: var(--muted); opacity: 0.55; }
+.heat-1 { color: color-mix(in srgb, var(--signal) 45%, var(--muted)); }
+.heat-2 { color: color-mix(in srgb, var(--signal) 65%, var(--text)); }
+.heat-3 { color: color-mix(in srgb, var(--signal) 82%, var(--text)); }
+.heat-4 { color: var(--signal); font-weight: 800; }
 
 .settings-sheet header,
 .history-sheet header,
