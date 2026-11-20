@@ -164,7 +164,12 @@ _ASSETS = {
     "/push.mjs": ("push.mjs", "text/javascript; charset=utf-8"),
     "/scroll-restoration.mjs": ("scroll-restoration.mjs", "text/javascript; charset=utf-8"),
     "/screen-clear.mjs": ("screen-clear.mjs", "text/javascript; charset=utf-8"),
+    "/screen-clear-state.mjs": (
+        "screen-clear-state.mjs",
+        "text/javascript; charset=utf-8",
+    ),
     "/service-worker.mjs": ("service-worker.mjs", "text/javascript; charset=utf-8"),
+    "/statistics.mjs": ("statistics.mjs", "text/javascript; charset=utf-8"),
     "/swipe.mjs": ("swipe.mjs", "text/javascript; charset=utf-8"),
     "/text-runs.mjs": ("text-runs.mjs", "text/javascript; charset=utf-8"),
     "/themes.mjs": ("themes.mjs", "text/javascript; charset=utf-8"),
@@ -1198,7 +1203,7 @@ class WebGatewayServer:
                 web.get(
                     "/{asset:index.html|app.mjs|bootstrap.mjs|command.mjs|connection-lifecycle.mjs|"
                     "diagnostics.mjs|event-details.mjs|effects-lab.mjs|history-notice.mjs|linkify.mjs|motion.mjs|pairing.mjs|paste.mjs|"
-                    "presentation.mjs|push.mjs|scroll-restoration.mjs|screen-clear.mjs|service-worker.mjs|combo.mjs|swipe.mjs|text-runs.mjs|"
+                    "presentation.mjs|push.mjs|scroll-restoration.mjs|screen-clear.mjs|screen-clear-state.mjs|service-worker.mjs|statistics.mjs|combo.mjs|swipe.mjs|text-runs.mjs|"
                     "themes.mjs|transcript-events.mjs|styles.css|manifest.webmanifest|"
                     "repair.html|repair.css|repair.mjs|sw.js|icon.svg|icon-512.png|"
                     "apple-touch-icon.png}",
