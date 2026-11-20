@@ -22,6 +22,7 @@ from uuid import uuid4
 
 from tfr.configuration_cli import read_configuration_archive
 from tfr.configuration_transfer import _validate_archive
+from tfr.deployment import deployment_path, write_deployment
 from tfr.gateway_recovery import gateway_recovery_details, restore_gateway_recovery
 from tfr.recovery_archive import is_complete_recovery_archive, restore_complete_recovery_logs
 from tfr.service_management import (
@@ -244,27 +245,13 @@ def _default_config_directory() -> Path:
 
 
 def _deployment_path() -> Path:
-    configured = os.environ.get("XDG_STATE_HOME")
-    base = Path(configured).expanduser() if configured else Path.home() / ".local" / "state"
-    return base / "tfr" / "deployment.json"
+    return deployment_path()
 
 
 def _save_deployment(profile: Profile, gateway_socket: Path) -> None:
-    value: dict[str, object]
-    if profile == "remote-ui":
-        value = {"schema_version": 2, "profile": profile}
-    else:
-        value = {
-            "schema_version": 2,
-            "profile": profile,
-            "gateway_socket": str(gateway_socket),
-        }
-    _write_file(
-        _deployment_path(),
-        json.dumps(value, separators=(",", ":")) + "\n",
-        mode=0o600,
-        description="deployment selection",
-        replace_confirmed=True,
+    write_deployment(
+        profile,
+        gateway_socket=gateway_socket if profile != "remote-ui" else None,
     )
 
 

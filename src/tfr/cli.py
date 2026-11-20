@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import os
 import sys
 from collections.abc import Sequence
@@ -20,23 +19,14 @@ from tfr.config import (
     load_gateway_bootstrap,
     load_ui_configuration,
 )
+from tfr.deployment import reconcile_remote_ui_deployment
 from tfr.gateway_transport import DEFAULT_GATEWAY_PORT
 from tfr.updates import current_build
 
 
 def _configured_default_mode() -> str | None:
-    configured = os.environ.get("XDG_STATE_HOME")
-    base = Path(configured).expanduser() if configured else Path.home() / ".local" / "state"
-    path = base / "tfr" / "deployment.json"
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    if (
-        isinstance(value, dict)
-        and value.get("schema_version") in {1, 2}
-        and value.get("profile") == "remote-ui"
-    ):
+    value = reconcile_remote_ui_deployment()
+    if value is not None and value["profile"] == "remote-ui":
         return "ui"
     return None
 
@@ -349,6 +339,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         return run_config_cli(original_arguments[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.mode == "ui":
+        reconcile_remote_ui_deployment()
     network_arguments = (
         any(
             value is not None
