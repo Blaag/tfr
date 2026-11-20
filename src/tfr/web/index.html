@@ -342,10 +342,21 @@
           </div>
           <button id="diagnostics-close" class="close-button" type="button" aria-label="Close diagnostics">×</button>
         </header>
+        <div class="diagnostics-performance-controls">
+          <label class="toggle-row" for="diagnostics-performance">
+            <span>
+              <strong>Performance instrumentation</strong>
+              <small>Local timing metrics; automatically turns off after 24 hours</small>
+            </span>
+            <input id="diagnostics-performance" type="checkbox">
+          </label>
+          <p id="diagnostics-performance-status" class="fine-print">Disabled</p>
+          <button id="diagnostics-performance-reset" type="button" hidden>Reset performance metrics</button>
+        </div>
         <pre id="diagnostics-output">No local diagnostics.</pre>
         <div class="diagnostics-actions">
           <button id="diagnostics-copy" type="button">Copy JSON</button>
-          <button id="diagnostics-clear" type="button">Clear</button>
+          <button id="diagnostics-clear" type="button">Clear entries</button>
         </div>
       </section>
     </dialog>

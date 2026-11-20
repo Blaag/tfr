@@ -157,7 +157,7 @@ def test_all_pwa_assets_are_in_the_python_package() -> None:
 def test_service_worker_uses_current_atomic_shell_cache() -> None:
     worker = files("tfr").joinpath("web", "sw.js").read_text(encoding="utf-8")
 
-    assert 'const CACHE_NAME = "tfr-shell-web1-v77";' in worker
+    assert 'const CACHE_NAME = "tfr-shell-web1-v78";' in worker
     assert "const NETWORK_TIMEOUT_MS = 5000;" in worker
     assert (
         'self.registration.showNotification(world ? `TFR · ${world}` : "New activity", {' in worker
@@ -529,14 +529,18 @@ def test_pwa_uses_accessible_viewport_and_prevents_ios_focus_zoom() -> None:
     assert 'id="text-larger"' in page
 
 
-def test_pwa_records_bounded_responsiveness_diagnostics() -> None:
+def test_pwa_records_only_opt_in_bounded_responsiveness_diagnostics() -> None:
     application = files("tfr").joinpath("web", "app.mjs").read_text(encoding="utf-8")
+    instrumentation = (
+        files("tfr").joinpath("web", "performance-diagnostics.mjs").read_text(encoding="utf-8")
+    )
 
-    assert '"main_thread_stall"' in application
-    assert '"interaction_unacknowledged"' in application
     assert '"transcript_render_slow"' in application
     assert '"transcript_node_pressure"' in application
     assert 'component: "responsiveness"' in application
+    assert 'const ENABLE_DURATION_MS = 24 * 60 * 60 * 1000;' in instrumentation
+    assert "const MAX_SAMPLES = 256;" in instrumentation
+    assert 'return { status: "disabled" };' in instrumentation
 
 
 def test_mobile_multiline_paste_opens_a_deliberate_preview() -> None:

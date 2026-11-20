@@ -651,6 +651,32 @@ try {
   assert.ok(statisticsGeometry.scrollWidth <= statisticsGeometry.width + 1);
   await page.locator("#settings-back").click();
   await page.locator('[data-settings-target="tools"]').click();
+  await page.locator("#diagnostics-button").click();
+  await page.locator("#diagnostics-dialog[open]").waitFor();
+  assert.equal(await page.locator("#diagnostics-performance").isChecked(), false);
+  assert.equal(
+    await page.evaluate(() => localStorage.getItem("tfr.performanceInstrumentation")),
+    null,
+  );
+  await page.locator("#diagnostics-performance").check();
+  assert.match(await page.locator("#diagnostics-performance-status").innerText(), /Enabled on this device until/);
+  assert.match(await page.locator("#diagnostics-output").innerText(), /"performance": \{/);
+  assert.match(await page.locator("#diagnostics-output").innerText(), /"status": "enabled"/);
+  assert.ok(await page.evaluate(() => localStorage.getItem("tfr.performanceInstrumentation") !== null));
+  const diagnosticsGeometry = await page.locator(".diagnostics-sheet").evaluate((node) => ({
+    right: node.getBoundingClientRect().right,
+    width: node.getBoundingClientRect().width,
+    scrollWidth: node.scrollWidth,
+    viewport: innerWidth,
+  }));
+  assert.ok(diagnosticsGeometry.right <= diagnosticsGeometry.viewport);
+  assert.ok(diagnosticsGeometry.scrollWidth <= diagnosticsGeometry.width + 1);
+  await page.locator("#diagnostics-performance-reset").click();
+  await page.locator("#diagnostics-performance").uncheck();
+  assert.match(await page.locator("#diagnostics-performance-status").innerText(), /no performance observers/);
+  await page.locator("#diagnostics-close").click();
+  await page.locator("#settings-button").click();
+  await page.locator('[data-settings-target="tools"]').click();
   await page.locator("#effects-lab-button").click();
   await page.locator("#effects-lab[open]").waitFor();
   assert.equal(

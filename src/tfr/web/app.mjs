@@ -36,6 +36,7 @@ import {
 import { linkParts } from "./linkify.mjs";
 import { motionAllowsAnimation } from "./motion.mjs";
 import { preparePastePreview, validatedPasteUpdate } from "./paste.mjs";
+import { createPerformanceInstrumentation } from "./performance-diagnostics.mjs";
 import {
   disablePush,
   enablePush,
@@ -88,10 +89,7 @@ const RECONNECT_DELAYS = [500, 1000, 2000, 4000, 8000, 15000];
 const HEARTBEAT_INTERVAL_MS = 20000;
 const HEARTBEAT_TIMEOUT_MS = 8000;
 const CONNECTION_TIMEOUT_MS = 8000;
-const EVENT_LOOP_PROBE_MS = 2000;
-const EVENT_LOOP_STALL_MS = 1000;
 const RESPONSIVENESS_REPORT_COOLDOWN_MS = 30000;
-const INTERACTION_ACK_TIMEOUT_MS = 1500;
 const SLOW_TRANSCRIPT_RENDER_MS = 250;
 const PRESENTATION_CHARACTER_PRESSURE = 2000;
 const TRANSCRIPT_NODE_PRESSURE = 10000;
@@ -212,6 +210,9 @@ const elements = {
   diagnosticsOutput: document.querySelector("#diagnostics-output"),
   diagnosticsCopy: document.querySelector("#diagnostics-copy"),
   diagnosticsClear: document.querySelector("#diagnostics-clear"),
+  diagnosticsPerformance: document.querySelector("#diagnostics-performance"),
+  diagnosticsPerformanceStatus: document.querySelector("#diagnostics-performance-status"),
+  diagnosticsPerformanceReset: document.querySelector("#diagnostics-performance-reset"),
   diagnosticsClose: document.querySelector("#diagnostics-close"),
   pasteDialog: document.querySelector("#paste-dialog"),
   pasteDialogWorld: document.querySelector("#paste-dialog-world"),
@@ -270,13 +271,21 @@ const pairingSubmission = createPairingSubmission(
   (code) => submitPairing(document, code),
   (callback, delay) => window.setTimeout(callback, delay),
 );
+const performanceInstrumentation = createPerformanceInstrumentation({
+  window,
+  document,
+  storage: {
+    getItem: readStorage,
+    setItem: safeStore,
+    removeItem: safeRemove,
+  },
+});
+performanceInstrumentation.restore();
 let pairingRecoveryTimer = null;
 let viewportTimer = null;
 let historyNoticeTimer = null;
 let historyNoticeKey = null;
 let historyDialogPending = false;
-let pendingInteraction = null;
-let interactionSequence = 0;
 const lastResponsivenessReports = new Map();
 let transcriptTouch = null;
 let suppressTranscriptClickUntil = 0;
@@ -299,6 +308,7 @@ function responsivenessMessage(prefix) {
 }
 
 function reportResponsiveness(code, message, operation) {
+  if (!performanceInstrumentation.isEnabled()) return;
   const now = performance.now();
   if (now - (lastResponsivenessReports.get(code) ?? -Infinity) < RESPONSIVENESS_REPORT_COOLDOWN_MS) return;
   lastResponsivenessReports.set(code, now);
@@ -310,57 +320,6 @@ function reportResponsiveness(code, message, operation) {
     operation,
   }));
 }
-
-function interactionOperation(target) {
-  if (!(target instanceof Element)) return null;
-  const control = target.closest("button, input, textarea, select, a, [role='button']");
-  if (!control) return null;
-  return (control.id || control.getAttribute("aria-label") || control.tagName).slice(0, 100);
-}
-
-function acknowledgeInteraction(target = null) {
-  if (!pendingInteraction) return;
-  if (target && pendingInteraction.target !== target) return;
-  pendingInteraction = null;
-}
-
-function monitorEventLoop(expected = performance.now() + EVENT_LOOP_PROBE_MS) {
-  window.setTimeout(() => {
-    const now = performance.now();
-    const delay = now - expected;
-    if (delay >= EVENT_LOOP_STALL_MS && document.visibilityState === "visible") {
-      reportResponsiveness(
-        "main_thread_stall",
-        `Main thread probe was delayed ${Math.round(delay)} ms`,
-        document.visibilityState,
-      );
-    }
-    monitorEventLoop(now + EVENT_LOOP_PROBE_MS);
-  }, EVENT_LOOP_PROBE_MS);
-}
-
-document.addEventListener("pointerdown", (event) => {
-  const operation = interactionOperation(event.target);
-  if (!operation) return;
-  const control = event.target instanceof Element
-    ? event.target.closest("button, input, textarea, select, a, [role='button']")
-    : null;
-  if (!control) return;
-  const sequence = ++interactionSequence;
-  pendingInteraction = { sequence, target: control };
-  window.setTimeout(() => {
-    if (pendingInteraction?.sequence !== sequence) return;
-    pendingInteraction = null;
-    reportResponsiveness(
-      "interaction_unacknowledged",
-      `Pointer interaction produced no click or focus within ${INTERACTION_ACK_TIMEOUT_MS} ms`,
-      operation,
-    );
-  }, INTERACTION_ACK_TIMEOUT_MS);
-}, true);
-document.addEventListener("click", () => acknowledgeInteraction(), true);
-document.addEventListener("focusin", () => acknowledgeInteraction(), true);
-monitorEventLoop();
 
 function scheduleCombo(callback, delay) {
   const timer = window.setTimeout(() => {
@@ -1550,6 +1509,7 @@ function clearSelectedScreen() {
   renderTranscript({ scrollToLive: true });
   showScreenRestoreHint();
   if (!animationsEnabled || !cells.length || !effect) return;
+  performanceInstrumentation.increment("screen_clear_animations");
   const animation = animateScreenClear({
     canvas: elements.screenClearOverlay,
     transcript: elements.transcript,
@@ -1597,7 +1557,8 @@ function updateScreenClearHandle() {
 }
 
 function renderTranscript({ scrollToLive = false, smoothScroll = false, restorePosition = false } = {}) {
-  const renderStarted = performance.now();
+  const instrumented = performanceInstrumentation.isEnabled();
+  const renderStarted = instrumented ? performance.now() : 0;
   cancelPresentationAnimations();
   if (liveRenderFrame !== null) window.cancelAnimationFrame(liveRenderFrame);
   liveRenderFrame = null;
@@ -1616,27 +1577,35 @@ function renderTranscript({ scrollToLive = false, smoothScroll = false, restoreP
   elements.eventList.replaceChildren(...nodes);
   elements.emptyState.hidden = visible.length > 0 || state.screenClearCutoffs.has(state.selectedWorld);
   updateScreenClearHandle();
-  const renderDuration = performance.now() - renderStarted;
-  if (renderDuration >= SLOW_TRANSCRIPT_RENDER_MS) {
+  const renderDuration = instrumented ? performance.now() - renderStarted : 0;
+  performanceInstrumentation.increment("transcript_renders");
+  performanceInstrumentation.recordDuration("transcript_render", renderDuration);
+  performanceInstrumentation.observeHighWater("event_nodes", visible.length);
+  if (instrumented && renderDuration >= SLOW_TRANSCRIPT_RENDER_MS) {
     reportResponsiveness(
       "transcript_render_slow",
       `Transcript render took ${Math.round(renderDuration)} ms for ${visible.length} events`,
       restorePosition ? "restore" : scrollToLive ? "return-live" : "render",
     );
   }
-  const presentationCharacters = elements.eventList.querySelectorAll(
-    ".presentation-character",
-  ).length;
-  const transcriptNodes = elements.eventList.getElementsByTagName("*").length;
-  if (
-    presentationCharacters > PRESENTATION_CHARACTER_PRESSURE ||
-    transcriptNodes > TRANSCRIPT_NODE_PRESSURE
-  ) {
-    reportResponsiveness(
-      "transcript_node_pressure",
-      `Transcript contains ${transcriptNodes} nodes and ${presentationCharacters} presentation characters`,
-      restorePosition ? "restore" : "render",
-    );
+  if (instrumented) {
+    const presentationCharacters = elements.eventList.querySelectorAll(
+      ".presentation-character",
+    ).length;
+    const transcriptNodes = elements.eventList.getElementsByTagName("*").length;
+    performanceInstrumentation.observeHighWater("presentation_characters", presentationCharacters);
+    performanceInstrumentation.observeHighWater("transcript_nodes", transcriptNodes);
+    performanceInstrumentation.observeHighWater("active_animations", activePresentationAnimations.size);
+    if (
+      presentationCharacters > PRESENTATION_CHARACTER_PRESSURE ||
+      transcriptNodes > TRANSCRIPT_NODE_PRESSURE
+    ) {
+      reportResponsiveness(
+        "transcript_node_pressure",
+        `Transcript contains ${transcriptNodes} nodes and ${presentationCharacters} presentation characters`,
+        restorePosition ? "restore" : "render",
+      );
+    }
   }
   if (restorePosition) {
     restoreTranscriptPosition({
@@ -1871,7 +1840,7 @@ function applyGatewayConfiguration(envelope) {
   }
 }
 
-function handleMessage(message) {
+function handleMessageBody(message) {
   if (!message || message.protocol !== 1 || typeof message.type !== "string") return;
   if (message.type.startsWith("paste_") && handlePasteUpdate(message)) return;
   if (message.type === "hello") {
@@ -2000,6 +1969,19 @@ function handleMessage(message) {
   }
   if (message.type === "error") {
     showToast(message.message || "Gateway protocol error", 4200);
+  }
+}
+
+function handleMessage(message) {
+  const instrumented = performanceInstrumentation.isEnabled();
+  const started = instrumented ? performance.now() : 0;
+  try {
+    return handleMessageBody(message);
+  } finally {
+    if (message?.type === "event") performanceInstrumentation.increment("events_processed");
+    if (instrumented) {
+      performanceInstrumentation.recordDuration("message_processing", performance.now() - started);
+    }
   }
 }
 
@@ -2132,12 +2114,12 @@ function connect() {
 }
 
 function scheduleReconnect() {
+  performanceInstrumentation.increment("reconnect_attempts");
   connection.scheduleReconnect();
 }
 
 function sendCommand(event) {
   event.preventDefault();
-  acknowledgeInteraction(elements.sendButton);
   const world = currentWorld();
   const draft = normalizeWorldCommand(elements.commandInput.value);
   if (draft.trimStart().startsWith("/")) {
@@ -2222,6 +2204,7 @@ async function sessionState() {
 
 async function clearLocalData() {
   stopHeartbeat();
+  performanceInstrumentation.disable();
   connection.stop()?.close();
   resetGatewayState();
   state.worlds = [];
@@ -2640,6 +2623,8 @@ function appendHeatmap(container, matrix) {
 }
 
 function renderStatistics(result) {
+  const instrumented = performanceInstrumentation.isEnabled();
+  const started = instrumented ? performance.now() : 0;
   const output = elements.statisticsResults;
   output.replaceChildren();
   output.hidden = false;
@@ -2675,6 +2660,10 @@ function renderStatistics(result) {
   scanned.className = "fine-print";
   scanned.textContent = `Scanned ${Number(result.scanned_lines) || 0} recalled conversational lines.`;
   output.append(scanned);
+  performanceInstrumentation.increment("statistics_renders");
+  if (instrumented) {
+    performanceInstrumentation.recordDuration("statistics_render", performance.now() - started);
+  }
 }
 
 async function loadStatistics() {
@@ -3251,7 +3240,6 @@ elements.historyButton.addEventListener("click", openHistoryDialog);
 elements.historyButton.addEventListener("pointerdown", (event) => {
   if (event.pointerType !== "touch") return;
   event.preventDefault();
-  acknowledgeInteraction(elements.historyButton);
   openHistoryDialog();
 });
 elements.historyDialog.addEventListener("close", () => {
@@ -3274,28 +3262,53 @@ elements.effectsLabButton.addEventListener("click", () => {
   elements.settingsDialog.close();
   elements.effectsLab.showModal();
 });
-elements.diagnosticsButton.addEventListener("click", () => {
-  const entries = diagnosticEntries();
-  const base = {
+
+function updatePerformanceInstrumentationControls() {
+  const report = performanceInstrumentation.report();
+  const enabled = report.status === "enabled";
+  elements.diagnosticsPerformance.checked = enabled;
+  elements.diagnosticsPerformanceReset.hidden = !enabled;
+  elements.diagnosticsPerformanceStatus.textContent = enabled
+    ? `Enabled on this device until ${new Date(report.expires_at).toLocaleString()}`
+    : "Disabled; no performance observers or sampling timers are running";
+  return report;
+}
+
+function diagnosticsDocument(serviceWorker = "inspecting", push = "inspecting") {
+  return {
     gateway: elements.gatewayVersion.textContent,
     connection: elements.connectionState.textContent,
-    service_worker: "inspecting",
-    push: "inspecting",
-    entries,
+    service_worker: serviceWorker,
+    push,
+    performance: updatePerformanceInstrumentationControls(),
+    entries: diagnosticEntries(),
   };
-  elements.diagnosticsOutput.textContent = JSON.stringify(base, null, 2);
+}
+
+elements.diagnosticsButton.addEventListener("click", () => {
+  elements.diagnosticsOutput.textContent = JSON.stringify(diagnosticsDocument(), null, 2);
   elements.settingsDialog.close();
   elements.diagnosticsDialog.showModal();
   Promise.all([serviceWorkerDiagnosticState(), pushDiagnosticState()]).then(
     ([serviceWorker, push]) => {
       if (!elements.diagnosticsDialog.open) return;
-      elements.diagnosticsOutput.textContent = JSON.stringify({
-        ...base,
-        service_worker: serviceWorker,
-        push,
-      }, null, 2);
+      elements.diagnosticsOutput.textContent = JSON.stringify(
+        diagnosticsDocument(serviceWorker, push),
+        null,
+        2,
+      );
     },
   );
+});
+elements.diagnosticsPerformance.addEventListener("change", () => {
+  if (elements.diagnosticsPerformance.checked) performanceInstrumentation.enable();
+  else performanceInstrumentation.disable();
+  elements.diagnosticsOutput.textContent = JSON.stringify(diagnosticsDocument(), null, 2);
+});
+elements.diagnosticsPerformanceReset.addEventListener("click", () => {
+  performanceInstrumentation.reset();
+  elements.diagnosticsOutput.textContent = JSON.stringify(diagnosticsDocument(), null, 2);
+  showToast("Performance metrics reset");
 });
 elements.diagnosticsClose.addEventListener("click", () => elements.diagnosticsDialog.close());
 elements.diagnosticsCopy.addEventListener("click", async () => {
@@ -3308,7 +3321,7 @@ elements.diagnosticsCopy.addEventListener("click", async () => {
 });
 elements.diagnosticsClear.addEventListener("click", () => {
   clearDiagnostics();
-  elements.diagnosticsOutput.textContent = "No local diagnostics.";
+  elements.diagnosticsOutput.textContent = JSON.stringify(diagnosticsDocument(), null, 2);
 });
 elements.effectsLabClose.addEventListener("click", () => {
   cancelComboVisuals();

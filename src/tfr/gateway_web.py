@@ -160,6 +160,10 @@ _ASSETS = {
     "/motion.mjs": ("motion.mjs", "text/javascript; charset=utf-8"),
     "/pairing.mjs": ("pairing.mjs", "text/javascript; charset=utf-8"),
     "/paste.mjs": ("paste.mjs", "text/javascript; charset=utf-8"),
+    "/performance-diagnostics.mjs": (
+        "performance-diagnostics.mjs",
+        "text/javascript; charset=utf-8",
+    ),
     "/presentation.mjs": ("presentation.mjs", "text/javascript; charset=utf-8"),
     "/push.mjs": ("push.mjs", "text/javascript; charset=utf-8"),
     "/scroll-restoration.mjs": ("scroll-restoration.mjs", "text/javascript; charset=utf-8"),
@@ -1202,7 +1206,7 @@ class WebGatewayServer:
                 web.get("/ws", self._websocket),
                 web.get(
                     "/{asset:index.html|app.mjs|bootstrap.mjs|command.mjs|connection-lifecycle.mjs|"
-                    "diagnostics.mjs|event-details.mjs|effects-lab.mjs|history-notice.mjs|linkify.mjs|motion.mjs|pairing.mjs|paste.mjs|"
+                    "diagnostics.mjs|event-details.mjs|effects-lab.mjs|history-notice.mjs|linkify.mjs|motion.mjs|pairing.mjs|paste.mjs|performance-diagnostics.mjs|"
                     "presentation.mjs|push.mjs|scroll-restoration.mjs|screen-clear.mjs|screen-clear-state.mjs|service-worker.mjs|statistics.mjs|combo.mjs|swipe.mjs|text-runs.mjs|"
                     "themes.mjs|transcript-events.mjs|styles.css|manifest.webmanifest|"
                     "repair.html|repair.css|repair.mjs|sw.js|icon.svg|icon-512.png|"

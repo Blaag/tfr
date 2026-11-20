@@ -5,7 +5,6 @@ import contextlib
 import hashlib
 import json
 import os
-import secrets
 import shutil
 import socket
 import ssl
@@ -36,6 +35,7 @@ from tfr.configuration_registry import SettingDescriptor
 from tfr.configuration_sync import CONFIGURATION_SYNC_CAPABILITY, required_action
 from tfr.core import EventBus
 from tfr.core_settings import core_configuration_registry
+from tfr.deployment import deployment_schema, write_deployment
 from tfr.diagnostics import DiagnosticBuffer, bounded_diagnostic_message
 from tfr.events import CommandRequest, Event
 from tfr.gateway import default_gateway_socket
@@ -175,19 +175,8 @@ def _local_configuration_needs_migration(path: Path, marker: Path) -> bool:
     return path.is_file() and not marker.is_file() and not _local_configuration_is_retired(path)
 
 
-def _deployment_path() -> Path:
-    configured = os.environ.get("XDG_STATE_HOME")
-    base = Path(configured).expanduser() if configured else Path.home() / ".local/state"
-    return base / "tfr/deployment.json"
-
-
 def _deployment_schema() -> int | None:
-    try:
-        value = json.loads(_deployment_path().read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-        return None
-    schema = value.get("schema_version") if isinstance(value, dict) else None
-    return schema if isinstance(schema, int) and not isinstance(schema, bool) else None
+    return deployment_schema(reconcile_remote_ui=True)
 
 
 def _profile_schema() -> int | None:
@@ -202,32 +191,6 @@ def _profile_schema() -> int | None:
         return None
     schema = value.get("schema_version") if isinstance(value, dict) else None
     return schema if isinstance(schema, int) and not isinstance(schema, bool) else None
-
-
-def _write_remote_ui_deployment() -> None:
-    path = _deployment_path()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.parent.chmod(0o700)
-    value = {"schema_version": 2, "profile": "remote-ui"}
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-    descriptor = os.open(
-        temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
-    )
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            descriptor = -1
-            json.dump(value, stream, separators=(",", ":"))
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        path.chmod(0o600)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        temporary.unlink(missing_ok=True)
 
 
 def _adopt_verified_explicit_connection(
@@ -260,7 +223,7 @@ def _adopt_verified_explicit_connection(
     active = profiles.active
     if active is None or active.host != host or active.port != port or active.ui_id != ui_id:
         return None
-    _write_remote_ui_deployment()
+    write_deployment("remote-ui")
     return profiles
 
 

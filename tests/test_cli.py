@@ -45,6 +45,10 @@ def test_remote_ui_deployment_selects_ui_for_bare_tfr(
     )
 
     assert _configured_default_mode() == "ui"
+    if schema_version == 1:
+        assert deployment.read_text(encoding="utf-8") == (
+            '{"schema_version":2,"profile":"remote-ui"}\n'
+        )
 
 
 def test_parser_uses_xdg_default_config_path(
