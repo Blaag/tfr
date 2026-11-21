@@ -124,4 +124,40 @@ def test_missing_profile_and_deployment_offer_verified_connection_adoption() -> 
 
     client = snapshot["clients"][0]
     assert client["issues"] == ["profile-store-missing", "deployment-metadata-missing"]
-    assert client["remediation"] == "adopt-verified-explicit-connection"
+    assert client["remediation"] == "reconnect-for-automatic-adoption"
+
+
+def test_legacy_configuration_reports_automatic_proposal_remediation() -> None:
+    report = {
+        "report_version": 1,
+        "checked_at": "2026-11-21T12:00:00Z",
+        "tfr_version": "0.1.129",
+        "protocol": 2,
+        "profile_schema": 1,
+        "identity_schema": 1,
+        "deployment_schema": 2,
+        "legacy_configuration_detected": True,
+    }
+    snapshot = compatibility_snapshot(
+        migration_pending=False,
+        legacy_bootstrap=False,
+        legacy_plugin_sources=0,
+        legacy_speaker_rules=0,
+        ui_records=[
+            {
+                "ui_id": "70c36162-c9b3-48c2-a6ff-2fd2ce1dbe7a",
+                "display_name": "quill · Terminal",
+                "client_type": "terminal",
+                "versions": {"tfr": "0.1.129"},
+            }
+        ],
+        ui_reports={"70c36162-c9b3-48c2-a6ff-2fd2ce1dbe7a": report},
+        pwa_device_count=0,
+        service={"active": True, "enabled": True, "linger": True},
+        web={"enabled": True, "active": True, "transport": "tailscale"},
+        now=datetime(2026, 11, 21, 13, tzinfo=UTC),
+    )
+
+    client = snapshot["clients"][0]
+    assert client["issues"] == ["legacy-configuration-detected"]
+    assert client["remediation"] == "review-automatically-submitted-config-migration"

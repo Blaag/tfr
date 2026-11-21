@@ -252,6 +252,10 @@ class GatewayProfileStore:
     def profiles(self) -> tuple[GatewayConnectionProfile, ...]:
         return tuple(sorted(self._profiles.values(), key=lambda item: item.name.casefold()))
 
+    def ensure_initialized(self) -> None:
+        if not os.path.lexists(self.path):
+            self._save()
+
     def get(self, name: str) -> GatewayConnectionProfile:
         try:
             return self._profiles[_profile_name(name).casefold()]

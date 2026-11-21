@@ -173,9 +173,11 @@ def compatibility_snapshot(
                 "checked_at": report_checked,
                 "issues": issues,
                 "remediation": (
-                    "adopt-verified-explicit-connection"
+                    "review-automatically-submitted-config-migration"
+                    if "legacy-configuration-detected" in issues
+                    else "reconnect-for-automatic-adoption"
                     if set(issues) <= {"profile-store-missing", "deployment-metadata-missing"}
-                    and bool(issues)
+                    and issues
                     else None
                 ),
             }

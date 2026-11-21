@@ -34,11 +34,13 @@ from tfr.gateway_client import (
     GatewayDisconnectedError,
     GatewayUiRuntime,
     RemoteWorldSession,
-    _adopt_verified_explicit_connection,
+    _adopt_verified_local_connection,
+    _adopt_verified_remote_connection,
     _local_configuration_needs_migration,
     _profile_schema,
     _recover_local_plugin_bootstrap,
     _retire_local_migration_sources,
+    _submit_initial_migration,
     remote_speaker_effects_warning,
     run_gateway_ui,
 )
@@ -102,14 +104,56 @@ async def test_client_queries_and_reports_compatibility() -> None:
     assert client._request.await_args_list[1].args[0]["type"] == "ui_compatibility_report"
 
 
-def test_verified_explicit_connection_is_adopted_without_changing_ui_identity(
+async def test_live_configuration_migration_refreshes_compatibility() -> None:
+    client = object.__new__(GatewayClient)
+    client.gateway_capabilities = ("compatibility-status-v1",)
+    client.migration_source_files = ()
+    report = {"report_version": 1, "legacy_configuration_detected": False}
+    client.local_compatibility_report_factory = Mock(return_value=report)
+    client._request = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            {"applied": True, "revision": 2, "restarting": False},
+            {"report": report},
+        ]
+    )
+
+    result = await client.config_migration_apply(
+        expected_revision=1,
+        choices={},
+        confirm=True,
+    )
+
+    assert result["applied"] is True
+    assert client._request.await_args_list[0].args[0]["type"] == "config_migration_apply"
+    assert client._request.await_args_list[1].args[0]["type"] == "ui_compatibility_report"
+    assert client._request.await_args_list[1].args[0]["report"] == report
+
+
+async def test_detected_legacy_configuration_is_submitted_automatically() -> None:
+    client = SimpleNamespace(
+        migration_values={"ui.theme": "high-contrast"},
+        migration_source_files=("config.jsonc",),
+        config_migrate=AsyncMock(return_value={"accepted": [], "conflicts": []}),
+    )
+
+    await _submit_initial_migration(client)
+
+    client.config_migrate.assert_awaited_once_with(
+        {"ui.theme": "high-contrast"},
+        ("config.jsonc",),
+    )
+    assert client.initial_migration_preview == {"accepted": [], "conflicts": []}
+    assert client.initial_migration_error is None
+
+
+def test_verified_remote_connection_is_adopted_without_changing_ui_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     ui_id = UUID("ead86f89-0ca6-4247-b08a-25ef09c2703b")
 
-    profiles = _adopt_verified_explicit_connection(
+    profiles = _adopt_verified_remote_connection(
         host="192.168.1.7",
         port=7347,
         tls_server_name="phrasing.tail2beeb4.ts.net",
@@ -126,6 +170,90 @@ def test_verified_explicit_connection_is_adopted_without_changing_ui_identity(
     assert _profile_schema() == 1
     deployment = json.loads((tmp_path / "state/tfr/deployment.json").read_text(encoding="utf-8"))
     assert deployment == {"schema_version": 2, "profile": "remote-ui"}
+
+
+def test_verified_local_connection_initializes_canonical_empty_stores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    socket_path = tmp_path / "gateway.sock"
+
+    profiles = _adopt_verified_local_connection(socket_path)
+
+    assert profiles is not None
+    assert profiles.profiles() == ()
+    assert _profile_schema() == 1
+    deployment = json.loads((tmp_path / "state/tfr/deployment.json").read_text())
+    assert deployment == {
+        "schema_version": 2,
+        "profile": "local-split",
+        "gateway_socket": str(socket_path),
+    }
+
+
+def test_verified_connection_does_not_overwrite_conflicting_deployment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    deployment = tmp_path / "state/tfr/deployment.json"
+    deployment.parent.mkdir(parents=True)
+    content = '{"schema_version":2,"profile":"gateway","gateway_socket":"/gateway.sock"}\n'
+    deployment.write_text(content, encoding="utf-8")
+
+    assert (
+        _adopt_verified_remote_connection(
+            host="192.168.1.7",
+            port=7347,
+            tls_server_name="gateway.example",
+            tls_ca=None,
+            token="a" * 64,
+            ui_id=uuid4(),
+            ui_name="quill · Terminal",
+        )
+        is None
+    )
+    assert deployment.read_text(encoding="utf-8") == content
+    assert not (tmp_path / "state/tfr/connections/profiles.json").exists()
+
+
+def test_verified_remote_connection_does_not_write_deployment_when_profile_conflicts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tfr.gateway_profiles import GatewayConnectionProfile, GatewayProfileStore
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    profiles = GatewayProfileStore()
+    profiles.add(
+        GatewayConnectionProfile(
+            name="existing",
+            host="old.example",
+            port=7347,
+            tls_server_name="old.example",
+            tls_ca=None,
+            credential_reference="credential:pending",
+            ui_id=uuid4(),
+            ui_name="Existing UI",
+        ),
+        "b" * 64,
+    )
+
+    assert (
+        _adopt_verified_remote_connection(
+            host="new.example",
+            port=7347,
+            tls_server_name="new.example",
+            tls_ca=None,
+            token="a" * 64,
+            ui_id=uuid4(),
+            ui_name="quill · Terminal",
+        )
+        is None
+    )
+    assert not (tmp_path / "state/tfr/deployment.json").exists()
+    assert profiles.active is not None
+    assert profiles.active.host == "old.example"
 
 
 async def test_remote_ui_pairing_issues_a_persistent_client_credential(tmp_path: Path) -> None:

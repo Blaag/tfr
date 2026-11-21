@@ -35,7 +35,7 @@ from tfr.configuration_registry import SettingDescriptor
 from tfr.configuration_sync import CONFIGURATION_SYNC_CAPABILITY, required_action
 from tfr.core import EventBus
 from tfr.core_settings import core_configuration_registry
-from tfr.deployment import deployment_schema, write_deployment
+from tfr.deployment import deployment_schema, ensure_verified_deployment
 from tfr.diagnostics import DiagnosticBuffer, bounded_diagnostic_message
 from tfr.events import CommandRequest, Event
 from tfr.gateway import default_gateway_socket
@@ -193,7 +193,7 @@ def _profile_schema() -> int | None:
     return schema if isinstance(schema, int) and not isinstance(schema, bool) else None
 
 
-def _adopt_verified_explicit_connection(
+def _adopt_verified_remote_connection(
     *,
     host: str,
     port: int,
@@ -206,7 +206,14 @@ def _adopt_verified_explicit_connection(
     from tfr.gateway_profiles import GatewayConnectionProfile, GatewayProfileStore
 
     profiles = GatewayProfileStore()
-    if not profiles.profiles():
+    existing = profiles.profiles()
+    if existing:
+        active = profiles.active
+        if active is None or active.host != host or active.port != port or active.ui_id != ui_id:
+            return None
+    if not ensure_verified_deployment("remote-ui"):
+        return None
+    if not existing:
         profiles.add(
             GatewayConnectionProfile(
                 name="default",
@@ -220,10 +227,17 @@ def _adopt_verified_explicit_connection(
             ),
             token,
         )
-    active = profiles.active
-    if active is None or active.host != host or active.port != port or active.ui_id != ui_id:
+    return profiles
+
+
+def _adopt_verified_local_connection(path: Path | str | None = None):
+    from tfr.gateway_profiles import GatewayProfileStore
+
+    socket_path = Path(path or default_gateway_socket()).expanduser()
+    if not ensure_verified_deployment("local-split", gateway_socket=socket_path):
         return None
-    write_deployment("remote-ui")
+    profiles = GatewayProfileStore()
+    profiles.ensure_initialized()
     return profiles
 
 
@@ -1597,6 +1611,9 @@ class GatewayClient:
                 _retire_local_migration_sources(sources, result.get("revision"))
             except OSError as exc:
                 result["local_cleanup_error"] = str(exc)[:240]
+        report_factory = getattr(self, "local_compatibility_report_factory", None)
+        if result.get("restarting") is not True and callable(report_factory):
+            await self.report_ui_compatibility(report_factory())
         return result
 
     async def config_migration_status(self) -> dict[str, object]:
@@ -3220,6 +3237,21 @@ def _legacy_migration_values(
     return output
 
 
+async def _submit_initial_migration(client: GatewayClient) -> None:
+    client.initial_migration_preview = None
+    client.initial_migration_error = None
+    values = getattr(client, "migration_values", {})
+    if not values:
+        return
+    try:
+        client.initial_migration_preview = await client.config_migrate(
+            values,
+            tuple(getattr(client, "migration_source_files", ())),
+        )
+    except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
+        client.initial_migration_error = str(exc)[:240]
+
+
 async def run_gateway_ui(
     configuration: UiConfiguration,
     path: Path | str | None = None,
@@ -3328,11 +3360,15 @@ async def run_gateway_ui(
             ):
                 raise
             await asyncio.sleep(1)
-    if gateway_host is not None and gateway_profiles is None and os.environ.get("TFR_MANAGED_ROOT"):
+    if (
+        isinstance(client, GatewayClient)
+        and gateway_host is not None
+        and gateway_profiles is None
+    ):
         resolved_ui_id = connection_options["client_id"]
         if not isinstance(resolved_ui_id, UUID):  # pragma: no cover
             raise ValueError("resolved UI identity is invalid")
-        gateway_profiles = _adopt_verified_explicit_connection(
+        gateway_profiles = _adopt_verified_remote_connection(
             host=gateway_host,
             port=gateway_port,
             tls_server_name=tls_server_name or gateway_host,
@@ -3345,15 +3381,21 @@ async def run_gateway_ui(
                 else f"{platform_name} · Terminal"[:80]
             ),
         )
-    local_compatibility = ui_compatibility_report(
-        tfr_version=build.version,
-        protocol=build.protocol,
-        deployment_schema=_deployment_schema(),
-        profile_schema=_profile_schema(),
-        legacy_configuration_detected=_local_configuration_needs_migration(
-            local_configuration.main_path, migration_marker
-        ),
-    )
+    elif isinstance(client, GatewayClient) and gateway_host is None:
+        gateway_profiles = _adopt_verified_local_connection(path)
+
+    def current_local_compatibility() -> dict[str, object]:
+        return ui_compatibility_report(
+            tfr_version=build.version,
+            protocol=build.protocol,
+            deployment_schema=_deployment_schema(),
+            profile_schema=_profile_schema(),
+            legacy_configuration_detected=_local_configuration_needs_migration(
+                local_configuration.main_path, migration_marker
+            ),
+        )
+
+    local_compatibility = current_local_compatibility()
     manager = SessionManager(client.sessions)  # type: ignore[arg-type]
     client.migration_values = {}
     client.migration_source_files = ()
@@ -3400,8 +3442,10 @@ async def run_gateway_ui(
                 else _legacy_migration_values(local_configuration, descriptors)
             )
             client.migration_source_files = local_sources
+            client.local_compatibility_report_factory = current_local_compatibility
             client.start()
             await client.report_ui_compatibility(local_compatibility)
+            await _submit_initial_migration(client)
             await client.update_ui_capabilities(
                 tuple(
                     sorted(
@@ -3595,10 +3639,34 @@ async def run_gateway_ui(
     if speaker_effects_warning is not None:
         tui.queue_startup_notice(tui.active_alias, speaker_effects_warning)
     if client.migration_values:
+        preview = getattr(client, "initial_migration_preview", None)
+        error = getattr(client, "initial_migration_error", None)
+        if isinstance(preview, dict):
+            conflicts = preview.get("conflicts", [])
+            conflict_count = len(conflicts) if isinstance(conflicts, list) else 0
+            migration_notice = (
+                "TFR submitted the detected legacy configuration to the Gateway. "
+                + (
+                    f"{conflict_count} decision(s) are required; review them with "
+                    "/config migrate preview."
+                    if conflict_count
+                    else "Review the prepared import with /config migrate preview, then apply it "
+                    "with /config migrate apply."
+                )
+            )
+        elif error:
+            migration_notice = (
+                f"TFR could not submit the detected legacy configuration automatically: {error}. "
+                "Retry with /config migrate."
+            )
+        else:
+            migration_notice = (
+                "Legacy local configuration was detected. Submit and review it with "
+                "/config migrate, then resolve conflicts before applying."
+            )
         tui.queue_startup_notice(
             tui.active_alias,
-            "Legacy local configuration was detected. Submit and review it with "
-            "/config migrate, then resolve conflicts before applying.",
+            migration_notice,
         )
     if client.history_reset:
         tui.queue_startup_notice(

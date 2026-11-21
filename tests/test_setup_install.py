@@ -101,6 +101,10 @@ def test_remote_ui_deployment_marker_uses_current_schema(
 
     value = json.loads((tmp_path / "tfr/deployment.json").read_text(encoding="utf-8"))
     assert value == {"schema_version": 2, "profile": "remote-ui"}
+    profiles = json.loads(
+        (tmp_path / "tfr/connections/profiles.json").read_text(encoding="utf-8")
+    )
+    assert profiles == {"schema_version": 1, "active": None, "profiles": []}
 
 
 def test_gateway_recovery_archive_must_be_private(tmp_path: Path) -> None:
