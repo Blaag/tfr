@@ -71,6 +71,47 @@ def make_event(sequence: int) -> Event:
     )
 
 
+async def test_request_consumes_pending_exception_when_socket_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = object.__new__(GatewayClient)
+    client._pump = SimpleNamespace(done=lambda: False)
+    client._pending = {}
+    client._write_lock = asyncio.Lock()
+    client.writer = object()  # type: ignore[assignment]
+    loop = asyncio.get_running_loop()
+    observed: list[asyncio.Future[dict[str, object] | None]] = []
+
+    class ObservedFuture(asyncio.Future[dict[str, object] | None]):
+        exception_calls = 0
+
+        def exception(self) -> BaseException | None:
+            self.exception_calls += 1
+            return super().exception()
+
+    def create_future() -> ObservedFuture:
+        future = ObservedFuture()
+        observed.append(future)
+        return future
+
+    error = GatewayProtocolError("Gateway update in progress; retry shortly")
+
+    async def fail_write(*_args: object, **_kwargs: object) -> None:
+        client._fail_pending(error)
+        raise ConnectionResetError("Connection lost")
+
+    monkeypatch.setattr(loop, "create_future", create_future)
+    monkeypatch.setattr("tfr.gateway_client.write_message", fail_write)
+
+    with pytest.raises(ConnectionResetError, match="Connection lost"):
+        await client._request({"type": "ping"}, uuid4())
+
+    assert len(observed) == 1
+    assert observed[0].done()
+    assert observed[0].exception_calls == 1  # type: ignore[attr-defined]
+    assert client._pending == {}
+
+
 async def test_configuration_import_can_defer_gateway_restart_to_setup() -> None:
     client = object.__new__(GatewayClient)
     client._request = AsyncMock(return_value={"applied": True})  # type: ignore[method-assign]
@@ -1533,6 +1574,27 @@ async def test_new_ui_can_rebuild_display_from_retained_gateway_history() -> Non
         assert [event.canonical_text for event in client.initial_events] == ["line 0", "line 1"]
     finally:
         await client.stop()
+        await server.stop()
+        await history.stop()
+        await bus.close()
+    socket_path.parent.rmdir()
+
+
+async def test_gateway_rejects_update_gated_client_during_handshake() -> None:
+    bus = EventBus()
+    history = EventHistory(bus, {"alpha": 10})
+    history.start()
+    runtime = FakeRuntime(history)
+    socket_path = Path("/tmp") / f"tfr-update-gate-{uuid4().hex[:8]}" / "gateway.sock"
+    server = GatewayServer(runtime, socket_path)  # type: ignore[arg-type]
+    await server.start()
+    server._accepting_update_participants = False
+
+    try:
+        with pytest.raises(GatewayProtocolError, match="Gateway update in progress"):
+            await GatewayClient.connect(socket_path)
+        assert server._update_participants == {}
+    finally:
         await server.stop()
         await history.stop()
         await bus.close()

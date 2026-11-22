@@ -1994,6 +1994,10 @@ class GatewayServer:
                 raise GatewayProtocolError("admin must be a boolean")
             if admin and auth_token is not None:
                 raise GatewayProtocolError("gateway administration requires the local socket")
+            if not admin:
+                async with self._update_participants_lock:
+                    if not self._accepting_update_participants:
+                        raise GatewayProtocolError("Gateway update in progress; retry shortly")
             connection_id = str(uuid4())
             client_build: BuildIdentity | None = None
             if "build" in hello:

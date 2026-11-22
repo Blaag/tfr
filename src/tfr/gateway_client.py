@@ -2005,6 +2005,10 @@ class GatewayClient:
             return await future
         finally:
             self._pending.pop(request_id, None)
+            if future.done() and not future.cancelled():
+                future.exception()
+            elif not future.done():
+                future.cancel()
 
     async def _run(self) -> None:
         error: Exception = GatewayDisconnectedError("gateway disconnected")
