@@ -249,10 +249,13 @@ def _deployment_path() -> Path:
 
 
 def _save_deployment(profile: Profile, gateway_socket: Path) -> None:
+    from tfr.gateway_profiles import GatewayProfileStore
+
     write_deployment(
         profile,
         gateway_socket=gateway_socket if profile != "remote-ui" else None,
     )
+    GatewayProfileStore().ensure_initialized()
 
 
 def empty_agents_config() -> str:

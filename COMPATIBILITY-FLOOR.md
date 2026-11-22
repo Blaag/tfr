@@ -19,7 +19,7 @@ migration merely because a compatibility report has a blocker.
    tfr-doctor --compatibility --json
    ```
 
-## Automatically adopted explicit connections
+## Automatically reconciled verified connections
 
 Some older native UIs start with explicit flags such as:
 
@@ -30,11 +30,13 @@ tfr ui --config ~/tfr/.tfr/config.jsonc \
   --token-file ~/.config/tfr/gateway.token
 ```
 
-After that connection authenticates successfully, a managed TFR installation
-with no existing profile atomically adopts the verified endpoint, token, TLS
-settings, stable UI identity, and Gateway-assigned UI name into the current
+After any remote connection authenticates successfully, a TFR installation with
+no existing profile atomically adopts the verified endpoint, token, TLS settings,
+stable UI identity, and Gateway-assigned UI name into the current
 profile/credential store. It also writes current remote-UI deployment metadata.
-The original token and script are retained for rollback.
+A verified local-socket UI creates an empty canonical profile store and current
+local-split deployment metadata. Existing conflicting or malformed state is never
+overwritten. The original token and script are retained for rollback.
 
 After one successful adopted start, simplify the script to:
 
@@ -48,11 +50,12 @@ a different UI identity.
 
 ## Interpreting blockers
 
-- `profile-store-missing`: reconnect once using the verified explicit flags on a
-  managed installation.
-- `deployment-metadata-missing`: normally repaired together with profile adoption.
-- `legacy-configuration-detected`: complete `/config migrate`; do not simply
-  delete the source file.
+- `profile-store-missing`: reconnect once; TFR creates or adopts canonical state
+  only after the connection is verified.
+- `deployment-metadata-missing`: repaired together with verified connection
+  reconciliation.
+- `legacy-configuration-detected`: TFR submits a migration proposal automatically;
+  review and apply it in the UI. Do not simply delete the source file.
 - `report-missing`: start that retained UI once on a reporting-capable release.
 - `report-stale`: reconnect that UI; reports become stale after 30 days.
 - `below-version-floor` or `protocol-mismatch`: upgrade that UI.

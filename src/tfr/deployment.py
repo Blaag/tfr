@@ -110,6 +110,29 @@ def reconcile_remote_ui_deployment(*, path: Path | None = None) -> DeploymentDoc
     return value
 
 
+def ensure_verified_deployment(
+    profile: DeploymentProfile,
+    *,
+    gateway_socket: Path | str | None = None,
+    path: Path | None = None,
+) -> bool:
+    destination = path or deployment_path()
+    value = _read(destination)
+    if value is None:
+        if os.path.lexists(destination):
+            return False
+        write_deployment(profile, gateway_socket=gateway_socket, path=destination)
+        return True
+    if value["profile"] != profile:
+        return False
+    if value["schema_version"] == CURRENT_DEPLOYMENT_SCHEMA:
+        if profile != "remote-ui" and value.get("gateway_socket") != str(gateway_socket):
+            write_deployment(profile, gateway_socket=gateway_socket, path=destination)
+        return True
+    write_deployment(profile, gateway_socket=gateway_socket, path=destination)
+    return True
+
+
 def deployment_schema(*, reconcile_remote_ui: bool = False) -> int | None:
     value = (
         reconcile_remote_ui_deployment()

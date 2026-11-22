@@ -8,6 +8,7 @@ import pytest
 
 from tfr.deployment import (
     deployment_schema,
+    ensure_verified_deployment,
     load_deployment,
     reconcile_remote_ui_deployment,
     write_deployment,
@@ -86,3 +87,36 @@ def test_installer_writer_always_uses_current_schema(
     write_deployment("remote-ui")
 
     assert load_deployment() == {"schema_version": 2, "profile": "remote-ui"}
+
+
+def test_verified_local_connection_migrates_matching_legacy_deployment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    path = tmp_path / "tfr/deployment.json"
+    path.parent.mkdir()
+    path.write_text(
+        '{"schema_version":1,"profile":"local-split","gateway_socket":"/old.sock"}\n',
+        encoding="utf-8",
+    )
+
+    assert ensure_verified_deployment("local-split", gateway_socket="/live.sock") is True
+    assert load_deployment() == {
+        "schema_version": 2,
+        "profile": "local-split",
+        "gateway_socket": "/live.sock",
+    }
+
+
+def test_verified_local_connection_updates_stale_current_socket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    write_deployment("local-split", gateway_socket="/old.sock")
+
+    assert ensure_verified_deployment("local-split", gateway_socket="/live.sock") is True
+    assert load_deployment() == {
+        "schema_version": 2,
+        "profile": "local-split",
+        "gateway_socket": "/live.sock",
+    }
